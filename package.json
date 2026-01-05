@@ -1,0 +1,17 @@
+{
+  "name": "promethea",
+  "version": "1.0.0",
+  "description": "Promethea AI Agent - 智能对话助手",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:windows": "tauri build --target x86_64-pc-windows-msvc",
+    "build:linux": "tauri build --target x86_64-unknown-linux-gnu",
+    "build:mac": "tauri build --target x86_64-apple-darwin"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^1.5.0"
+  }
+}
+

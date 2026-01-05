@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>普罗米娅AI助手 - 终端版</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 左侧会话列表 -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">🔥</span>
+                <span class="logo-text">普罗米娅</span>
+            </div>
+            <button id="newChatBtn" class="new-chat-btn" title="新建会话">
+                <span>+</span>
+            </button>
+        </div>
+        
+        <!-- 虚拟形象窗口 -->
+        <div class="avatar-container">
+            <div class="avatar-placeholder" id="avatarPlaceholder">
+                <img id="avatarImage" class="avatar-image" style="display: none;" />
+                <div class="avatar-icon" id="avatarIcon">👤</div>
+                <div class="avatar-hint" id="avatarHint">点击上传形象</div>
+                <input type="file" id="avatarUpload" accept="image/*" style="display: none;" />
+                
+                <!-- 状态指示器 -->
+                <div class="avatar-status" id="avatarStatus"></div>
+            </div>
+            <button id="removeAvatarBtn" class="remove-avatar-btn" style="display: none;" title="移除形象">✕</button>
+        </div>
+        
+        <div class="session-list-container">
+            <div class="session-list-header">
+                <span>会话历史</span>
+                <span class="session-count" id="sessionCount">0</span>
+            </div>
+            <ul id="sessionList" class="session-list"></ul>
+        </div>
+        
+        <!-- 系统状态栏 -->
+        <div class="system-status-bar">
+            <div class="status-indicator" id="apiStatus" title="API连接状态">
+                <span class="dot"></span> API
+            </div>
+            <div class="status-indicator" id="memoryStatus" title="记忆系统状态">
+                <span class="dot"></span> Memory
+            </div>
+        </div>
+    </aside>
+
+    <!-- 右侧终端风格聊天窗口 -->
+    <main class="terminal-container">
+        <div class="terminal-header">
+            <button id="sidebarToggle" class="sidebar-toggle">☰</button>
+            <div class="terminal-tabs">
+                <div class="tab active">
+                    <span class="tab-icon">💬</span>
+                    <span class="tab-title">对话</span>
+                </div>
+            </div>
+            <div class="terminal-controls">
+                <button id="metricsBtn" class="metrics-btn" title="性能统计">📊</button>
+                <button id="settingsBtn" class="settings-btn" title="系统设置">⚙️</button>
+                <button id="memoryGraphBtn" class="memory-graph-btn" title="查看记忆图">🧠</button>
+                <div class="control-btn minimize"></div>
+                <div class="control-btn maximize"></div>
+                <div class="control-btn close"></div>
+            </div>
+        </div>
+        
+        <div class="terminal-body">
+            <div class="chat-messages" id="chatMessages">
+                <!-- 消息会在这里显示 -->
+            </div>
+            
+            <div class="terminal-input-line">
+                <span class="prompt-symbol">$</span>
+                <input type="text" id="messageInput" placeholder="输入你的问题..." />
+                <button id="sendButton" class="send-btn">↵</button>
+            </div>
+        </div>
+        
+        <div class="terminal-status">
+            <span class="status-item">当前会话: <span id="currentSession">未开始</span></span>
+        </div>
+    </main>
+
+    <!-- 性能统计模态窗口 -->
+    <div id="metricsModal" class="modal">
+        <div class="modal-content metrics-modal">
+            <div class="modal-header">
+                <h2>📊 性能统计</h2>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Token消耗</div>
+                        <div class="metric-value" id="totalTokens">0</div>
+                        <div class="metric-sub">估算成本: $<span id="estimatedCost">0.00</span></div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">LLM调用</div>
+                        <div class="metric-value" id="llmCalls">0</div>
+                        <div class="metric-sub">平均: <span id="avgLlmTime">0</span>ms</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">记忆召回</div>
+                        <div class="metric-value" id="memoryRecalls">0</div>
+                        <div class="metric-sub">平均: <span id="avgMemoryTime">0</span>ms</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="metric-label">会话/消息</div>
+                        <div class="metric-value"><span id="sessionsCount">0</span>/<span id="messagesCount">0</span></div>
+                        <div class="metric-sub">运行时长: <span id="uptime">0</span>s</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 记忆图可视化模态窗口 -->
+    <div id="memoryGraphModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🧠 记忆图谱</h2>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div id="graphStats" class="graph-stats"></div>
+                <div id="graphCanvas"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 设置模态窗口 -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content settings-modal-content">
+            <div class="modal-header">
+                <h2>⚙️ 系统设置</h2>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body settings-modal-body">
+                <div class="settings-loading">正在加载配置...</div>
+                <form id="settingsForm" style="display: none;">
+                    <!-- API 设置 -->
+                    <div class="settings-section">
+                        <h3>🔑 API 配置</h3>
+                        <div class="form-group">
+                            <label for="apiKey">API Key</label>
+                            <input type="password" id="apiKey" name="api.api_key" placeholder="输入API密钥">
+                        </div>
+                        <div class="form-group">
+                            <label for="baseUrl">Base URL</label>
+                            <input type="text" id="baseUrl" name="api.base_url" placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label for="model">模型</label>
+                            <input type="text" id="model" name="api.model" placeholder="gpt-4">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="temperature">Temperature</label>
+                                <input type="number" id="temperature" name="api.temperature" step="0.1" min="0" max="2">
+                            </div>
+                            <div class="form-group">
+                                <label for="maxTokens">Max Tokens</label>
+                                <input type="number" id="maxTokens" name="api.max_tokens" min="100" max="10000">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="maxHistoryRounds">历史轮数</label>
+                            <input type="number" id="maxHistoryRounds" name="api.max_history_rounds" min="1" max="50">
+                        </div>
+                    </div>
+
+                    <!-- 系统设置 -->
+                    <div class="settings-section">
+                        <h3>⚡ 系统配置</h3>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="streamMode" name="system.stream_mode">
+                                <span>流式输出</span>
+                            </label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="debugMode" name="system.debug">
+                                <span>调试模式</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="logLevel">日志级别</label>
+                            <select id="logLevel" name="system.log_level">
+                                <option value="DEBUG">DEBUG</option>
+                                <option value="INFO">INFO</option>
+                                <option value="WARNING">WARNING</option>
+                                <option value="ERROR">ERROR</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <!-- 记忆系统设置 -->
+                    <div class="settings-section">
+                        <h3>🧠 记忆系统</h3>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="memoryEnabled" name="memory.enabled">
+                                <span>启用记忆系统</span>
+                            </label>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="neo4jEnabled" name="memory.neo4j.enabled">
+                                <span>启用Neo4j</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="neo4jUri">Neo4j URI</label>
+                            <input type="text" id="neo4jUri" name="memory.neo4j.uri" placeholder="bolt://localhost:7687">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="neo4jUsername">用户名</label>
+                                <input type="text" id="neo4jUsername" name="memory.neo4j.username" placeholder="neo4j">
+                            </div>
+                            <div class="form-group">
+                                <label for="neo4jDatabase">数据库</label>
+                                <input type="text" id="neo4jDatabase" name="memory.neo4j.database" placeholder="neo4j">
+                            </div>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="warmLayerEnabled" name="memory.warm_layer.enabled">
+                                <span>启用温层</span>
+                            </label>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="clusteringThreshold">聚类阈值</label>
+                                <input type="number" id="clusteringThreshold" name="memory.warm_layer.clustering_threshold" step="0.1" min="0" max="1">
+                            </div>
+                            <div class="form-group">
+                                <label for="minClusterSize">最小簇大小</label>
+                                <input type="number" id="minClusterSize" name="memory.warm_layer.min_cluster_size" min="1" max="20">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="maxSummaryLength">摘要长度</label>
+                                <input type="number" id="maxSummaryLength" name="memory.cold_layer.max_summary_length" min="100" max="2000">
+                            </div>
+                            <div class="form-group">
+                                <label for="compressionThreshold">压缩阈值</label>
+                                <input type="number" id="compressionThreshold" name="memory.cold_layer.compression_threshold" min="10" max="200">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 置信度检测设置 -->
+                    <div class="settings-section">
+                        <h3>🔍 置信度检测</h3>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="uncertaintyEnabled" name="ui.uncertainty_detection.enabled">
+                                <span>启用不确定性检测</span>
+                            </label>
+                            <small style="color: var(--text-muted); margin-left: 24px; display: block; margin-top: 4px;">
+                                标记AI回复中不确定的结论，支持追问
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label>显示级别</label>
+                            <div class="checkbox-group">
+                                <label>
+                                    <input type="checkbox" id="showCritical" name="ui.uncertainty_detection.show_critical">
+                                    <span>⚠️ 极不确定</span>
+                                </label>
+                            </div>
+                            <div class="checkbox-group">
+                                <label>
+                                    <input type="checkbox" id="showHigh" name="ui.uncertainty_detection.show_high">
+                                    <span>⚡ 很不确定</span>
+                                </label>
+                            </div>
+                            <div class="checkbox-group">
+                                <label>
+                                    <input type="checkbox" id="showMedium" name="ui.uncertainty_detection.show_medium">
+                                    <span>? 不太确定</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="minMarkDistance">最小标记间距</label>
+                                <input type="number" id="minMarkDistance" name="ui.uncertainty_detection.min_mark_distance" min="20" max="200">
+                            </div>
+                            <div class="form-group">
+                                <label for="signalThreshold">信号阈值</label>
+                                <input type="number" id="signalThreshold" name="ui.uncertainty_detection.signal_threshold" step="0.1" min="0.1" max="2.0">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 按钮 -->
+                    <div class="settings-actions">
+                        <button type="button" class="btn-secondary" id="resetBtn">重置</button>
+                        <button type="submit" class="btn-primary">保存并应用</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 悬浮追问按钮 -->
+    <div id="selectionMenu" class="selection-menu" style="display: none;">
+        <button id="quickAskBtn" class="quick-ask-btn">🤔 追问</button>
+    </div>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

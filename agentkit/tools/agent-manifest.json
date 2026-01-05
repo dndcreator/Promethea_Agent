@@ -1,0 +1,54 @@
+{
+  "name": "websearch",
+  "label": "网络搜索工具",
+  "version": "1.0.0",
+  "description": "使用DuckDuckGo搜索引擎进行网络搜索、新闻搜索和快速问答。完全免费，无需API密钥。",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.websearch",
+    "class": "WebSearchService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "search",
+        "description": "搜索网络内容，返回相关网页、文章和信息",
+        "example": "{\"tool_name\": \"search\", \"service_name\": \"websearch\", \"query\": \"人工智能最新进展\", \"max_results\": 5}"
+      },
+      {
+        "command": "quick_answer",
+        "description": "快速问答，获取即时答案或简短摘要",
+        "example": "{\"tool_name\": \"quick_answer\", \"service_name\": \"websearch\", \"query\": \"什么是量子计算\"}"
+      },
+      {
+        "command": "news_search",
+        "description": "搜索最新新闻报道",
+        "example": "{\"tool_name\": \"news_search\", \"service_name\": \"websearch\", \"query\": \"科技新闻\", \"max_results\": 5}"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词或问题"
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "最大返回结果数量（可选，默认5）",
+        "default": 5,
+        "minimum": 1,
+        "maximum": 20
+      }
+    },
+    "required": ["query"]
+  },
+  "dependencies": {
+    "python": ">=3.8",
+    "packages": [
+      "duckduckgo-search>=4.0.0"
+    ]
+  }
+}
+

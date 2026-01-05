@@ -1,0 +1,17 @@
+# Cargo 配置（可选优化）
+
+[build]
+# 增量编译，加快开发时的编译速度
+incremental = true
+
+[target.x86_64-pc-windows-msvc]
+# Windows平台优化
+rustflags = ["-C", "link-arg=-Wl,--large-address-aware"]
+
+# 如果在中国大陆，可以配置国内镜像源加速依赖下载
+# [source.crates-io]
+# replace-with = 'ustc'
+# 
+# [source.ustc]
+# registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
