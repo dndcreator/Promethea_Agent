@@ -151,7 +151,7 @@ class ForgettingManager:
                 query = """
                 MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
                 WHERE n.layer = 0  // 只清理热层
-                AND n.type <> 'Message'  // 保留原始消息
+                AND NOT n:Message  // 保留原始消息（使用标签过滤）
                 AND n.importance < $min_importance
                 RETURN n.id as id
                 LIMIT $limit
@@ -165,7 +165,7 @@ class ForgettingManager:
                 query = """
                 MATCH (n)
                 WHERE n.layer = 0
-                AND n.type <> 'Message'
+                AND NOT n:Message
                 AND n.importance < $min_importance
                 RETURN n.id as id
                 LIMIT $limit

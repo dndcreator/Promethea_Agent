@@ -88,42 +88,63 @@ class LLMExtractor:
         try:
             # 构建提取请求
             prompt = self.EXTRACTION_PROMPT.format(role=role, content=content)
-            
+            system_prompt = "你是一个专业的信息提取助手，擅长从对话中提取结构化信息。输出必须是严格 JSON。"
             messages = [
-                {"role": "system", "content": "你是一个专业的信息提取助手，擅长从对话中提取结构化信息。"},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ]
             
             # 如果有上下文，添加到 prompt 中
             if context and len(context) > 0:
                 context_str = "\n".join([
-                    f"{msg.get('role', 'unknown')}: {msg.get('content', '')}" 
+                    f"{msg.get('role', 'unknown')}: {msg.get('content', '')}"
                     for msg in context[-3:]  # 只取最近3条
                 ])
                 messages[1]["content"] = f"对话上下文：\n{context_str}\n\n{prompt}"
             
-            # 调用 LLM
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                max_tokens=1000
-            )
+            def _call(temperature: float, force_json: bool = False):
+                params: Dict[str, Any] = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": 1000
+                }
+                # 某些模型/网关支持 response_format 强制 JSON；不支持时会被忽略或报错（会被外层捕获）
+                if force_json:
+                    params["response_format"] = {"type": "json_object"}
+                return self.client.chat.completions.create(**params)
             
-            result_text = response.choices[0].message.content.strip()
-            
-            # 解析 JSON 结果
+            # 第一次尝试
+            response = _call(self.temperature, force_json=False)
+            result_text = (response.choices[0].message.content or "").strip()
             extracted_data = self._parse_json_response(result_text)
             
-            # 转换为 ExtractionResult
-            result = self._convert_to_extraction_result(extracted_data, content)
+            # 如果解析出来几乎为空，做一次强制 JSON 的重试（更低温度）
+            is_empty = (
+                not extracted_data
+                or (not extracted_data.get("facts") and not extracted_data.get("entities")
+                    and not extracted_data.get("time_expressions") and not extracted_data.get("locations"))
+            )
+            if is_empty:
+                try:
+                    response2 = _call(0.0, force_json=True)
+                    result_text2 = (response2.choices[0].message.content or "").strip()
+                    extracted_data2 = self._parse_json_response(result_text2)
+                    # 只有在第二次更好时才替换
+                    if extracted_data2 and (
+                        extracted_data2.get("facts") or extracted_data2.get("entities")
+                        or extracted_data2.get("time_expressions") or extracted_data2.get("locations")
+                    ):
+                        extracted_data = extracted_data2
+                except Exception as e:
+                    logger.warning(f"JSON 强制重试失败（忽略并继续使用第一次结果）: {e}")
             
+            result = self._convert_to_extraction_result(extracted_data, content)
             logger.info(f"成功提取 {len(result.tuples)} 个事实，{len(result.entities)} 个实体")
             return result
-            
+        
         except Exception as e:
             logger.error(f"LLM 提取失败: {e}")
-            # 返回空结果
             return ExtractionResult(metadata={"error": str(e), "source_text": content})
     
     def _parse_json_response(self, response: str) -> Dict[str, Any]:

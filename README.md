@@ -6,7 +6,7 @@
 
 ### 安装依赖
 ```bash
-pip install -r api_server/requirements.txt
+pip install -r requirements.txt
 ```
 
 ### 启动服务
@@ -40,7 +40,7 @@ Agent/
 │   ├── cold_layer.py        # 冷层：长期摘要
 │   └── adapter.py           # 记忆适配器
 ├── utility/                 # 工具模块
-│   └── confidence/          # 置信度检测
+│   └── (预留)               # 工具扩展预留
 ├── agentkit/                # 工具系统
 │   ├── mcp/                 # MCP协议实现
 │   └── tools/               # 工具集（搜索等）
@@ -62,7 +62,7 @@ Agent/
 - 流式输出（SSE）
 - 多轮对话历史
 - 会话管理
-- 置信度检测（标记AI不确定的回答）
+- 选中文本追问（手动触发）
 
 ### 记忆系统
 - **热层**：实时提取对话中的关键信息
@@ -100,25 +100,7 @@ Agent/
 - `memory.neo4j.enabled`: 是否启用Neo4j
 - `memory.neo4j.uri`: Neo4j连接地址
 
-**置信度检测**
-- `ui.uncertainty_detection.enabled`: 是否启用
-- `show_critical/high/medium`: 显示哪些级别的不确定标记
-- `signal_threshold`: 检测灵敏度（0.3-1.0，越低越敏感）
-
 注：部分配置支持在UI设置界面直接修改，无需重启服务。
-
----
-
-## 置信度检测
-
-当AI对某些回答不太确定时，会在文本中标记出来：
-- ⚠️ 极不确定
-- ⚡ 很不确定  
-- ? 不太确定
-
-点击标记可以追问"为什么"、"有什么坑"、"替代方案"等。
-
-**注意**：此功能需要模型支持logprobs（如gpt-3.5-turbo、gpt-4）。免费模型可能不支持。
 
 ---
 
@@ -142,18 +124,13 @@ python generate_icon.py your-logo.png
 
 **服务启动失败**
 - 检查是否在Agent目录下运行
-- 确认已安装依赖：`pip install -r api_server/requirements.txt`
+- 确认已安装依赖：`pip install -r requirements.txt`
 - 查看终端错误信息
 
 **Neo4j连接失败**
 - 默认情况下记忆系统是启用的，需要先安装Neo4j
 - 如果不需要记忆功能，在`config.json`中设置`memory.enabled: false`
 - Neo4j安装：https://neo4j.com/download/
-
-**置信度检测不显示**
-- 检查设置中是否启用了"不确定性检测"
-- 确认使用的模型支持logprobs（免费模型通常不支持）
-- 可以切换到gpt-3.5-turbo或gpt-4测试
 
 **Tauri打包失败**
 - 需要先安装Rust：https://rustup.rs/

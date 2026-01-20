@@ -58,38 +58,38 @@ def parse_tool_calls(content: str) -> list:
 def _process_single_tool_call(tool_args: dict, tool_calls: list):
     """处理单个工具调用字典"""
     try:
-        agent_type = tool_args.get('agentType', 'mcp').lower()
-        if agent_type == 'agent':
-            agent_name = tool_args.get('agent_name')
-            prompt = tool_args.get('prompt')
-            if agent_name and prompt:
-                tool_call = {
-                    'name': 'agent_call',
-                    'args': {
-                        'agentType': 'agent',
-                        'agent_name': agent_name,
-                        'prompt': prompt
-                    }
-                }
-                tool_calls.append(tool_call)
-        else:
-            tool_name = tool_args.get('tool_name')
-            if tool_name:
-                if 'service_name' in tool_args:
+            agent_type = tool_args.get('agentType', 'mcp').lower()
+            if agent_type == 'agent':
+                agent_name = tool_args.get('agent_name')
+                prompt = tool_args.get('prompt')
+                if agent_name and prompt:
                     tool_call = {
-                        'name': tool_name,
-                        'args': tool_args
+                        'name': 'agent_call',
+                        'args': {
+                            'agentType': 'agent',
+                            'agent_name': agent_name,
+                            'prompt': prompt
+                        }
                     }
                     tool_calls.append(tool_call)
-                else:
-                    service_name = tool_name
-                    tool_args['service_name'] = service_name
-                    tool_args['agentType'] = 'mcp'
-                    tool_call = {
-                        'name': tool_name,
-                        'args': tool_args
-                    }
-                    tool_calls.append(tool_call)
+            else:
+                tool_name = tool_args.get('tool_name')
+                if tool_name:
+                    if 'service_name' in tool_args:
+                        tool_call = {
+                            'name': tool_name,
+                            'args': tool_args
+                        }
+                        tool_calls.append(tool_call)
+                    else:
+                        service_name = tool_name
+                        tool_args['service_name'] = service_name
+                        tool_args['agentType'] = 'mcp'
+                        tool_call = {
+                            'name': tool_name,
+                            'args': tool_args
+                        }
+                        tool_calls.append(tool_call)
     except Exception as e:
         logger.warning(f"处理工具调用参数失败: {e}")
 
@@ -153,23 +153,18 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
     recursion_depth = 0
     current_messages = messages.copy()
     current_ai_content = ''
-    final_logprobs = None
     final_usage = {'prompt_tokens': 0, 'completion_tokens': 0}
 
     while recursion_depth < max_recursion:
         try:
             resp = await llm_caller(current_messages)
             current_ai_content = resp.get('content', '')
-            
+
             # 累积usage
             usage = resp.get('usage', {})
             if usage:
                 final_usage['prompt_tokens'] += usage.get('prompt_tokens', 0)
                 final_usage['completion_tokens'] += usage.get('completion_tokens', 0)
-            
-            # 保留第一次的logprobs（最重要）
-            if final_logprobs is None and resp.get('logprobs'):
-                final_logprobs = resp.get('logprobs')
 
             logger.debug(f"第{recursion_depth + 1}轮LLM回复:")
             logger.debug(f"回复内容: {current_ai_content}")
@@ -187,9 +182,9 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
             tool_results = await execute_tool_calls(tool_calls, mcp_manager)
 
             # 将工具结果作为新的用户消息（Observation）添加到历史中，让 LLM 继续处理
-            current_messages.append({'role': 'assistant', 'content': current_ai_content})
+                current_messages.append({'role': 'assistant', 'content': current_ai_content})
             current_messages.append({'role': 'user', 'content': f"工具调用结果:\n{tool_results}\n请根据以上结果回答用户的问题。"})
-            recursion_depth += 1
+                recursion_depth += 1
             
         except Exception as e:
             logger.error(f"工具调用循环错误: {e}")
@@ -223,6 +218,5 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
         'content': current_ai_content,
         'recursion_depth': recursion_depth,
         'messages': current_messages,
-        'logprobs': final_logprobs,
         'usage': final_usage if final_usage['prompt_tokens'] > 0 else None
     }

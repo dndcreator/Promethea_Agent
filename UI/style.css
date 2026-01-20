@@ -896,35 +896,6 @@ body {
     font-size: 14px;
 }
 
-/* 不确定标记和追问气泡 */
-.uncertain-mark {
-    cursor: pointer;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: all 0.2s;
-    position: relative;
-}
-
-.uncertain-mark[data-level="critical"] {
-    background: rgba(255, 95, 86, 0.15);
-    border-bottom: 2px dashed #ff5f56;
-}
-
-.uncertain-mark[data-level="high"] {
-    background: rgba(255, 189, 68, 0.15);
-    border-bottom: 2px dashed #ffbd44;
-}
-
-.uncertain-mark[data-level="medium"] {
-    background: rgba(255, 215, 0, 0.1);
-    border-bottom: 2px dashed #ffd700;
-}
-
-.uncertain-mark:hover {
-    background: rgba(255, 189, 68, 0.25);
-    transform: translateY(-1px);
-}
-
 /* 追问气泡 */
 .followup-bubble {
     background: var(--bg-secondary);
@@ -985,7 +956,7 @@ body {
     padding: 16px;
 }
 
-.uncertain-text {
+.selected-text {
     color: var(--text-secondary);
     font-size: 13px;
     margin-bottom: 12px;

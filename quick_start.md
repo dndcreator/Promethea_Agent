@@ -2,7 +2,7 @@
 
 ## 1. 安装依赖
 ```bash
-pip install -r api_server/requirements.txt
+pip install -r requirements.txt
 ```
 
 ## 2. 配置API

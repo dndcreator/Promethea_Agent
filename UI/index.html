@@ -261,50 +261,6 @@
                         </div>
                     </div>
 
-                    <!-- 置信度检测设置 -->
-                    <div class="settings-section">
-                        <h3>🔍 置信度检测</h3>
-                        <div class="form-group checkbox-group">
-                            <label>
-                                <input type="checkbox" id="uncertaintyEnabled" name="ui.uncertainty_detection.enabled">
-                                <span>启用不确定性检测</span>
-                            </label>
-                            <small style="color: var(--text-muted); margin-left: 24px; display: block; margin-top: 4px;">
-                                标记AI回复中不确定的结论，支持追问
-                            </small>
-                        </div>
-                        <div class="form-group">
-                            <label>显示级别</label>
-                            <div class="checkbox-group">
-                                <label>
-                                    <input type="checkbox" id="showCritical" name="ui.uncertainty_detection.show_critical">
-                                    <span>⚠️ 极不确定</span>
-                                </label>
-                            </div>
-                            <div class="checkbox-group">
-                                <label>
-                                    <input type="checkbox" id="showHigh" name="ui.uncertainty_detection.show_high">
-                                    <span>⚡ 很不确定</span>
-                                </label>
-                            </div>
-                            <div class="checkbox-group">
-                                <label>
-                                    <input type="checkbox" id="showMedium" name="ui.uncertainty_detection.show_medium">
-                                    <span>? 不太确定</span>
-                                </label>
-                            </div>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="minMarkDistance">最小标记间距</label>
-                                <input type="number" id="minMarkDistance" name="ui.uncertainty_detection.min_mark_distance" min="20" max="200">
-                            </div>
-                            <div class="form-group">
-                                <label for="signalThreshold">信号阈值</label>
-                                <input type="number" id="signalThreshold" name="ui.uncertainty_detection.signal_threshold" step="0.1" min="0.1" max="2.0">
-                            </div>
-                        </div>
-                    </div>
 
                     <!-- 按钮 -->
                     <div class="settings-actions">

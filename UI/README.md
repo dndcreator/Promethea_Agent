@@ -7,7 +7,7 @@
 ### 对话区域
 - 流式输出显示
 - 多轮对话历史
-- 置信度标记（点击可追问）
+- 选中文本追问（手动触发）
 - 打字机效果
 
 ### 侧边栏
@@ -26,7 +26,7 @@
 - `POST /api/chat` - 发送消息
 - `GET /api/sessions` - 获取会话列表
 - `GET /api/sessions/{id}` - 获取会话详情
-- `POST /api/followup` - 追问不确定的回答
+- `POST /api/followup` - 针对“手动选中的文本”进行追问
 
 ### 记忆相关
 - `GET /api/memory/graph/{session_id}` - 获取记忆图谱
@@ -56,5 +56,4 @@ UI/
 ## 注意事项
 
 - 记忆图谱需要Neo4j支持
-- 置信度检测需要模型支持logprobs
 - 配置修改会立即生效，无需重启

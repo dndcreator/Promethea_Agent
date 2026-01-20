@@ -51,7 +51,7 @@ class PrometheaConversation:
             logger.error(f"保存日志失败: {e}")
     
     
-    async def call_llm(self, messages: List[Dict], enable_logprobs: bool = False) -> Dict:
+    async def call_llm(self, messages: List[Dict]) -> Dict:
         try:
             params = {
                 'model': config.api.model,
@@ -60,12 +60,6 @@ class PrometheaConversation:
                 'max_tokens': config.api.max_tokens,
                 'stream': False
             }
-            
-            # 启用logprobs（用于置信度分析）
-            if enable_logprobs:
-                params['logprobs'] = True
-                params['top_logprobs'] = 5
-                logger.debug(f"已启用logprobs，模型: {config.api.model}")
             
             resp = await self.async_client.chat.completions.create(**params)
             
@@ -84,46 +78,6 @@ class PrometheaConversation:
                     'completion_tokens': getattr(resp.usage, 'completion_tokens', 0) if hasattr(resp, 'usage') and resp.usage else 0,
                 }
             }
-            
-            # 返回logprobs数据（如果启用）
-            if enable_logprobs and resp.choices and len(resp.choices) > 0:
-                choice = resp.choices[0]
-                if hasattr(choice, 'logprobs') and choice.logprobs:
-                    try:
-                        logprobs_obj = choice.logprobs
-                        # 兼容不同API的logprobs结构
-                        logprobs_content = []
-                        content_data = getattr(logprobs_obj, 'content', None) or []
-                        
-                        for item in content_data:
-                            token = getattr(item, 'token', None)
-                            logprob = getattr(item, 'logprob', None)
-                            if token is None or logprob is None:
-                                continue
-                            
-                            top_logprobs_data = getattr(item, 'top_logprobs', None) or []
-                            top_probs = []
-                            for top in top_logprobs_data:
-                                top_token = getattr(top, 'token', None)
-                                top_logprob = getattr(top, 'logprob', None)
-                                if top_token is not None and top_logprob is not None:
-                                    top_probs.append({'token': top_token, 'logprob': top_logprob})
-                            
-                            logprobs_content.append({
-                                'token': token,
-                                'logprob': logprob,
-                                'top_logprobs': top_probs
-                            })
-                        
-                        if logprobs_content:
-                            result['logprobs'] = {'content': logprobs_content}
-                            logger.debug(f"✅ 成功获取logprobs，token数: {len(logprobs_content)}")
-                        else:
-                            logger.warning(f"⚠️ logprobs数据为空")
-                    except Exception as e:
-                        logger.warning(f"⚠️ 解析logprobs失败: {e}")
-                else:
-                    logger.warning(f"⚠️ 模型 {config.api.model} 未返回logprobs（可能不支持此功能）")
             
             return result
         except RuntimeError as e:
@@ -148,45 +102,6 @@ class PrometheaConversation:
                         'completion_tokens': getattr(resp.usage, 'completion_tokens', 0) if hasattr(resp, 'usage') and resp.usage else 0,
                     }
                 }
-                
-                if enable_logprobs and resp.choices and len(resp.choices) > 0:
-                    choice = resp.choices[0]
-                    if hasattr(choice, 'logprobs') and choice.logprobs:
-                        try:
-                            logprobs_obj = choice.logprobs
-                            logprobs_content = []
-                            content_data = getattr(logprobs_obj, 'content', None) or []
-                            
-                            for item in content_data:
-                                token = getattr(item, 'token', None)
-                                logprob = getattr(item, 'logprob', None)
-                                if token is None or logprob is None:
-                                    continue
-                                
-                                top_logprobs_data = getattr(item, 'top_logprobs', None) or []
-                                top_probs = []
-                                for top in top_logprobs_data:
-                                    top_token = getattr(top, 'token', None)
-                                    top_logprob = getattr(top, 'logprob', None)
-                                    if top_token is not None and top_logprob is not None:
-                                        top_probs.append({'token': top_token, 'logprob': top_logprob})
-                                
-                                logprobs_content.append({
-                                    'token': token,
-                                    'logprob': logprob,
-                                    'top_logprobs': top_probs
-                                })
-                            
-                            if logprobs_content:
-                                result['logprobs'] = {'content': logprobs_content}
-                                logger.debug(f"✅ 成功获取logprobs (重试后)，token数: {len(logprobs_content)}")
-                            else:
-                                logger.warning(f"⚠️ logprobs数据为空 (重试后)")
-                        except Exception as e:
-                            logger.warning(f"⚠️ 解析logprobs失败 (重试后): {e}")
-                    else:
-                        logger.warning(f"⚠️ 模型未返回logprobs (重试后)")
-                
                 return result
             else:
                 raise

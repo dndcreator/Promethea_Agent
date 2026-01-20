@@ -153,7 +153,8 @@ class MCPManager:
 
             return None
     
-    async def get_service_tools(self, service_name: str) -> list:
+    # NOTE: 避免与下方同步 `get_service_tools` 重名导致方法被覆盖
+    async def get_service_tools_async(self, service_name: str) -> list:
 
         if service_name in self.tools_cache:
             return self.tools_cache[service_name]

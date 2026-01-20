@@ -58,14 +58,14 @@ class Neo4jConnector:
                 "CREATE INDEX location_content IF NOT EXISTS FOR (n:Location) ON (n.content)",
                 
                 # 会话查询索引
-                "CREATE INDEX message_session IF NOT EXISTS FOR (n:Message) ON (n.properties.session_id)",
+                "CREATE INDEX message_session IF NOT EXISTS FOR (n:Message) ON (n.session_id)",
                 
                 # 时间查询索引
                 "CREATE INDEX message_created IF NOT EXISTS FOR (n:Message) ON (n.created_at)",
                 
                 # 重要性查询索引
                 "CREATE INDEX node_importance IF NOT EXISTS FOR (n:Entity) ON (n.importance)",
-                "CREATE INDEX node_layer IF NOT EXISTS FOR (n) ON (n.layer)",
+                "CREATE INDEX node_layer IF NOT EXISTS FOR (n:Entity) ON (n.layer)",
             ]
             
             for constraint in constraints:

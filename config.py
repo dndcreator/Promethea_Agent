@@ -26,9 +26,9 @@ class SystemConfig(BaseModel):
 
 class APIConfig(BaseModel):
 
-    api_key: str = Field(default_factory=lambda: os.getenv("API_KEY", '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'), description = 'API密钥')
+    api_key: str = Field(default_factory=lambda: os.getenv("API_KEY", 'placeholder-key-not-set'), description = 'API密钥')
     base_url: str = Field(default_factory=lambda: os.getenv("API_BASE_URL", 'https://openrouter.ai/api/v1'), description = 'API基础URL')
-    model: str = Field(default_factory=lambda: os.getenv("API_MODEL", 'openai/gpt-oss-20b:free'), description = '使用的模型名称')
+    model: str = Field(default_factory=lambda: os.getenv("API_MODEL", 'nvidia/nemotron-3-nano-30b-a3b:free'), description = '使用的模型名称')
     temperature: float = Field(default = 0.7, ge = 0.0, le = 2.0, description = '温度参数')
     max_tokens: int = Field(default = 2000, ge = 1, le = 8192, description = '最大token数')
     max_history_rounds: int = Field(default = 10, ge = 1, le = 100, description = '最大历史轮数')
@@ -93,21 +93,6 @@ class MemoryConfig(BaseModel):
     cold_layer: ColdLayerConfig = Field(default_factory=ColdLayerConfig, description='冷层配置')
 
 
-class UIConfig(BaseModel):
-    """UI功能配置"""
-    uncertainty_detection: dict = Field(
-        default_factory=lambda: {
-            'enabled': False,
-            'show_critical': True,
-            'show_high': True,
-            'show_medium': False,
-            'min_mark_distance': 80,
-            'signal_threshold': 0.6
-        },
-        description='置信度检测配置'
-    )
-
-
 class SystemPrompts(BaseModel):
 
     Promethea_system_prompt: str = Field(
@@ -130,7 +115,6 @@ class PrometheaConfig(BaseModel):
     api: APIConfig = Field(default_factory = APIConfig)
     prompts: SystemPrompts = Field(default_factory = SystemPrompts)
     memory: MemoryConfig = Field(default_factory = MemoryConfig, description='记忆系统配置')
-    ui: UIConfig = Field(default_factory = UIConfig, description='UI功能配置')
 
 
 

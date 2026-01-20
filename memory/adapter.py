@@ -4,6 +4,7 @@
 """
 import logging
 from typing import Optional
+import threading
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,9 @@ class MemoryAdapter:
         self.hot_layer = None
         self.recall_engine = None
         self._session_cache = {}  # 缓存每个 session 的消息历史
+        # 重要：MessageManager 会在不同线程里触发写入（run_in_executor）
+        # hot_layer 是有状态对象（session_id 会被修改），必须加锁避免并发写入串台
+        self._hot_layer_lock = threading.Lock()
         self._init_memory_system()
     
     def _init_memory_system(self):
@@ -72,6 +76,7 @@ class MemoryAdapter:
             return False
         
         try:
+            with self._hot_layer_lock:
             # 更新 session_id（HotLayerManager 是有状态的）
             self.hot_layer.session_id = session_id
             

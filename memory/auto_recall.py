@@ -68,53 +68,51 @@ class AutoRecallEngine:
     def _three_layer_query(self, entities: List[str], session_id: str, recent_days: int = 7) -> Dict:
         """三层并行查询"""
         
+        # 重要：查询必须匹配当前图谱schema
+        # - Session 节点 id 使用 "session_{session_id}"
+        # - Message 节点通过 (:Message)-[:PART_OF_SESSION]->(:Session) 归属会话
+        # - Entity/Action/Time/Location 通过 (:X)-[:FROM_MESSAGE]->(:Message) 关联消息
+        # - Entity 与 Action 通过 SUBJECT_OF / OBJECT_OF 关联
         cypher = """
-        // Layer 1: 实体直连
-        WITH $entities AS query_entities, $session_id AS sid
-        
+        // Layer 1: 实体直连（实体 -> FROM_MESSAGE -> 消息 -> PART_OF_SESSION -> 会话）
+        WITH $entities AS query_entities, $session_node_id AS sid
+        OPTIONAL MATCH (s:Session {id: sid})
         OPTIONAL MATCH (e:Entity)
         WHERE e.content IN query_entities
-        
-        OPTIONAL MATCH (e)<-[:SUBJECT_OF|:OBJECT_OF]-(direct_msg:Message)
-        WHERE direct_msg.session_id = sid
-        
+        OPTIONAL MATCH (e)-[:FROM_MESSAGE]->(direct_msg:Message)-[:PART_OF_SESSION]->(s)
         WITH collect(DISTINCT {
             content: direct_msg.content,
             time: direct_msg.created_at,
             importance: direct_msg.importance,
             layer: 'direct'
-        }) AS layer1_results
-        
-        // Layer 2: 图谱扩散
-        OPTIONAL MATCH (e:Entity)
-        WHERE e.content IN $entities
-        
-        OPTIONAL MATCH (e)-[*1..2]-(related:Entity)
-        WHERE related.content <> e.content
-        
-        OPTIONAL MATCH (related)<-[:SUBJECT_OF|:OBJECT_OF]-(related_msg:Message)
-        WHERE related_msg.session_id = $session_id
-        
+        }) AS layer1_results, sid
+
+        // Layer 2: 图谱扩散（实体 <-> 动作 <-> 相关实体，再取相关实体关联的消息）
+        OPTIONAL MATCH (s:Session {id: sid})
+        OPTIONAL MATCH (e0:Entity)
+        WHERE e0.content IN $entities
+        OPTIONAL MATCH (e0)-[:SUBJECT_OF|OBJECT_OF]-(a:Action)-[:SUBJECT_OF|OBJECT_OF]-(related:Entity)
+        WHERE related.content IS NOT NULL AND related.content <> e0.content
+        OPTIONAL MATCH (related)-[:FROM_MESSAGE]->(related_msg:Message)-[:PART_OF_SESSION]->(s)
         WITH layer1_results, collect(DISTINCT {
             content: related_msg.content,
             time: related_msg.created_at,
             importance: related_msg.importance,
             layer: 'related',
             via: related.content
-        }) AS layer2_results
-        
-        // Layer 3: 近期窗口
-        OPTIONAL MATCH (recent_msg:Message)
-        WHERE recent_msg.session_id = $session_id
-          AND recent_msg.created_at > datetime() - duration({days: $recent_days})
-        
+        }) AS layer2_results, sid
+
+        // Layer 3: 近期窗口（会话内最近消息）
+        OPTIONAL MATCH (s:Session {id: sid})
+        OPTIONAL MATCH (recent_msg:Message)-[:PART_OF_SESSION]->(s)
+        WHERE recent_msg.created_at > datetime() - duration({days: $recent_days})
         WITH layer1_results, layer2_results, collect(DISTINCT {
             content: recent_msg.content,
             time: recent_msg.created_at,
             importance: recent_msg.importance,
             layer: 'recent'
         }) AS layer3_results
-        
+
         RETURN {
             direct: [r IN layer1_results WHERE r.content IS NOT NULL],
             related: [r IN layer2_results WHERE r.content IS NOT NULL],
@@ -127,7 +125,7 @@ class AutoRecallEngine:
                 cypher,
                 parameters={
                     "entities": entities if entities else [""],
-                    "session_id": f"session_{session_id}",
+                    "session_node_id": f"session_{session_id}",
                     "recent_days": recent_days
                 }
             )
@@ -174,7 +172,19 @@ class AutoRecallEngine:
                     break
                 
                 # 格式化
-                time_str = item['time'].strftime('%m-%d') if item.get('time') else ''
+                t = item.get('time')
+                # Neo4j driver 可能返回 neo4j.time.DateTime；这里做最稳妥的字符串化
+                if t is None:
+                    time_str = ''
+                elif hasattr(t, "to_native"):
+                    try:
+                        time_str = t.to_native().strftime('%m-%d')
+                    except Exception:
+                        time_str = str(t)[:10]
+                elif hasattr(t, "strftime"):
+                    time_str = t.strftime('%m-%d')
+                else:
+                    time_str = str(t)[:10]
                 via_str = f" (关联: {item['via']})" if item.get('via') else ""
                 
                 layer_lines.append(f"- [{time_str}] {content[:100]}...{via_str}")

@@ -1,9 +1,14 @@
 from pydantic import BaseModel
-from time import monotonic
+import time
 from typing import Dict, List, Optional
 import logging
 import uuid
 from pydantic import Field
+try:
+    # pydantic v2
+    from pydantic import field_validator
+except Exception:  # pragma: no cover
+    field_validator = None
 from .session_store import SessionStorage
 
 logger = logging.getLogger(__name__)
@@ -16,10 +21,28 @@ class Message(BaseModel):
     content: str
 
 class Session(BaseModel):
-    created_at: float = Field(default_factory = monotonic)
-    last_activity: float = Field(default_factory = monotonic)
+    # 统一使用“Unix epoch 秒”，便于前端直接 new Date(ts * 1000) 展示
+    # 兼容：历史版本曾写入 monotonic 值（远小于 epoch 秒），加载时会被重置为当前时间
+    created_at: float = Field(default_factory=time.time)
+    last_activity: float = Field(default_factory=time.time)
     agent_type: str = "default"
     messages: List[Message] = Field(default_factory = list)
+
+    if field_validator:
+        @field_validator("created_at", "last_activity", mode="before")
+        @classmethod
+        def _coerce_epoch_seconds(cls, v):
+            try:
+                if v is None:
+                    return time.time()
+                v = float(v)
+            except Exception:
+                return time.time()
+
+            # 2001-09-09 01:46:40Z 约等于 1e9；小于这个基本可判定为旧 monotonic
+            if v < 1_000_000_000:
+                return time.time()
+            return v
     
 class MessageManager:
 
@@ -95,7 +118,7 @@ class MessageManager:
         
         session = self.session[session_id]
         session.messages.append(Message(role=role, content=content))
-        session.last_activity = monotonic()
+        session.last_activity = time.time()
         if len(session.messages) > self.max_messages_per_session:
             session.messages = session.messages[-self.max_messages_per_session:]
         
@@ -208,7 +231,7 @@ class MessageManager:
     
     def cleanup_old_sessions(self, max_age_hours: int = 24) -> int:
 
-        current_time = monotonic()
+        current_time = time.time()
         expired_session_ids: List[str] = []
 
         for session_id, session in self.session.items():

@@ -6,11 +6,11 @@
         "log_level": "DEBUG"
     },
     "api": {
-        "api_key": "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",
+        "api_key": "sk-or-v1-e40cf26a91d...",
         "base_url": "https://openrouter.ai/api/v1",
-        "model": "openai/gpt-oss-20b:free",
+        "model": "nvidia/nemotron-3-nano-30b-a3b:free",
         "temperature": 0.7,
-        "max_tokens": 2000,
+        "max_tokens": 4000,
         "max_history_rounds": 10,
         "timeout": null,
         "retry_count": null
@@ -32,25 +32,15 @@
         },
         "warm_layer": {
             "enabled": true,
-            "embedding_model": "text-embedding-ada-002",
+            "embedding_model": "text-embedding-3-small",
             "clustering_threshold": 0.7,
             "min_cluster_size": 3,
             "max_concepts": 100
         },
         "cold_layer": {
-            "summary_model": "gpt-4",
+            "summary_model": "nvidia/nemotron-3-nano-30b-a3b:free",
             "max_summary_length": 500,
             "compression_threshold": 50
-        }
-    },
-    "ui": {
-        "uncertainty_detection": {
-            "enabled": false,
-            "show_critical": true,
-            "show_high": true,
-            "show_medium": false,
-            "min_mark_distance": 80,
-            "signal_threshold": 0.6
         }
     }
 }

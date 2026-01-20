@@ -58,6 +58,9 @@ class HotLayerManager:
         Returns:
             处理结果统计
         """
+        # 确保当前 session 节点存在（因为 adapter 可能会复用 manager 实例但修改 session_id）
+        self._ensure_session_node()
+
         logger.info(f"开始处理消息: role={role}, length={len(content)}")
         
         # 1. 使用 LLM 提取结构化信息

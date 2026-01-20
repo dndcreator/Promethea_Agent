@@ -30,7 +30,8 @@ class ColdLayerManager:
         )
         
         # 摘要参数
-        self.summary_model = config.api.model  # 使用主模型
+        # 优先使用冷层配置的摘要模型（允许与对话模型不同）
+        self.summary_model = getattr(config.memory.cold_layer, "summary_model", None) or config.api.model
         self.max_summary_length = config.memory.cold_layer.max_summary_length
         self.compression_threshold = config.memory.cold_layer.compression_threshold
         
@@ -85,7 +86,7 @@ class ColdLayerManager:
         query = """
         MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)
         WHERE m.layer = 0
-        RETURN m.content as content, m.properties.role as role, m.created_at as created_at
+        RETURN m.content as content, m.role as role, m.created_at as created_at
         ORDER BY m.created_at ASC
         SKIP $skip
         """
@@ -189,7 +190,6 @@ class ColdLayerManager:
             properties={
                 "session_id": session_id,
                 "message_count": message_count,
-                "created_at": datetime.now().isoformat()
             }
         )
         
@@ -213,9 +213,9 @@ class ColdLayerManager:
         MATCH (s:Session {id: $session_id})<-[:SUMMARIZES]-(sum:Summary)
         RETURN sum.id as id, sum.content as content, 
                sum.importance as importance, 
-               sum.properties.message_count as message_count,
-               sum.properties.created_at as created_at
-        ORDER BY sum.properties.created_at DESC
+               sum.message_count as message_count,
+               sum.created_at as created_at
+        ORDER BY sum.created_at DESC
         """
         
         results = self.connector.query(query, {"session_id": f"session_{session_id}"})

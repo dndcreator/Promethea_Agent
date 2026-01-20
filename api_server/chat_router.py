@@ -34,10 +34,10 @@ class ChatResponse(BaseModel):
     response: str
     session_id: Optional[str] = None
     status: str = "success"
-    uncertain_marks: Optional[List[Dict]] = None  # 不确定标记
 
 class FollowUpRequest(BaseModel):
-    uncertain_text: str  # 不确定的句子
+    # 用户手动选中的文本
+    selected_text: str
     query_type: str  # why/risk/alternative/custom
     custom_query: Optional[str] = None  # 自定义追问
     session_id: str
@@ -108,42 +108,8 @@ async def stream_chat_response(messages: List[Dict], session_id: str, user_messa
                 }
             )
             # 等待工具调用队列消费完成
-            tool_calls_queue.put(None)  # 结束信号
+            await tool_calls_queue.put(None)  # 结束信号
             await tool_consumer_task
-            
-            # 流式响应完成后，如果启用了不确定性检测，进行后处理分析
-            if config.ui.uncertainty_detection.get('enabled', False) and full_response_text:
-                try:
-                    complete_text = ''.join(full_response_text)
-                    # 使用非流式调用获取logprobs进行分析
-                    logprobs_result = await conversation.call_llm(messages, enable_logprobs=True)
-                    
-                    if logprobs_result.get('logprobs'):
-                        from utility.confidence import create_analyzer
-                        analyzer = create_analyzer(config.ui.uncertainty_detection)
-                        marks = analyzer.analyze(complete_text, logprobs_result['logprobs'])
-                        
-                        if marks:
-                            # 发送不确定性标记作为单独事件
-                            uncertain_marks = [
-                                {
-                                    'text': mark.text,
-                                    'start_pos': mark.start_pos,
-                                    'end_pos': mark.end_pos,
-                                    'level': mark.level,
-                                    'confidence': round(mark.avg_prob, 3),
-                                    'score': round(mark.signal_score, 3)
-                                }
-                                for mark in marks
-                            ]
-                            await text_output_queue.put(json.dumps({
-                                "type": "uncertain_marks",
-                                "marks": uncertain_marks,
-                                "session_id": session_id
-                            }) + "\n")
-                            logger.info(f"流式模式：检测到 {len(uncertain_marks)} 处不确定标记")
-                except Exception as e:
-                    logger.error(f"流式模式不确定性分析失败: {e}")
             
             # 发送完成信号
             await text_output_queue.put(json.dumps({
@@ -176,6 +142,10 @@ async def stream_chat_response(messages: List[Dict], session_id: str, user_messa
         final_response = processor.get_response_buffer()
         message_manager.add_message(session_id, "user", user_message)
         message_manager.add_message(session_id, "assistant", final_response)
+        try:
+            conversation.save_log(user_message, final_response)
+        except Exception as e:
+            logger.warning(f"写入对话日志失败: {e}")
         
         # 自动触发记忆层处理（后台任务，不阻塞）
         asyncio.create_task(auto_trigger_memory_layers(session_id))
@@ -239,10 +209,11 @@ async def auto_trigger_memory_layers(session_id: str):
                 if config.memory.warm_layer.enabled:
                     warm_layer = create_warm_layer_manager(connector)
                     if warm_layer:
-                        concepts_created = await warm_layer.cluster_entities(session_id)
+                        # WarmLayerManager.cluster_entities 是同步方法，这里不要 await
+                        concepts_created = warm_layer.cluster_entities(session_id)
                         logger.info(f"✅ 温层自动聚类完成，创建了 {concepts_created} 个概念")
             except Exception as e:
-                logger.warning(f"温层自动触发失败: {e}")
+                logger.exception(f"温层自动触发失败: {e}")
         
         # 自动触发冷层（达到阈值时）
         try:
@@ -255,7 +226,7 @@ async def auto_trigger_memory_layers(session_id: str):
                 if summary_id:
                     logger.info(f"✅ 冷层自动摘要完成: {summary_id}")
         except Exception as e:
-            logger.warning(f"冷层自动触发失败: {e}")
+            logger.exception(f"冷层自动触发失败: {e}")
         
         # 自动应用时间衰减（每50条消息）
         if message_count > 0 and message_count % 50 == 0:
@@ -276,7 +247,7 @@ async def auto_trigger_memory_layers(session_id: str):
                 logger.warning(f"清理遗忘节点失败: {e}")
             
     except Exception as e:
-        logger.error(f"自动触发记忆层失败: {e}")
+        logger.exception(f"自动触发记忆层失败: {e}")
 
 @router.post("/chat")
 async def chat(request: ChatRequest):
@@ -323,18 +294,14 @@ async def chat(request: ChatRequest):
             )
         else:
             # 非流式响应
-            # 检查是否启用置信度检测
-            enable_confidence = config.ui.uncertainty_detection.get('enabled', False)
-            
-            # 创建支持logprobs的LLM调用器
-            async def llm_caller_with_confidence(messages):
-                return await conversation.call_llm(messages, enable_logprobs=enable_confidence)
+            async def llm_caller(messages):
+                return await conversation.call_llm(messages)
             
             llm_start = time.time()
             tool_call_outcome = await tool_call_loop(
                 messages=messages,
                 mcp_manager=mcp_manager,
-                llm_caller=llm_caller_with_confidence,
+                llm_caller=llm_caller,
                 is_streaming=False
             )
             
@@ -347,39 +314,15 @@ async def chat(request: ChatRequest):
             )
             
             final_content = tool_call_outcome.get("content", "")
-            
-            # 分析置信度（如果启用）
-            uncertain_marks = None
-            if enable_confidence:
-                if not tool_call_outcome.get('logprobs'):
-                    logger.warning("置信度检测已启用，但LLM未返回logprobs数据（可能模型不支持）")
-                else:
-                try:
-                    from utility.confidence import create_analyzer
-                    analyzer = create_analyzer(config.ui.uncertainty_detection)
-                    marks = analyzer.analyze(final_content, tool_call_outcome['logprobs'])
-                    
-                    # 转换为可序列化的格式
-                    uncertain_marks = [
-                        {
-                            'text': mark.text,
-                            'start_pos': mark.start_pos,
-                            'end_pos': mark.end_pos,
-                            'level': mark.level,
-                            'confidence': round(mark.avg_prob, 3),
-                            'score': round(mark.signal_score, 3)
-                        }
-                        for mark in marks
-                    ]
-                        logger.info(f"✅ 检测到 {len(uncertain_marks)} 处不确定标记")
-                except Exception as e:
-                        logger.error(f"❌ 置信度分析失败: {e}", exc_info=True)
 
             # 写回历史
             message_manager.add_message(session_id, "user", request.message)
             message_manager.add_message(session_id, "assistant", final_content)
             metrics.record_message()
-            metrics.record_message()
+            try:
+                conversation.save_log(request.message, final_content)
+            except Exception as e:
+                logger.warning(f"写入对话日志失败: {e}")
             
             # 自动触发记忆层处理（后台任务，不阻塞）
             asyncio.create_task(auto_trigger_memory_layers(session_id))
@@ -387,8 +330,7 @@ async def chat(request: ChatRequest):
             return ChatResponse(
                 response=final_content, 
                 session_id=session_id, 
-                status="success",
-                uncertain_marks=uncertain_marks
+                status="success"
             )
 
     except Exception as e:
@@ -397,9 +339,19 @@ async def chat(request: ChatRequest):
 @router.get("/status")
 async def get_status():
     """获取服务状态"""
+    # 检查记忆系统状态
+    memory_status = False
+    try:
+        from memory.adapter import get_memory_adapter
+        adapter = get_memory_adapter()
+        memory_status = adapter.is_enabled()
+    except:
+        pass
+
     return {
         "status": "running",
-        "conversation_ready": conversation is not None
+        "conversation_ready": conversation is not None,
+        "memory_active": memory_status
     }
 
 @router.get("/sessions")
@@ -681,16 +633,6 @@ async def get_config():
                         "max_summary_length": config.memory.cold_layer.max_summary_length,
                         "compression_threshold": config.memory.cold_layer.compression_threshold,
                     }
-                },
-                "ui": {
-                    "uncertainty_detection": {
-                        "enabled": config.ui.uncertainty_detection.get('enabled', False),
-                        "show_critical": config.ui.uncertainty_detection.get('show_critical', True),
-                        "show_high": config.ui.uncertainty_detection.get('show_high', True),
-                        "show_medium": config.ui.uncertainty_detection.get('show_medium', False),
-                        "min_mark_distance": config.ui.uncertainty_detection.get('min_mark_distance', 80),
-                        "signal_threshold": config.ui.uncertainty_detection.get('signal_threshold', 0.6),
-                    }
                 }
             }
         }
@@ -774,7 +716,7 @@ async def get_memory_graph(session_id: str):
         # 查询所有节点和关系
         nodes_query = """
         MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
-        RETURN n.id as id, n.type as type, n.content as content, 
+        RETURN n.id as id, labels(n)[0] as type, n.content as content, 
                n.layer as layer, n.importance as importance, 
                n.access_count as access_count, n.created_at as created_at
         ORDER BY n.created_at ASC
@@ -840,8 +782,19 @@ async def get_memory_graph(session_id: str):
         }
         
     except Exception as e:
-        logger.error(f"获取记忆图失败: {e}")
-        raise HTTPException(status_code=500, detail=f"获取记忆图失败: {str(e)}")
+        # 关键：即使失败也返回结构化结果，避免前端因 stats 缺失而报 “total_nodes 不存在”
+        logger.error(f"获取记忆图失败: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"获取记忆图失败: {str(e)}",
+            "nodes": [],
+            "edges": [],
+            "stats": {
+                "total_nodes": 0,
+                "total_edges": 0,
+                "layers": {"hot": 0, "warm": 0, "cold": 0}
+            }
+        }
 
 
 @router.post("/followup")
@@ -857,10 +810,10 @@ async def handle_followup(request: FollowUpRequest):
         
         # 构建追问消息
         if request.query_type == "custom" and request.custom_query:
-            user_query = f"{request.custom_query}\n\n相关内容：「{request.uncertain_text}」"
+            user_query = f"{request.custom_query}\n\n相关内容：「{request.selected_text}」"
         else:
             user_query = templates.get(request.query_type, templates["why"]).format(
-                text=request.uncertain_text[:100]  # 限制长度
+                text=request.selected_text[:100]  # 限制长度
             )
         
         # 构建上下文：从message_manager获取最近几轮对话
@@ -878,7 +831,7 @@ async def handle_followup(request: FollowUpRequest):
         messages.append({"role": "user", "content": user_query})
         
         # 调用LLM（快速配置：低temperature，短max_tokens）
-        response = await conversation.call_llm(messages, enable_logprobs=False)
+        response = await conversation.call_llm(messages)
         
         return {
             "status": "success",

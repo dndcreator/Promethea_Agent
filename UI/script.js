@@ -83,7 +83,7 @@ class TerminalChatApp {
                 const mark = { text: text };
                 
                 // 调用气泡显示逻辑
-                this.showFollowUpBubble(mark, rect);
+                this.showFollowUpBubble(rect, mark);
                 
                 // 隐藏悬浮按钮
                 this.selectionMenu.style.display = 'none';
@@ -115,33 +115,30 @@ class TerminalChatApp {
     
     async checkApiStatus() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/status`);
+            // 优先访问后端真实状态接口（挂在 /api 下）
+            const response = await fetch(`${this.apiBaseUrl}/api/status`);
             if (response.ok) {
                 const data = await response.json();
                 this.updateStatus(this.apiStatusEl, true);
                 
-                // 检查记忆系统状态（通过config接口）
-                this.checkMemoryStatus();
+                // 检查记忆系统状态（直接使用后端返回的真实状态）
+                if (data.memory_active !== undefined) {
+                    this.updateStatus(this.memoryStatusEl, data.memory_active);
+                }
             } else {
                 this.updateStatus(this.apiStatusEl, false);
+                this.updateStatus(this.memoryStatusEl, false);
             }
         } catch (error) {
             this.updateStatus(this.apiStatusEl, false);
+            this.updateStatus(this.memoryStatusEl, false);
             console.log('❌ 无法连接到API服务');
         }
     }
     
+    // 废弃的方法，保留占位防止报错
     async checkMemoryStatus() {
-        try {
-            const response = await fetch(`${this.apiBaseUrl}/api/config`);
-            if (response.ok) {
-                const data = await response.json();
-                const memoryEnabled = data.config.memory.enabled && data.config.memory.neo4j.enabled;
-                this.updateStatus(this.memoryStatusEl, memoryEnabled);
-            }
-        } catch (e) {
-            this.updateStatus(this.memoryStatusEl, false);
-        }
+        return; 
     }
     
     updateStatus(element, isActive) {
@@ -166,7 +163,7 @@ class TerminalChatApp {
         this.addMessage('assistant', '欢迎使用普罗米娅AI助手！\n\n我是你的智能对话伙伴，可以帮你：\n• 回答问题\n• 分析文档\n• 编写代码\n• 创意写作\n\n开始对话吧！');
     }
     
-    addMessage(role, content, uncertainMarks = null) {
+    addMessage(role, content) {
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${role}`;
         
@@ -176,20 +173,10 @@ class TerminalChatApp {
         // 处理换行符
         let formattedContent = content.replace(/\n/g, '<br>');
         
-        // 如果有不确定标记，添加标记
-        if (uncertainMarks && uncertainMarks.length > 0) {
-            formattedContent = this.markUncertainText(formattedContent, uncertainMarks);
-        }
-        
         contentDiv.innerHTML = formattedContent;
         
         messageDiv.appendChild(contentDiv);
         this.chatMessages.appendChild(messageDiv);
-        
-        // 如果有不确定标记，绑定点击事件
-        if (uncertainMarks && uncertainMarks.length > 0) {
-            this.bindUncertainClickHandlers(contentDiv, uncertainMarks);
-        }
         
         // 滚动到底部
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
@@ -379,72 +366,76 @@ class TerminalChatApp {
             
             contentDiv.innerHTML = '';  // 清空"正在思考"
             
+            let doneReceived = false;
             while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
-                
+
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-                buffer = lines.pop();  // 保留不完整的行
-                
+                buffer = lines.pop() || '';  // 保留不完整的行
+
                 for (const line of lines) {
-                    if (!line.trim()) continue;
-                    
+                    const trimmed = line.trim();
+                    if (!trimmed) continue;
+
+                    let data;
                     try {
-                        const data = JSON.parse(line);
-                        
-                        if (data.type === 'text') {
-                            // 流式文本
-                            fullText += data.content;
-                            
-                            // 处理思考标签渲染
-                            let displayHtml = fullText.replace(/\n/g, '<br>');
-                            
-                            // 检查是否有闭合的思考标签
-                            if (fullText.includes('<thinking>') && fullText.includes('</thinking>')) {
-                                displayHtml = displayHtml.replace(
-                                    /&lt;thinking&gt;([\s\S]*?)&lt;\/thinking&gt;|<thinking>([\s\S]*?)<\/thinking>/g, 
-                                    (match, p1, p2) => {
-                                        const content = p1 || p2;
-                                        return `<details class="thought-process">
-                                            <summary>💭 深度思考过程</summary>
-                                            <div class="thought-content">${content}</div>
-                                        </details>`;
-                                    }
-                                );
-                            } else if (fullText.includes('<thinking>')) {
-                                // 正在思考中（未闭合）
-                                displayHtml = displayHtml.replace(
-                                    /&lt;thinking&gt;[\s\S]*|<thinking>[\s\S]*/, 
-                                    '<div class="thinking-status">🧠 正在深度思考...</div>'
-                                );
-                            }
-                            
-                            contentDiv.innerHTML = displayHtml;
-                            this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
-                            
-                            // 设置说话状态
-                            this.setAvatarStatus('speaking');
-                            
-                        } else if (data.type === 'done') {
-                            // 完成
-                            this.setAvatarStatus('idle');
-                            
-                            if (data.session_id) {
-                                this.currentSessionId = data.session_id;
-                                this.currentSessionEl.textContent = data.session_id.slice(0, 8) + '...';
-                            }
-                
-                        } else if (data.type === 'error') {
-                            throw new Error(data.content);
-                        }
+                        data = JSON.parse(trimmed);
                     } catch (e) {
-                        console.warn('解析SSE数据失败:', line, e);
+                        console.warn('解析SSE数据失败:', trimmed, e);
+                        continue;
+                    }
+
+                    if (data.type === 'text') {
+                        // 流式文本
+                        fullText += (data.content || '');
+
+                        // 处理思考标签渲染
+                        let displayHtml = fullText.replace(/\n/g, '<br>');
+
+                        // 检查是否有闭合的思考标签
+                        if (fullText.includes('<thinking>') && fullText.includes('</thinking>')) {
+                            displayHtml = displayHtml.replace(
+                                /&lt;thinking&gt;([\s\S]*?)&lt;\/thinking&gt;|<thinking>([\s\S]*?)<\/thinking>/g,
+                                (match, p1, p2) => {
+                                    const content = p1 || p2;
+                                    return `<details class="thought-process">
+                                        <summary>💭 深度思考过程</summary>
+                                        <div class="thought-content">${content}</div>
+                                    </details>`;
+                                }
+                            );
+                        } else if (fullText.includes('<thinking>')) {
+                            // 正在思考中（未闭合）
+                            displayHtml = displayHtml.replace(
+                                /&lt;thinking&gt;[\s\S]*|<thinking>[\s\S]*/,
+                                '<div class="thinking-status">🧠 正在深度思考...</div>'
+                            );
+                        }
+
+                        contentDiv.innerHTML = displayHtml;
+                        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+
+                        // 设置说话状态
+                        this.setAvatarStatus('speaking');
+                    } else if (data.type === 'done') {
+                        this.setAvatarStatus('idle');
+                        if (data.session_id) {
+                            this.currentSessionId = data.session_id;
+                            this.currentSessionEl.textContent = data.session_id.slice(0, 8) + '...';
+                        }
+                        doneReceived = true;
+                        break;
+                    } else if (data.type === 'error') {
+                        throw new Error(data.content || '未知错误');
                     }
                 }
+
+                if (doneReceived) break;
             }
-            
-            // 刷新会话列表
+
+            // 流式完成后刷新一次会话列表即可
             await this.refreshSessions();
             
         } catch (error) {
@@ -483,7 +474,7 @@ class TerminalChatApp {
                 <button class="bubble-close">✕</button>
             </div>
             <div class="bubble-content">
-                <p class="uncertain-text">"${mark.text.substring(0, 50)}${mark.text.length > 50 ? '...' : ''}"</p>
+                <p class="selected-text">"${mark.text.substring(0, 50)}${mark.text.length > 50 ? '...' : ''}"</p>
                 <div class="quick-actions">
                     <button class="quick-btn" data-type="why">❓ 为什么</button>
                     <button class="quick-btn" data-type="risk">⚠️ 有啥坑</button>
@@ -546,7 +537,11 @@ class TerminalChatApp {
         
         // 点击外部关闭
         const closeOnClickOutside = (e) => {
-            if (!bubble.contains(e.target) && !anchorElement.contains(e.target)) {
+            const anchorContains =
+                anchorElement &&
+                typeof anchorElement.contains === 'function' &&
+                anchorElement.contains(e.target);
+            if (!bubble.contains(e.target) && !anchorContains) {
                 bubble.remove();
                 document.removeEventListener('click', closeOnClickOutside);
             }
@@ -579,7 +574,7 @@ class TerminalChatApp {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    uncertain_text: mark.text,
+                    selected_text: mark.text,
                     query_type: queryType,
                     custom_query: customQuery,
                     session_id: this.currentSessionId
@@ -656,10 +651,31 @@ class MemoryGraphVisualization {
         
         try {
             const response = await fetch(`${this.apiBaseUrl}/api/memory/graph/${sessionId}`);
-            const data = await response.json();
-            
-            this.renderStats(data.stats);
-            this.renderGraph(data.nodes, data.edges);
+            let data = null;
+            try {
+                data = await response.json();
+            } catch (e) {
+                data = null;
+            }
+
+            // 后端错误（例如 Neo4j 未启动/连接失败）时，避免前端因 stats 不存在而崩溃
+            if (!response.ok) {
+                const detail = data?.detail || data?.message || `HTTP ${response.status}`;
+                this.graphStats.innerHTML = `<p style="color: #ff4141;">加载失败: ${detail}</p>`;
+                this.renderStats(data?.stats || null);
+                return;
+            }
+
+            // 兼容后端返回 {status:"disabled"/"error"} 等情况
+            if (!data || (data.status && data.status !== 'success')) {
+                const msg = data?.message || (data?.status === 'disabled' ? '记忆系统未启用或未就绪' : '加载失败');
+                this.graphStats.innerHTML = `<p style="color: #ffaa00;">${msg}</p>`;
+                this.renderStats(data?.stats || null);
+                return;
+            }
+
+            this.renderStats(data.stats || null);
+            this.renderGraph(data.nodes || [], data.edges || []);
         } catch (error) {
             this.graphStats.innerHTML = `<p style="color: #ff4141;">加载失败: ${error.message}</p>`;
         }
@@ -670,6 +686,11 @@ class MemoryGraphVisualization {
     }
     
     renderStats(stats) {
+        // stats 可能为空（例如后端报错返回 detail），这里做兜底避免字段不存在
+        if (!stats) {
+            stats = { total_nodes: 0, total_edges: 0, layers: { hot: 0, warm: 0, cold: 0 } };
+        }
+        if (!stats.layers) stats.layers = { hot: 0, warm: 0, cold: 0 };
         this.graphStats.innerHTML = `
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 15px;">
                 <div style="background: var(--bg-primary); padding: 10px; border-radius: 5px;">
@@ -971,16 +992,6 @@ class SettingsManager {
         this.setFieldValue('minClusterSize', config.memory.warm_layer.min_cluster_size);
         this.setFieldValue('maxSummaryLength', config.memory.cold_layer.max_summary_length);
         this.setFieldValue('compressionThreshold', config.memory.cold_layer.compression_threshold);
-        
-        // 置信度检测配置
-        if (config.ui && config.ui.uncertainty_detection) {
-            this.setFieldValue('uncertaintyEnabled', config.ui.uncertainty_detection.enabled, 'checkbox');
-            this.setFieldValue('showCritical', config.ui.uncertainty_detection.show_critical, 'checkbox');
-            this.setFieldValue('showHigh', config.ui.uncertainty_detection.show_high, 'checkbox');
-            this.setFieldValue('showMedium', config.ui.uncertainty_detection.show_medium, 'checkbox');
-            this.setFieldValue('minMarkDistance', config.ui.uncertainty_detection.min_mark_distance || 80);
-            this.setFieldValue('signalThreshold', config.ui.uncertainty_detection.signal_threshold || 0.6);
-        }
     }
     
     setFieldValue(fieldId, value, type = 'input') {
@@ -1038,9 +1049,6 @@ class SettingsManager {
                 neo4j: {},
                 warm_layer: {},
                 cold_layer: {}
-            },
-            ui: {
-                uncertainty_detection: {}
             }
         };
         
@@ -1073,7 +1081,8 @@ class SettingsManager {
 
 // 性能统计管理器
 class MetricsManager {
-    constructor() {
+    constructor(apiBaseUrl) {
+        this.apiBaseUrl = apiBaseUrl;
         this.modal = document.getElementById('metricsModal');
         this.btn = document.getElementById('metricsBtn');
         this.closeBtn = this.modal?.querySelector('.close-modal');
@@ -1103,7 +1112,7 @@ class MetricsManager {
     
     async loadMetrics() {
         try {
-            const response = await fetch('http://127.0.0.1:8000/api/metrics');
+            const response = await fetch(`${this.apiBaseUrl}/api/metrics`);
             const data = await response.json();
             
             if (data.status === 'success') {
@@ -1223,7 +1232,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const app = new TerminalChatApp();
     const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
     const settingsManager = new SettingsManager(app.apiBaseUrl);
-    const metricsManager = new MetricsManager();
+    const metricsManager = new MetricsManager(app.apiBaseUrl);
     const avatarManager = new AvatarManager();
     
     document.getElementById('memoryGraphBtn').addEventListener('click', () => {

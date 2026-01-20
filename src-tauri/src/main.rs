@@ -106,7 +106,7 @@ fn main() {
             eprintln!("启动 Python 服务失败: {}", e);
             eprintln!("请确保：");
             eprintln!("1. 已安装 Python 3.8+");
-            eprintln!("2. 已安装依赖: pip install -r api_server/requirements.txt");
+            eprintln!("2. 已安装依赖: pip install -r requirements.txt");
             eprintln!("3. 在项目根目录运行此程序");
             std::process::exit(1);
         }
