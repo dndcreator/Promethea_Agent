@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "promethea-agent"
+version = "0.1.0"
+description = "A general-purpose AI agent with computer control and memory capabilities"
+authors = [
+  { name = "Promethea Team", email = "your.email@example.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.0.0",
+    "python-multipart>=0.0.6",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.0",
+    "openai>=1.0.0",
+    "neo4j>=5.0.0",
+    "websockets>=12.0",
+    "aiohttp>=3.9.0",
+    "duckduckgo-search>=4.0.0",
+    "playwright>=1.40.0",
+    "pyautogui>=0.9.54",
+    "pillow>=10.0.0",
+    "pyperclip>=1.8.2",
+    "psutil>=5.9.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "black",
+    "isort",
+    "flake8"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short"
+]
+markers = [
+    "asyncio: 异步测试",
+    "live: 集成测试（需要运行服务器）",
+    "slow: 慢速测试"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*", "UI*"]

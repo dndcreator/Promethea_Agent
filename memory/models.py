@@ -22,6 +22,7 @@ class NodeType(str, Enum):
     # 冷层节点
     SUMMARY = "Summary"         # 摘要节点
     SESSION = "Session"         # 会话节点
+    USER = "User"               # 用户节点
 
 
 class RelationType(str, Enum):
@@ -41,6 +42,7 @@ class RelationType(str, Enum):
     # 冷层关系
     SUMMARIZES = "SUMMARIZES"       # 摘要关系
     PART_OF_SESSION = "PART_OF_SESSION"  # 属于会话
+    OWNED_BY = "OWNED_BY"           # 属于用户
 
 
 class FactTuple(BaseModel):
@@ -97,4 +99,3 @@ class ExtractionResult(BaseModel):
     time_expressions: List[str] = Field(default_factory=list)
     locations: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-

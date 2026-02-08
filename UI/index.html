@@ -49,6 +49,9 @@
             <div class="status-indicator" id="memoryStatus" title="记忆系统状态">
                 <span class="dot"></span> Memory
             </div>
+            <button id="logoutBtn" class="logout-btn" title="退出登录">
+                🚪
+            </button>
         </div>
     </aside>
 
@@ -63,6 +66,7 @@
                 </div>
             </div>
             <div class="terminal-controls">
+                <button id="doctorBtn" class="doctor-btn" title="系统自检 Doctor">🩺</button>
                 <button id="metricsBtn" class="metrics-btn" title="性能统计">📊</button>
                 <button id="settingsBtn" class="settings-btn" title="系统设置">⚙️</button>
                 <button id="memoryGraphBtn" class="memory-graph-btn" title="查看记忆图">🧠</button>
@@ -77,10 +81,11 @@
                 <!-- 消息会在这里显示 -->
             </div>
             
-            <div class="terminal-input-line">
-                <span class="prompt-symbol">$</span>
-                <input type="text" id="messageInput" placeholder="输入你的问题..." />
-                <button id="sendButton" class="send-btn">↵</button>
+            <div class="terminal-input-wrapper">
+                <div class="terminal-input-line">
+                    <input type="text" id="messageInput" placeholder="输入你的问题..." />
+                    <button id="sendButton" class="send-btn">↵</button>
+                </div>
             </div>
         </div>
         
@@ -88,6 +93,64 @@
             <span class="status-item">当前会话: <span id="currentSession">未开始</span></span>
         </div>
     </main>
+
+    <!-- 敏感操作确认模态窗口 -->
+    <div id="confirmModal" class="modal">
+        <div class="modal-content confirm-modal-content">
+            <div class="modal-header">
+                <h2>⚠️ 敏感操作确认</h2>
+            </div>
+            <div class="modal-body">
+                <p>Agent 尝试执行以下高风险操作，需要您的批准：</p>
+                <div class="confirm-details">
+                    <div class="detail-row">
+                        <span class="label">工具:</span>
+                        <span class="value" id="confirmToolName"></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="label">参数:</span>
+                        <pre class="value-code" id="confirmToolArgs"></pre>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" id="rejectToolBtn">拒绝</button>
+                    <button type="button" class="btn-primary btn-danger" id="approveToolBtn">批准执行</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 登录/注册模态窗口 -->
+    <div id="authModal" class="modal" style="display: block;">
+        <div class="modal-content auth-modal-content">
+            <div class="modal-header">
+                <h2 id="authTitle">🔐 登录</h2>
+            </div>
+            <div class="modal-body">
+                <form id="authForm">
+                    <div class="form-group">
+                        <label for="username">用户名</label>
+                        <input type="text" id="username" name="username" required placeholder="请输入用户名">
+                    </div>
+                    <div class="form-group">
+                        <label for="password">密码</label>
+                        <input type="password" id="password" name="password" required placeholder="请输入密码">
+                    </div>
+                    <div class="form-group" id="agentNameGroup" style="display: none;">
+                        <label for="agentName">Agent 名字</label>
+                        <input type="text" id="agentName" name="agent_name" placeholder="给你的助手起个名字 (默认: Promethea)">
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn-primary" id="authSubmitBtn">登录</button>
+                    </div>
+                    <div class="auth-switch">
+                        <span id="authSwitchText">还没有账号？</span>
+                        <a href="#" id="authSwitchLink">去注册</a>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
 
     <!-- 性能统计模态窗口 -->
     <div id="metricsModal" class="modal">
@@ -123,6 +186,23 @@
         </div>
     </div>
 
+    <!-- 系统自检（Doctor）模态窗口 -->
+    <div id="doctorModal" class="modal">
+        <div class="modal-content metrics-modal">
+            <div class="modal-header">
+                <h2>🩺 系统自检 Doctor</h2>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div class="doctor-actions">
+                    <button id="doctorRunBtn" class="btn-secondary">重新体检</button>
+                    <button id="doctorFixConfigBtn" class="btn-primary">修复 / 迁移配置</button>
+                </div>
+                <pre id="doctorOutput" class="doctor-output"></pre>
+            </div>
+        </div>
+    </div>
+
     <!-- 记忆图可视化模态窗口 -->
     <div id="memoryGraphModal" class="modal">
         <div class="modal-content">
@@ -147,7 +227,68 @@
             <div class="modal-body settings-modal-body">
                 <div class="settings-loading">正在加载配置...</div>
                 <form id="settingsForm" style="display: none;">
-                    <!-- API 设置 -->
+                    <!-- 用户个性化设置 -->
+                    <div class="settings-section">
+                        <h3>👤 个性化设置</h3>
+                        <div class="form-group">
+                            <label for="userAgentName">Agent 名字</label>
+                            <input type="text" id="userAgentName" name="user.agent_name" placeholder="Promethea">
+                        </div>
+                        <div class="form-group">
+                            <label for="userSystemPrompt">自定义 System Prompt</label>
+                            <textarea id="userSystemPrompt" name="user.system_prompt" rows="5" placeholder="自定义你的 Agent 人设..."></textarea>
+                        </div>
+                    </div>
+
+                    <!-- 用户 API 设置 (覆盖全局) -->
+                    <div class="settings-section">
+                        <h3>🔑 个人 API 配置 (可选)</h3>
+                        <p class="settings-hint">在此填写的配置将覆盖系统默认值。留空则使用默认配置。</p>
+                        <div class="form-group">
+                            <label for="userApiKey">API Key</label>
+                            <input type="password" id="userApiKey" name="user.api.api_key" placeholder="sk-...">
+                        </div>
+                        <div class="form-group">
+                            <label for="userBaseUrl">Base URL</label>
+                            <input type="text" id="userBaseUrl" name="user.api.base_url" placeholder="https://openrouter.ai/api/v1">
+                        </div>
+                        <div class="form-group">
+                            <label for="userModel">模型名称</label>
+                            <input type="text" id="userModel" name="user.api.model" placeholder="nvidia/nemotron-3-nano-30b-a3b:free">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="userTemperature">Temperature</label>
+                                <input type="number" id="userTemperature" name="user.api.temperature" step="0.1" min="0" max="2">
+                            </div>
+                            <div class="form-group">
+                                <label for="userMaxTokens">Max Tokens</label>
+                                <input type="number" id="userMaxTokens" name="user.api.max_tokens" min="100" max="10000">
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 社交账号绑定 -->
+                    <div class="settings-section">
+                        <h3>🔗 社交账号绑定</h3>
+                        <div class="channel-bind-container">
+                            <div class="bind-row">
+                                <select id="bindChannelType">
+                                    <option value="telegram">Telegram</option>
+                                    <option value="wechat">WeChat (Work)</option>
+                                    <option value="dingtalk">DingTalk</option>
+                                    <option value="feishu">Feishu</option>
+                                </select>
+                                <input type="text" id="bindAccountId" placeholder="输入账号ID (如 Telegram User ID)">
+                                <button type="button" id="bindBtn" class="btn-secondary">绑定</button>
+                            </div>
+                            <div id="boundChannelsList" class="bound-list">
+                                <!-- 已绑定的账号列表 -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 系统 API 设置 (仅管理员可见 - 暂不隐藏) -->
                     <div class="settings-section">
                         <h3>🔑 API 配置</h3>
                         <div class="form-group">

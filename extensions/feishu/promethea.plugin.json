@@ -1,0 +1,16 @@
+{
+  "id": "feishu",
+  "kind": "channel",
+  "name": "Feishu Channel",
+  "description": "Built-in Feishu channel",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "channel_config": { "type": "object" }
+    },
+    "additionalProperties": true
+  }
+}
+

@@ -1,0 +1,16 @@
+{
+  "id": "dingtalk",
+  "kind": "channel",
+  "name": "DingTalk Channel",
+  "description": "Built-in DingTalk channel",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "channel_config": { "type": "object" }
+    },
+    "additionalProperties": true
+  }
+}
+

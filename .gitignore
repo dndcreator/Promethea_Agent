@@ -1,6 +1,37 @@
 # Python
 __pycache__/
 *.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+venv/
+
+# Local secrets
+.env
+
+# Runtime data
+logs/
+browser_state.json
+sessions.json
+users/
+
+# Playwright
+playwright/.cache/
+
+# Node (UI tooling)
+node_modules/
+
+# OS
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.py[cod]
 *$py.class
 *.so
 .Python

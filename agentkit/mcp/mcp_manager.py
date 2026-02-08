@@ -1,6 +1,6 @@
 import sys
 import json
-import logging
+from loguru import logger
 import asyncio
 from typing import Any, Dict, List, Optional
 from asyncio import AbstractEventLoop
@@ -13,7 +13,7 @@ try:
     MCP_CLIENT_AVAILABLE = True
 except ImportError:
     MCP_CLIENT_AVAILABLE = False
-    logging.warning("MCP 客户端未安装，MCP 服务连接功能将不可用")
+    logger.warning("MCP 客户端未安装，MCP 服务连接功能将不可用")
 
 from agentkit.mcp.mcpregistry import MCP_REGISTRY
 
@@ -27,8 +27,7 @@ class MCPManager:
         self.handoffs = {} 
         self.handoff_filters = {} 
         self.handoff_callbacks = {} 
-        self.logger = logging.getLogger("MCPManager")
-        sys.stderr.write("MCPManager初始化\n")
+        logger.info("MCPManager初始化")
     
     def register_handoff(self, 
     service_name: str, 
@@ -40,7 +39,7 @@ class MCPManager:
     strict_schema=False):
 
         if service_name in self.services:
-            self.logger.warning(f"服务{service_name}已注册，跳过重复注册\n")
+            logger.warning(f"服务{service_name}已注册，跳过重复注册")
             return
         
         self.services[service_name] = {
@@ -51,7 +50,7 @@ class MCPManager:
             "filter_fn": filters,
             "strict_schema": strict_schema
         }
-        self.logger.info(f"注册handoff服务{service_name}成功")
+        logger.info(f"注册handoff服务{service_name}成功")
 
     async def _default_handoff_callback(ctx: Any, 
     input_json: Optional[str] = None) -> Any:
@@ -67,7 +66,7 @@ class MCPManager:
 
         try:
             task_json = json.dumps(task, ensure_ascii = False)
-            sys.stderr.write(f"执行handoff: services={service_name}, tsk={task_json}\n".encode("utf-8", errors="replace").decode("utf-8"))
+            logger.debug(f"执行handoff: services={service_name}, tsk={task_json}")
 
             if service_name not in self.services:
                 raise ValueError(f"{service_name}未注册")
@@ -80,7 +79,7 @@ class MCPManager:
                 "strict_schema": service.get("strict_schema", False)
             }   
             safe_info_json = json.dumps(safe_info, ensure_ascii = False)
-            sys.stderr.write(f"找到服务配置: {safe_info_json}\n".encode("utf-8", errors = "replace").decode("utf-8"))     
+            logger.debug(f"找到服务配置: {safe_info_json}")     
 
             if service["strict_schema"]:
                 required_fields = service["input_schema"].get("required", [])
@@ -91,24 +90,24 @@ class MCPManager:
                 try:
                     task["messages"] = service["filter_fn"](task["messages"])
                 except Exception as e:
-                    sys.stderr.write(f"消息过滤失败： {e}\n".encode("utf-8", errors = "replace").decode("utf-8"))     
+                    logger.error(f"消息过滤失败： {e}")     
             from agentkit.mcp.mcpregistry import MCP_REGISTRY
             agent_name = service["agent_name"]
             agent = MCP_REGISTRY.get(agent_name)
             if not agent:
                 raise ValueError(f"{agent_name}未注册")
-            sys.stderr.write(f"使用已注册的Agent实例: {agent_name}\n".encode("utf-8", errors = "replace").decode("utf-8"))
-            sys.stderr.write(f"开始执行Agent交接\n".encode("utf-8", errors = "replace").decode("utf-8"))
+            logger.info(f"使用已注册的Agent实例: {agent_name}")
+            logger.info(f"开始执行Agent交接")
             result = await agent.handle_handoff(task)
-            sys.stderr.write(f"Agent交接结果: {result}\n".encode("utf-8", errors = "replace").decode("utf-8"))
+            logger.debug(f"Agent交接结果: {result}")
 
             return result
     
         except Exception as e:
             error_report = f"交接执行失败: {str(e)}"
-            sys.stderr.write(f"{error_report}\n".encode("utf-8", errors = "replace").decode("utf-8"))
+            logger.error(f"{error_report}")
             import traceback
-            traceback.print_exc(file = sys.stderr)
+            logger.exception(e)
 
             return json.dumps({
                 "status": "failure",
@@ -118,18 +117,18 @@ class MCPManager:
     async def connect_service(self, service_name: str) -> Optional[ClientSession]:
 
         if service_name not in MCP_REGISTRY:
-            self.logger.warning(f"MCP服务 {service_name} 不存在")
+            logger.warning(f"MCP服务 {service_name} 不存在")
             return None
         if service_name in self.services:
             return self.services[service_name]
         if not MCP_CLIENT_AVAILABLE:
-            self.logger.warning(f"MCP 客户端不可用，无法连接服务: {service_name}")
+            logger.warning(f"MCP 客户端不可用，无法连接服务: {service_name}")
             return None
             
         service_config = MCP_REGISTRY[service_name]
         command = "python" if service_config["type"] == "python" else "node"
         try:
-            self.logger.info(f"正在连接MCP服务: {service_name}")
+            logger.info(f"正在连接MCP服务: {service_name}")
             server_parameters = StdioServerParameters(
                 command = command,
                 args = [service_config["script_path"]],
@@ -144,12 +143,12 @@ class MCPManager:
             )
             await session.initialize()
             self.services[service_name] = session
-            self.logger.info(f"MCP服务 {service_name} 连接成功")
+            logger.info(f"MCP服务 {service_name} 连接成功")
             
             return session
         except Exception as e:
-            self.logger.error(f"MCP服务 {service_name} 连接失败：{str(e)}")
-            import traceback; traceback.print_exc(file = sys.stderr)
+            logger.error(f"MCP服务 {service_name} 连接失败：{str(e)}")
+            logger.exception(e)
 
             return None
     
@@ -169,8 +168,8 @@ class MCPManager:
 
             return tools
         except Exception as e:
-            self.logger.error(f"获取服务 {service_name} 的工具列表失败：{str(e)}")
-            import traceback; traceback.print_exc(file = sys.stderr)
+            logger.error(f"获取服务 {service_name} 的工具列表失败：{str(e)}")
+            logger.exception(e)
             
             return []
     
@@ -180,14 +179,14 @@ class MCPManager:
         if not session:
             return None
         try:
-            self.logger.debug(f"调用工具 {service_name}.{tool_name} 参数：{args}")
+            logger.debug(f"调用工具 {service_name}.{tool_name} 参数：{args}")
             result = await session.call_tool(tool_name, args)
-            self.logger.debug(f"工具调用结果：{result}")
+            logger.debug(f"工具调用结果：{result}")
 
             return result
         except Exception as e:
-            self.logger.error(f"调用工具 {service_name}.{tool_name} 失败：{str(e)}")
-            import traceback; traceback.print_exc(file = sys.stderr)
+            logger.error(f"调用工具 {service_name}.{tool_name} 失败：{str(e)}")
+            logger.exception(e)
 
             return None
     
@@ -209,8 +208,8 @@ class MCPManager:
                         return await method(**filtered_args) if asyncio.iscoroutinefunction(method) else method(**filtered_args)
             return await self.call_service_tool(service_name, tool_name, args)
         except Exception as e:
-            self.logger.error(f"统一调用失败 {service_name}.{tool_name}: {str(e)}")
-            import traceback; traceback.print_exc(file = sys.stderr)
+            logger.error(f"统一调用失败 {service_name}.{tool_name}: {str(e)}")
+            logger.exception(e)
             return f"调用失败: {str(e)}"
 
     def get_available_services(self) -> list:
@@ -313,14 +312,14 @@ class MCPManager:
     
     async def clean_services(self):
 
-        self.logger.info("正在清理MCP服务连接...")
+        logger.info("正在清理MCP服务连接...")
         try:
             await self.exit_stack.aclose()
             self.services.clear(); self.tools_cache.clear()
-            self.logger.info("MCP服务连接清理完成")
+            logger.info("MCP服务连接清理完成")
         except Exception as e:
-            self.logger.error(f"清理MCP服务连接时出错: {str(e)}")
-            import traceback; traceback.print_exc(file = sys.stderr)
+            logger.error(f"清理MCP服务连接时出错: {str(e)}")
+            logger.exception(e)
     
     def get_mcp(self, name): return MCP_REGISTRY.get(name)
 

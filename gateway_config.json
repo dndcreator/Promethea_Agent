@@ -1,0 +1,39 @@
+{
+  "gateway": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 18789,
+    "auth_token": null,
+    "auto_start_channels": true
+  },
+  "channels": {
+    "web": {
+      "enabled": true,
+      "type": "web"
+    },
+    "dingtalk": {
+      "enabled": false,
+      "type": "dingtalk",
+      "app_key": "",
+      "app_secret": "",
+      "webhook_url": "",
+      "robot_code": ""
+    },
+    "feishu": {
+      "enabled": false,
+      "type": "feishu",
+      "app_id": "",
+      "app_secret": "",
+      "webhook_url": "",
+      "webhook_secret": ""
+    },
+    "wecom": {
+      "enabled": false,
+      "type": "wecom",
+      "corpid": "",
+      "corpsecret": "",
+      "agentid": "",
+      "webhook_url": ""
+    }
+  }
+}

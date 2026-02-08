@@ -1,3 +1,118 @@
+// 认证管理
+class AuthManager {
+    constructor(apiBaseUrl, onLoginSuccess) {
+        this.apiBaseUrl = apiBaseUrl;
+        this.onLoginSuccess = onLoginSuccess;
+        this.modal = document.getElementById('authModal');
+        this.form = document.getElementById('authForm');
+        this.title = document.getElementById('authTitle');
+        this.submitBtn = document.getElementById('authSubmitBtn');
+        this.switchLink = document.getElementById('authSwitchLink');
+        this.switchText = document.getElementById('authSwitchText');
+        this.agentNameGroup = document.getElementById('agentNameGroup');
+        
+        this.isRegister = false;
+        
+        this.bindEvents();
+        this.checkAuth();
+    }
+    
+    bindEvents() {
+        this.switchLink.addEventListener('click', (e) => {
+            e.preventDefault();
+            this.toggleMode();
+        });
+        
+        this.form.addEventListener('submit', (e) => this.handleSubmit(e));
+    }
+    
+    toggleMode() {
+        this.isRegister = !this.isRegister;
+        if (this.isRegister) {
+            this.title.textContent = '📝 注册';
+            this.submitBtn.textContent = '注册并创建 Agent';
+            this.switchText.textContent = '已有账号？';
+            this.switchLink.textContent = '去登录';
+            this.agentNameGroup.style.display = 'block';
+        } else {
+            this.title.textContent = '🔐 登录';
+            this.submitBtn.textContent = '登录';
+            this.switchText.textContent = '还没有账号？';
+            this.switchLink.textContent = '去注册';
+            this.agentNameGroup.style.display = 'none';
+        }
+    }
+    
+    checkAuth() {
+        const token = localStorage.getItem('auth_token');
+        if (token) {
+            this.modal.style.display = 'none';
+            if (this.onLoginSuccess) this.onLoginSuccess();
+        } else {
+            this.modal.style.display = 'block';
+        }
+    }
+    
+    async handleSubmit(e) {
+        e.preventDefault();
+        const formData = new FormData(this.form);
+        const data = Object.fromEntries(formData.entries());
+        
+        const endpoint = this.isRegister ? '/api/auth/register' : '/api/auth/login';
+        
+        try {
+            this.submitBtn.disabled = true;
+            this.submitBtn.textContent = '处理中...';
+            
+            const response = await fetch(`${this.apiBaseUrl}${endpoint}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            });
+            
+            const result = await response.json();
+            
+            if (!response.ok) {
+                throw new Error(result.detail || '操作失败');
+            }
+            
+            if (this.isRegister) {
+                alert('注册成功，请登录');
+                this.toggleMode();
+                // 自动填充用户名
+                document.getElementById('username').value = data.username;
+                document.getElementById('password').value = '';
+            } else {
+                localStorage.setItem('auth_token', result.access_token);
+                localStorage.setItem('user_id', result.user_id);
+                localStorage.setItem('agent_name', result.agent_name);
+                
+                this.modal.style.display = 'none';
+                if (this.onLoginSuccess) this.onLoginSuccess();
+                
+                // 欢迎提示
+                const agentName = result.agent_name || 'Promethea';
+                alert(`欢迎回来！${agentName} 已准备就绪。`);
+            }
+            
+        } catch (error) {
+            alert(error.message);
+        } finally {
+            this.submitBtn.disabled = false;
+            this.submitBtn.textContent = this.isRegister ? '注册并创建 Agent' : '登录';
+        }
+    }
+    
+    logout() {
+        localStorage.removeItem('auth_token');
+        localStorage.removeItem('user_id');
+        localStorage.removeItem('agent_name');
+        location.reload();
+    }
+}
+
 class TerminalChatApp {
     constructor() {
         this.messageInput = document.getElementById('messageInput');
@@ -15,13 +130,43 @@ class TerminalChatApp {
         this.sidebar = document.getElementById('sidebar');
         this.sidebarToggle = document.getElementById('sidebarToggle');
         this.avatarPlaceholder = document.getElementById('avatarPlaceholder');
+        this.logoutBtn = document.getElementById('logoutBtn');
+        
+        // 确认模态窗口
+        this.confirmModal = document.getElementById('confirmModal');
+        this.confirmToolName = document.getElementById('confirmToolName');
+        this.confirmToolArgs = document.getElementById('confirmToolArgs');
+        this.approveToolBtn = document.getElementById('approveToolBtn');
+        this.rejectToolBtn = document.getElementById('rejectToolBtn');
+        this.pendingConfirmation = null;
         
         this.apiBaseUrl = 'http://127.0.0.1:8000';
         this.currentSessionId = null;
         this.isTyping = false;
+        // tool_call 显示：call_id -> DOM element
+        this.toolCallElements = new Map();
+        
+        // 初始化认证管理器
+        this.authManager = new AuthManager(this.apiBaseUrl, () => this.initializeApp());
         
         this.bindEvents();
-        this.initializeApp();
+        // this.initializeApp(); // 移到登录成功后调用
+    }
+    
+    async fetchWithAuth(url, options = {}) {
+        const token = localStorage.getItem('auth_token');
+        const headers = options.headers || {};
+        if (token) {
+            headers['Authorization'] = `Bearer ${token}`;
+        }
+        options.headers = headers;
+        
+        const response = await fetch(url, options);
+        if (response.status === 401) {
+            this.authManager.logout();
+            throw new Error('认证失效，请重新登录');
+        }
+        return response;
     }
     
     async initializeApp() {
@@ -111,12 +256,101 @@ class TerminalChatApp {
         this.messageInput.addEventListener('blur', () => {
             this.messageInput.parentElement.style.boxShadow = '0 0 15px var(--shadow)';
         });
+
+        // 登出按钮
+        if (this.logoutBtn) {
+            this.logoutBtn.addEventListener('click', () => {
+                if (confirm('确定要退出登录吗？')) {
+                    this.authManager.logout();
+                }
+            });
+        }
+
+        // 确认模态窗口事件
+        this.approveToolBtn.addEventListener('click', () => this.handleToolConfirmation('approve'));
+        this.rejectToolBtn.addEventListener('click', () => this.handleToolConfirmation('reject'));
+    }
+    
+    async handleToolConfirmation(action) {
+        if (!this.pendingConfirmation) return;
+        
+        const { session_id, tool_call_id } = this.pendingConfirmation;
+        
+        // 隐藏模态窗口
+        this.confirmModal.style.display = 'none';
+        
+        // 如果是拒绝，直接结束
+        if (action === 'reject') {
+            this.addMessage('assistant', '❌ 已拒绝执行该操作。');
+            this.sendButton.disabled = false;
+            this.isTyping = false;
+            this.setAvatarStatus('idle');
+        } else {
+            // 如果是批准，继续显示思考状态
+            this.setAvatarStatus('thinking');
+        }
+
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/chat/confirm`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    session_id: session_id,
+                    tool_call_id: tool_call_id,
+                    action: action
+                })
+            });
+            
+            const data = await response.json();
+            
+            if (data.status === 'needs_confirmation') {
+                // 再次需要确认（链式调用）
+                this.showConfirmation(data);
+            } else if (data.status === 'success') {
+                // 显示结果
+                this.addMessage('assistant', data.response);
+                this.sendButton.disabled = false;
+                this.isTyping = false;
+                this.setAvatarStatus('idle');
+            } else if (data.status === 'rejected') {
+                // 已拒绝
+            } else {
+                throw new Error(data.message || '操作失败');
+            }
+            
+        } catch (error) {
+            console.error('确认操作失败:', error);
+            this.addMessage('assistant', `操作失败: ${error.message}`);
+            this.sendButton.disabled = false;
+            this.isTyping = false;
+            this.setAvatarStatus('idle');
+        }
+        
+        this.pendingConfirmation = null;
+    }
+
+    showConfirmation(data) {
+        this.pendingConfirmation = {
+            session_id: data.session_id,
+            tool_call_id: data.tool_call_id
+        };
+        
+        this.confirmToolName.textContent = data.tool_name || 'Unknown Tool';
+        try {
+            this.confirmToolArgs.textContent = JSON.stringify(data.args || {}, null, 2);
+        } catch (e) {
+            this.confirmToolArgs.textContent = String(data.args);
+        }
+        
+        this.confirmModal.style.display = 'block';
     }
     
     async checkApiStatus() {
         try {
             // 优先访问后端真实状态接口（挂在 /api 下）
-            const response = await fetch(`${this.apiBaseUrl}/api/status`);
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/status`);
             if (response.ok) {
                 const data = await response.json();
                 this.updateStatus(this.apiStatusEl, true);
@@ -136,7 +370,7 @@ class TerminalChatApp {
         }
     }
     
-    // 废弃的方法，保留占位防止报错
+    // Deprecated
     async checkMemoryStatus() {
         return; 
     }
@@ -210,7 +444,7 @@ class TerminalChatApp {
     
     async refreshSessions() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/api/sessions`);
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions`);
             if (!response.ok) throw new Error('获取会话列表失败');
             
             const data = await response.json();
@@ -267,7 +501,7 @@ class TerminalChatApp {
         if (!sessionId || this.currentSessionId === sessionId) return;
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/api/sessions/${sessionId}`);
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions/${sessionId}`);
             if (!response.ok) throw new Error('获取会话详情失败');
             
             const data = await response.json();
@@ -336,13 +570,19 @@ class TerminalChatApp {
         messageDiv.className = 'message assistant';
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        contentDiv.innerHTML = '正在思考...';
+        // 分离：工具调用区 + 文本区（避免互相覆盖）
+        contentDiv.innerHTML = `
+            <div class="tool-area"></div>
+            <div class="text-area">正在思考...</div>
+        `;
         messageDiv.appendChild(contentDiv);
         this.chatMessages.appendChild(messageDiv);
+        const toolArea = contentDiv.querySelector('.tool-area');
+        const textArea = contentDiv.querySelector('.text-area');
         
         try {
             // 调用后端API（流式）
-            const response = await fetch(`${this.apiBaseUrl}/api/chat`, {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/chat`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -364,7 +604,7 @@ class TerminalChatApp {
             let buffer = '';
             let fullText = '';
             
-            contentDiv.innerHTML = '';  // 清空"正在思考"
+            textArea.innerHTML = '';  // 清空"正在思考"
             
             let doneReceived = false;
             while (true) {
@@ -414,12 +654,119 @@ class TerminalChatApp {
                             );
                         }
 
-                        contentDiv.innerHTML = displayHtml;
+                        textArea.innerHTML = displayHtml;
                         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
 
                         // 设置说话状态
                         this.setAvatarStatus('speaking');
+                    } else if (data.type === 'tool_detected') {
+                        // 模型已检测到工具调用（还没拿到具体工具参数）
+                        const hint = document.createElement('div');
+                        hint.className = 'tool-hint';
+                        hint.textContent = data.content || '检测到工具调用...';
+                        toolArea.appendChild(hint);
+                        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+                    } else if (data.type === 'tool_start') {
+                        // 工具调用开始：显示折叠面板（类似 ChatGPT 工具过程）
+                        const callId = data.call_id || `${Date.now()}_${Math.random()}`;
+                        const toolName = data.tool_name || 'tool';
+                        const args = data.args || {};
+
+                        const details = document.createElement('details');
+                        details.className = 'tool-call';
+                        details.open = false;
+
+                        const summary = document.createElement('summary');
+                        summary.textContent = `🔧 调用工具：${toolName}（运行中）`;
+
+                        const body = document.createElement('div');
+                        body.className = 'tool-call-body';
+                        const argsPre = document.createElement('pre');
+                        argsPre.className = 'tool-call-args';
+                        try {
+                            argsPre.textContent = JSON.stringify(args, null, 2);
+                        } catch (_) {
+                            argsPre.textContent = String(args);
+                        }
+
+                        const resultPre = document.createElement('pre');
+                        resultPre.className = 'tool-call-result';
+                        resultPre.textContent = '';
+
+                        body.appendChild(argsPre);
+                        body.appendChild(resultPre);
+                        details.appendChild(summary);
+                        details.appendChild(body);
+                        toolArea.appendChild(details);
+                        this.toolCallElements.set(callId, { details, summary, resultPre });
+                        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+                    } else if (data.type === 'tool_result') {
+                        const callId = data.call_id;
+                        const entry = this.toolCallElements.get(callId);
+                        const resultText = data.result || '';
+                        if (entry) {
+                            entry.resultPre.textContent = resultText;
+                            entry.summary.textContent = `🔧 调用工具：${data.tool_name || 'tool'}（已完成）`;
+                            // 默认折叠；用户可展开查看参数与输出
+                        } else {
+                            // 容错：如果找不到对应卡片，直接追加一条
+                            const fallback = document.createElement('pre');
+                            fallback.className = 'tool-call-result';
+                            fallback.textContent = resultText;
+                            toolArea.appendChild(fallback);
+                        }
+                        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+                    } else if (data.type === 'tool_error') {
+                        const err = document.createElement('div');
+                        err.className = 'tool-error';
+                        err.textContent = data.content || '工具调用失败';
+                        toolArea.appendChild(err);
+                        this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
                     } else if (data.type === 'done') {
+                        // done 时对最终文本做一次“重复输出”去重并重绘，避免留下 A\n\nA 这种结果
+                        const dedupeText = (text) => {
+                            const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+                            const raw = (text || '').trim();
+                            if (!raw) return text || '';
+                            const paras = raw.split(/\n\s*\n+/).map(s => s.trim()).filter(Boolean);
+                            if (!paras.length) return raw;
+                            const collapsed = [];
+                            for (const p of paras) {
+                                if (collapsed.length && norm(collapsed[collapsed.length - 1]) === norm(p)) continue;
+                                collapsed.push(p);
+                            }
+                            if (collapsed.length >= 2 && collapsed.length % 2 === 0) {
+                                const mid = collapsed.length / 2;
+                                const first = collapsed.slice(0, mid).join('\n\n');
+                                const second = collapsed.slice(mid).join('\n\n');
+                                if (norm(first) === norm(second)) return first;
+                            }
+                            return collapsed.join('\n\n');
+                        };
+
+                        fullText = dedupeText(fullText);
+
+                        // 复用现有渲染逻辑（思考标签/换行）
+                        let displayHtml = fullText.replace(/\n/g, '<br>');
+                        if (fullText.includes('<thinking>') && fullText.includes('</thinking>')) {
+                            displayHtml = displayHtml.replace(
+                                /&lt;thinking&gt;([\s\S]*?)&lt;\/thinking&gt;|<thinking>([\s\S]*?)<\/thinking>/g,
+                                (match, p1, p2) => {
+                                    const content = p1 || p2;
+                                    return `<details class="thought-process">
+                                        <summary>💭 深度思考过程</summary>
+                                        <div class="thought-content">${content}</div>
+                                    </details>`;
+                                }
+                            );
+                        } else if (fullText.includes('<thinking>')) {
+                            displayHtml = displayHtml.replace(
+                                /&lt;thinking&gt;[\s\S]*|<thinking>[\s\S]*/,
+                                '<div class="thinking-status">🧠 正在深度思考...</div>'
+                            );
+                        }
+                        textArea.innerHTML = displayHtml;
+
                         this.setAvatarStatus('idle');
                         if (data.session_id) {
                             this.currentSessionId = data.session_id;
@@ -568,7 +915,7 @@ class TerminalChatApp {
         responseDiv.innerHTML = '<p class="loading">正在思考...</p>';
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/api/followup`, {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/followup`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -650,7 +997,9 @@ class MemoryGraphVisualization {
         this.graphCanvas.innerHTML = '';
         
         try {
-            const response = await fetch(`${this.apiBaseUrl}/api/memory/graph/${sessionId}`);
+            const token = localStorage.getItem('auth_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const response = await fetch(`${this.apiBaseUrl}/api/memory/graph/${sessionId}`, { headers });
             let data = null;
             try {
                 data = await response.json();
@@ -935,11 +1284,15 @@ class SettingsManager {
         
         this.form.onsubmit = (e) => this.handleSubmit(e);
         this.resetBtn.onclick = () => this.loadConfig();
+        
+        // 绑定按钮事件
+        document.getElementById('bindBtn').addEventListener('click', () => this.handleBindChannel());
     }
     
     async show() {
         this.modal.style.display = 'block';
         await this.loadConfig();
+        await this.loadBoundChannels();
     }
     
     hide() {
@@ -951,19 +1304,114 @@ class SettingsManager {
             this.loadingEl.style.display = 'block';
             this.form.style.display = 'none';
             
-            const response = await fetch(`${this.apiBaseUrl}/api/config`);
+            const token = localStorage.getItem('auth_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            
+            // 加载系统配置
+            const response = await fetch(`${this.apiBaseUrl}/api/config`, { headers });
             const data = await response.json();
             
             if (data.status === 'success') {
                 this.originalConfig = data.config;
                 this.populateForm(data.config);
+            }
+            
+            // 加载用户配置
+            const userResp = await fetch(`${this.apiBaseUrl}/api/user/profile`, { headers });
+            if (userResp.ok) {
+                const userData = await userResp.json();
+                this.setFieldValue('userAgentName', userData.agent_name);
+                this.setFieldValue('userSystemPrompt', userData.system_prompt);
+                
+                // 填充用户 API 配置
+                if (userData.api) {
+                    this.setFieldValue('userApiKey', userData.api.api_key);
+                    this.setFieldValue('userBaseUrl', userData.api.base_url);
+                    this.setFieldValue('userModel', userData.api.model);
+                    this.setFieldValue('userTemperature', userData.api.temperature);
+                    this.setFieldValue('userMaxTokens', userData.api.max_tokens);
+                }
+            }
+            
                 this.loadingEl.style.display = 'none';
                 this.form.style.display = 'block';
-            } else {
-                throw new Error('加载配置失败');
-            }
+            
         } catch (error) {
             this.loadingEl.innerHTML = `<p style="color: #ff4141;">加载失败: ${error.message}</p>`;
+        }
+    }
+    
+    async loadBoundChannels() {
+        try {
+            const token = localStorage.getItem('auth_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const response = await fetch(`${this.apiBaseUrl}/api/user/channels`, { headers });
+            const data = await response.json();
+            
+            const listEl = document.getElementById('boundChannelsList');
+            listEl.innerHTML = '';
+            
+            if (data.status === 'success' && data.channels) {
+                for (const [channel, accountId] of Object.entries(data.channels)) {
+                    const item = document.createElement('div');
+                    item.className = 'bound-item';
+                    item.innerHTML = `
+                        <span class="channel-icon">${this.getChannelIcon(channel)}</span>
+                        <span class="channel-name">${channel}</span>
+                        <span class="account-id">${accountId}</span>
+                        <span class="status-badge">已绑定</span>
+                    `;
+                    listEl.appendChild(item);
+                }
+            }
+        } catch (error) {
+            console.error('加载绑定渠道失败:', error);
+        }
+    }
+    
+    getChannelIcon(channel) {
+        const icons = {
+            'telegram': '✈️',
+            'wechat': '💬',
+            'dingtalk': '钉',
+            'feishu': '🐦'
+        };
+        return icons[channel] || '🔗';
+    }
+    
+    async handleBindChannel() {
+        const channel = document.getElementById('bindChannelType').value;
+        const accountId = document.getElementById('bindAccountId').value.trim();
+        
+        if (!accountId) {
+            alert('请输入账号ID');
+            return;
+        }
+        
+        try {
+            const token = localStorage.getItem('auth_token');
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`
+            };
+            
+            const response = await fetch(`${this.apiBaseUrl}/api/user/channels/bind`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify({ channel, account_id: accountId })
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok) {
+                alert('✅ 绑定成功！');
+                document.getElementById('bindAccountId').value = '';
+                this.loadBoundChannels();
+            } else {
+                throw new Error(data.detail || '绑定失败');
+            }
+        } catch (error) {
+            alert(`❌ 绑定失败: ${error.message}`);
         }
     }
     
@@ -1010,17 +1458,45 @@ class SettingsManager {
         
         const formData = new FormData(this.form);
         const config = this.buildConfigObject(formData);
+        const token = localStorage.getItem('auth_token');
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+        };
         
         try {
             const submitBtn = this.form.querySelector('.btn-primary');
             submitBtn.disabled = true;
             submitBtn.textContent = '正在保存...';
             
+            // 1. 保存用户配置
+            const userConfig = {
+                agent_name: formData.get('user.agent_name'),
+                system_prompt: formData.get('user.system_prompt'),
+                api: {
+                    api_key: formData.get('user.api.api_key') || null,
+                    base_url: formData.get('user.api.base_url') || null,
+                    model: formData.get('user.api.model') || null,
+                    temperature: formData.get('user.api.temperature') ? parseFloat(formData.get('user.api.temperature')) : null,
+                    max_tokens: formData.get('user.api.max_tokens') ? parseInt(formData.get('user.api.max_tokens')) : null
+                }
+            };
+            
+            await fetch(`${this.apiBaseUrl}/api/user/config`, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(userConfig)
+            });
+            
+            // 更新本地缓存
+            if (userConfig.agent_name) {
+                localStorage.setItem('agent_name', userConfig.agent_name);
+            }
+            
+            // 2. 保存系统配置
             const response = await fetch(`${this.apiBaseUrl}/api/config`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+                headers: headers,
                 body: JSON.stringify({ config })
             });
             
@@ -1112,7 +1588,9 @@ class MetricsManager {
     
     async loadMetrics() {
         try {
-            const response = await fetch(`${this.apiBaseUrl}/api/metrics`);
+            const token = localStorage.getItem('auth_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const response = await fetch(`${this.apiBaseUrl}/api/metrics`, { headers });
             const data = await response.json();
             
             if (data.status === 'success') {
@@ -1140,6 +1618,141 @@ class MetricsManager {
         const minutes = Math.floor((uptime % 3600) / 60);
         const secs = uptime % 60;
         document.getElementById('uptime').textContent = hours > 0 ? `${hours}h ${minutes}m` : minutes > 0 ? `${minutes}m ${secs}s` : `${secs}s`;
+    }
+}
+
+// 系统自检（Doctor）管理器
+class DoctorManager {
+    constructor(apiBaseUrl) {
+        this.apiBaseUrl = apiBaseUrl;
+        this.modal = document.getElementById('doctorModal');
+        this.btn = document.getElementById('doctorBtn');
+        this.closeBtn = this.modal?.querySelector('.close-modal');
+        this.outputEl = document.getElementById('doctorOutput');
+        this.runBtn = document.getElementById('doctorRunBtn');
+        this.fixBtn = document.getElementById('doctorFixConfigBtn');
+
+        this.bindEvents();
+    }
+
+    bindEvents() {
+        if (!this.btn || !this.modal) return;
+
+        this.btn.addEventListener('click', () => this.show());
+        this.closeBtn?.addEventListener('click', () => this.hide());
+
+        this.modal.addEventListener('click', (e) => {
+            if (e.target === this.modal) this.hide();
+        });
+
+        if (this.runBtn) {
+            this.runBtn.addEventListener('click', () => this.runDoctor());
+        }
+        if (this.fixBtn) {
+            this.fixBtn.addEventListener('click', () => this.migrateConfig());
+        }
+    }
+
+    async show() {
+        this.modal.style.display = 'block';
+        await this.runDoctor();
+    }
+
+    hide() {
+        this.modal.style.display = 'none';
+    }
+
+    async runDoctor() {
+        if (!this.outputEl) return;
+        this.outputEl.textContent = '正在运行系统自检，请稍候...\n';
+
+        try {
+            const token = localStorage.getItem('auth_token');
+            const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
+            const response = await fetch(`${this.apiBaseUrl}/api/doctor`, { headers });
+            const data = await response.json();
+
+            const lines = [];
+            lines.push(`状态: ${data.status || 'unknown'}`);
+            lines.push(`时间: ${data.timestamp || ''}`);
+            lines.push('');
+
+            const checks = data.checks || {};
+            for (const [key, value] of Object.entries(checks)) {
+                const ok = value.ok !== false;
+                lines.push(`■ ${key} => ${ok ? 'OK' : 'ERROR'}`);
+                if (value.issues && Array.isArray(value.issues) && value.issues.length > 0) {
+                    for (const issue of value.issues) {
+                        lines.push(`   - ${issue}`);
+                    }
+                }
+                // 对于 config/memory/plugins/mcp 等，附加一些关键字段做简要展示
+                if (key === 'config_api') {
+                    lines.push(`   base_url: ${value.api_base_url}`);
+                    lines.push(`   model: ${value.model}`);
+                } else if (key === 'memory') {
+                    lines.push(`   enabled: ${value.enabled}`);
+                    lines.push(`   neo4j_enabled: ${value.neo4j_enabled}`);
+                    lines.push(`   warm_layer_enabled: ${value.warm_layer_enabled}`);
+                } else if (key === 'plugins') {
+                    lines.push(`   plugins_total: ${value.plugins_total}`);
+                    lines.push(`   channels_total: ${value.channels_total}`);
+                    lines.push(`   services_total: ${value.services_total}`);
+                } else if (key === 'mcp') {
+                    lines.push(`   services_total: ${value.services_total}`);
+                    if (value.services && value.services.length) {
+                        lines.push(`   services: ${value.services.join(', ')}`);
+                    }
+                } else if (key === 'sessions') {
+                    lines.push(`   sessions_in_memory: ${value.sessions_in_memory}`);
+                    lines.push(`   sessions_file_exists: ${value.sessions_file_exists}`);
+                }
+                lines.push('');
+            }
+
+            this.outputEl.textContent = lines.join('\n');
+        } catch (error) {
+            this.outputEl.textContent = `自检失败: ${error.message}`;
+        }
+    }
+
+    async migrateConfig() {
+        if (!this.outputEl) return;
+        this.outputEl.textContent = '正在修复 / 迁移配置，请稍候...\n';
+
+        try {
+            const token = localStorage.getItem('auth_token');
+            const headers = {
+                'Content-Type': 'application/json',
+            };
+            if (token) {
+                headers['Authorization'] = `Bearer ${token}`;
+            }
+
+            const response = await fetch(`${this.apiBaseUrl}/api/doctor/migrate-config`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({}),
+            });
+            const data = await response.json();
+
+            const lines = [];
+            if (response.ok && data.status === 'success') {
+                lines.push(`状态: success`);
+                if (data.message) lines.push(data.message);
+                if (data.config_path) lines.push(`配置文件: ${data.config_path}`);
+                if (data.backup) lines.push(`已创建备份: ${data.backup}`);
+            } else {
+                lines.push(`状态: ${data.status || 'error'}`);
+                lines.push(`错误: ${data.message || '修复失败'}`);
+                if (data.config_path) lines.push(`配置文件: ${data.config_path}`);
+                if (data.backup) lines.push(`备份: ${data.backup}`);
+            }
+
+            this.outputEl.textContent = lines.join('\n');
+        } catch (error) {
+            this.outputEl.textContent = `自检修复失败: ${error.message}`;
+        }
     }
 }
 
@@ -1233,6 +1846,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
     const settingsManager = new SettingsManager(app.apiBaseUrl);
     const metricsManager = new MetricsManager(app.apiBaseUrl);
+    const doctorManager = new DoctorManager(app.apiBaseUrl);
     const avatarManager = new AvatarManager();
     
     document.getElementById('memoryGraphBtn').addEventListener('click', () => {

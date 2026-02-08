@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class HotLayerManager:
     """热层记忆管理器"""
     
-    def __init__(self, extractor: LLMExtractor, connector: Neo4jConnector, session_id: str):
+    def __init__(self, extractor: LLMExtractor, connector: Neo4jConnector, session_id: str, user_id: str = "default_user"):
         """
         初始化热层管理器
         
@@ -26,15 +26,29 @@ class HotLayerManager:
             extractor: LLM 提取器
             connector: Neo4j 连接器
             session_id: 会话 ID
+            user_id: 用户 ID (默认为 default_user)
         """
         self.extractor = extractor
         self.connector = connector
         self.session_id = session_id
+        self.user_id = user_id
         self._ensure_session_node()
-        logger.info(f"热层管理器初始化完成，会话: {session_id}")
+        logger.info(f"热层管理器初始化完成，会话: {session_id}, 用户: {user_id}")
     
     def _ensure_session_node(self):
-        """确保会话节点存在"""
+        """确保会话节点和用户节点存在，并建立关联"""
+        # 1. 确保用户节点存在
+        user_node = Neo4jNode(
+            id=f"user_{self.user_id}",
+            type=NodeType.USER,
+            content=f"用户 {self.user_id}",
+            layer=0,
+            importance=1.0,
+            properties={"user_id": self.user_id}
+        )
+        self.connector.create_node(user_node)
+
+        # 2. 确保会话节点存在
         session_node = Neo4jNode(
             id=f"session_{self.session_id}",
             type=NodeType.SESSION,
@@ -44,6 +58,15 @@ class HotLayerManager:
             properties={"session_id": self.session_id}
         )
         self.connector.create_node(session_node)
+
+        # 3. 建立会话归属关系 (Session -> User)
+        relation = Neo4jRelation(
+            type=RelationType.OWNED_BY,
+            source_id=f"session_{self.session_id}",
+            target_id=f"user_{self.user_id}",
+            weight=1.0
+        )
+        self.connector.create_relation(relation)
     
     def process_message(self, role: str, content: str, 
                        context: Optional[List[Dict]] = None) -> Dict[str, Any]:
@@ -116,6 +139,7 @@ class HotLayerManager:
             properties={
                 "role": role,
                 "session_id": self.session_id,
+                "user_id": self.user_id, # 增加 user_id 属性方便查询
                 "emotion_primary": emotion_primary,
                 "emotion_intensity": float(emotion_intensity),
                 "intent": extraction.metadata.get("intent", "unknown"),
@@ -354,5 +378,3 @@ class HotLayerManager:
         """
         
         return self.connector.query(query, {"entity": entity_name})
-
-

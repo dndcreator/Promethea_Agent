@@ -16,7 +16,7 @@ class AutoRecallEngine:
         self.connector = connector
         self.extractor = extractor
     
-    def recall(self, query: str, session_id: str) -> str:
+    def recall(self, query: str, session_id: str, user_id: str = "default_user") -> str:
         """召回相关记忆并格式化为上下文"""
         try:
             # 提取查询实体
@@ -26,8 +26,8 @@ class AutoRecallEngine:
             # 动态计算参数
             params = self._calculate_params(query, entities)
             
-            # 三层查询
-            results = self._three_layer_query(entities, session_id, params['recent_days'])
+            # 三层查询 (传入 user_id)
+            results = self._three_layer_query(entities, session_id, user_id, params['recent_days'])
             
             # 格式化
             return self._format_context(results, params['max_tokens'], params['items_per_layer'])
@@ -65,45 +65,51 @@ class AutoRecallEngine:
         
         return params
     
-    def _three_layer_query(self, entities: List[str], session_id: str, recent_days: int = 7) -> Dict:
-        """三层并行查询"""
+    def _three_layer_query(self, entities: List[str], session_id: str, user_id: str, recent_days: int = 7) -> Dict:
+        """三层并行查询 (支持跨会话的用户级召回)"""
         
         # 重要：查询必须匹配当前图谱schema
+        # - User 节点 id 使用 "user_{user_id}"
         # - Session 节点 id 使用 "session_{session_id}"
-        # - Message 节点通过 (:Message)-[:PART_OF_SESSION]->(:Session) 归属会话
-        # - Entity/Action/Time/Location 通过 (:X)-[:FROM_MESSAGE]->(:Message) 关联消息
-        # - Entity 与 Action 通过 SUBJECT_OF / OBJECT_OF 关联
+        # - Session 属于 User: (:Session)-[:OWNED_BY]->(:User)
+        # - Message 属于 Session: (:Message)-[:PART_OF_SESSION]->(:Session)
+        
         cypher = """
-        // Layer 1: 实体直连（实体 -> FROM_MESSAGE -> 消息 -> PART_OF_SESSION -> 会话）
-        WITH $entities AS query_entities, $session_node_id AS sid
-        OPTIONAL MATCH (s:Session {id: sid})
+        // 查找用户节点
+        WITH $entities AS query_entities, $user_node_id AS uid, $session_node_id as current_sid
+        
+        // Layer 1: 实体直连 (跨会话，但限制为该用户的会话)
+        // 路径: Entity -> Message -> Session -> User
+        OPTIONAL MATCH (u:User {id: uid})
         OPTIONAL MATCH (e:Entity)
         WHERE e.content IN query_entities
-        OPTIONAL MATCH (e)-[:FROM_MESSAGE]->(direct_msg:Message)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (e)-[:FROM_MESSAGE]->(direct_msg:Message)-[:PART_OF_SESSION]->(s:Session)-[:OWNED_BY]->(u)
         WITH collect(DISTINCT {
             content: direct_msg.content,
             time: direct_msg.created_at,
             importance: direct_msg.importance,
-            layer: 'direct'
-        }) AS layer1_results, sid
+            layer: 'direct',
+            session_id: s.session_id
+        }) AS layer1_results, uid, current_sid
 
-        // Layer 2: 图谱扩散（实体 <-> 动作 <-> 相关实体，再取相关实体关联的消息）
-        OPTIONAL MATCH (s:Session {id: sid})
+        // Layer 2: 图谱扩散 (跨会话)
+        OPTIONAL MATCH (u:User {id: uid})
         OPTIONAL MATCH (e0:Entity)
         WHERE e0.content IN $entities
         OPTIONAL MATCH (e0)-[:SUBJECT_OF|OBJECT_OF]-(a:Action)-[:SUBJECT_OF|OBJECT_OF]-(related:Entity)
         WHERE related.content IS NOT NULL AND related.content <> e0.content
-        OPTIONAL MATCH (related)-[:FROM_MESSAGE]->(related_msg:Message)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (related)-[:FROM_MESSAGE]->(related_msg:Message)-[:PART_OF_SESSION]->(s:Session)-[:OWNED_BY]->(u)
         WITH layer1_results, collect(DISTINCT {
             content: related_msg.content,
             time: related_msg.created_at,
             importance: related_msg.importance,
             layer: 'related',
-            via: related.content
-        }) AS layer2_results, sid
+            via: related.content,
+            session_id: s.session_id
+        }) AS layer2_results, uid, current_sid
 
-        // Layer 3: 近期窗口（会话内最近消息）
-        OPTIONAL MATCH (s:Session {id: sid})
+        // Layer 3: 近期窗口 (仅限当前会话，保持上下文连贯性)
+        OPTIONAL MATCH (s:Session {id: current_sid})
         OPTIONAL MATCH (recent_msg:Message)-[:PART_OF_SESSION]->(s)
         WHERE recent_msg.created_at > datetime() - duration({days: $recent_days})
         WITH layer1_results, layer2_results, collect(DISTINCT {
@@ -125,6 +131,7 @@ class AutoRecallEngine:
                 cypher,
                 parameters={
                     "entities": entities if entities else [""],
+                    "user_node_id": f"user_{user_id}",
                     "session_node_id": f"session_{session_id}",
                     "recent_days": recent_days
                 }
@@ -144,8 +151,8 @@ class AutoRecallEngine:
         
         # 按优先级处理
         priorities = [
-            ('direct', results.get('direct', []), '【直接相关】'),
-            ('related', results.get('related', []), '【关联信息】'),
+            ('direct', results.get('direct', []), '【直接相关记忆】'),
+            ('related', results.get('related', []), '【关联知识】'),
             ('recent', results.get('recent', []), '【近期对话】')
         ]
         
@@ -185,7 +192,10 @@ class AutoRecallEngine:
                     time_str = t.strftime('%m-%d')
                 else:
                     time_str = str(t)[:10]
+                
                 via_str = f" (关联: {item['via']})" if item.get('via') else ""
+                # 如果是跨会话的记忆，可以标注来源（可选）
+                # session_str = f" [Session: {item.get('session_id')}]" if item.get('session_id') else ""
                 
                 layer_lines.append(f"- [{time_str}] {content[:100]}...{via_str}")
                 token_count += est_tokens
@@ -195,4 +205,3 @@ class AutoRecallEngine:
                 lines.append("")
         
         return "\n".join(lines) if lines else ""
-

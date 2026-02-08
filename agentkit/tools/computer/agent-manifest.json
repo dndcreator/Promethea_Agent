@@ -1,0 +1,44 @@
+{
+    "name": "computer_control",
+    "label": "Computer Control",
+    "version": "1.0.0",
+    "description": "Control the local computer including browser, mouse, keyboard, and filesystem.",
+    "serviceType": "mcp",
+    "entryPoint": {
+        "module": "agentkit.tools.computer.computer_control",
+        "class": "ComputerControlService"
+    },
+    "capabilities": {
+        "invocation_commands": [
+            {
+                "command": "browser_action",
+                "description": "Control the browser (goto, click, type, screenshot). Actions: goto, click, type, scroll, screenshot, content.",
+                "example": "browser_action(action='goto', url='https://google.com')"
+            },
+            {
+                "command": "screen_action",
+                "description": "Control mouse and keyboard or take screenshots. Actions: move, click, type, press, screenshot.",
+                "example": "screen_action(action='screenshot')"
+            },
+            {
+                "command": "fs_action",
+                "description": "File system operations. Actions: read, write, list, delete, mkdir.",
+                "example": "fs_action(action='read', path='C:/test.txt')"
+            }
+        ]
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "action": { "type": "string", "description": "Specific operation to perform" },
+            "url": { "type": "string" },
+            "selector": { "type": "string", "description": "CSS selector for browser elements" },
+            "text": { "type": "string" },
+            "x": { "type": "integer" },
+            "y": { "type": "integer" },
+            "key": { "type": "string" },
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+        }
+    }
+}

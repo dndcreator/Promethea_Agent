@@ -1,0 +1,15 @@
+{
+  "id": "memory",
+  "kind": "memory",
+  "name": "Neo4j Memory",
+  "description": "Built-in Neo4j memory system",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" }
+    },
+    "additionalProperties": true
+  }
+}
+

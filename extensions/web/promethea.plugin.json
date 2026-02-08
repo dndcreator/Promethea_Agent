@@ -1,0 +1,15 @@
+{
+  "id": "web",
+  "kind": "channel",
+  "name": "Web Channel",
+  "description": "Built-in web UI channel",
+  "version": "0.1.0",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "channel_config": { "type": "object" }
+    },
+    "additionalProperties": true
+  }
+}

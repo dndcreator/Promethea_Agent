@@ -1,0 +1,37 @@
+{
+    "name": "websearch",
+    "label": "Web Search",
+    "version": "1.0.0",
+    "description": "Search the internet for real-time information, news, and answers.",
+    "serviceType": "mcp",
+    "entryPoint": {
+        "module": "agentkit.tools.web.websearch",
+        "class": "WebSearchService"
+    },
+    "capabilities": {
+        "invocation_commands": [
+            {
+                "command": "search",
+                "description": "Search for general information",
+                "example": "search(query='latest AI news')"
+            },
+            {
+                "command": "quick_answer",
+                "description": "Get instant answers for simple questions",
+                "example": "quick_answer(query='height of mount everest')"
+            },
+            {
+                "command": "news_search",
+                "description": "Search for news articles",
+                "example": "news_search(query='stock market today')"
+            }
+        ]
+    },
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "query": { "type": "string" },
+            "max_results": { "type": "integer" }
+        }
+    }
+}

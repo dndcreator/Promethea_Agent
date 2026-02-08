@@ -1,146 +1,105 @@
-# Promethea AI Agent
+# Promethea Agent (普罗米娅助手)
 
-带记忆的智能对话助手，支持三层记忆系统和图谱可视化。
+> **一个可进化、模块化、全能型的 AI 智能助手框架**
 
-## 快速开始
+Promethea 是一个基于 Python 构建的现代化 Agent 系统。它拥有**“手”**（电脑控制）、**“眼”**（网络搜索）和**“脑”**（长期记忆），并支持多用户个性化配置和全渠道接入。
 
-### 安装依赖
-```bash
+当前版本已对齐 Moltbot/Clawdbot 的核心思路：**微内核 + 插件化（extensions）+ 运行时注册表（runtime registry）**。核心只负责加载插件与路由，业务能力由插件注册进来。
+
+---
+
+## 🚀 极简启动指南
+
+默认情况下你只需要做两件事：
+
+1.  **（可选）启动 Neo4j 数据库**（启用记忆时才需要）。
+2.  **运行启动脚本**。
+
+### 详细步骤
+
+1.  **环境准备（Windows / PowerShell）**
+    - 确保已安装 Python 3.10+
+    - 安装依赖（两种方式任选其一）：
+
+```powershell
+cd D:\产品\Agent
+pip install -e .
+```
+
+或：
+
+```powershell
+cd D:\产品\Agent
 pip install -r requirements.txt
 ```
 
-### 启动服务
+如果你需要浏览器自动化能力：
 
-**Web模式（推荐开发时使用）**
-```bash
-python run_api.py
-# 浏览器访问 http://localhost:8000
+```powershell
+playwright install
 ```
 
-**桌面版（推荐日常使用）**
-```bash
-npm install          # 首次运行需要
-npm run dev          # 开发模式
-npm run build        # 打包成exe
+2.  **配置密钥（强烈建议）**
+    - 把 `env.example` 复制为 `.env`，并填写：
+      - `API_KEY`
+      - （如启用记忆）`NEO4J_URI / NEO4J_USERNAME / NEO4J_PASSWORD`
+
+3.  **自检插件系统（推荐）**
+
+```powershell
+python scripts\self_check_plugins.py
 ```
 
----
+4.  **启动服务**
 
-## 项目结构
-
-```
-Agent/
-├── api_server/              # 后端服务
-│   ├── chat_router.py       # 对话接口和记忆管理
-│   ├── message_manager.py   # 会话消息管理
-│   └── server.py            # FastAPI服务器
-├── memory/                  # 三层记忆系统
-│   ├── hot_layer.py         # 热层：实时信息抽取
-│   ├── warm_layer.py        # 温层：语义聚类
-│   ├── cold_layer.py        # 冷层：长期摘要
-│   └── adapter.py           # 记忆适配器
-├── utility/                 # 工具模块
-│   └── (预留)               # 工具扩展预留
-├── agentkit/                # 工具系统
-│   ├── mcp/                 # MCP协议实现
-│   └── tools/               # 工具集（搜索等）
-├── UI/                      # 前端界面
-│   ├── index.html
-│   ├── script.js            # 对话、可视化、设置
-│   └── style.css
-├── src-tauri/               # 桌面版
-│   └── src/main.rs          # 窗口和托盘管理
-├── config.json              # 配置文件
-└── run_api.py               # 启动脚本
+```powershell
+python start_gateway_service.py
 ```
 
----
+5.  **开始使用**
+    服务启动后，浏览器访问：
+    👉 `http://127.0.0.1:8000/UI/index.html`
 
-## 功能特性
-
-### 对话系统
-- 流式输出（SSE）
-- 多轮对话历史
-- 会话管理
-- 选中文本追问（手动触发）
-
-### 记忆系统
-- **热层**：实时提取对话中的关键信息
-- **温层**：聚类相似概念，形成知识网络
-- **冷层**：生成长期摘要，压缩历史记忆
-- Neo4j图谱存储
-- D3.js可视化展示
-
-### 工具扩展
-- 网络搜索（DuckDuckGo）
-- MCP协议支持
-- 可自定义添加工具
-
-### 界面功能
-- 会话列表
-- 记忆图谱查看
-- 性能统计
-- 在线配置修改
+    *   **首次登录**：在网页端点击“注册”，创建你的管理员账号。
+    *   **个性化配置**：登录后在“设置”中填入你的 API Key，并绑定通道账号（如钉钉/飞书/企微）。
 
 ---
 
-## 配置说明
+## ✨ 核心能力
 
-编辑 `config.json` 可修改：
-
-**API配置**
-- `api_key`: LLM API密钥
-- `base_url`: API地址
-- `model`: 使用的模型
-- `temperature`: 生成温度（0-2）
-- `max_tokens`: 最大生成长度
-
-**记忆系统**
-- `memory.enabled`: 是否启用记忆
-- `memory.neo4j.enabled`: 是否启用Neo4j
-- `memory.neo4j.uri`: Neo4j连接地址
-
-注：部分配置支持在UI设置界面直接修改，无需重启服务。
+| 能力 | 说明 |
+| :--- | :--- |
+| **🧠 进化记忆** | 基于 Neo4j 的三层记忆系统，记忆随用户 ID 隔离，越用越懂你。 |
+| **⚡ 并行思考** | 支持同时执行多项任务（如“一边查资料，一边写文档”）。 |
+| **🖥️ 电脑控制** | 安全接管电脑：操作浏览器、文件系统、运行软件。 |
+| **🔐 多用户支持** | 每个用户拥有独立的配置（API Key、人设）和记忆空间。 |
+| **🌐 全渠道互通** | 网页端配置绑定后，你在 Telegram/微信 发的消息也能触发同样的个性化服务。 |
 
 ---
 
-## 添加自定义图标
+## 🛠️ 维护与扩展
 
-准备一张方形PNG图片（建议512x512），然后：
+- **日志**: 运行时日志在 `logs/`（已加入 `.gitignore`，不应提交）。
+- **配置**:
+  - 敏感信息放 `.env`（已加入 `.gitignore`）
+  - 默认配置：`config/default.json`（非敏感配置）
+  - 用户配置：`config/users/{user_id}.json`（每个用户的个性化配置）
+  - 详细说明：参见 [config/README.md](config/README.md)
+- **插件化扩展（Moltbot 风格）**:
+  - 插件目录：`extensions/<plugin-id>/`
+  - 清单：`extensions/<plugin-id>/promethea.plugin.json`
+  - 入口：`extensions/<plugin-id>/plugin.py`（实现 `register(api)`）
 
-```bash
-# 方式1：使用Tauri官方工具
-cargo install tauri-cli
-cd src-tauri
-cargo tauri icon ../your-logo.png
+## 📚 模块文档
 
-# 方式2：使用项目脚本
-python generate_icon.py your-logo.png
-```
+项目采用模块化文档结构，每个主要模块都有独立的 README：
 
----
+- **[Gateway](gateway/README.md)** - 核心运行平台，事件总线，服务管理
+- **[Memory](memory/README.md)** - 三层记忆系统（热层/温层/冷层）
+- **[API Server](api_server/README.md)** - HTTP REST API 接口
+- **[Channels](channels/README.md)** - 多平台消息通道（钉钉/飞书/企微/Web）
+- **[Computer](computer/README.md)** - 电脑控制能力（浏览器/文件系统/进程）
+- **[Core](core/README.md)** - 核心插件系统和统一服务接口
+- **[Config](config/README.md)** - 配置管理系统
 
-## 常见问题
-
-**服务启动失败**
-- 检查是否在Agent目录下运行
-- 确认已安装依赖：`pip install -r requirements.txt`
-- 查看终端错误信息
-
-**Neo4j连接失败**
-- 默认情况下记忆系统是启用的，需要先安装Neo4j
-- 如果不需要记忆功能，在`config.json`中设置`memory.enabled: false`
-- Neo4j安装：https://neo4j.com/download/
-
-**Tauri打包失败**
-- 需要先安装Rust：https://rustup.rs/
-- Windows需要安装WebView2（通常系统自带）
-
----
-
-## 技术栈
-
-后端：FastAPI, Pydantic, OpenAI SDK  
-存储：Neo4j  
-前端：原生JS, D3.js  
-桌面：Tauri, Rust
+**Promethea Agent** - Your Personal Digital Evolution.
