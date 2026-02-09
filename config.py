@@ -25,7 +25,7 @@ class SystemConfig(BaseSettings):
         if v.upper() not in valid_levels:
             raise ValueError(f'日志级别必须是以下之一: {valid_levels}')
         return v.upper()
-
+    
 class APIConfig(BaseSettings):
     api_key: str = Field(default='placeholder-key-not-set', description='API密钥')
     base_url: str = Field(default='https://openrouter.ai/api/v1', description='API基础URL')
@@ -45,7 +45,7 @@ class APIConfig(BaseSettings):
             except UnicodeEncodeError:
                 raise ValueError('API密钥包含非ASCII字符')
         return v
-
+    
 class Neo4jConfig(BaseSettings):
     enabled: bool = Field(default=False, description='是否启用Neo4j记忆系统')
     uri: str = Field(default="bolt://localhost:7687", description='Neo4j连接地址')

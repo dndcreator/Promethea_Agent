@@ -1,5 +1,6 @@
 ﻿"""
-璁板繂绯荤粺閫傞厤鍣?瑙ｅ喅瀵硅瘽绯荤粺鍜岃蹇嗙郴缁熸帴鍙ｄ笉涓€鑷寸殑闂
+MemoryAdapter – adapts the simple MessageManager-style interface used by the
+conversation system to the richer multi-layer memory system (hot / warm / cold).
 """
 import logging
 import time
@@ -11,11 +12,14 @@ logger = logging.getLogger(__name__)
 
 class MemoryAdapter:
     """
-    璁板繂绯荤粺閫傞厤鍣?    
-    灏?MessageManager 鐨勭畝鍗曟帴鍙ｉ€傞厤鍒?HotLayerManager 鐨勫鏉傛帴鍙?    """
+    Memory system adapter.
+    
+    Exposes a very small API that the rest of the agent can call, while
+    internally delegating to the hot/warm/cold/forgetting managers.
+    """
     
     def __init__(self):
-        """鍒濆鍖栭€傞厤鍣?""
+        """Initialise the adapter and (best-effort) memory stack."""
         self.enabled = False
         self._config = None
         self.hot_layer = None
@@ -23,7 +27,10 @@ class MemoryAdapter:
         self._warm_layer = None
         self._cold_layer = None
         self._forgetting = None
-        self._session_cache = {}  # 缂撳瓨姣忎釜 session 鐨勬秷鎭巻鍙?        # 閲嶈锛歁essageManager 浼氬湪涓嶅悓绾跨▼閲岃Е鍙戝啓鍏ワ紙run_in_executor锛?        # hot_layer 鏄湁鐘舵€佸璞★紙session_id 浼氳淇敼锛夛紝蹇呴』鍔犻攣閬垮厤骞跺彂鍐欏叆涓插彴
+        # Cache recent messages for each session to build lightweight context.
+        # Important: MessageManager may run in different threads (run_in_executor);
+        # hot_layer carries state (session_id / user_id), so we must guard access.
+        self._session_cache = {}
         self._hot_layer_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
         self._maintenance_state = {}
@@ -36,78 +43,84 @@ class MemoryAdapter:
         self._init_memory_system()
     
     def _init_memory_system(self):
-        """鍒濆鍖栬蹇嗙郴缁燂紙澶辫触涓嶆姏寮傚父锛?""
+        """Initialise memory system (fail-soft: never raise to callers)."""
         try:
             from config import load_config
             config = load_config()
             self._config = config
             
-            # 妫€鏌ユ槸鍚﹀惎鐢?            if not config.memory.enabled:
-                logger.info("璁板繂绯荤粺鏈惎鐢紙config.memory.enabled = false锛?)
+            # Check if memory is enabled in config
+            if not config.memory.enabled:
+                logger.info("Memory system disabled (config.memory.enabled = false)")
                 return
             
-            # 浣跨敤宸ュ巶鍑芥暟鍒涘缓
+            # Use factory helpers to create hot-layer manager
             from memory import create_hot_layer_manager
-            # 鍒濆鍖栨椂缁欎竴涓粯璁?session_id锛屽疄闄呬娇鐢ㄦ椂浼氬姩鎬佹洿鏂?            self.hot_layer = create_hot_layer_manager("_adapter_init", "default_user")
+            # During init we give a dummy session_id; it will be updated per call.
+            self.hot_layer = create_hot_layer_manager("_adapter_init", "default_user")
             
             if self.hot_layer:
-                # 鍒濆鍖栧彫鍥炲紩鎿?                from .auto_recall import AutoRecallEngine
+                # Initialise auto-recall engine
+                from .auto_recall import AutoRecallEngine
                 self.recall_engine = AutoRecallEngine(
                     connector=self.hot_layer.connector,
                     extractor=self.hot_layer.extractor
                 )
                 self.enabled = True
-                logger.info("鉁?璁板繂绯荤粺閫傞厤鍣ㄥ垵濮嬪寲鎴愬姛锛堝惈鍙洖寮曟搸锛?)
+                logger.info("Memory adapter initialised successfully (with auto-recall)")
             else:
-                logger.info("璁板繂绯荤粺涓嶅彲鐢紙Neo4j 鏈繛鎺ユ垨閰嶇疆閿欒锛?)
+                logger.info("Memory system not available (Neo4j not connected or misconfigured)")
                 
         except Exception as e:
-            logger.warning(f"璁板繂绯荤粺鍒濆鍖栧け璐? {e}")
+            logger.warning(f"Memory system initialisation failed: {e}")
             self.enabled = False
     
     def add_message(self, session_id: str, role: str, content: str, user_id: str = "default_user") -> bool:
         """
-        娣诲姞娑堟伅鍒拌蹇嗙郴缁?        
+        Add a message into the memory system.
+        
         Args:
-            session_id: 浼氳瘽ID
-            role: 瑙掕壊 (user/assistant)
-            content: 娑堟伅鍐呭
-            user_id: 鐢ㄦ埛ID (榛樿涓?default_user)
+            session_id: Conversation/session identifier.
+            role: "user" or "assistant".
+            content: Message text.
+            user_id: Logical user id (default "default_user").
             
         Returns:
-            鏄惁鎴愬姛
+            bool: whether the message was successfully processed.
         """
         if not self.enabled or not self.hot_layer:
             return False
         
         try:
             with self._hot_layer_lock:
-                # 鏇存柊 session_id 鍜?user_id锛圚otLayerManager 鏄湁鐘舵€佺殑锛?                self.hot_layer.session_id = session_id
+                # Update stateful hot-layer with current session/user
+            self.hot_layer.session_id = session_id
                 self.hot_layer.user_id = user_id
             
-                # 鑾峰彇涓婁笅鏂囷紙浠庣紦瀛橈級
+                # Build lightweight context from cache
             context = self._get_context(session_id)
             
-                # 璋冪敤璁板繂绯荤粺
+                # Call into memory system
             stats = self.hot_layer.process_message(role, content, context)
             
-                # 鏇存柊缂撳瓨
+                # Update cache
             self._update_cache(session_id, role, content)
             
-                logger.debug(f"璁板繂宸蹭繚瀛? {stats}")
+                logger.debug(f"Memory stored with stats: {stats}")
             return True
             
         except Exception as e:
-            logger.error(f"璁板繂绯荤粺澶勭悊澶辫触: {e}")
+            logger.error(f"Memory system processing failed: {e}")
             return False
     
     def _get_context(self, session_id: str) -> list:
-        """鑾峰彇浼氳瘽涓婁笅鏂囷紙鏈€杩?鏉℃秷鎭級"""
+        """Get recent context messages (up to last 5) for a session."""
         if session_id not in self._session_cache:
             self._session_cache[session_id] = []
-        return self._session_cache[session_id][-5:]  # 鍙彇鏈€杩?鏉?    
+        # Only keep a small sliding window to avoid unbounded growth
+        return self._session_cache[session_id][-5:]
     def _update_cache(self, session_id: str, role: str, content: str):
-        """鏇存柊涓婁笅鏂囩紦瀛?""
+        """Update in-memory context cache."""
         if session_id not in self._session_cache:
             self._session_cache[session_id] = []
         
@@ -116,20 +129,21 @@ class MemoryAdapter:
             "content": content
         })
         
-        # 闄愬埗缂撳瓨澶у皬锛堟渶澶氫繚鐣?0鏉★級
+        # Limit cache size per session to at most 10 messages
         if len(self._session_cache[session_id]) > 10:
             self._session_cache[session_id] = self._session_cache[session_id][-10:]
     
     def get_context(self, query: str, session_id: str, user_id: str = "default_user") -> str:
         """
-        鑾峰彇鐩稿叧璁板繂涓婁笅鏂囷紙鑷姩鍙洖锛?        
+        Retrieve related memory context (auto recall).
+        
         Args:
-            query: 鐢ㄦ埛褰撳墠娑堟伅
-            session_id: 浼氳瘽ID
-            user_id: 鐢ㄦ埛ID
+            query: Current user query text.
+            session_id: Conversation/session identifier.
+            user_id: Logical user id.
             
         Returns:
-            鏍煎紡鍖栫殑涓婁笅鏂囧瓧绗︿覆
+            Formatted context string (may be empty).
         """
         if not self.enabled or not self.recall_engine:
             return ""
@@ -137,7 +151,7 @@ class MemoryAdapter:
         try:
             return self.recall_engine.recall(query, session_id, user_id)
         except Exception as e:
-            logger.error(f"鑾峰彇璁板繂涓婁笅鏂囧け璐? {e}")
+            logger.error(f"Failed to get memory context: {e}")
             return ""
     
     def _ensure_managers(self):
@@ -274,16 +288,15 @@ class MemoryAdapter:
                 state['decay_running'] = False
     
     def is_enabled(self) -> bool:
-        """妫€鏌ヨ蹇嗙郴缁熸槸鍚﹀彲鐢?""
+        """Return True if the memory system is initialised and usable."""
         return self.enabled and self.hot_layer is not None
 
 
-# 鍏ㄥ眬鍗曚緥
 _memory_adapter_instance: Optional[MemoryAdapter] = None
 
 
 def get_memory_adapter() -> MemoryAdapter:
-    """鑾峰彇鍏ㄥ眬璁板繂閫傞厤鍣ㄥ疄渚?""
+    """Get the global MemoryAdapter singleton instance."""
     global _memory_adapter_instance
     if _memory_adapter_instance is None:
         _memory_adapter_instance = MemoryAdapter()

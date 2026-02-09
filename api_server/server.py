@@ -43,7 +43,7 @@ class ConnectionManager:
             except Exception:
                 # 如果发送失败（连接已断开），安全移除
                 if connection in self.active_connections:
-                self.active_connections.remove(connection)
+                    self.active_connections.remove(connection)
 
 manager = ConnectionManager()
 gateway_integration = None  # 网关集成实例

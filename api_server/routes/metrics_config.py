@@ -73,9 +73,6 @@ async def update_config(request: dict):
         # 优先使用 config/default.json，如果不存在则使用根目录的 config.json（向后兼容）
         config_path = Path("config/default.json")
         if not config_path.exists():
-            # 优先使用 config/default.json，如果不存在则使用根目录的 config.json（向后兼容）
-        config_path = Path("config/default.json")
-        if not config_path.exists():
             config_path = Path("config.json")
 
         if config_path.exists():

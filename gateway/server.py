@@ -812,14 +812,18 @@ class GatewayServer:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Conversation service not initialized"
                 )
-            
+
             response = await self.conversation_service.call_llm(messages)
             result = response.get("content", "")
-            
-            return GatewayProtocol.create_response(request.id, True, {
-                "query": user_query,
-                "response": result
-            })
+
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {
+                    "query": user_query,
+                    "response": result,
+                },
+            )
         except Exception as e:
             logger.error(f"Error handling followup: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
@@ -852,18 +856,23 @@ class GatewayServer:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
-            
+
             # 重新加载默认配置
             result = await self.config_service.reload_default_config()
-            
+
             if result["success"]:
-                return GatewayProtocol.create_response(request.id, True, {
-                    "status": "reloaded",
-                    "message": result["message"],
-                    "config": result.get("config", {})
-                })
-            else:
-                return GatewayProtocol.create_response(request.id, False, error=result["message"])
+                return GatewayProtocol.create_response(
+                    request.id,
+                    True,
+                    {
+                        "status": "reloaded",
+                        "message": result["message"],
+                        "config": result.get("config", {}),
+                    },
+                )
+            return GatewayProtocol.create_response(
+                request.id, False, error=result["message"]
+            )
         except Exception as e:
             logger.error(f"Error reloading config: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))

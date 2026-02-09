@@ -4,7 +4,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ...gateway_integration import get_gateway_integration
+from gateway_integration import get_gateway_integration
 
 router = APIRouter()
 

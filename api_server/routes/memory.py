@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
-import logging
+from loguru import logger
 
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 @router.post("/memory/cluster/{session_id}")

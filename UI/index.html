@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div class="app-root">
     <!-- 左侧会话列表 -->
     <aside class="sidebar" id="sidebar">
         <div class="sidebar-header">
@@ -93,6 +94,7 @@
             <span class="status-item">当前会话: <span id="currentSession">未开始</span></span>
         </div>
     </main>
+    </div>
 
     <!-- 敏感操作确认模态窗口 -->
     <div id="confirmModal" class="modal">
@@ -121,7 +123,7 @@
     </div>
 
     <!-- 登录/注册模态窗口 -->
-    <div id="authModal" class="modal" style="display: block;">
+    <div id="authModal" class="modal">
         <div class="modal-content auth-modal-content">
             <div class="modal-header">
                 <h2 id="authTitle">🔐 登录</h2>

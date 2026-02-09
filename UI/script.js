@@ -49,7 +49,7 @@ class AuthManager {
             this.modal.style.display = 'none';
             if (this.onLoginSuccess) this.onLoginSuccess();
         } else {
-            this.modal.style.display = 'block';
+            this.modal.style.display = 'flex'; // 使用 flex 以正确居中
         }
     }
     
@@ -992,7 +992,7 @@ class MemoryGraphVisualization {
             return;
         }
         
-        this.modal.style.display = 'block';
+            this.modal.style.display = 'flex';
         this.graphStats.innerHTML = '<p>正在加载记忆图...</p>';
         this.graphCanvas.innerHTML = '';
         
@@ -1290,7 +1290,7 @@ class SettingsManager {
     }
     
     async show() {
-        this.modal.style.display = 'block';
+            this.modal.style.display = 'flex';
         await this.loadConfig();
         await this.loadBoundChannels();
     }
@@ -1578,7 +1578,7 @@ class MetricsManager {
     }
     
     async show() {
-        this.modal.style.display = 'block';
+            this.modal.style.display = 'flex';
         await this.loadMetrics();
     }
     
@@ -1654,7 +1654,7 @@ class DoctorManager {
     }
 
     async show() {
-        this.modal.style.display = 'block';
+            this.modal.style.display = 'flex';
         await this.runDoctor();
     }
 
