@@ -3,7 +3,10 @@ API兼容性测试
 验证原有REST API端点仍然正常工作
 """
 import os
-import requests
+try:
+    import requests
+except ModuleNotFoundError:  # live compatibility checks only
+    requests = None
 import json
 
 
@@ -125,7 +128,7 @@ class APICompatibilityTests:
             return False
     
     def run_all(self):
-        """运行所有测试"""
+        """Run all live API compatibility tests."""
         print("=" * 60)
         print("API兼容性测试")
         print("=" * 60)
@@ -139,7 +142,7 @@ class APICompatibilityTests:
         results.append(("会话列表", self.test_sessions_endpoint()))
         results.append(("API文档", self.test_docs_available()))
         
-        # 输出结果
+        # Print a summary of all test results
         print("\n" + "=" * 60)
         print("测试结果汇总")
         print("=" * 60)
@@ -160,6 +163,9 @@ def main():
     """主函数"""
     if os.getenv("PROMETHEA_LIVE_TEST") != "1":
         print("SKIP: set PROMETHEA_LIVE_TEST=1 to run live API tests")
+        return 0
+    if requests is None:
+        print("SKIP: install requests to run live API tests")
         return 0
     tester = APICompatibilityTests()
     success = tester.run_all()

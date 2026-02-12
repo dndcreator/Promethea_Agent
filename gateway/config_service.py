@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 """
-配置系统服务层
+Configuration system service layer.
 
-目标：
-- 把 Gateway 中的"配置"能力抽象成一个独立的 ConfigService
-- 管理默认配置、用户配置、环境变量（敏感信息）
-- 提供配置的创建、更新、查询、重置、热重载功能
-- 通过事件总线发出配置变更事件，让其他服务自动响应
-- 作为模型切换等功能的总集成入口
+Goals:
+- Extract all "configuration" capabilities in the Gateway into a standalone ConfigService.
+- Manage default configuration, per-user configuration, and environment variables (secrets).
+- Provide creation, update, query, reset, and hot-reload functionality for configuration.
+- Publish configuration change events via the event bus so that other services can react automatically.
+- Serve as the central entrypoint for model switching and other config-related features.
 """
 
 import os
@@ -25,12 +25,12 @@ from api_server.user_manager import user_manager
 
 class ConfigService:
     """
-    配置服务（对 Gateway 暴露的统一入口）
+    Configuration service (single entrypoint exposed to the Gateway).
 
-    - 管理三层配置：默认配置、用户配置、环境变量
-    - 提供配置的创建、更新、查询、重置、热重载
-    - 在 EventEmitter 上发出 CONFIG_* 事件，让其他服务自动响应配置变更
-    - 作为模型切换等功能的总集成入口
+    - Manages three layers of configuration: default, user, and environment variables.
+    - Provides creation, update, query, reset, and hot-reload APIs.
+    - Emits CONFIG_* events on the EventEmitter so other services can react to changes.
+    - Acts as the central hub for model switching and other config-related operations.
     """
 
     def __init__(
@@ -51,23 +51,23 @@ class ConfigService:
         logger.info("ConfigService: Initialized")
     
     def _load_default_config(self) -> None:
-        """加载默认配置（系统级）"""
+        """Load the default (system-level) configuration."""
         try:
             self._default_config = load_config()
             logger.info("ConfigService: Default config loaded")
         except Exception as e:
             logger.error(f"ConfigService: Failed to load default config: {e}")
-            # 使用空配置作为降级
+            # Fallback: use an empty config to keep the service usable
             self._default_config = PrometheaConfig()
     
-    # ===== 配置查询 API =====
+    # ===== Configuration query APIs =====
     
     def get_default_config(self) -> PrometheaConfig:
         """
-        获取默认配置（系统级）
+        Get the default (system-level) configuration.
         
         Returns:
-            默认配置对象
+            The default configuration object.
         """
         if not self._default_config:
             self._load_default_config()
@@ -75,80 +75,82 @@ class ConfigService:
     
     def get_user_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        获取用户配置（如果 user_id 为 None，返回默认配置的字典形式）
+        Get the user configuration.
+
+        If user_id is None, return the default configuration as a plain dict.
         
         Args:
-            user_id: 用户ID（可选）
+            user_id: Optional user ID.
             
         Returns:
-            用户配置字典
+            User configuration as a dictionary.
         """
         if not user_id:
-            # 返回默认配置的字典形式
+            # Return the default configuration as a dictionary
             if not self._default_config:
                 self._load_default_config()
             return self._default_config.model_dump() if self._default_config else {}
         
-        # 检查缓存
+        # Check cache first
         if user_id in self._user_config_cache:
             return self._user_config_cache[user_id]
         
-        # 从 user_manager 加载用户配置
+        # Load user config from user_manager
         try:
             user_config = user_manager.get_user_config(user_id)
-            # 合并默认配置和用户配置
+            # Merge default config and user config
             merged_config = self._merge_configs(user_id, user_config)
-            # 缓存
+            # Cache the merged result
             self._user_config_cache[user_id] = merged_config
             return merged_config
         except Exception as e:
             logger.error(f"ConfigService: Failed to get user config for {user_id}: {e}")
-            # 降级：返回默认配置
+            # Fallback: return default configuration
             if not self._default_config:
                 self._load_default_config()
             return self._default_config.model_dump() if self._default_config else {}
     
     def get_merged_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        获取合并后的配置（默认配置 + 用户配置 + 环境变量）
+        Get the merged configuration (default + user + environment).
         
-        优先级：环境变量 > 用户配置 > 默认配置
+        Precedence: environment vars > user config > default config.
         
         Args:
-            user_id: 用户ID（可选）
+            user_id: Optional user ID.
             
         Returns:
-            合并后的配置字典
+            Merged configuration as a dictionary.
         """
-        # 1. 从默认配置开始
+        # 1. Start from the default configuration
         if not self._default_config:
             self._load_default_config()
         
         default_dict = self._default_config.model_dump() if self._default_config else {}
         
-        # 2. 如果有用户ID，合并用户配置
+        # 2. If we have a user ID, merge user configuration
         if user_id:
             user_config = user_manager.get_user_config(user_id) if user_id else {}
-            # 深度合并用户配置到默认配置
+            # Deep-merge user configuration into the default configuration
             merged = self._deep_merge(default_dict.copy(), user_config)
         else:
             merged = default_dict.copy()
         
-        # 3. 环境变量优先级最高（已经在 load_config 中处理了）
-        # 这里不需要再次处理，因为 PrometheaConfig 已经读取了环境变量
+        # 3. Environment variables have highest priority (handled by load_config)
+        # No extra handling here because PrometheaConfig already reads env vars
         
         return merged
     
     def _merge_configs(self, user_id: str, user_config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        合并默认配置和用户配置
+        Merge default configuration with a specific user's configuration.
         
         Args:
-            user_id: 用户ID
-            user_config: 用户配置字典
+            user_id: User ID.
+            user_config: User configuration dictionary.
             
         Returns:
-            合并后的配置字典
+            The merged configuration dictionary.
         """
         if not self._default_config:
             self._load_default_config()
@@ -158,7 +160,7 @@ class ConfigService:
     
     @staticmethod
     def _deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
-        """深度合并字典"""
+        """Deep-merge two dictionaries in-place (source into target)."""
         for key, value in source.items():
             if key in target and isinstance(target[key], dict) and isinstance(value, dict):
                 ConfigService._deep_merge(target[key], value)
@@ -166,33 +168,49 @@ class ConfigService:
                 target[key] = value
         return target
     
-    # ===== 配置更新 API =====
+    # ===== Configuration update APIs =====
     
     async def update_user_config(
         self,
-        user_id: str,
-        config_updates: Dict[str, Any],
-        validate: bool = True
+        params_or_user_id: Any,
+        config_updates: Optional[Dict[str, Any]] = None,
+        validate: bool = True,
+        user_id: Optional[str] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """
-        更新用户配置
+        Update a user's configuration.
         
         Args:
-            user_id: 用户ID
-            config_updates: 要更新的配置项（支持嵌套，如 {"api": {"model": "..."}}）
-            validate: 是否验证配置
+            user_id: User ID.
+            config_updates: Configuration fields to update (supports nesting, e.g. {"api": {"model": "..."}}).
+            validate: Whether to validate the updated configuration.
             
         Returns:
-            更新结果 {"success": bool, "message": str, "config": dict}
+            Result dict: {"success": bool, "message": str, "config": dict}.
         """
         try:
-            # 1. 获取当前用户配置
+            # 1. Get current user configuration
+            if hasattr(params_or_user_id, "config_data"):
+                params_obj = params_or_user_id
+                user_id = user_id or kwargs.get("user_id")
+                config_updates = getattr(params_obj, "config_data", {}) or {}
+                validate = getattr(params_obj, "validate", validate)
+            else:
+                user_id = params_or_user_id
+
+            if not isinstance(user_id, str) or not user_id:
+                return {"success": False, "message": "user_id is required", "config": {}}
+
+            if config_updates is None:
+                config_updates = {}
+
             current_config = user_manager.get_user_config(user_id)
             
-            # 2. 深度合并更新
+            # 2. Apply a deep-merge of the updates
             updated_config = self._deep_merge(current_config.copy(), config_updates)
             
-            # 3. 验证配置（如果启用）
+            # 3. Optionally validate the configuration
             if validate:
                 validation_result = self._validate_config(updated_config)
                 if not validation_result["valid"]:
@@ -202,7 +220,7 @@ class ConfigService:
                         "config": current_config
                     }
             
-            # 4. 保存到文件
+            # 4. Persist updates to disk
             success = user_manager.update_user_config_file(user_id, config_updates)
             
             if not success:
@@ -212,11 +230,11 @@ class ConfigService:
                     "config": current_config
                 }
             
-            # 5. 清除缓存
+            # 5. Clear cache
             if user_id in self._user_config_cache:
                 del self._user_config_cache[user_id]
             
-            # 6. 发出配置变更事件
+            # 6. Emit configuration-changed event
             if self.event_emitter:
                 await self.event_emitter.emit(EventType.CONFIG_CHANGED, {
                     "user_id": user_id,
@@ -236,7 +254,7 @@ class ConfigService:
             logger.error(f"ConfigService: Error updating user config: {e}")
             return {
                 "success": False,
-                "message": f"更新配置失败: {str(e)}",
+                "message": f"Failed to update config: {str(e)}",
                 "config": {}
             }
     
@@ -246,30 +264,30 @@ class ConfigService:
         reset_to_default: bool = True
     ) -> Dict[str, Any]:
         """
-        重置用户配置
+        Reset a user's configuration.
         
         Args:
-            user_id: 用户ID
-            reset_to_default: 是否重置为默认配置（True）或清空（False）
+            user_id: User ID.
+            reset_to_default: If True, reset to default config; if False, clear user config.
             
         Returns:
-            重置结果
+            Result dict.
         """
         try:
             if reset_to_default:
-                # 重置为默认配置（保留用户特定的字段，如 agent_name）
+                # Reset to default configuration while preserving user-specific fields like agent_name
                 default_config = self.get_default_config().model_dump()
-                # 保留用户身份相关的字段
+                # Preserve identity-related fields for the user
                 current_config = user_manager.get_user_config(user_id)
                 preserved_fields = {
                     "agent_name": current_config.get("agent_name", "Promethea"),
                 }
                 default_config.update(preserved_fields)
                 
-                # 保存
+                # Save merged default configuration
                 success = user_manager.update_user_config_file(user_id, default_config)
             else:
-                # 清空配置（只保留必要字段）
+                # Clear configuration and keep only essential fields
                 empty_config = {
                     "agent_name": user_manager.get_user_config(user_id).get("agent_name", "Promethea"),
                     "system_prompt": "",
@@ -280,14 +298,14 @@ class ConfigService:
             if not success:
                 return {
                     "success": False,
-                    "message": "重置配置失败"
+                    "message": "Failed to reset configuration"
                 }
             
-            # 清除缓存
+            # Clear cache
             if user_id in self._user_config_cache:
                 del self._user_config_cache[user_id]
             
-            # 发出配置变更事件
+            # Emit configuration-changed event
             if self.event_emitter:
                 await self.event_emitter.emit(EventType.CONFIG_CHANGED, {
                     "user_id": user_id,
@@ -306,27 +324,27 @@ class ConfigService:
             logger.error(f"ConfigService: Error resetting user config: {e}")
             return {
                 "success": False,
-                "message": f"重置配置失败: {str(e)}"
+                "message": f"Failed to reset configuration: {str(e)}"
             }
     
-    # ===== 配置热重载 API =====
+    # ===== Configuration hot-reload APIs =====
     
     async def reload_default_config(self) -> Dict[str, Any]:
         """
-        重新加载默认配置（热重载）
+        Reload the default configuration (hot-reload).
         
         Returns:
-            重载结果
+            Result dict.
         """
         try:
             old_config = self._default_config.model_dump() if self._default_config else {}
             
-            # 重新加载
+            # Reload default configuration
             self._load_default_config()
             
             new_config = self._default_config.model_dump() if self._default_config else {}
             
-            # 发出配置变更事件（影响所有用户）
+            # Emit configuration-reloaded event (affects all users)
             if self.event_emitter:
                 await self.event_emitter.emit(EventType.CONFIG_RELOADED, {
                     "scope": "default",
@@ -334,7 +352,7 @@ class ConfigService:
                     "new_config": new_config
                 })
             
-            # 清除所有用户配置缓存（因为默认配置变了）
+            # Clear all user configuration cache entries (default config changed)
             self._user_config_cache.clear()
             
             logger.info("ConfigService: Default config reloaded")
@@ -349,30 +367,47 @@ class ConfigService:
             logger.error(f"ConfigService: Error reloading default config: {e}")
             return {
                 "success": False,
-                "message": f"重载配置失败: {str(e)}"
+                "message": f"Failed to reload configuration: {str(e)}"
             }
     
-    # ===== 模型切换等高级功能 =====
+    # ===== Model switching and other advanced features =====
     
     async def switch_model(
         self,
-        user_id: str,
-        model: str,
+        params_or_user_id: Any,
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
-        base_url: Optional[str] = None
+        base_url: Optional[str] = None,
+        user_id: Optional[str] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """
-        切换模型（用户级）
+        Switch the model for a given user.
         
         Args:
-            user_id: 用户ID
-            model: 模型名称
-            api_key: API密钥（可选，如果不提供则使用环境变量或默认值）
-            base_url: API基础URL（可选）
+            user_id: User ID.
+            model: Model name.
+            api_key: Optional API key (if omitted, env/default is used).
+            base_url: Optional base URL for the API.
             
         Returns:
-            切换结果
+            Result dict.
         """
+        if hasattr(params_or_user_id, "model"):
+            params_obj = params_or_user_id
+            user_id = user_id or kwargs.get("user_id")
+            model = getattr(params_obj, "model", None)
+            api_key = getattr(params_obj, "api_key", api_key)
+            base_url = getattr(params_obj, "base_url", base_url)
+        else:
+            user_id = params_or_user_id
+
+        if not isinstance(user_id, str) or not user_id:
+            return {"success": False, "message": "user_id is required", "config": {}}
+
+        if not model:
+            return {"success": False, "message": "model is required", "config": {}}
+
         updates = {
             "api": {
                 "model": model
@@ -393,19 +428,19 @@ class ConfigService:
         system_prompt: str
     ) -> Dict[str, Any]:
         """
-        更新系统提示词（用户级）
+        Update the system prompt for a specific user.
         
         Args:
-            user_id: 用户ID
-            system_prompt: 新的系统提示词
+            user_id: User ID.
+            system_prompt: New system prompt.
             
         Returns:
-            更新结果
+            Result dict.
         """
         return await self.update_user_config(
             user_id,
             {"system_prompt": system_prompt},
-            validate=False  # 系统提示词不需要验证
+            validate=False  # System prompt does not require schema validation
         )
     
     async def update_agent_name(
@@ -414,14 +449,14 @@ class ConfigService:
         agent_name: str
     ) -> Dict[str, Any]:
         """
-        更新 Agent 名称（用户级）
+        Update the agent display name for a specific user.
         
         Args:
-            user_id: 用户ID
-            agent_name: 新的 Agent 名称
+            user_id: User ID.
+            agent_name: New agent name.
             
         Returns:
-            更新结果
+            Result dict.
         """
         return await self.update_user_config(
             user_id,
@@ -429,25 +464,25 @@ class ConfigService:
             validate=False
         )
     
-    # ===== 配置验证 =====
+    # ===== Configuration validation =====
     
     def _validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
-        验证配置有效性
+        Validate a configuration dictionary.
         
         Args:
-            config: 配置字典
+            config: Configuration dictionary.
             
         Returns:
-            {"valid": bool, "error": str}
+            {"valid": bool, "error": str or None}
         """
         try:
-            # 尝试用 Pydantic 模型验证
-            # 只验证 API 配置部分
+            # Try to validate with the Pydantic model.
+            # Only validate the API configuration section.
             if "api" in config:
                 from config import APIConfig
                 api_config = APIConfig(**config["api"])
-                # 验证通过
+                # Validation succeeded
                 return {"valid": True, "error": None}
             
             return {"valid": True, "error": None}
@@ -455,36 +490,36 @@ class ConfigService:
         except Exception as e:
             return {"valid": False, "error": str(e)}
     
-    # ===== 配置诊断 =====
+    # ===== Configuration diagnostics =====
     
     def diagnose_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
-        诊断配置问题
+        Diagnose configuration issues.
         
         Args:
-            user_id: 用户ID（可选）
+            user_id: Optional user ID.
             
         Returns:
-            诊断结果
+            Diagnostic result dictionary.
         """
         issues = []
         warnings = []
         
-        # 获取配置
+        # Get merged configuration
         config = self.get_merged_config(user_id)
         
-        # 检查 API 配置
+        # Check API configuration
         api_config = config.get("api", {})
         if not api_config.get("api_key") or api_config.get("api_key") == "placeholder-key-not-set":
-            issues.append("API密钥未配置")
+            issues.append("API key is not configured")
         
         if not api_config.get("model"):
-            issues.append("模型未配置")
+            issues.append("Model is not configured")
         
-        # 检查记忆系统配置
+        # Check memory system configuration
         memory_config = config.get("memory", {})
         if memory_config.get("enabled") and not memory_config.get("neo4j", {}).get("enabled"):
-            warnings.append("记忆系统已启用但 Neo4j 未启用")
+            warnings.append("Memory system is enabled but Neo4j is not enabled")
         
         return {
             "user_id": user_id,

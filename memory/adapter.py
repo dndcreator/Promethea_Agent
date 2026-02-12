@@ -94,18 +94,18 @@ class MemoryAdapter:
         try:
             with self._hot_layer_lock:
                 # Update stateful hot-layer with current session/user
-            self.hot_layer.session_id = session_id
+                self.hot_layer.session_id = session_id
                 self.hot_layer.user_id = user_id
-            
+                
                 # Build lightweight context from cache
-            context = self._get_context(session_id)
-            
+                context = self._get_context(session_id)
+                
                 # Call into memory system
-            stats = self.hot_layer.process_message(role, content, context)
-            
+                stats = self.hot_layer.process_message(role, content, context)
+                
                 # Update cache
-            self._update_cache(session_id, role, content)
-            
+                self._update_cache(session_id, role, content)
+                
                 logger.debug(f"Memory stored with stats: {stats}")
             return True
             

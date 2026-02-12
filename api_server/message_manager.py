@@ -129,7 +129,14 @@ class MessageManager:
             "messages": [_model_to_dict(m) for m in session.messages],
         }
     
-    def add_message(self, session_id: str, role: str, content: str, user_id: str = "default_user") -> bool:
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        user_id: str = "default_user",
+        sync_memory: bool = True,
+    ) -> bool:
         """向会话追加一条消息，并异步同步到记忆系统。"""
         if session_id not in self.session:
             logger.warning(f"会话不存在: {session_id}")
@@ -147,7 +154,7 @@ class MessageManager:
         self.session_store.save_all(self.session)
         
         # 同步到记忆系统（如果启用），放到线程池中执行，避免阻塞主事件循环
-        if self.memory_adapter and self.memory_adapter.is_enabled():
+        if sync_memory and self.memory_adapter and self.memory_adapter.is_enabled():
             import asyncio
 
             try:

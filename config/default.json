@@ -21,7 +21,8 @@
             "uri": "bolt://127.0.0.1:7687",
             "username": "neo4j",
             "password": "",
-            "database": "neo4j"
+            "database": "neo4j",
+            "connection_timeout": 3
         },
         "hot_layer": {
             "max_tuples_per_message": 10,
@@ -40,6 +41,23 @@
             "summary_model": "nvidia/nemotron-3-nano-30b-a3b:free",
             "max_summary_length": 500,
             "compression_threshold": 50
+        },
+        "gating": {
+            "recall_filter": {
+                "enabled": true,
+                "min_query_chars": 6,
+                "max_query_chars": 4000
+            },
+            "write_filter": {
+                "enabled": true,
+                "min_user_chars": 4,
+                "min_assistant_chars_for_short_user": 20,
+                "max_combined_chars": 8000
+            },
+            "dedupe": {
+                "recent_write_cache_size": 2000,
+                "min_candidate_chars": 8
+            }
         }
     }
 }

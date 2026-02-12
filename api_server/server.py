@@ -36,17 +36,17 @@ class ConnectionManager:
         await websocket.send_text(message)
 
     async def broadcast(self, message: str):
-        # 创建列表副本进行遍历，避免在迭代中修改列表导致的问题
+        # Iterate over a shallow copy to avoid mutating the list during iteration
         for connection in list(self.active_connections):
             try:
                 await connection.send_text(message)
             except Exception:
-                # 如果发送失败（连接已断开），安全移除
+                # Safely remove connections that failed to send (likely disconnected)
                 if connection in self.active_connections:
                     self.active_connections.remove(connection)
 
 manager = ConnectionManager()
-gateway_integration = None  # 网关集成实例
+gateway_integration = None  # Gateway integration instance
 Promethea_agent = None
 
 class SystemInfoResponse(BaseModel):

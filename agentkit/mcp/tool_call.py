@@ -19,8 +19,8 @@ def parse_tool_calls(content: str) -> list:
     pos = 0
     
     while True:
-        # 查找下一个可能的 JSON 起始点 '{'
-        # 兼容中文全角大括号 '｛'
+        # Find the next potential JSON object start '{'
+        # Also tolerate full-width Chinese brace '｛'
         start_idx = -1
         idx1 = content.find('{', pos)
         idx2 = content.find('｛', pos)
@@ -36,16 +36,16 @@ def parse_tool_calls(content: str) -> list:
             break
             
         try:
-            # 如果是全角大括号，替换为半角以便解析
+            # If it's a full-width brace, skip/normalise so we can parse
             if content[start_idx] == '｛':
                 pos = start_idx + 1
                 continue
 
-            # 尝试解析 JSON 对象
+            # Try to decode a JSON object starting at this position
             tool_args, end_idx = decoder.raw_decode(content, start_idx)
             pos = start_idx + end_idx # 移动指针
             
-            # 验证解析出的对象是否是工具调用
+            # Validate whether the parsed object looks like a tool call
             if isinstance(tool_args, dict):
                 _process_single_tool_call(tool_args, tool_calls)
             else:
@@ -57,7 +57,7 @@ def parse_tool_calls(content: str) -> list:
     return tool_calls
 
 def _process_single_tool_call(tool_args: dict, tool_calls: list):
-    """处理单个工具调用字典"""
+    """Process a single tool-call dictionary and append to the list if valid."""
     try:
         agent_type = tool_args.get('agentType', 'mcp').lower()
         if agent_type == 'agent':
@@ -96,45 +96,46 @@ def _process_single_tool_call(tool_args: dict, tool_calls: list):
 
 async def execute_tool_calls(tool_calls: list, mcp_manager, session_id: str = None, approved_call_ids: Set[str] = None) -> List[Dict[str, Any]]:
     """
-    并行执行所有工具调用
-    返回一个包含内容块的列表，每个块可能是文本或图片
+    Execute all tool calls concurrently.
+
+    Returns a flat list of content blocks; each block may be text or image data.
     """
     if approved_call_ids is None:
         approved_call_ids = set()
 
-    # 0. 预处理：确保每个工具调用都有唯一ID
+    # 0. Pre-process: ensure every tool call has a unique ID
     for tool_call in tool_calls:
         if 'id' not in tool_call:
             tool_call['id'] = str(uuid.uuid4())
 
-    # 1. 安全检查：扫描所有工具调用
+    # 1. Security check: scan all tool calls
     for tool_call in tool_calls:
-        # 如果在批准名单中，跳过检查
+        # Skip checks for calls that were already approved
         if tool_call['id'] in approved_call_ids:
             continue
 
         tool_name = tool_call['name']
         args = tool_call['args']
         
-        # 检查是否需要确认
+        # Check whether user confirmation is required
         if global_policy.requires_confirmation(tool_name, args):
             logger.warning(f"工具 {tool_name} (ID: {tool_call['id']}) 需要用户确认")
-            # 抛出异常中断执行，携带当前批次的所有工具调用
+            # Raise an exception to interrupt execution and carry all pending tool calls
             raise ToolConfirmationRequired(tool_call['id'], tool_name, args, all_tool_calls=tool_calls)
 
     tasks = []
 
-    # 2. 创建所有异步任务
+    # 2. Create all async tasks
     for i, tool_call in enumerate(tool_calls):
         tasks.append(_execute_single_tool(i, tool_call, mcp_manager))
     
     if not tasks:
         return []
 
-    # 3. 并行等待结果
+    # 3. Wait for all tasks in parallel
     results = await asyncio.gather(*tasks)
     
-    # 4. 展平结果（因为每个工具可能返回多个块，如文本+图片）
+    # 4. Flatten results (each tool may return multiple blocks such as text + image)
     flat_results = []
     for res_blocks in results:
         flat_results.extend(res_blocks)
@@ -143,8 +144,10 @@ async def execute_tool_calls(tool_calls: list, mcp_manager, session_id: str = No
 
 async def _execute_single_tool(index: int, tool_call: dict, mcp_manager) -> List[Dict[str, Any]]:
     """
-    执行单个工具调用
-    返回: List[Dict] (OpenAI 格式的内容块列表)
+    Execute a single tool call.
+
+    Returns:
+        List[Dict]: OpenAI-style content blocks.
     """
     content_blocks = []
     
@@ -204,7 +207,6 @@ async def _execute_single_tool(index: int, tool_call: dict, mcp_manager) -> List
                 try:
                     # 只有当它看起来像 JSON 时才解析
                     if result_data.strip().startswith('{'):
-                        import json
                         result_data = json.loads(result_data)
                 except:
                     pass
@@ -282,11 +284,11 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
             logger.debug(f"解析到 {len(tool_calls)} 个工具调用")
 
             try:
-                # 执行工具并获取多模态结果块
-                # 传入 session_id 以便在需要时记录状态（虽然这里主要靠异常中断）
+                # Execute tools and get multimodal result blocks.
+                # Pass session_id so state can be recorded when needed (even though we mostly rely on exceptions).
                 tool_result_blocks = await execute_tool_calls(tool_calls, mcp_manager, session_id)
             except ToolConfirmationRequired as e:
-                # 捕获确认请求，返回特殊状态
+                # Capture confirmation requests and return a special status
                 logger.info(f"中断执行，等待用户确认工具: {e.tool_name} (ID: {e.tool_call_id})")
                 
                 return {
@@ -294,21 +296,21 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
                     'tool_call_id': e.tool_call_id,
                     'tool_name': e.tool_name,
                     'args': e.args,
-                    'current_messages': current_messages, # 保存当前对话状态
-                    'pending_tool_calls': e.all_tool_calls, # 关键：保存整批待执行工具
-                    'content': current_ai_content          # 保存AI的回复内容
+                    'current_messages': current_messages, # Save current conversation state
+                    'pending_tool_calls': e.all_tool_calls, # Save the full batch of pending tool calls
+                    'content': current_ai_content          # Save the AI reply content
                 }
 
             current_messages.append({'role': 'assistant', 'content': current_ai_content})
             
-            # 构建新的用户消息 (Observation)
-            # 包含文本结果和可能的图片
+            # Build a new user message (Observation) that includes
+            # both textual results and any images.
             observation_message = {
                 'role': 'user',
                 'content': tool_result_blocks
             }
             
-            # 追加提示词，引导模型继续
+            # Append a prompt to guide the model to continue
             tool_result_blocks.append({
                 "type": "text", 
                 "text": "\n请根据以上工具执行结果（可能包含截图），回答用户的问题或进行下一步操作。"
@@ -323,7 +325,7 @@ async def tool_call_loop(messages: List[Dict], mcp_manager, llm_caller, is_strea
             traceback.print_exc()
             break
             
-    # 如果因为达到最大递归深度而退出，尝试生成一个最终总结
+    # If we exit because we reached the max recursion depth, try to produce a final answer
     if recursion_depth >= max_recursion:
         try:
             logger.warning(f"达到最大递归深度 {max_recursion}，强制生成最终回答")

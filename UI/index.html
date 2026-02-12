@@ -70,6 +70,7 @@
                 <button id="doctorBtn" class="doctor-btn" title="系统自检 Doctor">🩺</button>
                 <button id="metricsBtn" class="metrics-btn" title="性能统计">📊</button>
                 <button id="settingsBtn" class="settings-btn" title="系统设置">⚙️</button>
+                <button id="langSwitchBtn" class="lang-switch-btn" title="Language / 语言">🌐</button>
                 <button id="memoryGraphBtn" class="memory-graph-btn" title="查看记忆图">🧠</button>
                 <div class="control-btn minimize"></div>
                 <div class="control-btn maximize"></div>
@@ -91,7 +92,7 @@
         </div>
         
         <div class="terminal-status">
-            <span class="status-item">当前会话: <span id="currentSession">未开始</span></span>
+            <span class="status-item"><span id="currentSessionLabel">当前会话</span>: <span id="currentSession">未开始</span></span>
         </div>
     </main>
     </div>
@@ -117,6 +118,22 @@
                 <div class="form-actions">
                     <button type="button" class="btn-secondary" id="rejectToolBtn">拒绝</button>
                     <button type="button" class="btn-primary btn-danger" id="approveToolBtn">批准执行</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 语言选择模态窗口 -->
+    <div id="languageModal" class="modal">
+        <div class="modal-content language-modal-content">
+            <div class="modal-header">
+                <h2 id="languageTitle">选择语言 / Choose Language</h2>
+            </div>
+            <div class="modal-body">
+                <p id="languageDesc" class="settings-hint">请选择界面语言（后端日志不受影响）</p>
+                <div class="language-actions">
+                    <button id="langZhBtn" class="btn-secondary">简体中文</button>
+                    <button id="langEnBtn" class="btn-primary">English</button>
                 </div>
             </div>
         </div>
@@ -205,16 +222,57 @@
         </div>
     </div>
 
-    <!-- 记忆图可视化模态窗口 -->
+    <!-- 记忆工作台模态窗口 -->
     <div id="memoryGraphModal" class="modal">
-        <div class="modal-content">
+        <div class="modal-content memory-workbench-modal">
             <div class="modal-header">
-                <h2>🧠 记忆图谱</h2>
+                <h2>🧠 记忆工作台</h2>
                 <span class="close-modal">&times;</span>
             </div>
-            <div class="modal-body">
+            <div class="modal-body memory-workbench-body">
+                <div class="memory-toolbar">
+                    <div class="memory-toolbar-left">
+                        <input type="search" id="memorySearchInput" class="memory-search" placeholder="搜索记忆内容 / 节点ID / 类型..." />
+                        <select id="memoryLayerFilter" class="memory-filter">
+                            <option value="all">全部层级</option>
+                            <option value="0">热层 Hot</option>
+                            <option value="1">温层 Warm</option>
+                            <option value="2">冷层 Cold</option>
+                        </select>
+                        <select id="memoryTypeFilter" class="memory-filter">
+                            <option value="all">全部类型</option>
+                        </select>
+                    </div>
+                    <div class="memory-toolbar-right">
+                        <button id="memoryOpenNeo4jBtn" class="btn-secondary">Neo4j</button>
+                        <button id="memoryClusterBtn" class="btn-secondary">聚类</button>
+                        <button id="memorySummarizeBtn" class="btn-secondary">摘要</button>
+                        <button id="memoryDecayBtn" class="btn-secondary">衰减</button>
+                        <button id="memoryCleanupBtn" class="btn-secondary">清理</button>
+                        <button id="memoryRefreshBtn" class="btn-primary">刷新</button>
+                    </div>
+                </div>
+
                 <div id="graphStats" class="graph-stats"></div>
-                <div id="graphCanvas"></div>
+
+                <div class="memory-workbench-grid">
+                    <div class="memory-graph-panel">
+                        <div id="graphCanvas"></div>
+                    </div>
+                    <aside class="memory-side-panel">
+                        <div class="memory-side-header">
+                            <h3 id="memoryNodeListTitle">节点列表</h3>
+                            <span id="memoryNodeCount" class="memory-node-count">0</span>
+                        </div>
+                        <div id="memoryNodeList" class="memory-node-list"></div>
+                        <div class="memory-side-header">
+                            <h3 id="memoryNodeDetailTitle">节点详情</h3>
+                        </div>
+                        <div id="memoryNodeDetail" class="memory-node-detail">
+                            选择左侧节点查看详情
+                        </div>
+                    </aside>
+                </div>
             </div>
         </div>
     </div>

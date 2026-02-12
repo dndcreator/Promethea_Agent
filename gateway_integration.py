@@ -93,7 +93,9 @@ class GatewayIntegration:
             memory_adapter = memory_system  # memory_system 就是 MemoryAdapter
             self.gateway_server.memory_service = MemoryService(
                 event_emitter=event_emitter,
-                memory_adapter=memory_adapter
+                memory_adapter=memory_adapter,
+                llm_client=conversation_core,
+                config_service=self.gateway_server.config_service,
             )
             # 向后兼容：保留旧属性名
             self.gateway_server.memory_system = memory_adapter
@@ -108,6 +110,8 @@ class GatewayIntegration:
             )
             # 向后兼容：保留旧属性名
             self.gateway_server.conversation_core = conversation_core
+            # Route final replies back to channel
+            event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)
         
         logger.info("Dependencies injected into gateway (with service layer)")
     
@@ -261,15 +265,22 @@ class GatewayIntegration:
             # 广播到WebSocket客户端（调试用）
             # 同时，ConversationService 会订阅这个事件并自动处理对话
             if self.gateway_server:
+                payload = {
+                    "channel": message.channel.value,
+                    "sender": message.sender_name or message.sender_id,
+                    "content": message.content,
+                    "message_type": message.message_type.value,
+                    "timestamp": message.timestamp.isoformat()
+                }
+                # Push to internal event bus for services (ConversationService, etc.)
+                await self.gateway_server.event_emitter.emit(
+                    EventType.CHANNEL_MESSAGE,
+                    payload,
+                )
+                # Broadcast to websocket clients for observability/debug UI.
                 await self.gateway_server.connection_manager.broadcast(
                     EventType.CHANNEL_MESSAGE,
-                    {
-                        "channel": message.channel.value,
-                        "sender": message.sender_name or message.sender_id,
-                        "content": message.content,
-                        "message_type": message.message_type.value,
-                        "timestamp": message.timestamp.isoformat()
-                    }
+                    payload,
                 )
 
             # ConversationService 已经订阅了 CHANNEL_MESSAGE 事件，会自动处理对话

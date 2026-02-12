@@ -54,7 +54,7 @@ class Neo4jConfig(BaseSettings):
     database: str = Field(default="neo4j", description='数据库名')
     max_connection_lifetime: int = Field(default=3600, description='最大连接生命周期(秒)')
     max_connection_pool_size: int = Field(default=50, description='最大连接池大小')
-    connection_timeout: int = Field(default=30, description='连接超时时间(秒)')
+    connection_timeout: int = Field(default=3, description='连接超时时间(秒)')
 
 class HotLayerConfig(BaseSettings):
     max_tuples_per_message: int = Field(default=10, description='每条消息最多提取的五元组数量')
@@ -74,12 +74,37 @@ class ColdLayerConfig(BaseSettings):
     max_summary_length: int = Field(default=500, ge=1, description='最大摘要长度')
     compression_threshold: int = Field(default=50, ge=1, description='触发压缩的消息数阈值')
 
+class MemoryRecallFilterConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    min_query_chars: int = Field(default=6, ge=0)
+    max_query_chars: int = Field(default=4000, ge=64)
+
+
+class MemoryWriteFilterConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    min_user_chars: int = Field(default=4, ge=0)
+    min_assistant_chars_for_short_user: int = Field(default=20, ge=0)
+    max_combined_chars: int = Field(default=8000, ge=256)
+
+
+class MemoryDedupeConfig(BaseSettings):
+    recent_write_cache_size: int = Field(default=2000, ge=100)
+    min_candidate_chars: int = Field(default=8, ge=1)
+
+
+class MemoryGatingConfig(BaseSettings):
+    recall_filter: MemoryRecallFilterConfig = Field(default_factory=MemoryRecallFilterConfig)
+    write_filter: MemoryWriteFilterConfig = Field(default_factory=MemoryWriteFilterConfig)
+    dedupe: MemoryDedupeConfig = Field(default_factory=MemoryDedupeConfig)
+
+
 class MemoryConfig(BaseSettings):
     enabled: bool = Field(default=False, description='是否启用记忆系统')
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
     hot_layer: HotLayerConfig = Field(default_factory=HotLayerConfig)
     warm_layer: WarmLayerConfig = Field(default_factory=WarmLayerConfig)
     cold_layer: ColdLayerConfig = Field(default_factory=ColdLayerConfig)
+    gating: MemoryGatingConfig = Field(default_factory=MemoryGatingConfig)
 
 class SystemPrompts(BaseSettings):
     Promethea_system_prompt: str = Field(
@@ -131,11 +156,11 @@ def load_config() -> PrometheaConfig:
     # 1. Start with defaults + env vars
     config = PrometheaConfig()
     
-    # 2. Overlay config/default.json if it exists (Legacy support & UI settings persistence)
-    # 优先使用 config/default.json，如果不存在则回退到根目录的 config.json（向后兼容）
+    # 2. Overlay config/default.json if it exists (legacy support & UI settings persistence)
+    # Prefer config/default.json; if it does not exist, fall back to root-level config.json (backwards compatible)
     config_path = Path('config/default.json')
     if not config_path.exists():
-        # 向后兼容：检查根目录的 config.json
+        # Backwards compatibility: also check legacy root-level config.json
         legacy_path = Path('config.json')
         if legacy_path.exists():
             config_path = legacy_path
@@ -173,7 +198,7 @@ def load_config() -> PrometheaConfig:
         except Exception as e:
             print(f'警告：加载 {config_path} 失败：{e}')
             print('使用默认/环境变量配置')
-            # 如果加载失败，尝试使用默认配置
+            # If loading fails, try to fall back to the default config file
             try:
                 default_config_path = Path('config/default.json')
                 if default_config_path.exists() and config_path != default_config_path:

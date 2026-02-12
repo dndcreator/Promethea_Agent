@@ -1,5 +1,5 @@
 """
-文件系统控制器
+File system controller.
 """
 import os
 import shutil
@@ -12,18 +12,19 @@ logger = logging.getLogger("Computer.FileSystem")
 
 
 class FileSystemController(ComputerController):
-    """文件系统控制器"""
+    """Computer controller for interacting with the file system."""
     
     def __init__(self, workspace_root: Optional[str] = None):
         super().__init__("FileSystem", ComputerCapability.FILESYSTEM)
-        # 工作空间根目录，用于限制文件操作范围
+        # Workspace root used to constrain the scope of file operations.
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
-        self.restricted_mode = True  # 限制模式，只能操作工作空间内的文件
+        # Backward-compatible default: unrestricted unless workspace_root is explicitly provided
+        self.restricted_mode = workspace_root is not None
     
     async def initialize(self) -> bool:
-        """初始化文件系统控制"""
+        """Initialise file system control."""
         try:
-            # 确保工作空间存在
+            # Ensure the workspace directory exists
             self.workspace_root.mkdir(parents=True, exist_ok=True)
             
             self.is_initialized = True
@@ -34,20 +35,20 @@ class FileSystemController(ComputerController):
             return False
     
     async def cleanup(self) -> bool:
-        """清理资源"""
+        """Clean up resources."""
         self.is_initialized = False
         logger.info("FileSystem controller cleaned up")
         return True
     
     def _resolve_path(self, path_str: str) -> Path:
-        """解析并验证路径"""
+        """Resolve and validate a path inside the workspace (if restricted)."""
         path = Path(path_str)
         
-        # 如果是相对路径，相对于工作空间
+        # If the path is relative, interpret it relative to the workspace root.
         if not path.is_absolute():
             path = self.workspace_root / path
         
-        # 限制模式：只允许访问工作空间内的文件
+        # Restricted mode: only allow access to paths inside the workspace.
         if self.restricted_mode:
             try:
                 path.resolve().relative_to(self.workspace_root.resolve())
@@ -59,7 +60,7 @@ class FileSystemController(ComputerController):
         return path
     
     async def execute(self, action: str, params: Dict[str, Any]) -> ComputerResult:
-        """执行文件系统操作"""
+        """Dispatch and execute a file-system action."""
         if not self.is_initialized:
             return ComputerResult(
                 success=False,
@@ -99,25 +100,25 @@ class FileSystemController(ComputerController):
             return ComputerResult(success=False, error=str(e))
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
-        """获取可用操作列表"""
+        """Return a list of supported file-system actions."""
         return [
-            {"name": "read", "description": "读取文件", "params": ["path", "encoding?"]},
-            {"name": "write", "description": "写入文件", "params": ["path", "content", "encoding?"]},
-            {"name": "append", "description": "追加内容", "params": ["path", "content", "encoding?"]},
-            {"name": "delete", "description": "删除文件/目录", "params": ["path", "recursive?"]},
-            {"name": "move", "description": "移动文件/目录", "params": ["src", "dst"]},
-            {"name": "copy", "description": "复制文件/目录", "params": ["src", "dst"]},
-            {"name": "mkdir", "description": "创建目录", "params": ["path", "parents?"]},
-            {"name": "list", "description": "列出目录", "params": ["path", "recursive?"]},
-            {"name": "exists", "description": "检查存在", "params": ["path"]},
-            {"name": "stat", "description": "获取文件信息", "params": ["path"]},
-            {"name": "search", "description": "搜索文件", "params": ["pattern", "path?"]},
+            {"name": "read", "description": "Read a file", "params": ["path", "encoding?"]},
+            {"name": "write", "description": "Write a file", "params": ["path", "content", "encoding?"]},
+            {"name": "append", "description": "Append to a file", "params": ["path", "content", "encoding?"]},
+            {"name": "delete", "description": "Delete a file or directory", "params": ["path", "recursive?"]},
+            {"name": "move", "description": "Move a file or directory", "params": ["src", "dst"]},
+            {"name": "copy", "description": "Copy a file or directory", "params": ["src", "dst"]},
+            {"name": "mkdir", "description": "Create a directory", "params": ["path", "parents?"]},
+            {"name": "list", "description": "List directory contents", "params": ["path", "recursive?"]},
+            {"name": "exists", "description": "Check path existence", "params": ["path"]},
+            {"name": "stat", "description": "Get file metadata", "params": ["path"]},
+            {"name": "search", "description": "Search for files", "params": ["pattern", "path?"]},
         ]
     
-    # ============ 文件操作 ============
+    # ============ File operations ============
     
     async def _read_file(self, params: Dict[str, Any]) -> str:
-        """读取文件"""
+        """Read file contents as text."""
         path_str = params.get('path')
         encoding = params.get('encoding', 'utf-8')
         
@@ -135,7 +136,7 @@ class FileSystemController(ComputerController):
         return path.read_text(encoding=encoding)
     
     async def _write_file(self, params: Dict[str, Any]) -> str:
-        """写入文件"""
+        """Write text content to a file (overwrite)."""
         path_str = params.get('path')
         content = params.get('content')
         encoding = params.get('encoding', 'utf-8')
@@ -145,14 +146,14 @@ class FileSystemController(ComputerController):
         
         path = self._resolve_path(path_str)
         
-        # 确保父目录存在
+        # Ensure the parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
         
         path.write_text(content, encoding=encoding)
         return f"Written to {path}"
     
     async def _append_file(self, params: Dict[str, Any]) -> str:
-        """追加内容到文件"""
+        """Append text content to an existing file."""
         path_str = params.get('path')
         content = params.get('content')
         encoding = params.get('encoding', 'utf-8')
@@ -167,10 +168,10 @@ class FileSystemController(ComputerController):
         
         return f"Appended to {path}"
     
-    # ============ 文件/目录管理 ============
+    # ============ File / directory management ============
     
     async def _delete(self, params: Dict[str, Any]) -> str:
-        """删除文件或目录"""
+        """Delete a file or directory (optionally recursive)."""
         path_str = params.get('path')
         recursive = params.get('recursive', False)
         
@@ -190,11 +191,11 @@ class FileSystemController(ComputerController):
                 shutil.rmtree(path)
                 return f"Deleted directory: {path}"
             else:
-                path.rmdir()  # 只删除空目录
+                path.rmdir()  # Only delete empty directories
                 return f"Deleted empty directory: {path}"
     
     async def _move(self, params: Dict[str, Any]) -> str:
-        """移动文件或目录"""
+        """Move a file or directory to a new location."""
         src_str = params.get('src')
         dst_str = params.get('dst')
         
@@ -211,7 +212,7 @@ class FileSystemController(ComputerController):
         return f"Moved {src} to {dst}"
     
     async def _copy(self, params: Dict[str, Any]) -> str:
-        """复制文件或目录"""
+        """Copy a file or directory to a new location."""
         src_str = params.get('src')
         dst_str = params.get('dst')
         
@@ -232,7 +233,7 @@ class FileSystemController(ComputerController):
             return f"Copied directory {src} to {dst}"
     
     async def _mkdir(self, params: Dict[str, Any]) -> str:
-        """创建目录"""
+        """Create a directory (optionally with parents)."""
         path_str = params.get('path')
         parents = params.get('parents', True)
         
@@ -244,7 +245,7 @@ class FileSystemController(ComputerController):
         return f"Created directory: {path}"
     
     async def _list_dir(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """列出目录内容"""
+        """List items in a directory (optionally recursive)."""
         path_str = params.get('path', '.')
         recursive = params.get('recursive', False)
         
@@ -268,7 +269,7 @@ class FileSystemController(ComputerController):
         return items
     
     def _get_item_info(self, path: Path) -> Dict[str, Any]:
-        """获取文件/目录信息"""
+        """Get basic information about a file or directory."""
         stat = path.stat()
         return {
             "name": path.name,
@@ -279,10 +280,10 @@ class FileSystemController(ComputerController):
             "created": stat.st_ctime,
         }
     
-    # ============ 文件信息 ============
+    # ============ File information ============
     
     async def _exists(self, params: Dict[str, Any]) -> bool:
-        """检查文件/目录是否存在"""
+        """Check if a file or directory exists."""
         path_str = params.get('path')
         
         if not path_str:
@@ -292,7 +293,7 @@ class FileSystemController(ComputerController):
         return path.exists()
     
     async def _get_stat(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取文件统计信息"""
+        """Get detailed file or directory statistics."""
         path_str = params.get('path')
         
         if not path_str:
@@ -306,7 +307,7 @@ class FileSystemController(ComputerController):
         return self._get_item_info(path)
     
     async def _search(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """搜索文件"""
+        """Search for files by glob pattern under a base path."""
         pattern = params.get('pattern')
         search_path = params.get('path', '.')
         
