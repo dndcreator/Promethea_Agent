@@ -1,44 +1,47 @@
-"""
-温层管理器
-对热层节点进行语义聚类，生成主题概念节点
+﻿"""
+Warm-layer manager.
+
+Cluster base-layer nodes into higher-level topic concept nodes.
 """
 import logging
 import json
 from typing import List, Dict, Optional
 from openai import OpenAI
+from .api_settings import resolve_memory_api
 
 logger = logging.getLogger(__name__)
 
 
 class WarmLayerManager:
-    """温层记忆管理器 - 语义聚类"""
+    """Warm-layer memory manager for semantic clustering."""
     
     def __init__(self, connector, config):
         """
-        初始化温层管理器
-        
+        Initialize warm-layer manager.
+
         Args:
-            connector: Neo4j 连接器
-            config: 配置对象
+            connector: Neo4j connector.
+            config: Project configuration object.
         """
         self.connector = connector
         self.config = config
+        memory_api = resolve_memory_api(config)
         
-        # 初始化 Embedding 客户端
+        # Initialize LLM client (used for clustering prompts).
         self.client = OpenAI(
-            api_key=config.api.api_key,
-            base_url=config.api.base_url
+            api_key=memory_api["api_key"],
+            base_url=memory_api["base_url"]
         )
         
-        # LLM 聚类参数
+        # LLM clustering parameters.
         self.min_cluster_size = config.memory.warm_layer.min_cluster_size
         self.max_concepts = getattr(config.memory.warm_layer, "max_concepts", 100)
-        self.cluster_model = getattr(config.api, "model", "")
+        self.cluster_model = memory_api["model"]
         
-        logger.info("温层管理器初始化完成")
+        logger.info("Warm-layer manager initialized")
     
     def _extract_json(self, text: str) -> Optional[dict]:
-        """尽量从模型输出中提取 JSON（允许 ```json 包裹）。"""
+        """Best-effort extraction of JSON from model output (supports ```json fences)."""
         if not text:
             return None
         s = text.strip()
@@ -48,13 +51,13 @@ class WarmLayerManager:
             except Exception:
                 pass
         elif "```" in s:
-            # 有些模型会用 ``` 包裹但不写 json
+            # Some models wrap content in ``` fences without specifying json.
             try:
                 s = s.split("```", 1)[1].split("```", 1)[0].strip()
             except Exception:
                 pass
 
-        # 截取最外层对象
+        # Take the outer-most object.
         if "{" in s and "}" in s:
             s = s[s.find("{"): s.rfind("}") + 1]
         try:
@@ -64,29 +67,35 @@ class WarmLayerManager:
 
     def _llm_cluster_entities(self, session_id: str, entities: List[Dict]) -> Optional[List[Dict]]:
         """
-        让 LLM 将实体聚类为概念簇。
+        Ask the LLM to cluster entities into topic concepts.
 
         Returns:
             clusters: [{ "name": str, "entities": [str] }]
         """
-        # 只给模型看必要字段，避免 prompt 过长
+        # Only pass minimal name strings to avoid very long prompts.
         entity_names = [e.get("content", "") for e in entities if e.get("content")]
-        entity_names = list(dict.fromkeys(entity_names))  # 去重保序
+        entity_names = list(dict.fromkeys(entity_names))  # de-duplicate, keep order
 
-        prompt = f"""你是一个信息组织助手。请把下面的“实体列表”聚成若干个“概念/主题簇”。
-要求：
-1) 输出必须是严格 JSON（不要额外文字）。
-2) JSON 格式：{{"clusters":[{{"name":"概念名","entities":["实体1","实体2"]}}], "unassigned":["无法归类的实体"]}}
-3) clusters 数量不要太多（<= {min(12, max(3, self.max_concepts))}），每个 clusters 至少包含 {self.min_cluster_size} 个实体；实体必须来自输入列表。
-4) 概念名用中文、短一些（<= 12 字），尽量抽象（如“工作项目/技术栈/家庭安排/健康作息”等）。
-5) 不要编造不存在的实体。
-
-会话ID：{session_id}
-实体列表（共 {len(entity_names)} 个）：
-{json.dumps(entity_names, ensure_ascii=False)}
-"""
+        max_clusters = min(12, max(3, self.max_concepts))
+        prompt = (
+            "You are an assistant for clustering entities into concise topic concepts.\n"
+            "Instructions:\n"
+            "1) Output MUST be strict JSON, no extra text.\n"
+            '2) JSON format:\n'
+            '   {\"clusters\":[{\"name\":\"topic name\",\"entities\":[\"entity1\",\"entity2\"]}],'
+            ' \"unassigned\":[\"entities that cannot be grouped\"]}\n'
+            f"3) Number of clusters should not be large (<= {max_clusters}), and each cluster "
+            f"must contain at least {self.min_cluster_size} member entities. All entities must "
+            "come from the input list.\n"
+            "4) Topic names should be short and descriptive (<= 12 characters), such as "
+            "\"work project\", \"tech stack\", \"family schedule\", etc.\n"
+            "5) Do not invent entities that are not in the input list.\n\n"
+            f"Session ID: {session_id}\n"
+            f"Entity list (total {len(entity_names)}):\n"
+            f"{json.dumps(entity_names, ensure_ascii=False)}\n"
+        )
         messages = [
-            {"role": "system", "content": "你擅长把零散实体归纳成少量主题簇，并输出严格 JSON。"},
+            {"role": "system", "content": "You are good at clustering entities into concise topics. Return strict JSON only."},
             {"role": "user", "content": prompt}
         ]
         try:
@@ -105,38 +114,36 @@ class WarmLayerManager:
                 return None
             return clusters
         except Exception as e:
-            logger.warning(f"LLM 聚类失败: {e}")
+            logger.warning(f"LLM clustering failed: {e}")
             return None
     
     def cluster_entities(self, session_id: str) -> int:
-        """
-        对会话中的实体节点进行聚类
-        """
-        logger.info(f"开始对会话 {session_id} 的实体进行聚类")
+        """Cluster entities in a session into concepts."""
+        logger.info(f"Start clustering entities for session: {session_id}")
         
-        # 1. 获取所有实体节点
+        # 1. Fetch all entities for this session.
         entities = self._get_session_entities(session_id)
         
         if len(entities) < self.min_cluster_size:
-            logger.info(f"实体数量不足 ({len(entities)} < {self.min_cluster_size})，跳过聚类")
+            logger.info(f"Not enough entities for clustering ({len(entities)} < {self.min_cluster_size})")
             return 0
 
-        # 2. 调用 LLM 聚类（必要时重试一次）
+        # 2. Call LLM for clustering (retry once if needed).
         clusters = self._llm_cluster_entities(session_id, entities)
         if clusters is None:
             clusters = self._llm_cluster_entities(session_id, entities)
         if not clusters:
-            logger.info("LLM 未返回有效聚类结果，跳过")
+            logger.info("LLM returned no valid clusters; skip")
             return 0
 
-        # 3. 建立 content -> id 映射（同名取第一个）
+        # 3. Build content -> id mapping (first occurrence wins).
         content_to_id = {}
         for e in entities:
             c = (e.get("content") or "").strip()
             if c and c not in content_to_id:
                 content_to_id[c] = e.get("id")
 
-        # 4. 为每个聚类创建 Concept 节点并建立关系
+        # 4. For each cluster, create a Concept node and link members.
         concepts_created = 0
         for idx, cluster in enumerate(clusters):
             if concepts_created >= self.max_concepts:
@@ -148,7 +155,7 @@ class WarmLayerManager:
             if not name or not isinstance(members, list):
                 continue
 
-            # 过滤掉不在输入列表的实体
+            # Filter out entities that are not present in the input list.
             member_ids = []
             member_entities = []
             for m in members:
@@ -159,7 +166,7 @@ class WarmLayerManager:
                     member_ids.append(content_to_id[key])
                     member_entities.append({"id": content_to_id[key], "content": key})
 
-            # 最小簇大小约束
+            # Respect minimum cluster size.
             if len(member_ids) < self.min_cluster_size:
                 continue
 
@@ -167,11 +174,11 @@ class WarmLayerManager:
             if concept_id:
                 concepts_created += 1
 
-        logger.info(f"LLM 温层聚类完成，创建了 {concepts_created} 个概念节点")
+        logger.info(f"Warm-layer clustering complete, created {concepts_created} concepts")
         return concepts_created
 
     def _get_session_entities(self, session_id: str) -> List[Dict]:
-        """获取会话的所有实体节点"""
+        """Get all entity nodes for a session."""
         query = """
         MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)
         MATCH (m)<-[:FROM_MESSAGE]-(e:Entity)
@@ -183,28 +190,28 @@ class WarmLayerManager:
         return [dict(r) for r in results]
     
     def _create_concept_node_from_llm(self, session_id: str, concept_name: str, entities: List[Dict]) -> Optional[str]:
-        """根据 LLM 给出的 concept_name + 实体列表创建概念节点并建立关系。"""
+        """Create a Concept node from LLM output and link entities to it."""
         from .models import Neo4jNode, Neo4jRelation, NodeType, RelationType
         import uuid
         
         concept_name = concept_name.strip()[:50]
 
-        # 检查是否已存在相似概念（限定在会话内）
+        # Reuse an existing similar concept node when available.
         existing = self._find_similar_concept(session_id, concept_name)
         if existing:
-            logger.debug(f"概念已存在: {existing}")
-            # 直接建立关系
+            logger.debug(f"Reusing existing concept node: {existing}")
+            # Link all entities to the reused concept.
             for entity in entities:
                 self._link_entity_to_concept(entity['id'], existing)
             return existing
         
-        # 创建新概念节点
+        # Create new concept node.
         concept_id = f"concept_{uuid.uuid4().hex[:12]}"
         concept_node = Neo4jNode(
             id=concept_id,
             type=NodeType.CONCEPT,
             content=concept_name,
-            layer=1,  # 温层
+            layer=1,  # warm layer
             importance=0.7,
             properties={
                 "session_id": session_id,
@@ -213,13 +220,13 @@ class WarmLayerManager:
         )
         
         self.connector.create_node(concept_node)
-        logger.info(f"创建概念节点(LLM): {concept_name} (包含 {len(entities)} 个实体)")
+        logger.info(f"Created concept node (LLM): {concept_name} (entities={len(entities)})")
         
-        # 建立实体到概念的关系
+        # Link entities to concept node.
         for entity in entities:
             self._link_entity_to_concept(entity['id'], concept_id)
         
-        # 连接到会话
+        # Link concept node back to session.
         session_relation = Neo4jRelation(
             type=RelationType.PART_OF_SESSION,
             source_id=concept_id,
@@ -231,7 +238,7 @@ class WarmLayerManager:
         return concept_id
     
     def _find_similar_concept(self, session_id: str, concept_name: str) -> Optional[str]:
-        """查找相似的概念节点（限定会话，简单字符串匹配）"""
+        """Find an existing similar concept in the same session (simple substring match)."""
         query = """
         MATCH (c:Concept)
         WHERE c.session_id = $session_id AND c.content CONTAINS $keyword
@@ -248,7 +255,7 @@ class WarmLayerManager:
         return results[0]['id'] if results else None
     
     def _link_entity_to_concept(self, entity_id: str, concept_id: str):
-        """建立实体到概念的关系"""
+        """Create BELONGS_TO relation from entity to concept."""
         from .models import Neo4jRelation, RelationType
         
         relation = Neo4jRelation(
@@ -260,7 +267,7 @@ class WarmLayerManager:
         self.connector.create_relation(relation)
     
     def get_concepts(self, session_id: str) -> List[Dict]:
-        """获取会话的所有概念"""
+        """Get all concept nodes for a session."""
         query = """
         MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(c:Concept)
         OPTIONAL MATCH (c)<-[:BELONGS_TO]-(e:Entity)
@@ -273,7 +280,7 @@ class WarmLayerManager:
         return [dict(r) for r in results]
     
     def get_entities_by_concept(self, concept_id: str) -> List[Dict]:
-        """获取概念下的所有实体"""
+        """Get all entities that belong to a given concept."""
         query = """
         MATCH (c:Concept {id: $concept_id})<-[:BELONGS_TO]-(e:Entity)
         RETURN e.id as id, e.content as content, e.importance as importance
@@ -286,26 +293,26 @@ class WarmLayerManager:
 
 def create_warm_layer_manager(connector):
     """
-    工厂函数：创建温层管理器
-    
+    Factory function to create a WarmLayerManager.
+
     Args:
-        connector: Neo4j 连接器
-        
+        connector: Neo4j connector.
+
     Returns:
-        WarmLayerManager 实例，失败返回 None
+        WarmLayerManager instance, or None if memory is disabled.
     """
     try:
         from config import load_config
         config = load_config()
         
-        # 检查是否启用
+        # Check whether memory system is enabled.
         if not config.memory.enabled:
-            logger.info("记忆系统未启用")
+            logger.info("Memory system disabled")
             return None
         
         return WarmLayerManager(connector, config)
         
     except Exception as e:
-        logger.warning(f"温层管理器初始化失败: {e}")
+        logger.warning(f"Warm-layer manager initialization failed: {e}")
         return None
 

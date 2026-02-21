@@ -1,6 +1,6 @@
-"""
-ToolService 测试
-测试工具服务的核心功能
+﻿"""
+ToolService 
+?
 """
 import pytest
 from unittest.mock import MagicMock, AsyncMock
@@ -9,16 +9,16 @@ from gateway.events import EventEmitter
 
 
 class TestToolService:
-    """ToolService 测试类"""
+    """TODO: add docstring."""
     
     def test_init(self):
-        """测试初始化"""
+        """TODO: add docstring."""
         service = ToolService()
         assert service is not None
         assert service._registered_tools == {}
     
     def test_register_tool(self):
-        """测试注册工具"""
+        """TODO: add docstring."""
         service = ToolService()
         
         class TestTool:
@@ -34,7 +34,7 @@ class TestToolService:
         assert "test.tool" in service._registered_tools
     
     def test_unregister_tool(self):
-        """测试注销工具"""
+        """TODO: add docstring."""
         service = ToolService()
         
         class TestTool:
@@ -52,10 +52,10 @@ class TestToolService:
     
     @pytest.mark.asyncio
     async def test_list_tools(self):
-        """测试列出工具"""
+        """TODO: add docstring."""
         service = ToolService()
         
-        # 注册一个工具
+        # TODO: comment cleaned
         class TestTool:
             tool_id = "test.tool"
             name = "Test Tool"
@@ -72,7 +72,7 @@ class TestToolService:
     
     @pytest.mark.asyncio
     async def test_call_tool(self):
-        """测试调用工具"""
+        """TODO: add docstring."""
         service = ToolService(event_emitter=EventEmitter())
         
         class TestTool:
@@ -94,3 +94,4 @@ class TestToolService:
         
         assert result["result"] == "success"
         assert result["args"]["param"] == "value"
+

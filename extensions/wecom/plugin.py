@@ -1,4 +1,4 @@
-from channels.wecom_channel import WeComChannel
+﻿from channels.wecom_channel import WeComChannel
 from channels.base import ChannelConfig
 
 

@@ -1,4 +1,4 @@
-from channels.web_channel import WebChannel
+﻿from channels.web_channel import WebChannel
 from channels.base import ChannelConfig
 
 

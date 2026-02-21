@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 from pathlib import Path
 
 from core.plugins.loader import load_promethea_plugins, PluginLoadOptions

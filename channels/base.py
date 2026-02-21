@@ -1,5 +1,4 @@
-"""
-通道基类 - 统一的通道抽象接口
+﻿"""
 """
 import asyncio
 from abc import ABC, abstractmethod
@@ -10,22 +9,22 @@ from datetime import datetime
 from loguru import logger
 
 class ChannelType(str, Enum):
-    """通道类型"""
-    WEB = "web"              # Web前端
-    DINGTALK = "dingtalk"    # 钉钉
-    FEISHU = "feishu"        # 飞书
-    WECOM = "wecom"          # 企业微信
-    WECHAT = "wechat"        # 微信(测试用)
-    QQ = "qq"                # QQ(测试用)
+    """TODO: add docstring."""
+    WEB = "web"              # TODO: comment cleaned
+    DINGTALK = "dingtalk"
+    FEISHU = "feishu"        # TODO: comment cleaned
+    WECOM = "wecom"
+    WECHAT = "wechat"        # WeChat (for testing)
+    QQ = "qq"                # QQ (for testing)
     API = "api"              # REST API
     WEBHOOK = "webhook"      # Webhook
     
 
 class MessageType(str, Enum):
-    """消息类型"""
+    """TODO: add docstring."""
     TEXT = "text"
     MARKDOWN = "markdown"
-    CARD = "card"            # 交互卡片
+    CARD = "card"
     IMAGE = "image"
     FILE = "file"
     AUDIO = "audio"
@@ -34,34 +33,29 @@ class MessageType(str, Enum):
     
 
 class Message(BaseModel):
-    """统一消息模型"""
+    """TODO: add docstring."""
     message_id: str
     channel: ChannelType
     message_type: MessageType = MessageType.TEXT
     
-    # 发送者信息
     sender_id: str
     sender_name: Optional[str] = None
     
-    # 接收者信息
-    receiver_id: str           # 用户ID或群组ID
+    receiver_id: str           # User ID or group ID
     receiver_type: str = "user"  # user, group, channel
     
-    # 消息内容
     content: str
-    raw_content: Optional[Dict[str, Any]] = None  # 原始消息格式
+    raw_content: Optional[Dict[str, Any]] = None  # Original message payload
     
-    # 元数据
     timestamp: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
-    # 引用/回复
     reply_to: Optional[str] = None
     thread_id: Optional[str] = None
 
 
 class ChannelConfig(BaseModel):
-    """通道配置"""
+    """TODO: add docstring."""
     model_config = ConfigDict(extra="allow")
     enabled: bool = True
     app_key: Optional[str] = None
@@ -73,7 +67,7 @@ class ChannelConfig(BaseModel):
 
 
 class BaseChannel(ABC):
-    """通道基类"""
+    """TODO: add docstring."""
     
     def __init__(self, channel_name: str, channel_type: ChannelType, config: ChannelConfig):
         self.channel_name = channel_name
@@ -82,23 +76,20 @@ class BaseChannel(ABC):
         self.is_connected = False
         self.is_running = False
         
-        # 兼容：历史代码里大量使用 self.logger
         self.logger = logger.bind(channel=self.channel_name)
 
-        # 消息处理回调
         self._on_message_callbacks: List[Callable] = []
         self._on_event_callbacks: List[Callable] = []
         
-    # ============ 抽象方法 ============
     
     @abstractmethod
     async def connect(self) -> bool:
-        """连接到通道"""
+        """TODO: add docstring."""
         pass
     
     @abstractmethod
     async def disconnect(self) -> bool:
-        """断开通道连接"""
+        """TODO: add docstring."""
         pass
     
     @abstractmethod
@@ -109,7 +100,7 @@ class BaseChannel(ABC):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """发送消息"""
+        """TODO: add docstring."""
         pass
     
     @abstractmethod
@@ -119,18 +110,16 @@ class BaseChannel(ABC):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """发送交互卡片"""
         pass
     
     @abstractmethod
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """获取用户信息"""
+        """TODO: add docstring."""
         pass
     
-    # ============ 通用方法 ============
     
     async def start(self) -> bool:
-        """启动通道"""
+        """TODO: add docstring."""
         if self.is_running:
             logger.warning(f"Channel {self.channel_name} is already running")
             return True
@@ -155,7 +144,7 @@ class BaseChannel(ABC):
             return False
     
     async def stop(self) -> bool:
-        """停止通道"""
+        """TODO: add docstring."""
         if not self.is_running:
             return True
         
@@ -170,17 +159,17 @@ class BaseChannel(ABC):
             return False
     
     def on_message(self, callback: Callable):
-        """注册消息回调"""
+        """TODO: add docstring."""
         if callback not in self._on_message_callbacks:
             self._on_message_callbacks.append(callback)
     
     def on_event(self, callback: Callable):
-        """注册事件回调"""
+        """TODO: add docstring."""
         if callback not in self._on_event_callbacks:
             self._on_event_callbacks.append(callback)
     
     async def _emit_message(self, message: Message):
-        """触发消息事件"""
+        """TODO: add docstring."""
         for callback in self._on_message_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -191,7 +180,7 @@ class BaseChannel(ABC):
                 logger.error(f"Error in message callback: {e}")
     
     async def _emit_event(self, event_type: str, event_data: Dict[str, Any]):
-        """触发通用事件"""
+        """TODO: add docstring."""
         for callback in self._on_event_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
@@ -202,7 +191,7 @@ class BaseChannel(ABC):
                 logger.error(f"Error in event callback: {e}")
     
     def get_status(self) -> Dict[str, Any]:
-        """获取通道状态"""
+        """TODO: add docstring."""
         return {
             "channel_name": self.channel_name,
             "channel_type": self.channel_type,
@@ -212,7 +201,5 @@ class BaseChannel(ABC):
         }
     
     async def validate_config(self) -> bool:
-        """验证配置"""
         if not self.config.enabled:
             return True
-        return True  # 子类可以覆盖

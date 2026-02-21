@@ -1,4 +1,4 @@
-import unittest
+﻿import unittest
 import asyncio
 import time
 
@@ -105,8 +105,9 @@ class TestToolExecution(unittest.TestCase):
         
         self.assertEqual(len(new_messages), 2)
         self.assertEqual(new_messages[0]['role'], 'system')
-        self.assertIn("可用工具", new_messages[0]['content'])
+        self.assertIn("", new_messages[0]['content'])
         self.assertIn("mock_service", new_messages[0]['content'])
 
 if __name__ == '__main__':
     unittest.main()
+

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Windows-friendly self check: plugin discovery + load + registry summary.
 """
 from __future__ import annotations

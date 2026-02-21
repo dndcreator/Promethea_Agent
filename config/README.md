@@ -1,63 +1,50 @@
-# 配置文件夹说明
+﻿# 配置说明
 
-本目录用于存储系统的所有配置文件。
+本项目采用“默认配置 + 用户配置 + 环境变量”的分层配置模型。
 
-## 目录结构
+## 配置来源与优先级
 
+从低到高：
+1. `config/default.json`（系统默认）
+2. `config/users/<user_id>/config.json`（用户非敏感配置）
+3. `.env` / 系统环境变量（敏感配置优先）
+
+## 当前安全策略
+
+- API Key 等敏感信息：只放 `.env`（全局共享）
+- 用户配置文件：仅存非敏感项（如 agent 名称、系统提示词等）
+
+## 常用环境变量（示例）
+
+```env
+API__API_KEY=...
+API__BASE_URL=https://openrouter.ai/api/v1
+API__MODEL=nvidia/nemotron-3-nano-30b-a3b:free
+
+MEMORY__ENABLED=true
+MEMORY__NEO4J__ENABLED=true
+MEMORY__NEO4J__URI=bolt://127.0.0.1:7687
+MEMORY__NEO4J__USERNAME=neo4j
+MEMORY__NEO4J__PASSWORD=...
+MEMORY__NEO4J__DATABASE=neo4j
 ```
+
+## 用户配置文件位置
+
+```text
 config/
-├── default.json          # 默认配置文件（系统级配置）
-├── users/                # 用户配置目录
-│   ├── {user_id}.json   # 每个用户的个性化配置文件
-│   └── .gitkeep         # 保持目录存在
-└── README.md            # 本文件
+├─ default.json
+└─ users/
+   └─ <user_id>/
+      └─ config.json
 ```
 
-## 配置文件说明
+## 常见问题
 
-### 1. `default.json` - 默认配置
+### 1) 为什么用户配置里改了 api 仍不生效
 
-- **位置**: `config/default.json`
-- **用途**: 系统级的默认配置，包含所有非敏感配置项
-- **优先级**: 最低（环境变量 > 用户配置 > 默认配置）
-- **特点**:
-  - 用户可以随时选择回到默认配置
-  - 如果读取配置出错，会自动回退到默认配置
-  - 不应包含敏感信息（如 API Key、密码等）
+因为当前策略是全局 `.env` 控制敏感 key，用户配置中的敏感字段会被过滤。
 
-### 2. `users/{user_id}.json` - 用户配置
+### 2) 如何恢复默认配置
 
-- **位置**: `config/users/{user_id}.json`
-- **用途**: 每个用户的个性化配置
-- **优先级**: 中等（环境变量 > 用户配置 > 默认配置）
-- **特点**:
-  - 每个用户有独立的配置文件
-  - 可以覆盖默认配置中的任意字段
-  - 支持用户级别的模型切换、提示词定制等
-
-### 3. 环境变量配置
-
-- **位置**: `.env` 文件（项目根目录）
-- **用途**: 存储敏感信息（API Key、密码等）
-- **优先级**: 最高（环境变量 > 用户配置 > 默认配置）
-- **特点**:
-  - 不应提交到版本控制系统
-  - 使用 `env.example` 作为模板
-
-## 配置加载顺序
-
-1. **环境变量** (`.env` 或系统环境变量) - 最高优先级
-2. **用户配置** (`config/users/{user_id}.json`) - 中等优先级
-3. **默认配置** (`config/default.json`) - 最低优先级
-
-## 配置回退机制
-
-- 如果用户配置读取失败，自动回退到默认配置
-- 如果默认配置读取失败，使用代码中的硬编码默认值
-- 如果配置验证失败，自动回退到默认配置
-
-## 迁移说明
-
-- 旧的 `config.json` 文件会自动迁移到 `config/default.json`
-- 旧的 `users/{user_id}/config.json` 文件会自动迁移到 `config/users/{user_id}.json`
-- 系统支持向后兼容，旧的路径仍然可以工作
+可通过配置接口 reset，或手动删除对应用户配置文件后重启服务。

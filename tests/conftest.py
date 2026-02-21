@@ -1,12 +1,12 @@
-"""
-测试配置和共享 fixtures
+﻿"""
+?fixtures
 """
 import os
 import sys
 from pathlib import Path
 from typing import Generator
 
-# 添加项目根目录到路径
+# TODO: comment cleaned
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -16,13 +16,13 @@ from unittest.mock import Mock, MagicMock
 
 @pytest.fixture
 def project_root_path():
-    """项目根目录路径"""
+    """TODO: add docstring."""
     return Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
 def test_config():
-    """测试配置"""
+    """TODO: add docstring."""
     return {
         "api": {
             "api_key": "test-key",
@@ -30,14 +30,14 @@ def test_config():
             "model": "test-model"
         },
         "memory": {
-            "enabled": False  # 默认禁用记忆系统，避免需要 Neo4j
+            "enabled": False  # TODO: comment cleaned
         }
     }
 
 
 @pytest.fixture
 def mock_event_emitter():
-    """模拟事件发射器"""
+    """TODO: add docstring."""
     emitter = MagicMock()
     emitter.on = MagicMock()
     emitter.emit = MagicMock()
@@ -47,7 +47,7 @@ def mock_event_emitter():
 
 @pytest.fixture
 def mock_connection_manager():
-    """模拟连接管理器"""
+    """TODO: add docstring."""
     manager = MagicMock()
     manager.add_connection = MagicMock()
     manager.remove_connection = MagicMock()
@@ -57,7 +57,7 @@ def mock_connection_manager():
 
 @pytest.fixture
 def mock_memory_adapter():
-    """模拟记忆适配器"""
+    """TODO: add docstring."""
     adapter = MagicMock()
     adapter.is_enabled = MagicMock(return_value=False)
     adapter.add_message = MagicMock(return_value=True)
@@ -67,7 +67,7 @@ def mock_memory_adapter():
 
 @pytest.fixture
 def mock_message_manager():
-    """模拟消息管理器"""
+    """TODO: add docstring."""
     manager = MagicMock()
     manager.create_session = MagicMock()
     manager.get_session = MagicMock(return_value=None)
@@ -78,15 +78,16 @@ def mock_message_manager():
 
 @pytest.fixture(autouse=True)
 def reset_environment(monkeypatch):
-    """每个测试前重置环境变量"""
-    # 保存原始环境变量
+    """TODO: add docstring."""
+    # TODO: comment cleaned
     original_env = os.environ.copy()
     
-    # 设置测试环境变量
+    # TODO: comment cleaned
     monkeypatch.setenv("PROMETHEA_TEST", "1")
     
     yield
     
-    # 恢复原始环境变量
+    # TODO: comment cleaned
     os.environ.clear()
     os.environ.update(original_env)
+

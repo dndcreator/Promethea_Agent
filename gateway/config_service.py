@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 """
 Configuration system service layer.
@@ -20,7 +20,7 @@ from loguru import logger
 from .events import EventEmitter
 from .protocol import EventType
 from config import PrometheaConfig, load_config
-from api_server.user_manager import user_manager
+from gateway.http.user_manager import user_manager
 
 
 class ConfigService:
@@ -39,13 +39,10 @@ class ConfigService:
     ) -> None:
         self.event_emitter = event_emitter
         
-        # 默认配置（系统级，从 config.py 加载）
         self._default_config: Optional[PrometheaConfig] = None
         
-        # 配置缓存（用户ID -> 合并后的配置）
         self._user_config_cache: Dict[str, Dict[str, Any]] = {}
         
-        # 初始化默认配置
         self._load_default_config()
         
         logger.info("ConfigService: Initialized")
@@ -98,9 +95,7 @@ class ConfigService:
         # Load user config from user_manager
         try:
             user_config = user_manager.get_user_config(user_id)
-            # Merge default config and user config
             merged_config = self._merge_configs(user_id, user_config)
-            # Cache the merged result
             self._user_config_cache[user_id] = merged_config
             return merged_config
         except Exception as e:
@@ -140,7 +135,7 @@ class ConfigService:
         # No extra handling here because PrometheaConfig already reads env vars
         
         return merged
-    
+
     def _merge_configs(self, user_id: str, user_config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Merge default configuration with a specific user's configuration.
@@ -216,7 +211,7 @@ class ConfigService:
                 if not validation_result["valid"]:
                     return {
                         "success": False,
-                        "message": f"配置验证失败: {validation_result['error']}",
+                        "message": f"Configuration validation failed: {validation_result['error']}",
                         "config": current_config
                     }
             
@@ -226,7 +221,7 @@ class ConfigService:
             if not success:
                 return {
                     "success": False,
-                    "message": "保存用户配置失败",
+                    "message": "Failed to save user configuration",
                     "config": current_config
                 }
             
@@ -246,7 +241,7 @@ class ConfigService:
             
             return {
                 "success": True,
-                "message": "配置更新成功",
+                "message": "Configuration updated successfully",
                 "config": updated_config
             }
         
@@ -317,7 +312,7 @@ class ConfigService:
             
             return {
                 "success": True,
-                "message": "配置重置成功"
+                "message": "Configuration reset successfully"
             }
         
         except Exception as e:
@@ -359,7 +354,7 @@ class ConfigService:
             
             return {
                 "success": True,
-                "message": "默认配置重载成功",
+                "message": "Default configuration reloaded successfully",
                 "config": new_config
             }
         
@@ -520,6 +515,14 @@ class ConfigService:
         memory_config = config.get("memory", {})
         if memory_config.get("enabled") and not memory_config.get("neo4j", {}).get("enabled"):
             warnings.append("Memory system is enabled but Neo4j is not enabled")
+        memory_api = memory_config.get("api", {})
+        if memory_config.get("enabled") and not memory_api.get("use_main_api", True):
+            if not memory_api.get("api_key"):
+                warnings.append("Memory API is configured as dedicated, but memory.api.api_key is empty")
+            if not memory_api.get("base_url"):
+                warnings.append("Memory API is configured as dedicated, but memory.api.base_url is empty")
+            if not memory_api.get("model"):
+                warnings.append("Memory API is configured as dedicated, but memory.api.model is empty")
         
         return {
             "user_id": user_id,

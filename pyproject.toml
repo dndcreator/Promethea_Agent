@@ -14,7 +14,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
@@ -36,6 +36,7 @@ dependencies = [
     "psutil>=5.9.0",
     "passlib[bcrypt]>=1.7.4",
     "python-jose[cryptography]>=3.3.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -60,9 +61,9 @@ addopts = [
     "--tb=short"
 ]
 markers = [
-    "asyncio: 异步测试",
-    "live: 集成测试（需要运行服务器）",
-    "slow: 慢速测试"
+    "asyncio: async tests",
+    "live: integration tests requiring running services",
+    "slow: slow tests"
 ]
 
 [tool.setuptools.packages.find]

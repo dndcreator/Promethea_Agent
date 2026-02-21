@@ -1,47 +1,44 @@
-"""自动记忆召回引擎"""
+﻿"""Automatic memory recall engine."""
 
 from typing import List, Dict
 from datetime import datetime
 from .neo4j_connector import Neo4jConnector
 from .llm_extractor import LLMExtractor
+from .session_scope import user_node_id
 import logging
 
 logger = logging.getLogger(__name__)
 
 
 class AutoRecallEngine:
-    """基于图谱的自动记忆召回（动态参数）"""
+    """Heuristic-based automatic memory recall engine."""
     
     def __init__(self, connector: Neo4jConnector, extractor: LLMExtractor):
         self.connector = connector
         self.extractor = extractor
     
     def recall(self, query: str, session_id: str, user_id: str = "default_user") -> str:
-        """召回相关记忆并格式化为上下文"""
+        """Recall relevant memories and format them as context."""
         try:
-            # 提取查询实体
             extraction = self.extractor.extract(role="user", content=query)
             entities = extraction.entities if extraction.entities else []
             
-            # 动态计算参数
             params = self._calculate_params(query, entities)
             
-            # 三层查询 (传入 user_id)
             results = self._three_layer_query(entities, session_id, user_id, params['recent_days'])
             
-            # 格式化
             return self._format_context(results, params['max_tokens'], params['items_per_layer'])
             
         except Exception as e:
-            logger.error(f"记忆召回失败: {e}")
+            logger.error(f"Memory auto-recall failed: {e}")
             return ""
     
     def _calculate_params(self, query: str, entities: List[str]) -> Dict:
-        """根据查询特征动态计算参数"""
+        """Adaptively calculate recall parameters based on query and entities."""
         entity_count = len(entities)
         query_length = len(query)
         
-        # 简单分级
+        # Simple level heuristic.
         if entity_count >= 3 or query_length > 80:
             level = 'complex'
         elif entity_count >= 1 or query_length > 20:
@@ -49,7 +46,7 @@ class AutoRecallEngine:
         else:
             level = 'simple'
         
-        # 参数预设
+        # Parameter presets.
         presets = {
             'simple':  {'max_tokens': 800,  'items_per_layer': 2, 'recent_days': 3},
             'normal':  {'max_tokens': 1500, 'items_per_layer': 3, 'recent_days': 7},
@@ -57,29 +54,27 @@ class AutoRecallEngine:
         }
         
         params = presets[level]
-        
-        # 回忆型问题特殊处理
-        if any(kw in query for kw in ["之前", "刚才", "上次", "记得", "说过"]):
-            params['items_per_layer'] += 1
-            params['recent_days'] += 3
+
+        # TODO: support localized temporal keywords if needed.
+        # Currently we do not special-case Chinese phrases to avoid encoding issues.
         
         return params
     
     def _three_layer_query(self, entities: List[str], session_id: str, user_id: str, recent_days: int = 7) -> Dict:
-        """三层并行查询 (支持跨会话的用户级召回)"""
+        """Three-layer Cypher query (supports cross-session, user-scoped recall)."""
         
-        # 重要：查询必须匹配当前图谱schema
-        # - User 节点 id 使用 "user_{user_id}"
-        # - Session 节点 id 使用 "session_{session_id}"
-        # - Session 属于 User: (:Session)-[:OWNED_BY]->(:User)
-        # - Message 属于 Session: (:Message)-[:PART_OF_SESSION]->(:Session)
+        # Important: query must match current graph schema.
+        # - User node id uses "user_{user_id}"
+        # - Session node id uses "session_{session_id}"
+        # - Session belongs to User: (:Session)-[:OWNED_BY]->(:User)
+        # - Message belongs to Session: (:Message)-[:PART_OF_SESSION]->(:Session)
         
         cypher = """
-        // 查找用户节点
+        // Find user node
         WITH $entities AS query_entities, $user_node_id AS uid, $session_node_id as current_sid
         
-        // Layer 1: 实体直连 (跨会话，但限制为该用户的会话)
-        // 路径: Entity -> Message -> Session -> User
+        // Layer 1: Direct entity matches (cross-session, but limited to this user)
+        // Path: Entity -> Message -> Session -> User
         OPTIONAL MATCH (u:User {id: uid})
         OPTIONAL MATCH (e:Entity)
         WHERE e.content IN query_entities
@@ -92,7 +87,7 @@ class AutoRecallEngine:
             session_id: s.session_id
         }) AS layer1_results, uid, current_sid
 
-        // Layer 2: 图谱扩散 (跨会话)
+        // Layer 2: Indirect matches via Action graph
         OPTIONAL MATCH (u:User {id: uid})
         OPTIONAL MATCH (e0:Entity)
         WHERE e0.content IN $entities
@@ -108,7 +103,7 @@ class AutoRecallEngine:
             session_id: s.session_id
         }) AS layer2_results, uid, current_sid
 
-        // Layer 3: 近期窗口 (仅限当前会话，保持上下文连贯性)
+        // Layer 3: Recent context window (current session only, preserve recency)
         OPTIONAL MATCH (s:Session {id: current_sid})
         OPTIONAL MATCH (recent_msg:Message)-[:PART_OF_SESSION]->(s)
         WHERE recent_msg.created_at > datetime() - duration({days: $recent_days})
@@ -131,7 +126,7 @@ class AutoRecallEngine:
                 cypher,
                 parameters={
                     "entities": entities if entities else [""],
-                    "user_node_id": f"user_{user_id}",
+                    "user_node_id": user_node_id(user_id),
                     "session_node_id": f"session_{session_id}",
                     "recent_days": recent_days
                 }
@@ -141,26 +136,25 @@ class AutoRecallEngine:
                 'direct': [], 'related': [], 'recent': []
             }
         except Exception as e:
-            logger.error(f"图谱查询失败: {e}")
+            logger.error(f"Auto-recall Cypher query failed: {e}")
             return {'direct': [], 'related': [], 'recent': []}
     
     def _format_context(self, results: Dict, max_tokens: int = 1500, items_per_layer: int = 3) -> str:
-        """格式化上下文"""
+        """Format recalled results into a compact context string."""
         lines = []
         token_count = 0
         
-        # 按优先级处理
+        # Process in order of priority.
         priorities = [
-            ('direct', results.get('direct', []), '【直接相关记忆】'),
-            ('related', results.get('related', []), '【关联知识】'),
-            ('recent', results.get('recent', []), '【近期对话】')
+            ('direct', results.get('direct', []), '[Direct memories]'),
+            ('related', results.get('related', []), '[Related knowledge]'),
+            ('recent', results.get('recent', []), '[Recent dialog]')
         ]
         
         for layer_name, items, header in priorities:
             if not items:
                 continue
             
-            # 排序
             sorted_items = sorted(
                 items,
                 key=lambda x: (x.get('importance', 0), x.get('time', datetime.min)),
@@ -173,14 +167,14 @@ class AutoRecallEngine:
                 if not content:
                     continue
                 
-                # Token限制
+                # Rough token limit.
                 est_tokens = len(content) // 1.5
                 if token_count + est_tokens > max_tokens:
                     break
                 
-                # 格式化
+                # Format timestamp.
                 t = item.get('time')
-                # Neo4j driver 可能返回 neo4j.time.DateTime；这里做最稳妥的字符串化
+                # Neo4j driver may return neo4j.time.DateTime; do a best-effort conversion.
                 if t is None:
                     time_str = ''
                 elif hasattr(t, "to_native"):
@@ -193,8 +187,8 @@ class AutoRecallEngine:
                 else:
                     time_str = str(t)[:10]
                 
-                via_str = f" (关联: {item['via']})" if item.get('via') else ""
-                # 如果是跨会话的记忆，可以标注来源（可选）
+                via_str = f" (via: {item['via']})" if item.get('via') else ""
+                # If this is conversation memory, we could also label its session (optional):
                 # session_str = f" [Session: {item.get('session_id')}]" if item.get('session_id') else ""
                 
                 layer_lines.append(f"- [{time_str}] {content[:100]}...{via_str}")

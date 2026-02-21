@@ -6,7 +6,7 @@ layer is disabled, so callers can simply check for a falsy value.
 """
 from typing import Optional
 from .neo4j_connector import Neo4jConnectionPool
-from .llm_extractor import LLMExtractor
+from .llm_extractor import create_extractor_from_config
 from .hot_layer import HotLayerManager
 from .warm_layer import WarmLayerManager
 from .cold_layer import ColdLayerManager
@@ -23,7 +23,7 @@ def create_hot_layer_manager(session_id: str, user_id: str = "default_user") -> 
     if not connector:
         return None
         
-    extractor = LLMExtractor(config.api)
+    extractor = create_extractor_from_config(config)
     return HotLayerManager(extractor, connector, session_id, user_id)
 
 def create_warm_layer_manager(connector) -> Optional[WarmLayerManager]:

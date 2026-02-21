@@ -1,4 +1,4 @@
-from memory.adapter import get_memory_adapter
+﻿from memory.adapter import get_memory_adapter
 
 
 def register(api):

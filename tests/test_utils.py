@@ -1,5 +1,5 @@
-"""
-测试工具函数
+﻿"""
+
 """
 import json
 import uuid
@@ -12,7 +12,7 @@ def create_test_request(
     params: Optional[Dict[str, Any]] = None,
     request_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """创建测试请求消息"""
+    """TODO: add docstring."""
     return {
         "type": "req",
         "id": request_id or str(uuid.uuid4()),
@@ -27,7 +27,7 @@ def create_test_response(
     error: Optional[str] = None,
     request_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """创建测试响应消息"""
+    """TODO: add docstring."""
     response = {
         "type": "resp",
         "id": request_id or str(uuid.uuid4()),
@@ -44,7 +44,7 @@ def create_test_event(
     event_type: str,
     payload: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """创建测试事件消息"""
+    """TODO: add docstring."""
     return {
         "type": "event",
         "event": event_type,
@@ -53,7 +53,7 @@ def create_test_event(
 
 
 def mock_websocket_connection():
-    """创建模拟 WebSocket 连接"""
+    """TODO: add docstring."""
     ws = MagicMock()
     ws.send = MagicMock()
     ws.recv = MagicMock()
@@ -62,22 +62,22 @@ def mock_websocket_connection():
 
 
 def assert_response_ok(response: Dict[str, Any], expected_data: Optional[Any] = None):
-    """断言响应成功"""
-    assert response.get("ok") is True, f"响应失败: {response}"
+    """TODO: add docstring."""
+    assert response.get("ok") is True, f": {response}"
     if expected_data is not None:
         assert response.get("data") == expected_data
 
 
 def assert_response_error(response: Dict[str, Any], expected_error: Optional[str] = None):
-    """断言响应失败"""
-    assert response.get("ok") is False, f"响应应该失败但成功了: {response}"
+    """TODO: add docstring."""
+    assert response.get("ok") is False, f": {response}"
     if expected_error:
         assert expected_error in str(response.get("error", ""))
 
 
 def load_test_config(config_name: str = "test") -> Dict[str, Any]:
-    """加载测试配置"""
-    # 这里可以扩展为从文件加载测试配置
+    """TODO: add docstring."""
+    # TODO: comment cleaned
     return {
         "test": {
             "api": {
@@ -92,6 +92,7 @@ def load_test_config(config_name: str = "test") -> Dict[str, Any]:
 
 
 class AsyncMock(Mock):
-    """异步 Mock 对象"""
+    """TODO: add docstring."""
     async def __call__(self, *args, **kwargs):
         return super().__call__(*args, **kwargs)
+

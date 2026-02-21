@@ -16,6 +16,12 @@
     },
     "memory": {
         "enabled": true,
+        "api": {
+            "use_main_api": true,
+            "api_key": "",
+            "base_url": "https://openrouter.ai/api/v1",
+            "model": ""
+        },
         "neo4j": {
             "enabled": true,
             "uri": "bolt://127.0.0.1:7687",
@@ -31,11 +37,16 @@
             "enable_time_normalization": true
         },
         "warm_layer": {
-            "enabled": false,
+            "enabled": true,
             "embedding_model": "text-embedding-3-small",
             "clustering_threshold": 0.7,
             "min_cluster_size": 3,
-            "max_concepts": 100
+            "max_concepts": 100,
+            "cluster_every_messages": 12,
+            "cluster_min_interval_s": 300,
+            "idle_cluster_delay_s": 120,
+            "idle_cluster_min_messages": 2,
+            "idle_cluster_min_interval_s": 60
         },
         "cold_layer": {
             "summary_model": "nvidia/nemotron-3-nano-30b-a3b:free",

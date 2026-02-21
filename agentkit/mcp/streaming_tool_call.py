@@ -1,4 +1,4 @@
-import re
+﻿import re
 import json
 import logging
 import asyncio
@@ -44,7 +44,7 @@ class CallbackManager:
             else:
                 return callback(*args, **kwargs)
         except Exception as e:
-            logger.error(f"回调函数 {name} 执行错误: {e}")
+            logger.error(f"Callback '{name}' execution failed: {e}")
             return None
 
 
@@ -58,7 +58,7 @@ class StreamingToolCall:
         self.brace_count = 0
         self.mcp_manager = mcp_manager
         self.text_buffer = ""
-        self.sentence_endings = r"[。？！；\.\?\!\;]"
+        self.sentence_endings = r"[\u3002\uFF1F\uFF01\uFF1B\.\?\!\;]"
 
         self.callback_manager = CallbackManager()
         
@@ -89,7 +89,7 @@ class StreamingToolCall:
         
         results = []
         for char in text_chunk:
-            if char in '{｛':
+            if char in "{\uFF5B":
                 if not self.is_in_tool_call:
                     if self.text_buffer:
                         result = await self._flush_text_buffer()
@@ -103,7 +103,7 @@ class StreamingToolCall:
                     self.tool_call_buffer += char
                     self.brace_count += 1
                 
-            elif char in '}｝':
+            elif char in "}\uFF5D":
                 if self.is_in_tool_call:
                     self.tool_call_buffer += char
                     self.brace_count -= 1
@@ -164,37 +164,41 @@ class StreamingToolCall:
                     daemon=True
                 ).start()
             except Exception as e:
-                logger.error(f"语音集成错误: {e}")
+                logger.error(f"Voice integration streaming failed: {e}")
 
     async def _extract_tool_call(self, tool_call: str):
 
         try:
-            logger.info(f"检测到工具调用: {tool_call[:100]}...")
+            logger.info(f"Detected tool-call segment: {tool_call[:100]}...")
             tool_calls = parse_tool_calls(tool_call)
 
             if tool_calls:
-                logger.info(f"解析到 {len(tool_calls)} 个工具调用")
+                logger.info(f"Parsed {len(tool_calls)} tool calls")
                 if self.tool_calls_queue:
                     for tool_call in tool_calls:
-                        # 兼容 asyncio.Queue，使用 put_nowait (非阻塞)
+                        # Support both asyncio.Queue (put_nowait) and normal Queue.
                         if hasattr(self.tool_calls_queue, 'put_nowait'):
                             self.tool_calls_queue.put_nowait(tool_call)
                         else:
-                            # 兼容普通 Queue
                             self.tool_calls_queue.put(tool_call)
-                    logger.info(f"已将 {len(tool_calls)} 个工具调用添加到队列")
+                    logger.info(f"Queued {len(tool_calls)} tool calls")
                 
                 if self.tool_call_detected_signal:
                     try:
-                        self.tool_call_detected_signal("正在执行工具调用...")
+                        self.tool_call_detected_signal("Executing tool calls...")
                     except Exception as e:
-                        logger.error(f"工具调用检测信号执行错误: {e}")
+                        logger.error(f"Tool-call detection callback failed: {e}")
                 
-                return (AI_NAME, f"<span style='color:#888;font-size:14pt;font-family:Lucida Console;'>🔧 检测到工具调用，正在执行...</span>")
+                return (
+                    AI_NAME,
+                    "<span style='color:#888;font-size:14pt;font-family:Lucida Console;'>"
+                    "Detected tool calls, executing..."
+                    "</span>",
+                )
             else:
-                logger.warning("工具调用解析失败")
+                logger.warning("Failed to parse tool calls from stream")
         except Exception as e:
-            error_msg = f"工具调用提取失败: {str(e)}"
+            error_msg = f"Tool-call extraction failed: {str(e)}"
             logger.error(error_msg)
         
         return None
@@ -209,8 +213,10 @@ class StreamingToolCall:
                 results.append(result)
         
         if self.is_in_tool_call and self.tool_call_buffer:
-            logger.warning(f"检测到未完成的工具调用: {self.tool_call_buffer}")
-            # 可以选择丢弃或特殊处理
+            logger.warning(
+                f"Detected unfinished tool call at end of stream: {self.tool_call_buffer}"
+            )
+            # Could optionally flush or handle as a special error case.
         return results if results else None
 
     def reset(self):
@@ -245,7 +251,7 @@ class StreamingToolCallProcessor:
                 self.response_buffer += chunk_text
                 await self.tool_call_extractor.process_text_chunk(chunk_text)
         except Exception as e:
-            logger.error(f"AI流式响应处理错误: {e}")
+            logger.error(f"Error processing AI streaming response: {e}")
         finally:
             self.is_processing = False
             await self.tool_call_extractor.finish_processing()

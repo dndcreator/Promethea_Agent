@@ -1,6 +1,7 @@
-"""
-电脑控制 MCP 服务适配器
-将底层 computer 模块的能力暴露给 MCP 框架
+﻿"""
+Computer control MCP service adapter.
+
+Expose low-level capabilities of the `computer` module to the MCP framework.
 """
 from loguru import logger
 import asyncio
@@ -11,49 +12,45 @@ from gateway_integration import GatewayIntegration
 
 
 class ComputerControlService:
-    """电脑控制服务 (MCP Wrapper)"""
+    """Computer control service (MCP wrapper)."""
     
     def __init__(self):
         self.name = "computer_control"
         self.gateway = None
 
     async def execute_action(self, capability: str, action: str, params: Dict[str, Any] = None) -> str:
-        """执行电脑操作"""
+        """Execute a computer control action via the gateway."""
         try:
-            # 动态导入以避免循环依赖
             from gateway_integration import get_gateway_integration
             
-            # 获取全局单例
             gateway = get_gateway_integration()
             if not gateway:
-                return "❌ 网关系统未初始化，无法执行电脑操作"
+                return "Error: gateway system is not initialized, cannot run computer actions"
 
-            # 构造参数
             if params is None:
                 params = {}
-                
-            logger.info(f"执行电脑操作: {capability}.{action} params={params}")
             
-            # 使用网关集成的统一方法执行，复用全局 Controller
+            logger.info(f"Executing computer action: {capability}.{action} params={params}")
+            
             result = await gateway.execute_computer_action(capability, action, params)
             
             if result.success:
-                output = f"✅ 操作成功\n"
+                output = "SUCCESS: operation completed\n"
                 if result.result:
-                    output += f"结果: {result.result}\n"
+                    output += f"Result: {result.result}\n"
                 if result.screenshot:
-                    output += f"[包含截图数据: {len(result.screenshot)} bytes]\n"
+                    output += f"[Including screenshot data: {len(result.screenshot)} bytes]\n"
                 return output
             else:
-                return f"❌ 操作失败: {result.error}"
+                return f"ERROR: operation failed: {result.error}"
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return f"❌ 系统错误: {str(e)}"
+            return f"ERROR: system exception: {str(e)}"
 
     async def browser_action(self, action: str, url: str = "", selector: str = "", text: str = "") -> str:
-        """浏览器操作"""
+        """Browser operations."""
         params = {}
         if url: params["url"] = url
         if selector: params["selector"] = selector
@@ -62,7 +59,7 @@ class ComputerControlService:
         return await self.execute_action(ComputerCapability.BROWSER, action, params)
 
     async def screen_action(self, action: str, x: int = 0, y: int = 0, text: str = "", key: str = "") -> str:
-        """屏幕/键鼠操作"""
+        """Screen, mouse and keyboard operations."""
         params = {}
         if x or y: 
             params["x"] = x
@@ -70,7 +67,6 @@ class ComputerControlService:
         if text: params["text"] = text
         if key: params["key"] = key
         
-        # 根据 action 映射到正确的 capability
         cap = ComputerCapability.SCREEN
         if action in ["move", "click", "scroll"]: cap = ComputerCapability.MOUSE
         if action in ["type", "press"]: cap = ComputerCapability.KEYBOARD
@@ -79,7 +75,7 @@ class ComputerControlService:
         return await self.execute_action(cap, action, params)
 
     async def fs_action(self, action: str, path: str, content: str = "") -> str:
-        """文件系统操作"""
+        """File system operations."""
         params = {"path": path}
         if content: params["content"] = content
         return await self.execute_action(ComputerCapability.FILESYSTEM, action, params)

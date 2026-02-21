@@ -1,6 +1,4 @@
-"""
-飞书通道 - 支持飞书机器人和应用
-参考: https://open.feishu.cn/document/
+﻿"""
 """
 import hmac
 import hashlib
@@ -15,33 +13,28 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class FeishuChannel(BaseChannel):
-    """飞书通道实现"""
+    """TODO: add docstring."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("feishu", ChannelType.FEISHU, config)
         
-        # 飞书配置
-        self.app_id = config.app_key  # 使用app_key字段存储app_id
+        self.app_id = config.app_key
         self.app_secret = config.app_secret
-        self.webhook_url = config.webhook_url  # 群机器人webhook
+        self.webhook_url = config.webhook_url
         self.webhook_secret = config.extra.get("webhook_secret")
         
-        # API端点
         self.api_base = config.api_endpoint or "https://open.feishu.cn/open-apis"
         
-        # 访问令牌
         self.tenant_access_token = None
         self.token_expires_at = 0
         
-        # HTTP会话
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def connect(self) -> bool:
-        """连接飞书"""
+        """TODO: add docstring."""
         try:
             self.session = aiohttp.ClientSession()
             
-            # 如果配置了app_id，获取tenant_access_token
             if self.app_id and self.app_secret:
                 await self._refresh_access_token()
             
@@ -54,7 +47,7 @@ class FeishuChannel(BaseChannel):
             return False
     
     async def disconnect(self) -> bool:
-        """断开连接"""
+        """TODO: add docstring."""
         if self.session:
             await self.session.close()
             self.session = None
@@ -64,7 +57,7 @@ class FeishuChannel(BaseChannel):
         return True
     
     async def _refresh_access_token(self):
-        """刷新访问令牌"""
+        """TODO: add docstring."""
         url = f"{self.api_base}/auth/v3/tenant_access_token/internal"
         payload = {
             "app_id": self.app_id,
@@ -81,12 +74,12 @@ class FeishuChannel(BaseChannel):
                 raise Exception(f"Failed to get access token: {data}")
     
     async def _ensure_token(self):
-        """确保令牌有效"""
+        """TODO: add docstring."""
         if not self.tenant_access_token or time.time() >= self.token_expires_at:
             await self._refresh_access_token()
     
     def _generate_signature(self, timestamp: str, secret: str) -> str:
-        """生成签名（用于webhook验证）"""
+        """TODO: add docstring."""
         string_to_sign = f"{timestamp}\n{secret}"
         hmac_code = hmac.new(
             string_to_sign.encode("utf-8"),
@@ -102,13 +95,10 @@ class FeishuChannel(BaseChannel):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """发送消息"""
         try:
-            # 通过webhook发送（群机器人）
             if self.webhook_url and kwargs.get("use_webhook", True):
                 return await self._send_webhook_message(content, message_type, **kwargs)
             
-            # 通过API发送（应用消息）
             else:
                 await self._ensure_token()
                 return await self._send_api_message(receiver_id, content, message_type, **kwargs)
@@ -123,11 +113,10 @@ class FeishuChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """通过Webhook发送消息（群机器人）"""
+        """TODO: add docstring."""
         if not self.webhook_url:
             return {"success": False, "error": "Webhook URL not configured"}
         
-        # 构造消息体
         if message_type == MessageType.TEXT:
             payload = {
                 "msg_type": "text",
@@ -136,13 +125,11 @@ class FeishuChannel(BaseChannel):
                 }
             }
         elif message_type == MessageType.MARKDOWN:
-            # 飞书使用post格式
             payload = {
                 "msg_type": "post",
                 "content": {
                     "post": {
                         "zh_cn": {
-                            "title": kwargs.get("title", "消息"),
                             "content": [[{"tag": "text", "text": content}]]
                         }
                     }
@@ -154,7 +141,6 @@ class FeishuChannel(BaseChannel):
                 "content": {"text": content}
             }
         
-        # 添加签名
         if self.webhook_secret:
             timestamp = str(int(time.time()))
             sign = self._generate_signature(timestamp, self.webhook_secret)
@@ -177,17 +163,14 @@ class FeishuChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """通过API发送消息（应用消息）"""
         url = f"{self.api_base}/im/v1/messages"
         headers = {
             "Authorization": f"Bearer {self.tenant_access_token}",
             "Content-Type": "application/json; charset=utf-8"
         }
         
-        # 确定接收者ID类型
         receive_id_type = kwargs.get("receive_id_type", "chat_id")  # open_id, user_id, union_id, email, chat_id
         
-        # 构造消息内容
         if message_type == MessageType.TEXT:
             msg_type = "text"
             msg_content = {"text": content}
@@ -195,7 +178,7 @@ class FeishuChannel(BaseChannel):
             msg_type = "post"
             msg_content = {
                 "zh_cn": {
-                    "title": kwargs.get("title", "消息"),
+                    "title": kwargs.get("title", "Message"),
                     "content": [[{"tag": "text", "text": content}]]
                 }
             }
@@ -226,9 +209,8 @@ class FeishuChannel(BaseChannel):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """发送交互卡片（Interactive Message）"""
+        """TODO: add docstring."""
         try:
-            # 通过webhook发送卡片
             if self.webhook_url and kwargs.get("use_webhook", True):
                 payload = {
                     "msg_type": "interactive",
@@ -250,7 +232,6 @@ class FeishuChannel(BaseChannel):
                         "result": result
                     }
             
-            # 通过API发送卡片
             else:
                 await self._ensure_token()
                 
@@ -283,7 +264,6 @@ class FeishuChannel(BaseChannel):
             return {"success": False, "error": str(e)}
     
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """获取用户信息"""
         try:
             await self._ensure_token()
             
@@ -306,11 +286,9 @@ class FeishuChannel(BaseChannel):
             return None
     
     async def validate_config(self) -> bool:
-        """验证配置"""
         if not self.config.enabled:
             return True
         
-        # 至少需要webhook_url或(app_id+app_secret)
         has_webhook = bool(self.webhook_url)
         has_app = bool(self.app_id and self.app_secret)
         

@@ -1,5 +1,5 @@
-"""
-浏览器控制器 - 基于 Playwright
+﻿"""
+Browser controller - based on Playwright.
 """
 import asyncio
 from typing import Dict, Any, List, Optional
@@ -10,7 +10,7 @@ logger = logging.getLogger("Computer.Browser")
 
 
 class BrowserController(ComputerController):
-    """浏览器控制器"""
+    """Browser controller."""
     
     def __init__(self):
         super().__init__("Browser", ComputerCapability.BROWSER)
@@ -21,24 +21,21 @@ class BrowserController(ComputerController):
         self._pages: Dict[str, Any] = {}  # tab_id -> page
     
     async def initialize(self) -> bool:
-        """初始化浏览器"""
+        """Initialize browser, context and first page."""
         try:
-            # 动态导入 Playwright
             from playwright.async_api import async_playwright
             
             self.playwright = await async_playwright().start()
             
-            # 启动浏览器（默认使用 Chromium）
             self.browser = await self.playwright.chromium.launch(
-                headless=False,  # 显示浏览器窗口
+                headless=False,
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                 ]
             )
             
-            # 创建浏览器上下文
-            # 尝试加载保存的状态（Cookies, LocalStorage）
+            # Create browser context and try to restore saved state (cookies, local storage, etc.).
             import os
             state_path = "browser_state.json"
             if os.path.exists(state_path):
@@ -54,11 +51,7 @@ class BrowserController(ComputerController):
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 )
             
-            # 自动保存状态的钩子 (简单起见，我们在每次操作后尝试保存，或者提供显式保存)
-            # 这里我们至少在 cleanup 时保存
-
-            
-            # 创建第一个页面
+            # Create first page.
             self.page = await self.context.new_page()
             self._pages['default'] = self.page
             
@@ -74,10 +67,10 @@ class BrowserController(ComputerController):
             return False
     
     async def cleanup(self) -> bool:
-        """清理浏览器资源"""
+        """Clean up browser resources and save state."""
         try:
             if self.context:
-                # 保存状态
+                # Persist browser state to disk so it can be restored later.
                 try:
                     await self.context.storage_state(path="browser_state.json")
                     logger.info("Saved browser state to browser_state.json")
@@ -98,7 +91,7 @@ class BrowserController(ComputerController):
             return False
     
     async def execute(self, action: str, params: Dict[str, Any]) -> ComputerResult:
-        """执行浏览器操作"""
+        """Execute a browser action."""
         if not self.is_initialized:
             return ComputerResult(
                 success=False,
@@ -106,7 +99,6 @@ class BrowserController(ComputerController):
             )
         
         try:
-            # 路由到具体的操作方法
             action_map = {
                 'navigate': self._navigate,
                 'click': self._click,
@@ -141,30 +133,30 @@ class BrowserController(ComputerController):
             return ComputerResult(success=False, error=str(e))
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
-        """获取可用操作列表"""
+        """Get list of supported browser actions."""
         return [
-            {"name": "navigate", "description": "导航到URL", "params": ["url"]},
-            {"name": "click", "description": "点击元素", "params": ["selector"]},
-            {"name": "type", "description": "输入文本", "params": ["selector", "text"]},
-            {"name": "screenshot", "description": "截图", "params": ["full_page?"]},
-            {"name": "get_content", "description": "获取页面内容", "params": []},
-            {"name": "evaluate", "description": "执行JavaScript", "params": ["script"]},
-            {"name": "wait", "description": "等待", "params": ["selector?", "timeout?"]},
-            {"name": "new_tab", "description": "打开新标签页", "params": ["url?"]},
-            {"name": "close_tab", "description": "关闭标签页", "params": ["tab_id?"]},
-            {"name": "switch_tab", "description": "切换标签页", "params": ["tab_id"]},
-            {"name": "list_tabs", "description": "列出所有标签页", "params": []},
-            {"name": "back", "description": "后退", "params": []},
-            {"name": "forward", "description": "前进", "params": []},
-            {"name": "reload", "description": "刷新", "params": []},
-            {"name": "get_url", "description": "获取当前URL", "params": []},
-            {"name": "get_title", "description": "获取页面标题", "params": []},
+            {"name": "navigate", "description": "Navigate to URL", "params": ["url"]},
+            {"name": "click", "description": "Click element", "params": ["selector"]},
+            {"name": "type", "description": "Type text", "params": ["selector", "text"]},
+            {"name": "screenshot", "description": "Screenshot", "params": ["full_page?"]},
+            {"name": "get_content", "description": "Get page content", "params": []},
+            {"name": "evaluate", "description": "Execute JavaScript", "params": ["script"]},
+            {"name": "wait", "description": "Wait for selector or timeout", "params": ["selector?", "timeout?"]},
+            {"name": "new_tab", "description": "Open new tab", "params": ["url?"]},
+            {"name": "close_tab", "description": "Close current tab", "params": ["tab_id?"]},
+            {"name": "switch_tab", "description": "Switch tab", "params": ["tab_id"]},
+            {"name": "list_tabs", "description": "List all tabs", "params": []},
+            {"name": "back", "description": "Navigate back", "params": []},
+            {"name": "forward", "description": "Navigate forward", "params": []},
+            {"name": "reload", "description": "Reload page", "params": []},
+            {"name": "get_url", "description": "Get current URL", "params": []},
+            {"name": "get_title", "description": "Get page title", "params": []},
         ]
     
-    # ============ 具体操作实现 ============
+    # ============ Concrete browser operations ============
     
     async def _navigate(self, params: Dict[str, Any]) -> str:
-        """导航到URL"""
+        """Navigate to URL."""
         url = params.get('url')
         if not url:
             raise ValueError("Missing required parameter: url")
@@ -173,7 +165,7 @@ class BrowserController(ComputerController):
         return f"Navigated to {url}"
     
     async def _click(self, params: Dict[str, Any]) -> str:
-        """点击元素"""
+        """Click an element."""
         selector = params.get('selector')
         if not selector:
             raise ValueError("Missing required parameter: selector")
@@ -182,7 +174,7 @@ class BrowserController(ComputerController):
         return f"Clicked {selector}"
     
     async def _type(self, params: Dict[str, Any]) -> str:
-        """输入文本"""
+        """Type text into an element."""
         selector = params.get('selector')
         text = params.get('text')
         
@@ -193,7 +185,7 @@ class BrowserController(ComputerController):
         return f"Typed '{text}' into {selector}"
     
     async def _screenshot(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """截图"""
+        """Take a screenshot and return base64 data."""
         full_page = params.get('full_page', False)
         path = params.get('path')
         
@@ -202,7 +194,7 @@ class BrowserController(ComputerController):
             type='png'
         )
         
-        # 转换为 Base64
+        # Convert to Base64.
         import base64
         screenshot_base64 = base64.b64encode(screenshot_bytes).decode('utf-8')
         
@@ -220,7 +212,7 @@ class BrowserController(ComputerController):
         return result
     
     async def _get_content(self, params: Dict[str, Any]) -> str:
-        """获取页面内容"""
+        """Get page content (HTML or text)."""
         content_type = params.get('type', 'text')
         
         if content_type == 'html':
@@ -231,7 +223,7 @@ class BrowserController(ComputerController):
             raise ValueError(f"Unknown content type: {content_type}")
     
     async def _evaluate(self, params: Dict[str, Any]) -> Any:
-        """执行JavaScript"""
+        """Evaluate JavaScript."""
         script = params.get('script')
         if not script:
             raise ValueError("Missing required parameter: script")
@@ -239,7 +231,7 @@ class BrowserController(ComputerController):
         return await self.page.evaluate(script)
     
     async def _wait(self, params: Dict[str, Any]) -> str:
-        """等待"""
+        """Wait for a selector or for a fixed time."""
         selector = params.get('selector')
         timeout = params.get('timeout', 30000)
         
@@ -252,7 +244,7 @@ class BrowserController(ComputerController):
             return f"Waited {wait_time}s"
     
     async def _new_tab(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """打开新标签页"""
+        """Open a new tab."""
         page = await self.context.new_page()
         tab_id = f"tab_{len(self._pages)}"
         self._pages[tab_id] = page
@@ -267,7 +259,7 @@ class BrowserController(ComputerController):
         }
     
     async def _close_tab(self, params: Dict[str, Any]) -> str:
-        """关闭标签页"""
+        """Close a tab."""
         tab_id = params.get('tab_id', 'default')
         
         if tab_id not in self._pages:
@@ -280,7 +272,7 @@ class BrowserController(ComputerController):
         return f"Closed tab {tab_id}"
     
     async def _switch_tab(self, params: Dict[str, Any]) -> str:
-        """切换标签页"""
+        """Switch active tab."""
         tab_id = params.get('tab_id')
         if not tab_id or tab_id not in self._pages:
             raise ValueError(f"Invalid tab_id: {tab_id}")
@@ -289,7 +281,7 @@ class BrowserController(ComputerController):
         return f"Switched to tab {tab_id}"
     
     async def _list_tabs(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """列出所有标签页"""
+        """List all open tabs."""
         tabs = []
         for tab_id, page in self._pages.items():
             tabs.append({
@@ -300,24 +292,24 @@ class BrowserController(ComputerController):
         return tabs
     
     async def _back(self, params: Dict[str, Any]) -> str:
-        """后退"""
+        """Navigate back."""
         await self.page.go_back()
         return "Navigated back"
     
     async def _forward(self, params: Dict[str, Any]) -> str:
-        """前进"""
+        """Navigate forward."""
         await self.page.go_forward()
         return "Navigated forward"
     
     async def _reload(self, params: Dict[str, Any]) -> str:
-        """刷新页面"""
+        """Reload current page."""
         await self.page.reload()
         return "Page reloaded"
     
     async def _get_url(self, params: Dict[str, Any]) -> str:
-        """获取当前URL"""
+        """Get current page URL."""
         return self.page.url
     
     async def _get_title(self, params: Dict[str, Any]) -> str:
-        """获取页面标题"""
+        """Get current page title."""
         return await self.page.title()

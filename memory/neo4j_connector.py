@@ -1,4 +1,4 @@
-"""
+﻿"""
 Neo4j connection and query helper.
 """
 import logging
@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from neo4j import GraphDatabase, Transaction
 
 from .models import Neo4jNode, Neo4jRelation, NodeType, RelationType
+from .session_scope import user_node_id
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ class Neo4jConnector:
                 "CREATE CONSTRAINT session_id IF NOT EXISTS FOR (n:Session) REQUIRE n.id IS UNIQUE",
                 "CREATE CONSTRAINT time_id IF NOT EXISTS FOR (n:Time) REQUIRE n.id IS UNIQUE",
                 "CREATE CONSTRAINT location_id IF NOT EXISTS FOR (n:Location) REQUIRE n.id IS UNIQUE",
+                "CREATE CONSTRAINT concept_id IF NOT EXISTS FOR (n:Concept) REQUIRE n.id IS UNIQUE",
+                "CREATE CONSTRAINT summary_id IF NOT EXISTS FOR (n:Summary) REQUIRE n.id IS UNIQUE",
+                "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
             ]
 
             indexes = [
@@ -114,21 +118,46 @@ class Neo4jConnector:
 
     @staticmethod
     def _create_relation_tx(tx: Transaction, relation: Neo4jRelation) -> bool:
-        query = f"""
-        MATCH (a {{id: $source_id}})
-        MATCH (b {{id: $target_id}})
-        MERGE (a)-[r:{relation.type.value}]->(b)
-        ON CREATE SET
-            r.weight = $weight,
-            r.created_at = datetime($created_at)
-        SET r += $properties
-        RETURN r
-        """
+        if relation.edge_key:
+            query = f"""
+            MATCH (a {{id: $source_id}})
+            MATCH (b {{id: $target_id}})
+            MERGE (a)-[r:{relation.type.value} {{edge_key: $edge_key}}]->(b)
+            ON CREATE SET
+                r.weight = $weight,
+                r.created_at = datetime($created_at),
+                r.first_seen_at = datetime($created_at),
+                r.evidence_count = 1
+            ON MATCH SET
+                r.evidence_count = coalesce(r.evidence_count, 1) + 1
+            SET
+                r.last_seen_at = datetime($created_at),
+                r += $properties
+            RETURN r
+            """
+        else:
+            query = f"""
+            MATCH (a {{id: $source_id}})
+            MATCH (b {{id: $target_id}})
+            MERGE (a)-[r:{relation.type.value}]->(b)
+            ON CREATE SET
+                r.weight = $weight,
+                r.created_at = datetime($created_at),
+                r.first_seen_at = datetime($created_at),
+                r.evidence_count = 1
+            ON MATCH SET
+                r.evidence_count = coalesce(r.evidence_count, 1) + 1
+            SET
+                r.last_seen_at = datetime($created_at),
+                r += $properties
+            RETURN r
+            """
         try:
             result = tx.run(
                 query,
                 source_id=relation.source_id,
                 target_id=relation.target_id,
+                edge_key=relation.edge_key,
                 weight=relation.weight,
                 created_at=relation.created_at.isoformat(),
                 properties=relation.properties,
@@ -147,9 +176,30 @@ class Neo4jConnector:
         results = self.query("MATCH (n {id: $id}) RETURN n", {"id": node_id})
         return results[0]["n"] if results else None
 
-    def find_node_by_content(self, node_type: NodeType, content: str) -> Optional[str]:
-        query = f"MATCH (n:{node_type.value} {{content: $content}}) RETURN n.id as id LIMIT 1"
-        results = self.query(query, {"content": content})
+    def find_node_by_content(
+        self,
+        node_type: NodeType,
+        content: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[str]:
+        query = f"""
+        MATCH (n:{node_type.value} {{content: $content}})
+        WHERE
+            $user_node_id IS NULL
+            OR EXISTS {{
+                MATCH (n)-[:FROM_MESSAGE]->(:Message)-[:PART_OF_SESSION]->(:Session)-[:OWNED_BY]->(:User {{id: $user_node_id}})
+            }}
+            OR EXISTS {{
+                MATCH (n)-[:PART_OF_SESSION]->(:Session)-[:OWNED_BY]->(:User {{id: $user_node_id}})
+            }}
+        RETURN n.id as id
+        LIMIT 1
+        """
+        params = {
+            "content": content,
+            "user_node_id": user_node_id(user_id) if user_id else None,
+        }
+        results = self.query(query, params)
         return results[0]["id"] if results else None
 
     def get_neighbors(

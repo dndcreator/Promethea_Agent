@@ -1,4 +1,4 @@
-import os
+﻿import os
 from typing import List
 
 from .manifest import resolve_plugin_manifest_path

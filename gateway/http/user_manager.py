@@ -1,4 +1,4 @@
-import json
+﻿import json
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -86,13 +86,6 @@ class UserManager:
         default_config = {
             "agent_name": agent_name,
             "system_prompt": "",
-            "api": {
-                "api_key": "",
-                "base_url": "https://openrouter.ai/api/v1",
-                "model": "nvidia/nemotron-3-nano-30b-a3b:free",
-                "temperature": 0.7,
-                "max_tokens": 2000,
-            },
         }
 
         try:
@@ -130,12 +123,17 @@ class UserManager:
         config_path.parent.mkdir(parents=True, exist_ok=True)
 
         current_config = self.get_user_config(user_uuid)
-        if "api" in config_data:
-            current_config.setdefault("api", {}).update(config_data["api"])
-        if "agent_name" in config_data:
-            current_config["agent_name"] = config_data["agent_name"]
-        if "system_prompt" in config_data:
-            current_config["system_prompt"] = config_data["system_prompt"]
+        sanitized = dict(config_data or {})
+        # API credentials are global (env), never persisted per-user.
+        sanitized.pop("api", None)
+        if isinstance(sanitized.get("memory"), dict):
+            mem = dict(sanitized["memory"])
+            mem.pop("api", None)
+            if mem:
+                sanitized["memory"] = mem
+            else:
+                sanitized.pop("memory", None)
+        current_config = self._deep_merge(current_config, sanitized)
 
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -144,6 +142,19 @@ class UserManager:
         except Exception as e:
             logger.error(f"Update user config failed: {e}")
             return False
+
+    @staticmethod
+    def _deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(target, dict):
+            target = {}
+        if not isinstance(source, dict):
+            return target
+        for key, value in source.items():
+            if isinstance(value, dict) and isinstance(target.get(key), dict):
+                UserManager._deep_merge(target[key], value)
+            else:
+                target[key] = value
+        return target
 
     def verify_user(self, username: str, password: str) -> Optional[Dict[str, Any]]:
         user = self.get_user_by_username(username)

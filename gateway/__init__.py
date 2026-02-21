@@ -1,5 +1,4 @@
-"""
-网关系统 - 统一消息通道管理
+﻿"""
 """
 from .protocol import GatewayProtocol, MessageType, RequestType, EventType
 from .server import GatewayServer

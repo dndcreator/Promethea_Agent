@@ -1,5 +1,4 @@
-"""
-进程管理控制器
+﻿"""
 """
 import subprocess
 import signal
@@ -11,7 +10,7 @@ logger = logging.getLogger("Computer.Process")
 
 
 class ProcessController(ComputerController):
-    """进程管理控制器"""
+    """TODO: add docstring."""
     
     def __init__(self):
         super().__init__("Process", ComputerCapability.PROCESS)
@@ -19,9 +18,7 @@ class ProcessController(ComputerController):
         self.active_processes: Dict[int, Any] = {}  # pid -> subprocess.Popen
     
     async def initialize(self) -> bool:
-        """初始化进程管理"""
         try:
-            # 动态导入 psutil
             import psutil
             self.psutil = psutil
             
@@ -36,11 +33,10 @@ class ProcessController(ComputerController):
             return False
     
     async def cleanup(self) -> bool:
-        """清理资源 - 终止所有活动进程"""
+        """TODO: add docstring."""
         try:
             for pid, proc in list(self.active_processes.items()):
                 try:
-                    if proc.poll() is None:  # 进程仍在运行
                         proc.terminate()
                         proc.wait(timeout=3)
                 except Exception as e:
@@ -55,7 +51,6 @@ class ProcessController(ComputerController):
             return False
     
     async def execute(self, action: str, params: Dict[str, Any]) -> ComputerResult:
-        """执行进程操作"""
         if not self.is_initialized:
             return ComputerResult(
                 success=False,
@@ -90,23 +85,11 @@ class ProcessController(ComputerController):
             return ComputerResult(success=False, error=str(e))
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
-        """获取可用操作列表"""
         return [
-            {"name": "run", "description": "运行命令（同步）", "params": ["command", "cwd?", "env?", "timeout?"]},
-            {"name": "run_async", "description": "运行命令（异步）", "params": ["command", "cwd?", "env?"]},
-            {"name": "list", "description": "列出进程", "params": ["filter?"]},
-            {"name": "get", "description": "获取进程信息", "params": ["pid"]},
-            {"name": "kill", "description": "强制终止进程", "params": ["pid"]},
-            {"name": "terminate", "description": "优雅终止进程", "params": ["pid"]},
-            {"name": "wait", "description": "等待进程结束", "params": ["pid", "timeout?"]},
-            {"name": "get_output", "description": "获取进程输出", "params": ["pid"]},
-            {"name": "system_info", "description": "获取系统信息", "params": []},
         ]
     
-    # ============ 命令执行 ============
     
     async def _run_command(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """同步运行命令"""
         command = params.get('command')
         cwd = params.get('cwd')
         env = params.get('env')
@@ -147,7 +130,6 @@ class ProcessController(ComputerController):
             }
     
     async def _run_async(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """异步运行命令"""
         command = params.get('command')
         cwd = params.get('cwd')
         env = params.get('env')
@@ -174,10 +156,8 @@ class ProcessController(ComputerController):
             "status": "running"
         }
     
-    # ============ 进程管理 ============
     
     async def _list_processes(self, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """列出进程"""
         filter_name = params.get('filter')
         
         processes = []
@@ -185,7 +165,6 @@ class ProcessController(ComputerController):
             try:
                 info = proc.info
                 
-                # 过滤
                 if filter_name and filter_name.lower() not in info['name'].lower():
                     continue
                 
@@ -202,7 +181,6 @@ class ProcessController(ComputerController):
         return processes
     
     async def _get_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取进程详细信息"""
         pid = params.get('pid')
         
         if pid is None:
@@ -229,7 +207,6 @@ class ProcessController(ComputerController):
             raise PermissionError(f"Access denied to process {pid}")
     
     async def _kill_process(self, params: Dict[str, Any]) -> str:
-        """强制终止进程"""
         pid = params.get('pid')
         
         if pid is None:
@@ -239,7 +216,6 @@ class ProcessController(ComputerController):
             proc = self.psutil.Process(pid)
             proc.kill()
             
-            # 从活动进程中移除
             if pid in self.active_processes:
                 del self.active_processes[pid]
             
@@ -250,7 +226,6 @@ class ProcessController(ComputerController):
             raise PermissionError(f"Access denied to kill process {pid}")
     
     async def _terminate_process(self, params: Dict[str, Any]) -> str:
-        """优雅终止进程"""
         pid = params.get('pid')
         
         if pid is None:
@@ -260,7 +235,6 @@ class ProcessController(ComputerController):
             proc = self.psutil.Process(pid)
             proc.terminate()
             
-            # 从活动进程中移除
             if pid in self.active_processes:
                 del self.active_processes[pid]
             
@@ -271,7 +245,6 @@ class ProcessController(ComputerController):
             raise PermissionError(f"Access denied to terminate process {pid}")
     
     async def _wait_process(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """等待进程结束"""
         pid = params.get('pid')
         timeout = params.get('timeout', 30)
         
@@ -296,7 +269,6 @@ class ProcessController(ComputerController):
                     "error": f"Timeout after {timeout}s"
                 }
         else:
-            # 检查系统进程
             try:
                 proc = self.psutil.Process(pid)
                 proc.wait(timeout=timeout)
@@ -318,7 +290,6 @@ class ProcessController(ComputerController):
                 }
     
     async def _get_output(self, params: Dict[str, Any]) -> Dict[str, str]:
-        """获取进程输出"""
         pid = params.get('pid')
         
         if pid is None:
@@ -329,7 +300,6 @@ class ProcessController(ComputerController):
         
         proc = self.active_processes[pid]
         
-        # 非阻塞读取
         stdout, stderr = proc.communicate() if proc.poll() is not None else ("", "")
         
         return {
@@ -339,10 +309,8 @@ class ProcessController(ComputerController):
             "returncode": proc.returncode
         }
     
-    # ============ 系统信息 ============
     
     async def _get_system_info(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """获取系统信息"""
         cpu_percent = self.psutil.cpu_percent(interval=0.1)
         memory = self.psutil.virtual_memory()
         disk = self.psutil.disk_usage('/')

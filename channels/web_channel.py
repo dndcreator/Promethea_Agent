@@ -1,5 +1,4 @@
-"""
-Web通道 - 保留现有Web前端功能
+﻿"""
 """
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -9,22 +8,21 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class WebChannel(BaseChannel):
-    """Web通道实现"""
+    """TODO: add docstring."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("web", ChannelType.WEB, config)
         
-        # Web通道使用WebSocket，连接由gateway管理
         self.websocket_connections: Dict[str, Any] = {}
     
     async def connect(self) -> bool:
-        """连接（Web通道总是可用的）"""
+        """TODO: add docstring."""
         self.is_connected = True
         self.logger.info("Web channel connected")
         return True
     
     async def disconnect(self) -> bool:
-        """断开连接"""
+        """TODO: add docstring."""
         self.is_connected = False
         self.websocket_connections.clear()
         self.logger.info("Web channel disconnected")
@@ -37,11 +35,10 @@ class WebChannel(BaseChannel):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """发送消息到Web客户端"""
+        """TODO: add docstring."""
         try:
             message_id = f"web_msg_{uuid.uuid4().hex[:8]}"
             
-            # 通过gateway发送（实际发送逻辑在gateway中）
             result = {
                 "success": True,
                 "message_id": message_id,
@@ -66,8 +63,6 @@ class WebChannel(BaseChannel):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """发送交互卡片（Web使用HTML渲染）"""
-        # Web通道使用HTML/JSON格式
         return await self.send_message(
             receiver_id,
             str(card_data),
@@ -76,7 +71,7 @@ class WebChannel(BaseChannel):
         )
     
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """获取用户信息（Web通道使用connection_id）"""
+        """TODO: add docstring."""
         return {
             "user_id": user_id,
             "channel": "web",
@@ -84,12 +79,10 @@ class WebChannel(BaseChannel):
         }
     
     def register_websocket(self, connection_id: str, websocket: Any):
-        """注册WebSocket连接"""
         self.websocket_connections[connection_id] = websocket
         self.logger.debug(f"Registered websocket for connection: {connection_id}")
     
     def unregister_websocket(self, connection_id: str):
-        """注销WebSocket连接"""
         if connection_id in self.websocket_connections:
             del self.websocket_connections[connection_id]
             self.logger.debug(f"Unregistered websocket for connection: {connection_id}")

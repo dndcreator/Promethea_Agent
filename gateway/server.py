@@ -1,8 +1,11 @@
-"""
-网关服务器 - WebSocket服务器核心
+﻿"""
+Gateway server - WebSocket-based multiplexing server.
 """
 import asyncio
+import os
 import time
+import uuid
+from types import SimpleNamespace
 from typing import Dict, Any, Optional, Callable
 from datetime import datetime
 from loguru import logger
@@ -14,20 +17,24 @@ from .protocol import (
     SendMessageParams, AgentCallParams, MemoryQueryParams,
     HealthPayload, StatusPayload, AgentResponsePayload
 )
+from channels.base import MessageType as ChannelMessageType
+from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
 from .connection import ConnectionManager, Connection
 from .events import EventEmitter
 from .tool_service import ToolService, ToolInvocationContext
 from .memory_service import MemoryService
 from .conversation_service import ConversationService
 from .config_service import ConfigService
+from memory.session_scope import ensure_session_owned
 
 
 class GatewayServer:
-    """网关服务器
-
-    设计对齐 moltbot：Gateway 本身只是一个协议 + 事件总线层，
-    具体能力（Agent、记忆、电脑控制、会话管理等）通过依赖注入提供，
-    而不是在这里直接 import 其他子系统。
+    """Gateway server.
+    
+    Designed as the central hub between clients and the moltbot stack.
+    The gateway itself is a thin orchestration + event bus layer; concrete
+    capabilities (agent, memory, tools, channels, etc.) are provided via
+    injected services rather than imported here directly.
     """
     
     def __init__(
@@ -35,45 +42,49 @@ class GatewayServer:
         event_emitter: Optional[EventEmitter] = None,
         connection_manager: Optional[ConnectionManager] = None,
     ):
-        # 事件总线 & 连接管理作为可注入依赖，便于测试和扩展
+        # Event bus & connection manager can be injected for testing/extensibility.
         self.event_emitter = event_emitter or EventEmitter()
         self.connection_manager = connection_manager or ConnectionManager(self.event_emitter)
         
-        # 请求处理器注册表
+        # Request handlers registry.
         self._handlers: Dict[RequestType, Callable] = {}
         self._register_default_handlers()
         
-        # 幂等性缓存
+        # Idempotency cache for responses.
         self._idempotency_cache: Dict[str, ResponseMessage] = {}
-        self._idempotency_ttl = 300  # 5分钟
+        self._idempotency_ttl = 300  # 5 minutes
         
-        # 服务器状态
+        # Server state.
         self.started_at = None
         self.is_running = False
         
-        # 通道管理器（通过 GatewayIntegration 注入）
+        # Channel registry (registered via GatewayIntegration).
         self.channels: Dict[str, Any] = {}
         
-        # Agent / 会话管理器等运行时依赖，由上层注入
+        # Runtime dependencies, wired up by higher-level integration code.
         self.agent_manager = None
         self.message_manager = None
+        self.mcp_manager = None
 
-        # 电脑控制服务，由 GatewayIntegration 注入（实现 execute_computer_action / get_computer_status）
+        # Computer-control service, registered by GatewayIntegration
+        # (implements execute_computer_action / get_computer_status).
         self.computer_service = None
 
-        # 四个一级服务：工具、记忆、对话、配置（都通过事件总线通信）
-        # 这些服务会在 GatewayIntegration 中初始化并注入依赖
+        # Four first-class subsystems: tools, memory, conversation, config.
+        # They communicate over the event bus and are initialized via
+        # GatewayIntegration.
         self.tool_service: Optional[ToolService] = None
         self.memory_service: Optional[MemoryService] = None
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
         
-        # 向后兼容：保留旧属性名（指向新服务）
-        self.memory_system = None  # 将指向 memory_service.memory_adapter
-        self.conversation_core = None  # 将指向 conversation_service.conversation_core
+        # Backward-compat compatibility: keep legacy attributes pointing to
+        # new services.
+        self.memory_system = None  # alias to memory_service.memory_adapter
+        self.conversation_core = None  # alias to conversation_service.conversation_core
         
     def _register_default_handlers(self):
-        """注册默认请求处理器"""
+        """Register default request handlers."""
         self._handlers[RequestType.CONNECT] = self._handle_connect
         self._handlers[RequestType.HEALTH] = self._handle_health
         self._handlers[RequestType.STATUS] = self._handle_status
@@ -82,7 +93,7 @@ class GatewayServer:
         self._handlers[RequestType.CHANNELS_STATUS] = self._handle_channels_status
         self._handlers[RequestType.SYSTEM_INFO] = self._handle_system_info
         
-        # 记忆系统
+        # Memory handlers
         self._handlers[RequestType.MEMORY_QUERY] = self._handle_memory_query
         self._handlers[RequestType.MEMORY_CLUSTER] = self._handle_memory_cluster
         self._handlers[RequestType.MEMORY_SUMMARIZE] = self._handle_memory_summarize
@@ -90,19 +101,22 @@ class GatewayServer:
         self._handlers[RequestType.MEMORY_DECAY] = self._handle_memory_decay
         self._handlers[RequestType.MEMORY_CLEANUP] = self._handle_memory_cleanup
         
-        # 会话管理
+        # Session handlers
         self._handlers[RequestType.SESSIONS_LIST] = self._handle_sessions_list
         self._handlers[RequestType.SESSION_DETAIL] = self._handle_session_detail
         self._handlers[RequestType.SESSION_DELETE] = self._handle_session_delete
         
-        # 追问系统
+        # Follow-up handlers
         self._handlers[RequestType.FOLLOWUP] = self._handle_followup
+        self._handlers[RequestType.CHAT] = self._handle_chat
+        self._handlers[RequestType.CHAT_CONFIRM] = self._handle_chat_confirm
+        self._handlers[RequestType.BATCH] = self._handle_batch
         
-        # 工具系统
+        # Tool handlers
         self._handlers[RequestType.TOOLS_LIST] = self._handle_tools_list
         self._handlers[RequestType.TOOL_CALL] = self._handle_tool_call
         
-        # 配置管理
+        # Config handlers
         self._handlers[RequestType.CONFIG_GET] = self._handle_config_get
         self._handlers[RequestType.CONFIG_RELOAD] = self._handle_config_reload
         self._handlers[RequestType.CONFIG_UPDATE] = self._handle_config_update
@@ -110,7 +124,7 @@ class GatewayServer:
         self._handlers[RequestType.CONFIG_SWITCH_MODEL] = self._handle_config_switch_model
         self._handlers[RequestType.CONFIG_DIAGNOSE] = self._handle_config_diagnose
         
-        # 电脑控制
+        # Computer-control handlers
         self._handlers[RequestType.COMPUTER_BROWSER] = self._handle_computer_control
         self._handlers[RequestType.COMPUTER_SCREEN] = self._handle_computer_control
         self._handlers[RequestType.COMPUTER_FILESYSTEM] = self._handle_computer_control
@@ -118,16 +132,231 @@ class GatewayServer:
         self._handlers[RequestType.COMPUTER_STATUS] = self._handle_computer_status
     
     def register_handler(self, request_type: RequestType, handler: Callable):
-        """注册自定义请求处理器"""
+        """Register a request handler."""
         self._handlers[request_type] = handler
         logger.info(f"Registered handler for: {request_type}")
+
+    def _validate_request_params(
+        self,
+        method: RequestType,
+        params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Validate request params with protocol-level schemas when available."""
+        from .protocol import (
+            FollowupParams,
+            ChatParams,
+            ChatConfirmParams,
+            MemoryClusterParams,
+            MemorySummarizeParams,
+            SessionParams,
+        )
+
+        validators = {
+            RequestType.SEND: SendMessageParams,
+            RequestType.AGENT: AgentCallParams,
+            RequestType.MEMORY_QUERY: MemoryQueryParams,
+            RequestType.FOLLOWUP: FollowupParams,
+            RequestType.CHAT: ChatParams,
+            RequestType.CHAT_CONFIRM: ChatConfirmParams,
+            RequestType.MEMORY_CLUSTER: MemoryClusterParams,
+            RequestType.MEMORY_SUMMARIZE: MemorySummarizeParams,
+            RequestType.SESSION_DETAIL: SessionParams,
+            RequestType.SESSION_DELETE: SessionParams,
+            RequestType.MEMORY_GRAPH: SessionParams,
+            RequestType.MEMORY_DECAY: SessionParams,
+            RequestType.MEMORY_CLEANUP: SessionParams,
+        }
+        model = validators.get(method)
+        if not model:
+            return params
+        obj = model(**params)
+        return obj.model_dump() if hasattr(obj, "model_dump") else obj.dict()
+
+    async def handle_http_request(
+        self,
+        method: RequestType,
+        params: Dict[str, Any],
+        user_id: str,
+        timeout_ms: Optional[int] = None,
+        retries: int = 0,
+    ) -> ResponseMessage:
+        """
+        HTTP -> gateway protocol bridge.
+        Keeps HTTP and WebSocket on the same request-handler table.
+        """
+
+        class _HttpConnection:
+            def __init__(self, uid: str):
+                self.connection_id = f"http_{uuid.uuid4().hex}"
+                self.identity = SimpleNamespace(device_id=uid)
+                self.is_authenticated = True
+                self.metadata: Dict[str, Any] = {"transport": "http"}
+
+            async def send_event(self, *args, **kwargs):
+                return None
+
+            async def send_message(self, *args, **kwargs):
+                return None
+
+            async def send_response(self, *args, **kwargs):
+                return None
+
+        request_id = str(uuid.uuid4())
+        req_params = dict(params or {})
+        req_params.setdefault("user_id", user_id)
+        await self.event_emitter.emit(
+            EventType.REQUEST_RECEIVED,
+            {
+                "request_id": request_id,
+                "transport": "http",
+                "method": method.value,
+                "user_id": user_id,
+            },
+        )
+
+        try:
+            validated = self._validate_request_params(method, req_params)
+        except Exception as e:
+            return GatewayProtocol.create_response(
+                request_id,
+                False,
+                error=f"invalid request params: {e}",
+            )
+
+        request = RequestMessage(id=request_id, method=method, params=validated)
+        handler = self._handlers.get(method)
+        if not handler:
+            response = GatewayProtocol.create_response(
+                request.id,
+                False,
+                error=f"Unknown request method: {method}",
+            )
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request_id,
+                    "transport": "http",
+                    "method": method.value,
+                    "error": response.error,
+                },
+            )
+            return response
+
+        guard_error = self._service_guard_error(method)
+        if guard_error:
+            response = GatewayProtocol.create_response(
+                request.id,
+                False,
+                error=guard_error,
+            )
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request_id,
+                    "transport": "http",
+                    "method": method.value,
+                    "error": response.error,
+                },
+            )
+            return response
+
+        connection = _HttpConnection(user_id)
+        attempts = max(0, int(retries)) + 1
+        timeout_s = (float(timeout_ms) / 1000.0) if timeout_ms else None
+        last_error = None
+
+        for _ in range(attempts):
+            try:
+                if timeout_s:
+                    response = await asyncio.wait_for(handler(connection, request), timeout=timeout_s)
+                else:
+                    response = await handler(connection, request)
+                await self.event_emitter.emit(
+                    EventType.REQUEST_COMPLETED,
+                    {
+                        "request_id": request_id,
+                        "transport": "http",
+                        "method": method.value,
+                        "ok": response.ok,
+                    },
+                )
+                return response
+            except asyncio.TimeoutError:
+                last_error = "request timeout"
+            except Exception as e:
+                last_error = str(e)
+
+        response = GatewayProtocol.create_response(
+            request.id,
+            False,
+            error=last_error or "request failed",
+        )
+        await self.event_emitter.emit(
+            EventType.REQUEST_FAILED,
+            {
+                "request_id": request_id,
+                "transport": "http",
+                "method": method.value,
+                "error": response.error,
+            },
+        )
+        return response
+
+    def get_services_health(self) -> Dict[str, Any]:
+        """Return service readiness/availability snapshot."""
+        return {
+            "tool_service": bool(self.tool_service),
+            "memory_service": bool(self.memory_service and self.memory_service.is_enabled()),
+            "conversation_service": bool(self.conversation_service),
+            "config_service": bool(self.config_service),
+            "message_manager": bool(self.message_manager),
+            "agent_manager": bool(self.agent_manager),
+            "mcp_manager": bool(self.mcp_manager),
+        }
+
+    def _service_guard_error(self, method: RequestType) -> Optional[str]:
+        """Return a degradation error when a required service is unavailable."""
+        memory_methods = {
+            RequestType.MEMORY_QUERY,
+            RequestType.MEMORY_CLUSTER,
+            RequestType.MEMORY_SUMMARIZE,
+            RequestType.MEMORY_GRAPH,
+            RequestType.MEMORY_DECAY,
+            RequestType.MEMORY_CLEANUP,
+        }
+        config_methods = {
+            RequestType.CONFIG_GET,
+            RequestType.CONFIG_RELOAD,
+            RequestType.CONFIG_UPDATE,
+            RequestType.CONFIG_RESET,
+            RequestType.CONFIG_SWITCH_MODEL,
+            RequestType.CONFIG_DIAGNOSE,
+        }
+        convo_methods = {
+            RequestType.CHAT,
+            RequestType.CHAT_CONFIRM,
+            RequestType.FOLLOWUP,
+            RequestType.SESSIONS_LIST,
+            RequestType.SESSION_DETAIL,
+            RequestType.SESSION_DELETE,
+        }
+
+        if method in memory_methods and (
+            not self.memory_service or not self.memory_service.is_enabled()
+        ):
+            return "memory service unavailable (degraded)"
+        if method in config_methods and not self.config_service:
+            return "config service unavailable (degraded)"
+        if method in convo_methods and not self.conversation_service:
+            return "conversation service unavailable (degraded)"
+        return None
     
     async def start(self):
-        """启动网关服务器"""
+        """Start the gateway server and background tasks."""
         self.started_at = datetime.now()
         self.is_running = True
         
-        # 启动后台任务
+        # Start periodic background tasks.
         asyncio.create_task(self._heartbeat_task())
         asyncio.create_task(self._cleanup_task())
         
@@ -138,9 +367,8 @@ class GatewayServer:
         })
     
     async def _handle_computer_control(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理电脑控制请求"""
+        """Handle computer-control requests."""
         try:
-            # 提取控制器类型
             capability_map = {
                 RequestType.COMPUTER_BROWSER: 'browser',
                 RequestType.COMPUTER_SCREEN: 'screen',
@@ -166,7 +394,7 @@ class GatewayServer:
                     error="Missing 'action' parameter"
                 )
             
-            # 通过依赖注入的电脑控制服务执行（避免 Gateway 反向依赖 gateway_integration 模块）
+            # Execute via injected computer_service to avoid circular imports.
             integration = getattr(self, "computer_service", None)
             
             if not integration:
@@ -198,7 +426,7 @@ class GatewayServer:
             )
     
     async def _handle_computer_status(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """获取电脑控制器状态"""
+        """Get current status of the computer-control service."""
         try:
             integration = getattr(self, "computer_service", None)
             
@@ -226,21 +454,21 @@ class GatewayServer:
             )
     
     async def stop(self):
-        """停止网关服务器"""
+        """Stop the gateway server."""
         self.is_running = False
         logger.info("Gateway Server stopped")
     
     async def handle_connection(self, websocket, connection: Connection):
-        """处理WebSocket连接"""
+        """Main loop for handling a single WebSocket connection."""
         connection_id = connection.connection_id
         
         try:
             while self.is_running:
-                # 接收消息
+                # Receive raw message text.
                 data = await websocket.receive_text()
                 
                 try:
-                    # 解析消息
+                    # Parse message into protocol object.
                     message = GatewayProtocol.parse_message(data)
                     
                     if isinstance(message, RequestMessage):
@@ -262,8 +490,17 @@ class GatewayServer:
             await self.connection_manager.disconnect(connection_id)
     
     async def _handle_request(self, connection: Connection, request: RequestMessage):
-        """处理请求"""
-        # 检查幂等性
+        """Handle a single request message."""
+        await self.event_emitter.emit(
+            EventType.REQUEST_RECEIVED,
+            {
+                "request_id": request.id,
+                "transport": "ws",
+                "method": request.method.value,
+                "connection_id": connection.connection_id,
+            },
+        )
+        # Idempotency check.
         if request.idempotency_key:
             cached = self._idempotency_cache.get(request.idempotency_key)
             if cached:
@@ -271,10 +508,10 @@ class GatewayServer:
                 await connection.send_message(cached)
                 return
         
-        # 更新心跳
+        # Update connection heartbeat.
         await self.connection_manager.heartbeat(connection.connection_id)
         
-        # 获取处理器
+        # Lookup handler.
         handler = self._handlers.get(request.method)
         if not handler:
             await connection.send_response(
@@ -282,17 +519,37 @@ class GatewayServer:
                 False,
                 error=f"Unknown request method: {request.method}"
             )
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request.id,
+                    "transport": "ws",
+                    "method": request.method.value,
+                    "connection_id": connection.connection_id,
+                    "error": f"Unknown request method: {request.method}",
+                },
+            )
             return
         
         try:
-            # 调用处理器
+            # Invoke handler.
             response = await handler(connection, request)
             
-            # 缓存幂等性响应
+            # Cache successful idempotent responses.
             if request.idempotency_key and response.ok:
                 self._idempotency_cache[request.idempotency_key] = response
             
             await connection.send_message(response)
+            await self.event_emitter.emit(
+                EventType.REQUEST_COMPLETED,
+                {
+                    "request_id": request.id,
+                    "transport": "ws",
+                    "method": request.method.value,
+                    "connection_id": connection.connection_id,
+                    "ok": response.ok,
+                },
+            )
             
         except Exception as e:
             logger.error(f"Error handling request {request.method}: {e}")
@@ -301,19 +558,38 @@ class GatewayServer:
                 False,
                 error=f"Internal error: {str(e)}"
             )
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request.id,
+                    "transport": "ws",
+                    "method": request.method.value,
+                    "connection_id": connection.connection_id,
+                    "error": str(e),
+                },
+            )
     
-    # ============ 请求处理器 ============
+    # ============ Request handlers ============
     
     async def _handle_connect(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理连接请求"""
+        """Handle connect request and perform optional authentication."""
         try:
             connect_params = ConnectParams(**request.params)
             
-            # 更新连接身份
+            # Save identity and validate optional token auth.
             connection.identity = connect_params.identity
-            connection.is_authenticated = True  # TODO: 实现真正的认证
+            expected_token = os.getenv("GATEWAY_AUTH_TOKEN", "").strip()
+            if expected_token:
+                connection.is_authenticated = (connect_params.token or "") == expected_token
+                if not connection.is_authenticated:
+                    return GatewayProtocol.create_response(
+                        request.id, False, error="Authentication failed"
+                    )
+            else:
+                # Local default mode: keep backward compatible behavior.
+                connection.is_authenticated = True
             
-            # 发送欢迎载荷
+            # Build connect response payload.
             payload = {
                 "status": "connected",
                 "connection_id": connection.connection_id,
@@ -331,43 +607,180 @@ class GatewayServer:
             )
     
     async def _handle_health(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理健康检查"""
+        """Handle health-check request."""
         health_info = await self._get_health_info()
+        health_info["services"] = self.get_services_health()
         return GatewayProtocol.create_response(request.id, True, health_info)
     
     async def _handle_status(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理状态查询"""
+        """Handle gateway status query."""
         status_info = {
             "gateway_status": "running" if self.is_running else "stopped",
             "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
             "connections": self.connection_manager.get_active_count(),
             "channels": {name: {"status": "active"} for name in self.channels.keys()},
-            "agents": {},  # TODO: 从 agent_manager 获取
+            "agents": self._get_agents_runtime_state(),
             "nodes": {},
         }
+        if self.conversation_service and hasattr(
+            self.conversation_service, "get_processing_stats"
+        ):
+            try:
+                status_info["conversation_processing"] = (
+                    self.conversation_service.get_processing_stats()
+                )
+            except Exception:
+                pass
         return GatewayProtocol.create_response(request.id, True, status_info)
+
+    def _get_agents_runtime_state(self) -> Dict[str, Any]:
+        """Best-effort agent runtime snapshot for status APIs."""
+        if not self.agent_manager:
+            return {"total_loaded": 0, "items": {}}
+
+        try:
+            items: Dict[str, Any] = {}
+            if hasattr(self.agent_manager, "get_available_agents"):
+                for agent in self.agent_manager.get_available_agents() or []:
+                    key = (
+                        str(agent.get("base_name") or "").strip()
+                        or str(agent.get("name") or "").strip()
+                    )
+                    if not key:
+                        continue
+                    items[key] = {
+                        "name": agent.get("name"),
+                        "model_id": agent.get("model_id"),
+                        "description": agent.get("description"),
+                        "loaded": True,
+                    }
+            elif hasattr(self.agent_manager, "agents"):
+                for key in getattr(self.agent_manager, "agents", {}).keys():
+                    items[str(key)] = {"loaded": True}
+
+            # Attach active session counts when the manager exposes in-memory session state.
+            session_map = getattr(self.agent_manager, "agent_sessions", None)
+            if isinstance(session_map, dict):
+                for key, payload in items.items():
+                    sessions = session_map.get(key)
+                    if sessions is None and payload.get("name"):
+                        sessions = session_map.get(str(payload["name"]))
+                    payload["active_sessions"] = len(sessions or {})
+
+            return {"total_loaded": len(items), "items": items}
+        except Exception as e:
+            return {"total_loaded": 0, "items": {}, "error": str(e)}
+
+    def _resolve_request_user_id(self, connection: Connection, request: RequestMessage) -> str:
+        identity = getattr(connection, "identity", None)
+        device_id = getattr(identity, "device_id", None) if identity else None
+        if device_id:
+            return str(device_id)
+        user_id = request.params.get("user_id") if isinstance(request.params, dict) else None
+        if user_id:
+            return str(user_id)
+        return "default_user"
+
+    def _ensure_session_access(self, session_id: str, user_id: str) -> bool:
+        if not self.message_manager:
+            return False
+        return self.message_manager.get_session(session_id, user_id=user_id) is not None
+
+    async def _execute_tool_for_chat(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        *,
+        session_id: Optional[str],
+        user_id: Optional[str],
+        request_id: Optional[str] = None,
+        connection_id: Optional[str] = None,
+    ) -> Any:
+        agent_type = str(args.get("agentType", "mcp")).lower()
+        if agent_type == "agent":
+            if not self.agent_manager:
+                raise RuntimeError("agent manager not initialized")
+            agent_name = args.get("agent_name")
+            prompt = args.get("prompt")
+            if not agent_name or not prompt:
+                raise ValueError("missing agent_name or prompt for agent tool call")
+            result = await self.agent_manager.call_agent(agent_name, prompt, session_id)
+            if result.get("status") != "success":
+                raise RuntimeError(result.get("error") or "agent call failed")
+            return result.get("result", "")
+
+        if not self.tool_service:
+            self.tool_service = ToolService(self.event_emitter)
+        ctx = ToolInvocationContext(
+            session_id=session_id,
+            user_id=user_id,
+            source="chat",
+            metadata={"request_id": request_id, "connection_id": connection_id},
+        )
+        return await self.tool_service.call_tool(
+            tool_name=tool_name,
+            params=args,
+            ctx=ctx,
+            request_id=request_id,
+            connection_id=connection_id,
+        )
     
     async def _handle_send(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理发送消息"""
+        """Handle generic channel send request."""
         try:
             params = SendMessageParams(**request.params)
             
-            # TODO: 路由到对应通道
+            # Route to concrete channel implementation.
             channel = self.channels.get(params.channel)
             if not channel:
                 return GatewayProtocol.create_response(
                     request.id, False, error=f"Channel not found: {params.channel}"
                 )
             
-            # 发送消息（待实现）
-            result = {
-                "status": "sent",
+            if not getattr(channel, "is_connected", False):
+                return GatewayProtocol.create_response(
+                    request.id, False, error=f"Channel not connected: {params.channel}"
+                )
+
+            message_type = ChannelMessageType.TEXT
+            if params.message_type:
+                try:
+                    message_type = ChannelMessageType(params.message_type)
+                except ValueError:
+                    message_type = ChannelMessageType.TEXT
+
+            metadata = params.metadata or {}
+            try:
+                result = await channel.send_message(
+                    params.target,
+                    params.content,
+                    message_type,
+                    **metadata,
+                )
+            except TypeError:
+                # Legacy channel signature without receiver_id.
+                result = await channel.send_message(
+                    params.content,
+                    message_type,
+                    **metadata,
+                )
+            
+            payload = {
+                "status": "sent" if result is not None else "unknown",
                 "channel": params.channel,
                 "target": params.target,
-                "message_id": f"msg_{int(time.time() * 1000)}"
+                "message_type": message_type.value,
+                "result": result or {},
             }
             
-            return GatewayProtocol.create_response(request.id, True, result)
+            ok = True
+            if isinstance(result, dict) and result.get("success") is False:
+                ok = False
+                return GatewayProtocol.create_response(
+                    request.id, False, error=result.get("error", "Send failed")
+                )
+            
+            return GatewayProtocol.create_response(request.id, ok, payload)
             
         except Exception as e:
             return GatewayProtocol.create_response(
@@ -375,7 +788,7 @@ class GatewayServer:
             )
     
     async def _handle_agent(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理Agent调用"""
+        """Handle Agent invocation (with optional streaming)."""
         try:
             params = AgentCallParams(**request.params)
             
@@ -384,16 +797,16 @@ class GatewayServer:
                     request.id, False, error="Agent manager not initialized"
                 )
             
-            # 生成运行ID
+            # Generate run ID.
             run_id = f"run_{int(time.time() * 1000)}"
             
-            # 发送接受响应
+            # Send accepted response.
             accept_payload = {
                 "run_id": run_id,
                 "status": "accepted",
             }
             
-            # 异步执行Agent调用
+            # Run agent asynchronously (streaming or non-streaming).
             if params.stream:
                 asyncio.create_task(
                     self._execute_agent_stream(connection, run_id, params)
@@ -411,7 +824,7 @@ class GatewayServer:
             )
     
     async def _handle_channels_status(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理通道状态查询"""
+        """Handle query for channel status."""
         channels_info = {
             name: {
                 "status": "active",
@@ -422,7 +835,7 @@ class GatewayServer:
         return GatewayProtocol.create_response(request.id, True, {"channels": channels_info})
     
     async def _handle_system_info(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理系统信息查询"""
+        """Handle system-info query."""
         system_info = {
             "version": "1.0.0",
             "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
@@ -433,7 +846,7 @@ class GatewayServer:
         return GatewayProtocol.create_response(request.id, True, system_info)
     
     async def _handle_memory_query(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆查询"""
+        """Handle memory context query."""
         try:
             params = MemoryQueryParams(**request.params)
             
@@ -442,17 +855,23 @@ class GatewayServer:
                     request.id, False, error="Memory service not initialized"
                 )
             
-            # 通过 MemoryService 获取记忆上下文
+            # Delegate memory query to MemoryService.
+            user_id = self._resolve_request_user_id(connection, request)
+            if params.session_id and not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
             context = await self.memory_service.get_context(
                 query=params.query,
                 session_id=params.session_id or "default",
-                user_id=params.filters.get("user_id") if params.filters else None
+                user_id=user_id,
             )
             
             results = {
                 "query": params.query,
                 "context": context,
                 "total": len(context) if context else 0,
+                "user_id": user_id,
             }
             
             return GatewayProtocol.create_response(request.id, True, results)
@@ -463,11 +882,11 @@ class GatewayServer:
             )
     
     async def _handle_tools_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理工具列表查询
+        """Handle tool-list query.
 
-        对外协议保持不变，但内部通过 ToolService 统一实现：
-        - 优先列出 MCP / Agent handoff 服务
-        - 同时包含本地注册工具（若有）
+        External protocol remains stable; internally we route via ToolService:
+        - Prefer listing MCP / Agent-handoff services first
+        - Also include locally registered tools when present
         """
         try:
             if not self.tool_service:
@@ -481,13 +900,13 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_tool_call(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理工具调用
+        """Handle tool-call request.
 
-        对外协议保持不变：
-        - params.tool_name: 工具/服务名（必填）
-        - params.params:    具体参数（包含 service_name / tool_name / 业务参数等）
+        Protocol contract:
+        - params.tool_name: tool / service name (required)
+        - params.params:    concrete args (may include service_name / tool_name / business args)
 
-        内部通过 ToolService 进行调度，并在事件总线上发出 TOOL_CALL_* 事件。
+        Internally dispatch via ToolService and emit TOOL_CALL_* events.
         """
         try:
             if not self.tool_service:
@@ -533,10 +952,10 @@ class GatewayServer:
             logger.error(f"Error calling tool: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
-    # ============ 记忆系统处理器 ============
+    # ============ Memory-system handlers ============
     
     async def _handle_memory_cluster(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆聚类"""
+        """Handle memory clustering request."""
         try:
             from .protocol import MemoryClusterParams
             
@@ -552,10 +971,20 @@ class GatewayServer:
                     request.id, False, error="Memory system not enabled"
                 )
             
-            result = await self.memory_service.cluster_entities(params.session_id)
+            user_id = self._resolve_request_user_id(connection, request)
+            if not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
+
+            result = await self.memory_service.cluster_entities(
+                params.session_id,
+                user_id=user_id,
+            )
             
             return GatewayProtocol.create_response(request.id, True, {
                 "session_id": params.session_id,
+                "user_id": user_id,
                 **result
             })
         except Exception as e:
@@ -563,7 +992,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_memory_summarize(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆摘要"""
+        """Handle memory summarization request."""
         try:
             from .protocol import MemorySummarizeParams
             
@@ -579,8 +1008,15 @@ class GatewayServer:
                     request.id, False, error="Memory system not enabled"
                 )
             
+            user_id = self._resolve_request_user_id(connection, request)
+            if not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
+
             result = await self.memory_service.summarize_session(
                 params.session_id,
+                user_id=user_id,
                 incremental=params.incremental
             )
             
@@ -590,7 +1026,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_memory_graph(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆图查询"""
+        """Handle query for memory graph (nodes + edges)."""
         try:
             from .protocol import SessionParams
             
@@ -612,41 +1048,90 @@ class GatewayServer:
                 })
             
             connector = memory_adapter.hot_layer.connector
+            user_id = self._resolve_request_user_id(connection, request)
+            if not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
+            owned, resolved_session = ensure_session_owned(
+                connector,
+                params.session_id,
+                user_id,
+            )
+            if not owned:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session memory not found"
+                )
             
-            # 查询节点
+            # Query nodes in this session graph.
             nodes_query = """
             MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
             RETURN n.id as id, labels(n)[0] as type, n.content as content,
-                   n.layer as layer, n.importance as importance
+                   n.layer as layer, n.importance as importance,
+                   n.access_count as access_count, n.created_at as created_at
             """
             
-            # 查询边
+            # Query relations in this session graph.
             edges_query = """
             MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n1)
             MATCH (n1)-[r]->(n2)
-            RETURN n1.id as source, n2.id as target, type(r) as type
+            WHERE n2.id <> $session_id
+            RETURN n1.id as source, n2.id as target, type(r) as type, r.weight as weight
             """
             
-            session_param = {"session_id": f"session_{params.session_id}"}
+            session_param = {"session_id": f"session_{resolved_session}"}
             nodes_raw = connector.query(nodes_query, session_param)
             edges_raw = connector.query(edges_query, session_param)
             
-            nodes = [{"id": n.get("id"), "type": n.get("type"), "content": n.get("content")} 
-                    for n in nodes_raw]
-            edges = [{"source": e.get("source"), "target": e.get("target"), "type": e.get("type")} 
-                    for e in edges_raw]
+            nodes = [
+                {
+                    "id": n.get("id"),
+                    "type": (n.get("type", "") or "").lower(),
+                    "content": n.get("content", ""),
+                    "layer": n.get("layer", 0),
+                    "importance": n.get("importance", 0.5),
+                    "access_count": n.get("access_count", 0),
+                    "created_at": n.get("created_at"),
+                }
+                for n in nodes_raw
+            ]
+            edges = [
+                {
+                    "source": e.get("source"),
+                    "target": e.get("target"),
+                    "type": e.get("type", ""),
+                    "weight": e.get("weight", 1.0),
+                }
+                for e in edges_raw
+            ]
+
+            layer_counts = {"hot": 0, "warm": 0, "cold": 0}
+            for node in nodes:
+                layer = node.get("layer", 0)
+                if layer == 0:
+                    layer_counts["hot"] += 1
+                elif layer == 1:
+                    layer_counts["warm"] += 1
+                elif layer == 2:
+                    layer_counts["cold"] += 1
             
             return GatewayProtocol.create_response(request.id, True, {
+                "session_id": params.session_id,
+                "user_id": user_id,
                 "nodes": nodes,
                 "edges": edges,
-                "stats": {"total_nodes": len(nodes), "total_edges": len(edges)}
+                "stats": {
+                    "total_nodes": len(nodes),
+                    "total_edges": len(edges),
+                    "layers": layer_counts,
+                },
             })
         except Exception as e:
             logger.error(f"Error getting memory graph: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_memory_decay(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆衰减"""
+        """Handle time-decay application over memory graph."""
         try:
             from .protocol import SessionParams
             
@@ -662,7 +1147,15 @@ class GatewayServer:
                     request.id, False, error="Memory system not enabled"
                 )
             
-            result = await self.memory_service.apply_decay(params.session_id)
+            user_id = self._resolve_request_user_id(connection, request)
+            if not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
+            result = await self.memory_service.apply_decay(
+                params.session_id,
+                user_id=user_id,
+            )
             
             return GatewayProtocol.create_response(request.id, True, result)
         except Exception as e:
@@ -670,7 +1163,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_memory_cleanup(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理记忆清理"""
+        """Handle cleanup of forgotten/low-importance memory nodes."""
         try:
             from .protocol import SessionParams
             
@@ -686,24 +1179,33 @@ class GatewayServer:
                     request.id, False, error="Memory system not enabled"
                 )
             
-            result = await self.memory_service.cleanup_forgotten(params.session_id)
+            user_id = self._resolve_request_user_id(connection, request)
+            if not self._ensure_session_access(params.session_id, user_id):
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Session not found"
+                )
+            result = await self.memory_service.cleanup_forgotten(
+                params.session_id,
+                user_id=user_id,
+            )
             
             return GatewayProtocol.create_response(request.id, True, result)
         except Exception as e:
             logger.error(f"Error cleaning up memory: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
-    # ============ 会话管理处理器 ============
+    # ============ Conversation-management handlers ============
     
     async def _handle_sessions_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理会话列表查询"""
+        """Handle query for list of sessions."""
         try:
             if not self.message_manager:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Message manager not initialized"
                 )
             
-            sessions_info = self.message_manager.get_all_sessions_info()
+            user_id = self._resolve_request_user_id(connection, request)
+            sessions_info = self.message_manager.get_all_sessions_info(user_id=user_id)
             sessions = []
             for sid, info in sessions_info.items():
                 if info:
@@ -712,14 +1214,15 @@ class GatewayServer:
             
             return GatewayProtocol.create_response(request.id, True, {
                 "sessions": sessions,
-                "total": len(sessions)
+                "total": len(sessions),
+                "user_id": user_id,
             })
         except Exception as e:
             logger.error(f"Error listing sessions: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_session_detail(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理会话详情查询"""
+        """Handle query for detailed session info and messages."""
         try:
             from .protocol import SessionParams
             
@@ -730,17 +1233,23 @@ class GatewayServer:
                     request.id, False, error="Message manager not initialized"
                 )
 
-            session_info = self.message_manager.get_session(params.session_id)
+            user_id = self._resolve_request_user_id(connection, request)
+            session_info = self.message_manager.get_session(
+                params.session_id, user_id=user_id
+            )
             
             if not session_info:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Session not found"
                 )
             
-            messages = self.message_manager.get_messages(params.session_id)
+            messages = self.message_manager.get_messages(
+                params.session_id, user_id=user_id
+            )
             
             return GatewayProtocol.create_response(request.id, True, {
                 "session_id": params.session_id,
+                "user_id": user_id,
                 "session_info": session_info,
                 "messages": messages
             })
@@ -749,7 +1258,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_session_delete(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理会话删除"""
+        """Handle deletion of a session (and its messages)."""
         try:
             from .protocol import SessionParams
             
@@ -760,60 +1269,343 @@ class GatewayServer:
                     request.id, False, error="Message manager not initialized"
                 )
 
-            deleted = self.message_manager.delete_session(params.session_id)
+            user_id = self._resolve_request_user_id(connection, request)
+            deleted = self.message_manager.delete_session(
+                params.session_id, user_id=user_id
+            )
             
             return GatewayProtocol.create_response(request.id, True, {
                 "session_id": params.session_id,
+                "user_id": user_id,
                 "status": "deleted" if deleted else "not_found"
             })
         except Exception as e:
             logger.error(f"Error deleting session: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
-    # ============ 追问系统处理器 ============
-    
-    async def _handle_followup(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理追问请求"""
+    # ============ Follow-up handlers ============
+
+    async def _handle_chat(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        """Handle one chat turn in gateway control-plane."""
         try:
-            from .protocol import FollowupParams
-            
-            params = FollowupParams(**request.params)
-            
-            # 追问模板
-            templates = {
-                "why": "为什么说「{text}」？请用100字以内简短解释推理依据和前提。",
-                "risk": "「{text}」有什么潜在的坑或代价？请用100字以内诚实说明。",
-                "alternative": "除了「{text}」，还有什么替代方案？请用100字以内列举2-3个方案并简要对比。",
-            }
-            
-            if params.query_type == "custom" and params.custom_query:
-                user_query = f"{params.custom_query}\n\n相关内容：「{params.selected_text}」"
-            else:
-                user_query = templates.get(params.query_type, templates["why"]).format(
-                    text=params.selected_text[:100]
-                )
-            
-            # 获取最近消息
-            messages = []
             if not self.message_manager:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Message manager not initialized"
                 )
-
-            recent_messages = self.message_manager.get_recent_messages(params.session_id, count=6)
-            if recent_messages:
-                messages = [{"role": msg["role"], "content": msg["content"]} 
-                           for msg in recent_messages]
-            
-            messages.append({"role": "user", "content": user_query})
-            
-            # 调用LLM（通过 ConversationService）
             if not self.conversation_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Conversation service not initialized"
                 )
 
-            response = await self.conversation_service.call_llm(messages)
+            user_id = self._resolve_request_user_id(connection, request)
+            user_text = (request.params.get("message") or "").strip()
+            if not user_text:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="message is required"
+                )
+
+            session_id = request.params.get("session_id")
+            if session_id:
+                if not self.message_manager.get_session(session_id, user_id=user_id):
+                    self.message_manager.create_session(session_id=session_id, user_id=user_id)
+            else:
+                session_id = self.message_manager.create_session(user_id=user_id)
+
+            turn_id = str(uuid.uuid4())
+            began = self.message_manager.begin_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                user_role="user",
+                user_content=user_text,
+                user_id=user_id,
+            )
+            if not began:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="failed to start turn"
+                )
+
+            recent = self.message_manager.get_recent_messages(session_id, user_id=user_id)
+            messages = [{"role": m["role"], "content": m["content"]} for m in recent]
+            messages.append({"role": "user", "content": user_text})
+
+            user_config = None
+            if self.config_service:
+                user_config = self.config_service.get_merged_config(user_id)
+
+            tool_call_outcome = await self.conversation_service.run_chat_loop(
+                messages,
+                user_config,
+                session_id=session_id,
+                user_id=user_id,
+                tool_executor=lambda name, payload: self._execute_tool_for_chat(
+                    name,
+                    payload,
+                    session_id=session_id,
+                    user_id=user_id,
+                    request_id=request.id,
+                    connection_id=connection.connection_id,
+                ),
+            )
+
+            if tool_call_outcome.get("status") == "needs_confirmation":
+                pending = dict(tool_call_outcome)
+                pending["current_messages"] = messages
+                pending["turn_id"] = turn_id
+                self.message_manager.set_pending_confirmation(
+                    session_id, pending, user_id=user_id
+                )
+                return GatewayProtocol.create_response(
+                    request.id,
+                    True,
+                    {
+                        "status": "needs_confirmation",
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_outcome.get("tool_call_id"),
+                        "tool_name": tool_call_outcome.get("tool_name"),
+                        "args": tool_call_outcome.get("args"),
+                        "response": f"Tool `{tool_call_outcome.get('tool_name')}` requires confirmation.",
+                    },
+                )
+
+            final_content = tool_call_outcome.get("content", "")
+            committed = self.message_manager.commit_turn(
+                session_id=session_id,
+                turn_id=turn_id,
+                assistant_content=final_content,
+                user_id=user_id,
+            )
+            if not committed:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="failed to commit turn"
+                )
+
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {
+                    "status": "success",
+                    "session_id": session_id,
+                    "response": final_content,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error handling chat: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_chat_confirm(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        """Handle tool-confirmation continuation for chat turn."""
+        try:
+            if not self.message_manager:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Message manager not initialized"
+                )
+            if not self.conversation_service:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Conversation service not initialized"
+                )
+
+            user_id = self._resolve_request_user_id(connection, request)
+            session_id = request.params.get("session_id")
+            tool_call_id = request.params.get("tool_call_id")
+            action = request.params.get("action")
+            if not session_id or not tool_call_id:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="session_id and tool_call_id are required"
+                )
+
+            pending = self.message_manager.get_pending_confirmation(session_id, user_id=user_id)
+            if not pending:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="no pending tool confirmation"
+                )
+            if pending.get("tool_call_id") != tool_call_id:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="tool_call_id mismatch"
+                )
+
+            if action == "reject":
+                turn_id = pending.get("turn_id")
+                if turn_id:
+                    self.message_manager.abort_turn(session_id, turn_id, user_id=user_id)
+                self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
+                return GatewayProtocol.create_response(
+                    request.id,
+                    True,
+                    {"status": "rejected", "session_id": session_id, "response": "Tool execution rejected."},
+                )
+            if action != "approve":
+                return GatewayProtocol.create_response(
+                    request.id, False, error="action must be approve or reject"
+                )
+
+            current_messages = pending.get("current_messages", [])
+            turn_id = pending.get("turn_id")
+            tool_result_blocks = []
+            try:
+                all_tool_calls = pending.get("pending_tool_calls", [])
+                if not all_tool_calls:
+                    all_tool_calls = [
+                        {
+                            "name": pending.get("tool_name"),
+                            "args": pending.get("args", {}),
+                            "id": pending.get("tool_call_id"),
+                        }
+                    ]
+
+                if not self.mcp_manager:
+                    raise RuntimeError("mcp manager not initialized")
+                tool_result_blocks = await execute_tool_calls(
+                    all_tool_calls,
+                    self.mcp_manager,
+                    session_id=session_id,
+                    approved_call_ids={tool_call_id},
+                    tool_executor=lambda name, payload: self._execute_tool_for_chat(
+                        name,
+                        payload,
+                        session_id=session_id,
+                        user_id=user_id,
+                        request_id=request.id,
+                        connection_id=connection.connection_id,
+                    ),
+                )
+            except Exception as e:
+                if isinstance(e, ToolConfirmationRequired):
+                    new_pending = {
+                        "status": "needs_confirmation",
+                        "tool_call_id": e.tool_call_id,
+                        "tool_name": e.tool_name,
+                        "args": e.args,
+                        "current_messages": current_messages,
+                        "pending_tool_calls": e.all_tool_calls,
+                        "content": pending.get("content", ""),
+                        "turn_id": turn_id,
+                    }
+                    self.message_manager.set_pending_confirmation(
+                        session_id, new_pending, user_id=user_id
+                    )
+                    return GatewayProtocol.create_response(
+                        request.id,
+                        True,
+                        {
+                            "status": "needs_confirmation",
+                            "session_id": session_id,
+                            "tool_call_id": e.tool_call_id,
+                            "tool_name": e.tool_name,
+                            "args": e.args,
+                            "response": f"Tool `{e.tool_name}` requires confirmation.",
+                        },
+                    )
+                logger.error(f"resume tool execution failed: {e}")
+                tool_result_blocks = [{"type": "text", "text": f"tool execution error: {e}"}]
+
+            tool_result_blocks.append(
+                {"type": "text", "text": "User approved tool execution. Continue based on these results."}
+            )
+            observation_message = {"role": "user", "content": tool_result_blocks}
+
+            messages = list(current_messages)
+            messages.append({"role": "assistant", "content": pending.get("content", "")})
+            messages.append(observation_message)
+
+            user_config = None
+            if self.config_service:
+                user_config = self.config_service.get_merged_config(user_id)
+            self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
+
+            tool_call_outcome = await self.conversation_service.run_chat_loop(
+                messages,
+                user_config,
+                session_id=session_id,
+                user_id=user_id,
+            )
+
+            if tool_call_outcome.get("status") == "needs_confirmation":
+                next_pending = dict(tool_call_outcome)
+                next_pending["current_messages"] = messages
+                next_pending["turn_id"] = turn_id
+                self.message_manager.set_pending_confirmation(
+                    session_id, next_pending, user_id=user_id
+                )
+                return GatewayProtocol.create_response(
+                    request.id,
+                    True,
+                    {
+                        "status": "needs_confirmation",
+                        "session_id": session_id,
+                        "tool_call_id": tool_call_outcome.get("tool_call_id"),
+                        "tool_name": tool_call_outcome.get("tool_name"),
+                        "args": tool_call_outcome.get("args"),
+                        "response": f"Tool `{tool_call_outcome.get('tool_name')}` requires confirmation.",
+                    },
+                )
+
+            final_content = tool_call_outcome.get("content", "")
+            if turn_id:
+                committed = self.message_manager.commit_turn(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    assistant_content=final_content,
+                    user_id=user_id,
+                )
+                if not committed:
+                    return GatewayProtocol.create_response(
+                        request.id, False, error="failed to commit confirmed turn"
+                    )
+            else:
+                self.message_manager.add_message(session_id, "assistant", final_content, user_id)
+
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {"status": "success", "session_id": session_id, "response": final_content},
+            )
+        except Exception as e:
+            logger.error(f"Error handling chat confirm: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_followup(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        """Handle follow-up query requests."""
+        try:
+            from .protocol import FollowupParams
+
+            params = FollowupParams(**request.params)
+            templates = {
+                "why": "Why did you say \"{text}\"? Explain the reasoning in under 100 words.",
+                "risk": "What risks or trade-offs are in \"{text}\"? Keep it under 100 words.",
+                "alternative": "Besides \"{text}\", list 2-3 alternatives and compare briefly in under 100 words.",
+            }
+
+            if params.query_type == "custom" and params.custom_query:
+                user_query = f"{params.custom_query}\n\nRelated text: {params.selected_text}"
+            else:
+                user_query = templates.get(params.query_type, templates["why"]).format(
+                    text=params.selected_text[:100]
+                )
+
+            if not self.message_manager:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Message manager not initialized"
+                )
+
+            user_id = self._resolve_request_user_id(connection, request)
+            recent_messages = self.message_manager.get_recent_messages(
+                params.session_id, count=6, user_id=user_id
+            )
+            messages = [
+                {"role": msg["role"], "content": msg["content"]}
+                for msg in (recent_messages or [])
+            ]
+            messages.append({"role": "user", "content": user_query})
+
+            if not self.conversation_service:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Conversation service not initialized"
+                )
+
+            response = await self.conversation_service.call_llm(
+                messages,
+                user_id=user_id,
+            )
             result = response.get("content", "")
 
             return GatewayProtocol.create_response(
@@ -827,21 +1619,73 @@ class GatewayServer:
         except Exception as e:
             logger.error(f"Error handling followup: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_batch(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        """Handle batch requests with optional timeout/retry/priority per item."""
+        try:
+            items = request.params.get("requests", [])
+            user_id = self._resolve_request_user_id(connection, request)
+            if not isinstance(items, list) or not items:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="requests must be a non-empty list"
+                )
+
+            normalized = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                normalized.append(
+                    {
+                        "method": item.get("method"),
+                        "params": item.get("params", {}) or {},
+                        "timeout_ms": item.get("timeout_ms"),
+                        "retries": int(item.get("retries", 0) or 0),
+                        "priority": int(item.get("priority", 0) or 0),
+                    }
+                )
+            normalized.sort(key=lambda x: x["priority"], reverse=True)
+
+            results = []
+            for item in normalized:
+                method_raw = item.get("method")
+                try:
+                    method = RequestType(method_raw)
+                except Exception:
+                    results.append(
+                        {"method": method_raw, "ok": False, "error": f"Unknown method: {method_raw}"}
+                    )
+                    continue
+
+                payload = dict(item.get("params") or {})
+                payload.setdefault("user_id", user_id)
+                response = await self.handle_http_request(
+                    method=method,
+                    params=payload,
+                    user_id=user_id,
+                    timeout_ms=item.get("timeout_ms"),
+                    retries=item.get("retries", 0),
+                )
+                if response.ok:
+                    results.append({"method": method.value, "ok": True, "payload": response.payload or {}})
+                else:
+                    results.append({"method": method.value, "ok": False, "error": response.error})
+
+            return GatewayProtocol.create_response(request.id, True, {"results": results})
+        except Exception as e:
+            logger.error(f"Error handling batch: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
     
-    # ============ 配置管理处理器 ============
+    # ============ Config-management handlers ============
     
     async def _handle_config_get(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理配置获取"""
+        """Handle configuration fetch for current user."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
             
-            # 获取用户ID（如果有）
-            user_id = request.params.get("user_id")
-            
-            # 获取合并后的配置
+            user_id = self._resolve_request_user_id(connection, request)
             config_data = self.config_service.get_merged_config(user_id)
             
             return GatewayProtocol.create_response(request.id, True, config_data)
@@ -850,14 +1694,14 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_config_reload(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理配置重载"""
+        """Handle reload of default configuration."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
 
-            # 重新加载默认配置
+            # Reload default config from disk.
             result = await self.config_service.reload_default_config()
 
             if result["success"]:
@@ -878,18 +1722,14 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_config_update(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理配置更新"""
+        """Handle user configuration update."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
             
-            user_id = request.params.get("user_id")
-            if not user_id:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="user_id is required"
-                )
+            user_id = self._resolve_request_user_id(connection, request)
             
             config_updates = request.params.get("config", {})
             if not config_updates:
@@ -910,18 +1750,14 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_config_reset(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理配置重置"""
+        """Handle user configuration reset."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
             
-            user_id = request.params.get("user_id")
-            if not user_id:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="user_id is required"
-                )
+            user_id = self._resolve_request_user_id(connection, request)
             
             reset_to_default = request.params.get("reset_to_default", True)
             
@@ -938,18 +1774,14 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_config_switch_model(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理模型切换"""
+        """Handle switching of underlying LLM model for current user."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
             
-            user_id = request.params.get("user_id")
-            if not user_id:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="user_id is required"
-                )
+            user_id = self._resolve_request_user_id(connection, request)
             
             model = request.params.get("model")
             if not model:
@@ -973,15 +1805,15 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     async def _handle_config_diagnose(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """处理配置诊断"""
+        """Handle configuration diagnostics for current user."""
         try:
             if not self.config_service:
                 return GatewayProtocol.create_response(
                     request.id, False, error="Config service not initialized"
                 )
             
-            user_id = request.params.get("user_id")
-            
+            user_id = self._resolve_request_user_id(connection, request)
+
             result = self.config_service.diagnose_config(user_id)
             
             return GatewayProtocol.create_response(request.id, True, result)
@@ -989,10 +1821,10 @@ class GatewayServer:
             logger.error(f"Error diagnosing config: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
-    # ============ 辅助方法 ============
+    # ============ Helpers ============
     
     async def _get_health_info(self) -> Dict[str, Any]:
-        """获取健康信息"""
+        """Collect current health information for the gateway."""
         return {
             "status": "healthy" if self.is_running else "unhealthy",
             "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
@@ -1004,19 +1836,19 @@ class GatewayServer:
         }
     
     async def _execute_agent(self, connection: Connection, run_id: str, params: AgentCallParams):
-        """执行Agent调用（非流式）"""
+        """Execute Agent call (non-streaming)."""
         try:
-            # 发送开始事件
+            # Emit start event.
             await connection.send_event(EventType.AGENT_START, {"run_id": run_id})
             
-            # 调用Agent
+            # Execute agent call.
             result = await self.agent_manager.call_agent(
                 params.agent_name,
                 params.prompt,
                 params.session_id
             )
             
-            # 发送完成事件
+            # Emit completion/error events.
             if result.get("status") == "success":
                 await connection.send_event(EventType.AGENT_COMPLETE, {
                     "run_id": run_id,
@@ -1039,25 +1871,102 @@ class GatewayServer:
             })
     
     async def _execute_agent_stream(self, connection: Connection, run_id: str, params: AgentCallParams):
-        """执行Agent调用（流式）"""
-        # TODO: 实现流式调用
-        await self._execute_agent(connection, run_id, params)
+        """Execute Agent call (streaming)."""
+        try:
+            await connection.send_event(EventType.AGENT_START, {"run_id": run_id})
+
+            streamed_chunks = []
+            stream_started = False
+
+            if hasattr(self.agent_manager, "call_agent_stream"):
+                try:
+                    async for chunk in self.agent_manager.call_agent_stream(
+                        params.agent_name,
+                        params.prompt,
+                        params.session_id,
+                    ):
+                        if not chunk:
+                            continue
+                        stream_started = True
+                        streamed_chunks.append(chunk)
+                        await connection.send_event(
+                            EventType.AGENT_STREAM,
+                            {"run_id": run_id, "chunk": chunk, "finished": False},
+                        )
+                    content = "".join(streamed_chunks)
+                    await connection.send_event(
+                        EventType.AGENT_STREAM,
+                        {"run_id": run_id, "chunk": "", "finished": True},
+                    )
+                    await connection.send_event(
+                        EventType.AGENT_COMPLETE,
+                        {"run_id": run_id, "result": content, "status": "completed"},
+                    )
+                    return
+                except Exception as e:
+                    if stream_started:
+                        logger.error(f"Streaming agent {run_id} failed after partial output: {e}")
+                        await connection.send_event(
+                            EventType.AGENT_ERROR,
+                            {"run_id": run_id, "error": str(e), "status": "error"},
+                        )
+                        return
+                    logger.warning(f"Streaming not available, fallback to non-stream: {e}")
+
+            result = await self.agent_manager.call_agent(
+                params.agent_name,
+                params.prompt,
+                params.session_id,
+            )
+
+            if result.get("status") == "success":
+                content = result.get("result", "") or ""
+                chunk_size = 256
+                for idx in range(0, len(content), chunk_size):
+                    await connection.send_event(
+                        EventType.AGENT_STREAM,
+                        {"run_id": run_id, "chunk": content[idx:idx + chunk_size], "finished": False},
+                    )
+                await connection.send_event(
+                    EventType.AGENT_STREAM,
+                    {"run_id": run_id, "chunk": "", "finished": True},
+                )
+                await connection.send_event(
+                    EventType.AGENT_COMPLETE,
+                    {"run_id": run_id, "result": content, "status": "completed"},
+                )
+            else:
+                await connection.send_event(
+                    EventType.AGENT_ERROR,
+                    {"run_id": run_id, "error": result.get("error"), "status": "error"},
+                )
+        except Exception as e:
+            logger.error(f"Error executing agent {run_id}: {e}")
+            await connection.send_event(
+                EventType.AGENT_ERROR,
+                {"run_id": run_id, "error": str(e), "status": "error"},
+            )
     
     async def _heartbeat_task(self):
-        """心跳任务"""
+        """Periodic heartbeat broadcast task."""
         while self.is_running:
-            await asyncio.sleep(30)  # 每30秒发送一次心跳
+            await asyncio.sleep(30)  # broadcast every 30 seconds
+            health_payload = {
+                "timestamp": datetime.now().isoformat(),
+                "services": self.get_services_health(),
+            }
+            await self.event_emitter.emit(EventType.HEALTH_UPDATE, health_payload)
             await self.connection_manager.broadcast(
                 EventType.HEARTBEAT,
-                {"timestamp": datetime.now().isoformat()}
+                health_payload,
             )
     
     async def _cleanup_task(self):
-        """清理任务"""
+        """Periodic cleanup task (idempotency cache + stale connections)."""
         while self.is_running:
-            await asyncio.sleep(60)  # 每分钟清理一次
+            await asyncio.sleep(60)  # run once per minute
             
-            # 清理过期的幂等性缓存
+            # Cleanup expired idempotency-cache entries.
             now = time.time()
             expired_keys = [
                 key for key, response in self._idempotency_cache.items()
@@ -1066,5 +1975,6 @@ class GatewayServer:
             for key in expired_keys:
                 del self._idempotency_cache[key]
             
-            # 清理过期连接
+            # Cleanup stale websocket connections.
             await self.connection_manager.cleanup_stale_connections()
+

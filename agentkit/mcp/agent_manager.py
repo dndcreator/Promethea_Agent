@@ -1,4 +1,4 @@
-import logging
+﻿import logging
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional
@@ -44,7 +44,7 @@ class AgentManager:
             self.max_history_rounds = config.api.max_history_rounds
         except ImportError:
             self.max_history_rounds = 10
-            logger.warning("无法导入配置，使用默认历史轮数设置")
+            logger.warning("Failed to import config, using default history settings")
         self.context_ttl_hours = 24
         self.debug_mode = True
 
@@ -52,19 +52,19 @@ class AgentManager:
             self.config_dir.mkdir(exist_ok=True)
             self._load_agent_configs()
         else:
-            logger.info("AgentManager使用MCP架构，跳过外部配置文件加载")
+            logger.info("AgentManager running in MCP mode, skip external config loading")
         
         try:
             loop = asyncio.get_running_loop()
             asyncio.create_task(self._periodic_cleanup())
         except RuntimeError:
             pass
-        logger.info(f"AgentManager初始化完成,已加载 {len(self.agents)} 个Agent")
+        logger.info(f"AgentManager initialized, loaded {len(self.agents)} agents")
     
     def _load_agent_configs(self):
 
         if not self.config_dir:
-            logger.info(f"未找到配置目录，跳过配置加载")
+            logger.info("Config directory not found, skip agent-config loading")
 
             return
         
@@ -90,16 +90,16 @@ class AgentManager:
                             api_key = agent_data.get("api_key",""),
                         )
                         self.agents[agent_key] = agent_config
-                        logger.info(f"已加载Agent: {agent_key} ({agent_config.name})")
+                        logger.info(f"Loaded agent: {agent_key} ({agent_config.name})")
             except Exception as e:
-                logger.error(f"加载配置文件 {config_file} 失败: {e}")
+                logger.error(f"Failed to load agent config file {config_file}: {e}")
     
     def _validate_agent_config(self, config: Dict[str, Any]) -> bool:
 
         required_fields = ['model_id', 'name']
         for field in required_fields:
             if field not in config or not config[field]:
-                logger.warning(f"Agent配置缺少必需字段: {field}")
+                logger.warning(f"Agent config missing required field: {field}")
                 return False
         return True
 
@@ -140,17 +140,19 @@ class AgentManager:
             try:
                 await asyncio.sleep(3600)
                 if self.debug_mode:
-                    logger.debug("执行定期上下文清理...")
+                    logger.debug("Running periodic agent-session context cleanup...")
                 for agent_name, sessions in list(self.agent_sessions.items()):
                     for session_id, session_data in list(sessions.items()):
                         if self._is_context_expired(session_data.timestamp):
                             sessions.pop(session_id, None)
                             if self.debug_mode:
-                                logger.debug(f"清理过期上下文: {agent_name}, session {session_id}")
+                                logger.debug(
+                                    f"Cleaned expired agent session context: agent={agent_name}, session={session_id}"
+                                )
                     if not sessions:
                         self.agent_sessions.pop(agent_name, None)
             except Exception as e:
-                logger.error(f"定期上下文清理失败: {e}")
+                logger.error(f"Periodic agent-session context cleanup failed: {e}")
     
     def _replace_placeholders(self, text: str, agent_config: AgentConfig) -> str:
 
@@ -233,13 +235,13 @@ class AgentManager:
 
         if agent_name not in self.agents:
             available_agents = list(self.agents.keys())
-            error_msg = f"请求的Agent '{agent_name}' 未找到或未正确配置。"
+            error_msg = f"Requested agent {agent_name} is not found or not configured."
             if available_agents:
-                error_msg += f" 已加载的Agent: {', '.join(available_agents)}。"
+                error_msg += f" Loaded agents: {\", \".join(available_agents)}."
             else:
-                error_msg += "未检测到Agent"
-            error_msg += " 请确认您请求的Agent名称是否准确。"
-            logger.error(f"Agent调用失败: {error_msg}")
+                error_msg += " No agent is currently loaded."
+            error_msg += " Please verify the agent name."
+            logger.error(f"Agent call failed: {error_msg}")
             
             return {"status": "error", "error": error_msg}
         agent_config = self.agents[agent_name]
@@ -256,9 +258,9 @@ class AgentManager:
             user_message = self._build_user_message(prompt, agent_config)
             messages.append(user_message)
             if not self._validate_messages(messages):
-                return {"status": "error", "error": "消息序列格式无效"}
+                return {"status": "error", "error": "Invalid message sequence format"}
             if self.debug_mode:
-                logger.debug(f"Agent调用消息序列:")
+                logger.debug("Agent call message sequence:")
                 for i, msg in enumerate(messages):
                     logger.debug(f"  [{i}] {msg['role']}: {msg['content'][:100]}...")
             response = await self._call_llm_api(agent_config, messages)
@@ -270,26 +272,70 @@ class AgentManager:
             else:
                 return response
         except Exception as e:
-            error_msg = f"调用Agent '{agent_name}' 时发生错误: {str(e)}"
-            logger.error(f"Agent调用异常: {error_msg}")
+            error_msg = f"Error when calling Agent '{agent_name}': {str(e)}"
+            logger.error(f"Agent call exception: {error_msg}")
             return {"status": "error", "error": error_msg}
+
+    async def call_agent_stream(self, agent_name: str, prompt: str, session_id: str = None):
+        if agent_name not in self.agents:
+            available_agents = list(self.agents.keys())
+            error_msg = f"Requested agent {agent_name} is not found or not configured."
+            if available_agents:
+                error_msg += f" Loaded agents: {\", \".join(available_agents)}."
+            else:
+                error_msg += " No agent is currently loaded."
+            error_msg += " Please verify the agent name."
+            logger.error(f"Agent stream call failed: {error_msg}")
+            raise ValueError(error_msg)
+
+        agent_config = self.agents[agent_name]
+        if not session_id:
+            session_id = f"agent_{agent_config.base_name}_default_user_session"
+
+        history = self.get_agent_session_history(agent_name, session_id)
+        messages = []
+        system_message = self._build_system_message(agent_config)
+        messages.append(system_message)
+        messages.extend(history)
+        user_message = self._build_user_message(prompt, agent_config)
+        messages.append(user_message)
+
+        if not self._validate_messages(messages):
+            raise ValueError("Invalid message sequence format")
+
+        if self.debug_mode:
+            logger.debug("Agent stream message sequence:")
+            for i, msg in enumerate(messages):
+                logger.debug(f"  [{i}] {msg['role']}: {msg['content'][:100]}...")
+
+        content_parts: List[str] = []
+        async for chunk in self._call_llm_api_stream(agent_config, messages):
+            if chunk:
+                content_parts.append(chunk)
+                yield chunk
+
+        assistant_response = "".join(content_parts)
+        if assistant_response:
+            self.update_agent_session_history(
+                agent_name, user_message["content"], assistant_response, session_id
+            )
     
     async def _call_llm_api(self, agent_config: AgentConfig, messages: List[Dict[str, str]]) -> Dict[str, Any]:
 
         try:
             from openai import AsyncOpenAI
             if self.debug_mode:
-                logger.debug(f"调用LLM API - Agent: {agent_config.name}")
-                logger.debug(f"  模型: {agent_config.id}")
-                logger.debug(f"  消息序列: {messages}")
-                logger.debug(f"  温度: {agent_config.temperature}")
-                logger.debug(f"  最大Token: {agent_config.max_output_tokens}")
-                logger.debug(f"  消息数量: {len(messages)}")
+                logger.debug(f"Calling LLM API - Agent: {agent_config.name}")
+                logger.debug(f"  Model: {agent_config.id}")
+                logger.debug(f"  Messages: {messages}")
+                logger.debug(f"  Temperature: {agent_config.temperature}")
+                logger.debug(f"  Max tokens: {agent_config.max_output_tokens}")
+                logger.debug(f"  Message count: {len(messages)}")
 
             if not agent_config.id:
-                return {"status": "error", "error": "Agent配置缺少模型ID"}
+                return {"status": "error", "error": "Agent config missing model ID"}
             if not agent_config.api_key:
-                return {"status": "error", "error": "Agent配置缺少API密钥"}
+                return {"status": "error", "error": "Agent config missing API key"}
             client = AsyncOpenAI(
                 api_key=agent_config.api_key,
                 base_url=agent_config.api_base_url or "https://api.deepseek.com/v1"
@@ -302,26 +348,61 @@ class AgentManager:
                 "stream": False
             }
             if self.debug_mode:
-                logger.debug(f"API调用参数: {api_params}")
+                logger.debug(f"API call params: {api_params}")
             
             response = await client.chat.completions.create(**api_params)
             assistant_content = response.choices[0].message.content
             if self.debug_mode:
                 usage = response.usage
-                logger.debug(f"API响应成功:")
-                logger.debug(f"  使用Token: {usage.prompt_tokens} (输入) + {usage.completion_tokens} (输出) = {usage.total_tokens} (总计)")
-                logger.debug(f"  响应长度: {len(assistant_content)} 字符")
+                logger.debug("API response success:")
+                logger.debug(
+                    f"  Tokens used: {usage.prompt_tokens} (in) + "
+                    f"{usage.completion_tokens} (out) = {usage.total_tokens} (total)"
+                )
+                logger.debug(f"  Response length: {len(assistant_content)} characters")
             return {"status": "success", "result": assistant_content}
 
         except Exception as e:
-            error_msg = f"LLM API调用失败: {str(e)}"
-            logger.error(f"Agent '{agent_config.name}' API调用失败: {error_msg}")
+            error_msg = f"LLM API call failed: {str(e)}"
+            logger.error(f"Agent '{agent_config.name}' API call failed: {error_msg}")
             if self.debug_mode:
                 import traceback
-                logger.debug(f"详细错误信息:")
+                logger.debug("Detailed error traceback:")
                 logger.debug(traceback.format_exc())
 
             return {"status": "error", "error": error_msg}
+
+    async def _call_llm_api_stream(self, agent_config: AgentConfig, messages: List[Dict[str, str]]):
+        from openai import AsyncOpenAI
+
+        if not agent_config.id:
+            raise ValueError("Agent config missing model ID")
+        if not agent_config.api_key:
+            raise ValueError("Agent config missing API key")
+
+        client = AsyncOpenAI(
+            api_key=agent_config.api_key,
+            base_url=agent_config.api_base_url or "https://api.deepseek.com/v1",
+        )
+
+        api_params = {
+            "model": agent_config.id,
+            "messages": messages,
+            "max_tokens": agent_config.max_output_tokens,
+            "temperature": agent_config.temperature,
+            "stream": True,
+        }
+        if self.debug_mode:
+            logger.debug(f"API stream params: {api_params}")
+
+        stream = await client.chat.completions.create(**api_params)
+        async for event in stream:
+            delta = event.choices[0].delta
+            content = getattr(delta, "content", None)
+            if content is None and isinstance(delta, dict):
+                content = delta.get("content")
+            if content:
+                yield content
     
     def get_available_agents(self) -> List[Dict[str, Any]]:
 
@@ -356,13 +437,13 @@ class AgentManager:
         
         self.agents.clear()
         self._load_agent_configs()
-        logger.info("Agent配置已重新加载")
+        logger.info("Agent configs reloaded")
 
     def _register_agent_from_manifest(self, agent_name: str, agent_config: Dict[str, Any]):
 
         try:
             if not self._validate_agent_config(agent_config):
-                logger.warning(f"Agent配置验证失败: {agent_name}")
+                logger.warning(f"Agent config validation failed: {agent_name}")
                 return False
             
             agent_config_obj = AgentConfig(
@@ -378,17 +459,17 @@ class AgentManager:
                 api_key = agent_config.get("api_key", ""))
             
             self.agents[agent_name] = agent_config_obj
-            logger.info(f"已从manifest注册Agent: {agent_name} ({agent_config_obj.name})")
+            logger.info(f"Registered Agent from manifest: {agent_name} ({agent_config_obj.name})")
             return True
         except Exception as e:
-            logger.error(f"从manifest注册Agent失败 {agent_name}: {e}")
+            logger.error(f"Agent registration from manifest failed for {agent_name}: {e}")
             return False
     
     async def call_agent_by_action(self, agent_name: str, action_args: Dict[str, Any]) -> str:
 
         try:
             if agent_name not in self.agents:
-                return f"Agent '{agent_name}' 未找到或未正确配置"
+                return f"Agent {agent_name} is not found or not configured"
             agent_config = self.agents[agent_name]
             action = action_args.get('action', '')
             user_prompt = self._build_action_prompt(action, action_args)
@@ -396,9 +477,9 @@ class AgentManager:
             if result.get("status") == "success":
                 return result.get("result", "")
             else:
-                return result.get("error", "调用失败")
+                return result.get("error", "Call failed")
         except Exception as e:
-            logger.error(f"Agent调用异常: {str(e)}")
+            logger.error(f"Agent call exception: {str(e)}")
             return {"status": "error", "error": str(e)}
     
     def _build_action_prompt(self, action: str, action_args: Dict[str, Any]) -> str:
@@ -408,9 +489,9 @@ class AgentManager:
         
         if clean_args:
             args_str = ", ".join([f"{k}: {v}" for k, v in clean_args.items()])
-            return f"请执行动作 '{action}'，参数: {args_str}"
+            return f"Please perform action '{action}' with arguments: {args_str}"
         else:
-            return f"请执行动作 '{action}'"
+            return f"Please perform action '{action}'"
 
 _AGENT_MANAGER = None
 

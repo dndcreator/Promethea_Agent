@@ -1,6 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 
 
@@ -20,12 +20,11 @@ class ChatResponse(BaseModel):
 
 
 class FollowUpRequest(BaseModel):
-    # 用户手动选中的文本
     selected_text: str
     query_type: str  # why/risk/alternative/custom
-    custom_query: Optional[str] = None  # 自定义追问
+    custom_query: Optional[str] = None
     session_id: str
-    context: Optional[List[Dict]] = None  # 最近几轮对话上下文
+    context: Optional[List[Dict]] = None
 
 
 class UserLogin(BaseModel):
@@ -61,3 +60,15 @@ class ConfirmToolRequest(BaseModel):
     session_id: str
     tool_call_id: str
     action: str # "approve" or "reject"
+
+
+class BatchRequestItem(BaseModel):
+    method: str
+    params: Dict = Field(default_factory=dict)
+    timeout_ms: Optional[int] = None
+    retries: int = 0
+    priority: int = 0
+
+
+class BatchRequest(BaseModel):
+    requests: List[BatchRequestItem]

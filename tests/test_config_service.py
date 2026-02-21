@@ -1,6 +1,6 @@
-"""
-ConfigService 测试
-测试配置服务的核心功能
+﻿"""
+ConfigService 
+?
 """
 import pytest
 from unittest.mock import MagicMock, patch
@@ -9,16 +9,16 @@ from gateway.events import EventEmitter
 
 
 class TestConfigService:
-    """ConfigService 测试类"""
+    """TODO: add docstring."""
     
     def test_init(self):
-        """测试初始化"""
+        """TODO: add docstring."""
         service = ConfigService()
         assert service is not None
         assert service._default_config is not None
     
     def test_get_default_config(self):
-        """测试获取默认配置"""
+        """TODO: add docstring."""
         service = ConfigService()
         config = service.get_default_config()
         assert config is not None
@@ -26,13 +26,13 @@ class TestConfigService:
         assert hasattr(config, 'memory')
     
     def test_get_user_config_no_user(self):
-        """测试获取用户配置（无用户）"""
+        """TODO: add docstring."""
         service = ConfigService()
         config = service.get_user_config()
         assert isinstance(config, dict)
     
     def test_get_merged_config(self):
-        """测试获取合并配置"""
+        """TODO: add docstring."""
         service = ConfigService()
         merged = service.get_merged_config()
         assert isinstance(merged, dict)
@@ -41,14 +41,14 @@ class TestConfigService:
     
     @pytest.mark.asyncio
     async def test_reload_default_config(self):
-        """测试重载默认配置"""
+        """TODO: add docstring."""
         service = ConfigService(event_emitter=EventEmitter())
         result = await service.reload_default_config()
         assert result['success'] is True
     
     @pytest.mark.asyncio
     async def test_update_user_config(self):
-        """测试更新用户配置"""
+        """TODO: add docstring."""
         service = ConfigService(event_emitter=EventEmitter())
         
         # Mock user_manager
@@ -63,7 +63,7 @@ class TestConfigService:
     
     @pytest.mark.asyncio
     async def test_switch_model(self):
-        """测试切换模型"""
+        """TODO: add docstring."""
         service = ConfigService(event_emitter=EventEmitter())
         
         with patch('gateway.config_service.user_manager') as mock_user_manager:
@@ -74,3 +74,4 @@ class TestConfigService:
             
             result = await service.switch_model(params, user_id="test_user")
             assert result['success'] is True
+

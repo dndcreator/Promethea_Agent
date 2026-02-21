@@ -1,4 +1,4 @@
-from channels.feishu_channel import FeishuChannel
+﻿from channels.feishu_channel import FeishuChannel
 from channels.base import ChannelConfig
 
 

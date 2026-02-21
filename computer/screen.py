@@ -1,5 +1,5 @@
-"""
-屏幕和键鼠控制器 - 基于 PyAutoGUI
+﻿"""
+Screen and input controller - based on PyAutoGUI.
 """
 from typing import Dict, Any, List, Optional, Tuple
 from .base import ComputerController, ComputerCapability, ComputerResult
@@ -11,7 +11,7 @@ logger = logging.getLogger("Computer.Screen")
 
 
 class ScreenController(ComputerController):
-    """屏幕和键鼠控制器"""
+    """Screen + mouse + keyboard controller."""
     
     def __init__(self):
         super().__init__("Screen", ComputerCapability.SCREEN)
@@ -19,18 +19,18 @@ class ScreenController(ComputerController):
         self.pil_image = None
     
     async def initialize(self) -> bool:
-        """初始化屏幕控制"""
+        """Initialize screen controller (PyAutoGUI + Pillow)."""
         try:
-            # 动态导入 PyAutoGUI
+            # Lazy-import PyAutoGUI to avoid hard dependency at import time.
             import pyautogui
             from PIL import Image
             
             self.pyautogui = pyautogui
             self.pil_image = Image
             
-            # 设置安全措施
-            self.pyautogui.FAILSAFE = True  # 鼠标移到角落时终止
-            self.pyautogui.PAUSE = 0.1  # 每次操作后暂停
+            # Configure safety options.
+            self.pyautogui.FAILSAFE = True  # Move mouse to corner to abort.
+        self.pyautogui.PAUSE = 0.1      # Small pause after each action.
             
             self.is_initialized = True
             logger.info("Screen controller initialized")
@@ -44,13 +44,13 @@ class ScreenController(ComputerController):
             return False
     
     async def cleanup(self) -> bool:
-        """清理资源"""
+        """Clean up screen-controller resources."""
         self.is_initialized = False
         logger.info("Screen controller cleaned up")
         return True
     
     async def execute(self, action: str, params: Dict[str, Any]) -> ComputerResult:
-        """执行屏幕/键鼠操作"""
+        """Execute screen / mouse / keyboard operation."""
         if not self.is_initialized:
             return ComputerResult(
                 success=False,
@@ -59,7 +59,7 @@ class ScreenController(ComputerController):
         
         try:
             action_map = {
-                # 鼠标操作
+                # Mouse actions
                 'move': self._move_mouse,
                 'click': self._click,
                 'double_click': self._double_click,
@@ -67,18 +67,18 @@ class ScreenController(ComputerController):
                 'drag': self._drag,
                 'scroll': self._scroll,
                 
-                # 键盘操作
+                # Keyboard actions
                 'type': self._type,
                 'press': self._press,
                 'hotkey': self._hotkey,
                 
-                # 屏幕操作
+                # Screen actions
                 'screenshot': self._screenshot,
                 'locate': self._locate_on_screen,
                 'get_screen_size': self._get_screen_size,
                 'get_mouse_position': self._get_mouse_position,
                 
-                # 剪贴板
+                # Clipboard actions
                 'get_clipboard': self._get_clipboard,
                 'set_clipboard': self._set_clipboard,
             }
@@ -98,36 +98,36 @@ class ScreenController(ComputerController):
             return ComputerResult(success=False, error=str(e))
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
-        """获取可用操作列表"""
+        """Return available screen and input actions."""
         return [
-            # 鼠标操作
-            {"name": "move", "description": "移动鼠标", "params": ["x", "y", "duration?"]},
-            {"name": "click", "description": "点击", "params": ["x?", "y?", "button?"]},
-            {"name": "double_click", "description": "双击", "params": ["x?", "y?"]},
-            {"name": "right_click", "description": "右键点击", "params": ["x?", "y?"]},
-            {"name": "drag", "description": "拖动", "params": ["x1", "y1", "x2", "y2", "duration?"]},
-            {"name": "scroll", "description": "滚动", "params": ["clicks", "x?", "y?"]},
+            # Mouse actions
+            {"name": "move", "description": "Move mouse", "params": ["x", "y", "duration?"]},
+            {"name": "click", "description": "Click", "params": ["x?", "y?", "button?"]},
+            {"name": "double_click", "description": "Double click", "params": ["x?", "y?"]},
+            {"name": "right_click", "description": "Right click", "params": ["x?", "y?"]},
+            {"name": "drag", "description": "Drag", "params": ["x1", "y1", "x2", "y2", "duration?"]},
+            {"name": "scroll", "description": "Scroll", "params": ["clicks", "x?", "y?"]},
             
-            # 键盘操作
-            {"name": "type", "description": "输入文本", "params": ["text", "interval?"]},
-            {"name": "press", "description": "按键", "params": ["key", "presses?", "interval?"]},
-            {"name": "hotkey", "description": "快捷键", "params": ["keys"]},
+            # Keyboard actions
+            {"name": "type", "description": "Type text", "params": ["text", "interval?"]},
+            {"name": "press", "description": "Press key", "params": ["key", "presses?", "interval?"]},
+            {"name": "hotkey", "description": "Hotkey", "params": ["keys"]},
             
-            # 屏幕操作
-            {"name": "screenshot", "description": "截图", "params": ["region?", "path?"]},
-            {"name": "locate", "description": "定位图像", "params": ["image_path"]},
-            {"name": "get_screen_size", "description": "获取屏幕尺寸", "params": []},
-            {"name": "get_mouse_position", "description": "获取鼠标位置", "params": []},
+            # Screen actions
+            {"name": "screenshot", "description": "Take screenshot", "params": ["region?", "path?"]},
+            {"name": "locate", "description": "Locate image", "params": ["image_path"]},
+            {"name": "get_screen_size", "description": "Get screen size", "params": []},
+            {"name": "get_mouse_position", "description": "Get mouse position", "params": []},
             
-            # 剪贴板
-            {"name": "get_clipboard", "description": "获取剪贴板", "params": []},
-            {"name": "set_clipboard", "description": "设置剪贴板", "params": ["text"]},
+            # Clipboard helpers
+            {"name": "get_clipboard", "description": "Get clipboard", "params": []},
+            {"name": "set_clipboard", "description": "Set clipboard", "params": ["text"]},
         ]
     
-    # ============ 鼠标操作 ============
+    # ============ Mouse actions ============
     
     async def _move_mouse(self, params: Dict[str, Any]) -> str:
-        """移动鼠标"""
+        """Move mouse to target position."""
         x = params.get('x')
         y = params.get('y')
         duration = params.get('duration', 0.2)
@@ -139,7 +139,7 @@ class ScreenController(ComputerController):
         return f"Moved mouse to ({x}, {y})"
     
     async def _click(self, params: Dict[str, Any]) -> str:
-        """点击"""
+        """Click at optional (x, y) with given button."""
         x = params.get('x')
         y = params.get('y')
         button = params.get('button', 'left')
@@ -152,7 +152,7 @@ class ScreenController(ComputerController):
             return f"Clicked with {button} button at current position"
     
     async def _double_click(self, params: Dict[str, Any]) -> str:
-        """双击"""
+        """Double-click at optional (x, y)."""
         x = params.get('x')
         y = params.get('y')
         
@@ -164,7 +164,7 @@ class ScreenController(ComputerController):
             return "Double clicked at current position"
     
     async def _right_click(self, params: Dict[str, Any]) -> str:
-        """右键点击"""
+        """Right-click at optional (x, y)."""
         x = params.get('x')
         y = params.get('y')
         
@@ -176,7 +176,7 @@ class ScreenController(ComputerController):
             return "Right clicked at current position"
     
     async def _drag(self, params: Dict[str, Any]) -> str:
-        """拖动"""
+        """Drag from (x1, y1) to (x2, y2)."""
         x1 = params.get('x1')
         y1 = params.get('y1')
         x2 = params.get('x2')
@@ -191,7 +191,7 @@ class ScreenController(ComputerController):
         return f"Dragged from ({x1}, {y1}) to ({x2}, {y2})"
     
     async def _scroll(self, params: Dict[str, Any]) -> str:
-        """滚动"""
+        """Scroll vertically, optionally at (x, y)."""
         clicks = params.get('clicks')
         x = params.get('x')
         y = params.get('y')
@@ -206,10 +206,10 @@ class ScreenController(ComputerController):
             self.pyautogui.scroll(clicks)
             return f"Scrolled {clicks} clicks"
     
-    # ============ 键盘操作 ============
+    # ============ Keyboard actions ============
     
     async def _type(self, params: Dict[str, Any]) -> str:
-        """输入文本"""
+        """Type text with optional interval between characters."""
         text = params.get('text')
         interval = params.get('interval', 0.05)
         
@@ -220,7 +220,7 @@ class ScreenController(ComputerController):
         return f"Typed: {text}"
     
     async def _press(self, params: Dict[str, Any]) -> str:
-        """按键"""
+        """Press a key one or more times."""
         key = params.get('key')
         presses = params.get('presses', 1)
         interval = params.get('interval', 0.1)
@@ -232,7 +232,7 @@ class ScreenController(ComputerController):
         return f"Pressed {key} {presses} times"
     
     async def _hotkey(self, params: Dict[str, Any]) -> str:
-        """快捷键"""
+        """Press a hotkey combination (list of keys)."""
         keys = params.get('keys')
         
         if not keys or not isinstance(keys, list):
@@ -241,16 +241,16 @@ class ScreenController(ComputerController):
         self.pyautogui.hotkey(*keys)
         return f"Pressed hotkey: {'+'.join(keys)}"
     
-    # ============ 屏幕操作 ============
+    # ============ Screen actions ============
     
     async def _screenshot(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """截图"""
+        """Take a screenshot and return metadata + base64 image."""
         region = params.get('region')  # (x, y, width, height)
         path = params.get('path')
         
         screenshot = self.pyautogui.screenshot(region=region)
         
-        # 转换为 Base64
+        # Encode screenshot to Base64.
         buffer = BytesIO()
         screenshot.save(buffer, format='PNG')
         screenshot_bytes = buffer.getvalue()
@@ -271,7 +271,7 @@ class ScreenController(ComputerController):
         return result
     
     async def _locate_on_screen(self, params: Dict[str, Any]) -> Optional[Dict[str, int]]:
-        """在屏幕上定位图像"""
+        """Locate an image on screen and return bounding box if found."""
         image_path = params.get('image_path')
         confidence = params.get('confidence', 0.8)
         
@@ -298,7 +298,7 @@ class ScreenController(ComputerController):
             return None
     
     async def _get_screen_size(self, params: Dict[str, Any]) -> Dict[str, int]:
-        """获取屏幕尺寸"""
+        """Get current screen size."""
         size = self.pyautogui.size()
         return {
             "width": size.width,
@@ -306,17 +306,17 @@ class ScreenController(ComputerController):
         }
     
     async def _get_mouse_position(self, params: Dict[str, Any]) -> Dict[str, int]:
-        """获取鼠标位置"""
+        """Get current mouse position."""
         pos = self.pyautogui.position()
         return {
             "x": pos.x,
             "y": pos.y
         }
     
-    # ============ 剪贴板操作 ============
+    # ============ Clipboard helper actions ============
     
     async def _get_clipboard(self, params: Dict[str, Any]) -> str:
-        """获取剪贴板内容"""
+        """Get current clipboard text."""
         try:
             import pyperclip
             return pyperclip.paste()
@@ -324,7 +324,7 @@ class ScreenController(ComputerController):
             raise ImportError("pyperclip not installed. Run: pip install pyperclip")
     
     async def _set_clipboard(self, params: Dict[str, Any]) -> str:
-        """设置剪贴板内容"""
+        """Set clipboard text."""
         text = params.get('text')
         
         if text is None:

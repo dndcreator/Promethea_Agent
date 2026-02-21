@@ -1,6 +1,4 @@
-"""
-事件系统 - 事件发射和订阅
-"""
+﻿"""Event bus used by gateway services."""
 import asyncio
 import logging
 from typing import Dict, List, Callable, Any, Optional
@@ -11,7 +9,7 @@ logger = logging.getLogger("Gateway.Events")
 
 
 class EventEmitter:
-    """事件发射器"""
+    """Async event emitter with listener registry and bounded history."""
     
     def __init__(self):
         self._listeners: Dict[EventType, List[Callable]] = defaultdict(list)
@@ -20,26 +18,26 @@ class EventEmitter:
         self._max_history = 1000
         
     def on(self, event: EventType, handler: Callable) -> None:
-        """订阅事件"""
+        """Register a listener for an event."""
         if handler not in self._listeners[event]:
             self._listeners[event].append(handler)
             logger.debug(f"Registered handler for event: {event}")
     
     def off(self, event: EventType, handler: Callable) -> None:
-        """取消订阅"""
+        """Unregister a listener."""
         if handler in self._listeners[event]:
             self._listeners[event].remove(handler)
             logger.debug(f"Unregistered handler for event: {event}")
     
     def once(self, event: EventType, handler: Callable) -> None:
-        """订阅一次性事件"""
+        """Register a listener that runs once."""
         async def wrapper(*args, **kwargs):
             await handler(*args, **kwargs)
             self.off(event, wrapper)
         self.on(event, wrapper)
     
     async def emit(self, event: EventType, payload: Dict[str, Any]) -> None:
-        """发射事件"""
+        """Emit event to all listeners."""
         self._seq_counter += 1
         event_msg = EventMessage(
             event=event,
@@ -47,12 +45,12 @@ class EventEmitter:
             seq=self._seq_counter
         )
         
-        # 保存到历史
+        # Keep bounded event history for diagnostics.
         self._event_history.append(event_msg)
         if len(self._event_history) > self._max_history:
             self._event_history = self._event_history[-self._max_history:]
         
-        # 通知所有监听器
+        # Dispatch handlers.
         handlers = self._listeners.get(event, [])
         if handlers:
             logger.debug(f"Emitting event {event} to {len(handlers)} handlers")
@@ -72,14 +70,14 @@ class EventEmitter:
             logger.debug(f"No handlers for event: {event}")
     
     def get_history(self, event: Optional[EventType] = None, limit: int = 100) -> List[EventMessage]:
-        """获取事件历史"""
+        """Return event history, optionally filtered by event type."""
         if event:
             filtered = [e for e in self._event_history if e.event == event]
             return filtered[-limit:]
         return self._event_history[-limit:]
     
     def clear_listeners(self, event: Optional[EventType] = None) -> None:
-        """清空监听器"""
+        """Clear listeners for one event or all events."""
         if event:
             self._listeners[event].clear()
         else:

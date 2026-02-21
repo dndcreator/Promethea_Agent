@@ -1,5 +1,4 @@
-"""
-通道系统 - 多平台消息通道抽象
+﻿"""
 """
 from .base import BaseChannel, ChannelType, ChannelConfig, Message, MessageType
 from .registry import ChannelRegistry

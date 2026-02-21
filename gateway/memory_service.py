@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -11,6 +12,8 @@ from core.services import get_memory_service
 
 from .events import EventEmitter
 from .protocol import EventType
+from memory.session_scope import scoped_session_id
+from memory.session_scope import user_node_id
 
 
 class MemoryService:
@@ -160,7 +163,6 @@ class MemoryService:
         key = self._make_write_key(user_id, memory_type, normalized)
         if key in self._recent_write_index:
             return False
-        self._remember_write_key(key)
         return True
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
@@ -245,11 +247,11 @@ class MemoryService:
         """
         text = f"{user_input}\n{assistant_output}".lower()
         hints = [
-            ("preference", ["prefer", "like", "喜欢", "偏好"]),
-            ("constraint", ["must", "cannot", "deadline", "必须", "不能", "限制"]),
-            ("goal", ["goal", "plan to", "想要", "目标"]),
-            ("identity", ["i am", "my name is", "我是", "我叫"]),
-            ("project_state", ["project", "milestone", "release", "项目", "版本"]),
+            ("preference", ["prefer", "like"]),
+            ("constraint", ["must", "cannot", "deadline"]),
+            ("goal", ["goal", "plan to"]),
+            ("identity", ["i am", "my name is"]),
+            ("project_state", ["project", "milestone", "release"]),
         ]
         for mem_type, tokens in hints:
             if any(token in text for token in tokens):
@@ -273,6 +275,94 @@ class MemoryService:
         except Exception:
             return None
 
+    def _get_merged_config(self, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        try:
+            if self.config_service:
+                if user_id:
+                    return self.config_service.get_merged_config(user_id)
+                return self.config_service.get_default_config().model_dump()
+            from config import config as global_config
+            return global_config.model_dump()
+        except Exception:
+            return None
+
+    def _resolve_memory_api_for_user(self, user_id: str) -> Dict[str, str]:
+        cfg = self._get_merged_config(user_id=user_id) or {}
+        api_cfg = cfg.get("api", {})
+        memory_api = cfg.get("memory", {}).get("api", {})
+        use_main = bool(memory_api.get("use_main_api", True))
+
+        if use_main:
+            return {
+                "api_key": api_cfg.get("api_key", ""),
+                "base_url": api_cfg.get("base_url", ""),
+                "model": api_cfg.get("model", ""),
+            }
+
+        return {
+            "api_key": memory_api.get("api_key") or api_cfg.get("api_key", ""),
+            "base_url": memory_api.get("base_url") or api_cfg.get("base_url", ""),
+            "model": memory_api.get("model") or api_cfg.get("model", ""),
+        }
+
+    async def _call_memory_classifier_llm(
+        self,
+        user_id: str,
+        prompt: str,
+        query: str,
+    ) -> Optional[str]:
+        api = self._resolve_memory_api_for_user(user_id)
+        model = api.get("model", "").strip()
+        api_key = api.get("api_key", "").strip()
+        base_url = api.get("base_url", "").strip()
+
+        if not model:
+            return None
+
+        if self.llm_client:
+            try:
+                response = await self.llm_client.call_llm(
+                    [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": query},
+                    ],
+                    user_config={
+                        "api": {
+                            "api_key": api_key,
+                            "base_url": base_url,
+                            "model": model,
+                        }
+                    },
+                    user_id=user_id,
+                )
+                return (response or {}).get("content", "") or ""
+            except Exception as e:
+                logger.debug("MemoryService: shared llm client memory classify failed: {}", e)
+
+        if not api_key or not base_url:
+            return None
+
+        try:
+            from openai import OpenAI
+
+            def _sync_call() -> str:
+                client = OpenAI(api_key=api_key, base_url=base_url)
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": query},
+                    ],
+                    temperature=0.2,
+                    max_tokens=500,
+                )
+                return (resp.choices[0].message.content or "").strip()
+
+            return await asyncio.to_thread(_sync_call)
+        except Exception as e:
+            logger.debug("MemoryService: dedicated memory classify client failed: {}", e)
+            return None
+
     async def _classify_interaction(
         self,
         user_input: str,
@@ -281,9 +371,6 @@ class MemoryService:
     ) -> Dict[str, Any]:
         if not self._should_run_memory_llm(user_input, assistant_output, user_id=user_id):
             return {"has_long_term_state": False, "candidates": []}
-
-        if not self.llm_client:
-            return self._heuristic_classify(user_input, assistant_output)
 
         prompt = (
             "You are a strict memory classifier. Input is one completed interaction "
@@ -296,7 +383,7 @@ class MemoryService:
             "Rules:\n"
             "- If no durable state, return has_long_term_state=false and empty candidates.\n"
             "- Keep each content concise and factual.\n"
-            "- semantic_keys must include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
+            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
             "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
             "- Do not include temporary tool/output details."
         )
@@ -305,14 +392,9 @@ class MemoryService:
             f"[ASSISTANT_OUTPUT]\n{assistant_output}\n"
         )
         try:
-            response = await self.llm_client.call_llm(
-                [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": query},
-                ],
-                user_config=self._get_user_config(user_id),
-            )
-            text = (response or {}).get("content", "") or ""
+            text = await self._call_memory_classifier_llm(user_id, prompt, query)
+            if not text:
+                return self._heuristic_classify(user_input, assistant_output)
             obj = self._extract_json(text)
             if not obj:
                 return {"has_long_term_state": False, "candidates": []}
@@ -402,7 +484,7 @@ class MemoryService:
                     ORDER BY m.created_at DESC
                     LIMIT 5
                     """,
-                    {"user_node_id": f"user_{user_id}", "keys": keys},
+                    {"user_node_id": user_node_id(user_id), "keys": keys},
                 )
                 for row in semantic_rows:
                     prev = self._normalize_content(str(row.get("content", "")))
@@ -458,6 +540,7 @@ class MemoryService:
                 memory_type = item["type"]
                 content = item["content"]
                 semantic_keys = item.get("semantic_keys", [])
+                write_key = self._make_write_key(user_id, memory_type, content)
                 if not self._should_write_candidate(user_id, memory_type, content):
                     continue
                 if not self._graph_memory_state_changed(
@@ -473,10 +556,16 @@ class MemoryService:
                     role="user",
                     content=content,
                     user_id=user_id,
+                    metadata={
+                        "memory_type": memory_type,
+                        "semantic_keys": semantic_keys,
+                        "memory_source": "interaction.completed",
+                    },
                 )
                 if not success:
                     continue
 
+                self._remember_write_key(write_key)
                 self.memory_adapter.on_message_saved(session_id, "user", user_id)
                 saved_count += 1
 
@@ -541,6 +630,7 @@ class MemoryService:
         role: str,
         content: str,
         user_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if not self.enabled or not self.memory_adapter:
             return False
@@ -550,6 +640,7 @@ class MemoryService:
                 role=role,
                 content=content,
                 user_id=user_id or "default_user",
+                metadata=metadata,
             )
             if success:
                 self.memory_adapter.on_message_saved(
@@ -562,7 +653,11 @@ class MemoryService:
 
     # ===== Memory maintenance API =====
 
-    async def cluster_entities(self, session_id: str) -> Dict[str, Any]:
+    async def cluster_entities(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
             return {"concepts_created": 0, "total_concepts": 0, "concepts": []}
 
@@ -572,15 +667,18 @@ class MemoryService:
             if not self.memory_adapter.hot_layer:
                 return {"concepts_created": 0, "total_concepts": 0, "concepts": []}
 
+            scoped_sid = scoped_session_id(session_id, user_id or "default_user")
             warm_layer = create_warm_layer_manager(self.memory_adapter.hot_layer.connector)
-            concepts_created = warm_layer.cluster_entities(session_id)
-            concepts = warm_layer.get_concepts(session_id)
+            concepts_created = warm_layer.cluster_entities(scoped_sid)
+            concepts = warm_layer.get_concepts(scoped_sid)
 
             if self.event_emitter:
                 await self.event_emitter.emit(
                     EventType.MEMORY_CLUSTERED,
                     {
                         "session_id": session_id,
+                        "memory_session_id": scoped_sid,
+                        "user_id": user_id,
                         "concepts_created": concepts_created,
                         "total_concepts": len(concepts),
                     },
@@ -598,6 +696,7 @@ class MemoryService:
     async def summarize_session(
         self,
         session_id: str,
+        user_id: Optional[str] = None,
         incremental: bool = False,
     ) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
@@ -609,17 +708,18 @@ class MemoryService:
             if not self.memory_adapter.hot_layer:
                 return {"status": "skipped", "message": "Hot layer not available"}
 
+            scoped_sid = scoped_session_id(session_id, user_id or "default_user")
             cold_layer = create_cold_layer_manager(self.memory_adapter.hot_layer.connector)
-            if not cold_layer.should_create_summary(session_id):
+            if not cold_layer.should_create_summary(scoped_sid):
                 return {
                     "status": "skipped",
                     "message": "Not enough messages or summary exists",
                 }
 
             if incremental:
-                summary_id = cold_layer.create_incremental_summary(session_id)
+                summary_id = cold_layer.create_incremental_summary(scoped_sid)
             else:
-                summary_id = cold_layer.summarize_session(session_id)
+                summary_id = cold_layer.summarize_session(scoped_sid)
 
             summary = cold_layer.get_summary_by_id(summary_id) if summary_id else None
 
@@ -628,6 +728,8 @@ class MemoryService:
                     EventType.MEMORY_SUMMARIZED,
                     {
                         "session_id": session_id,
+                        "memory_session_id": scoped_sid,
+                        "user_id": user_id,
                         "summary_id": summary_id,
                         "incremental": incremental,
                     },
@@ -635,6 +737,7 @@ class MemoryService:
 
             return {
                 "session_id": session_id,
+                "memory_session_id": scoped_sid,
                 "summary_id": summary_id,
                 "summary": summary,
             }
@@ -642,7 +745,11 @@ class MemoryService:
             logger.error("MemoryService: Error summarizing session: {}", e)
             return {"status": "error", "message": str(e)}
 
-    async def apply_decay(self, session_id: str) -> Dict[str, Any]:
+    async def apply_decay(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
             return {"status": "skipped", "message": "Memory system not enabled"}
 
@@ -652,15 +759,20 @@ class MemoryService:
             if not self.memory_adapter.hot_layer:
                 return {"status": "skipped", "message": "Hot layer not available"}
 
+            scoped_sid = scoped_session_id(session_id, user_id or "default_user")
             forgetting_manager = create_forgetting_manager(
                 self.memory_adapter.hot_layer.connector
             )
-            return forgetting_manager.apply_time_decay(session_id)
+            return forgetting_manager.apply_time_decay(scoped_sid)
         except Exception as e:
             logger.error("MemoryService: Error applying decay: {}", e)
             return {"status": "error", "message": str(e)}
 
-    async def cleanup_forgotten(self, session_id: str) -> Dict[str, Any]:
+    async def cleanup_forgotten(
+        self,
+        session_id: str,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
             return {"status": "skipped", "message": "Memory system not enabled"}
 
@@ -670,10 +782,11 @@ class MemoryService:
             if not self.memory_adapter.hot_layer:
                 return {"status": "skipped", "message": "Hot layer not available"}
 
+            scoped_sid = scoped_session_id(session_id, user_id or "default_user")
             forgetting_manager = create_forgetting_manager(
                 self.memory_adapter.hot_layer.connector
             )
-            return forgetting_manager.cleanup_forgotten(session_id)
+            return forgetting_manager.cleanup_forgotten(scoped_sid)
         except Exception as e:
             logger.error("MemoryService: Error cleaning up forgotten: {}", e)
             return {"status": "error", "message": str(e)}

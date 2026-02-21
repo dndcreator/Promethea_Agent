@@ -1,159 +1,60 @@
-# Core 模块
+﻿# Core 模块使用说明
 
-Core 模块提供核心插件系统和统一服务接口。
+`core` 提供插件注册与运行时服务发现能力。
 
-## 架构设计
+## 主要职责
 
-```
-┌─────────────────────────────────────┐
-│   Plugin Registry (插件注册表)        │
-│  - 插件发现和加载                     │
-│  - 服务注册和查找                     │
-└─────────────────────────────────────┘
-              │
-    ┌─────────┼─────────┐
-    ▼         ▼         ▼
-Plugin   Service   Runtime
-Loader   Registry  Registry
-```
+- 插件发现与加载
+- 运行时服务注册表
+- 统一服务获取接口
 
-## 核心组件
+## 目录
 
-### 1. Plugin System (`plugins/`)
-
-#### Plugin Discovery (`plugins/discovery.py`)
-- **职责**: 发现插件
-- **功能**:
-  - 扫描 `extensions/` 目录
-  - 读取插件清单文件
-
-#### Plugin Loader (`plugins/loader.py`)
-- **职责**: 加载插件
-- **功能**:
-  - 加载插件代码
-  - 执行插件注册函数
-
-#### Plugin Registry (`plugins/registry.py`)
-- **职责**: 插件注册表
-- **功能**:
-  - 注册和查找插件
-  - 服务注册和查找
-
-#### Plugin Runtime (`plugins/runtime.py`)
-- **职责**: 运行时注册表
-- **功能**:
-  - 管理活跃插件
-  - 提供运行时服务
-
-### 2. Services (`services.py`)
-
-- **职责**: 统一服务获取接口
-- **功能**:
-  - 通过插件注册表获取服务
-  - 避免直接 import，实现解耦
-  - 支持降级处理
-
-## 插件系统
-
-### 插件结构
-
-```
-extensions/
-└── my-plugin/
-    ├── promethea.plugin.json  # 插件清单
-    └── plugin.py              # 插件入口
+```text
+core/
+├─ plugins/
+│  ├─ discovery.py
+│  ├─ loader.py
+│  ├─ registry.py
+│  └─ runtime.py
+└─ services.py
 ```
 
-### 插件清单格式
+## 插件基本结构
 
-```json
-{
-  "id": "my-plugin",
-  "name": "My Plugin",
-  "version": "1.0.0",
-  "description": "Plugin description",
-  "entry": "plugin.py",
-  "services": ["memory", "tool"]
-}
+```text
+extensions/<plugin-id>/
+├─ promethea.plugin.json
+└─ plugin.py
 ```
 
-### 插件入口
+## 插件入口约定
 
-```python
-def register(api):
-    """插件注册函数"""
-    # 注册服务
-    api.register_service("memory", MyMemoryService())
-    
-    # 注册工具
-    api.register_tool("my_tool", my_tool_function)
-    
-    # 订阅事件
-    api.event_emitter.on(EventType.CHANNEL_MESSAGE, handler)
-```
+`plugin.py` 需要提供 `register(api)`：
 
-## 使用示例
+- 注册服务
+- 注册工具
+- 可订阅事件
 
-### 获取服务
+## 典型用法
+
+### 获取核心服务
 
 ```python
 from core.services import get_memory_service
 
 memory_service = get_memory_service()
-if memory_service:
-    # 使用记忆服务
-    memory_service.add_message(...)
 ```
 
-### 注册服务
+### 新增插件能力
 
-```python
-from core.plugins.registry import register_service
+1. 在 `extensions/` 下建插件目录
+2. 写 `promethea.plugin.json`
+3. 实现 `register(api)`
+4. 重启服务
 
-register_service("my_service", MyService())
-```
+## 设计建议
 
-### 查找服务
-
-```python
-from core.plugins.registry import find_service
-
-service = find_service("memory")
-```
-
-## 插件开发
-
-### 1. 创建插件目录
-
-```bash
-mkdir extensions/my-plugin
-```
-
-### 2. 创建插件清单
-
-```json
-{
-  "id": "my-plugin",
-  "name": "My Plugin",
-  "version": "1.0.0",
-  "entry": "plugin.py"
-}
-```
-
-### 3. 实现插件入口
-
-```python
-# plugin.py
-def register(api):
-    # 注册服务
-    api.register_service("my_service", MyService())
-    
-    # 注册工具
-    api.register_tool("my_tool", my_tool)
-```
-
-## 相关文档
-
-- [主 README](../README.md)
-- [Gateway 模块](../gateway/README.md)
-- [Extensions 目录](../extensions/)
+- 插件尽量无状态或状态可恢复
+- 服务注册要有唯一名称
+- 避免在插件里直接硬编码全局配置路径

@@ -1,11 +1,11 @@
 ﻿"""
-MemoryAdapter – adapts the simple MessageManager-style interface used by the
 conversation system to the richer multi-layer memory system (hot / warm / cold).
 """
 import logging
 import time
 from typing import Optional
 import threading
+from .session_scope import scoped_session_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +33,26 @@ class MemoryAdapter:
         self._session_cache = {}
         self._hot_layer_lock = threading.Lock()
         self._maintenance_lock = threading.Lock()
+        self._idle_timer_lock = threading.Lock()
+        self._idle_timers = {}
         self._maintenance_state = {}
         self._maintenance_defaults = {
             'cluster_every_messages': 12,
             'cluster_min_interval_s': 300,
+            'idle_cluster_delay_s': 120,
+            'idle_cluster_min_messages': 2,
+            'idle_cluster_min_interval_s': 60,
             'summary_min_interval_s': 600,
             'decay_interval_s': 24 * 3600,
         }
+        self._maintenance_persist_keys = (
+            'messages',
+            'messages_since_cluster',
+            'last_message_at',
+            'last_cluster_at',
+            'last_summary_at',
+            'last_decay_at',
+        )
         self._init_memory_system()
     
     def _init_memory_system(self):
@@ -48,6 +61,7 @@ class MemoryAdapter:
             from config import load_config
             config = load_config()
             self._config = config
+            self._load_maintenance_defaults_from_config(config)
             
             # Check if memory is enabled in config
             if not config.memory.enabled:
@@ -74,8 +88,35 @@ class MemoryAdapter:
         except Exception as e:
             logger.warning(f"Memory system initialisation failed: {e}")
             self.enabled = False
+
+    def _load_maintenance_defaults_from_config(self, config):
+        warm = getattr(config.memory, "warm_layer", None)
+        if warm is None:
+            return
+        self._maintenance_defaults['cluster_every_messages'] = max(
+            1, int(getattr(warm, 'cluster_every_messages', self._maintenance_defaults['cluster_every_messages']))
+        )
+        self._maintenance_defaults['cluster_min_interval_s'] = max(
+            0, int(getattr(warm, 'cluster_min_interval_s', self._maintenance_defaults['cluster_min_interval_s']))
+        )
+        self._maintenance_defaults['idle_cluster_delay_s'] = max(
+            10, int(getattr(warm, 'idle_cluster_delay_s', self._maintenance_defaults['idle_cluster_delay_s']))
+        )
+        self._maintenance_defaults['idle_cluster_min_messages'] = max(
+            1, int(getattr(warm, 'idle_cluster_min_messages', self._maintenance_defaults['idle_cluster_min_messages']))
+        )
+        self._maintenance_defaults['idle_cluster_min_interval_s'] = max(
+            0, int(getattr(warm, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
+        )
     
-    def add_message(self, session_id: str, role: str, content: str, user_id: str = "default_user") -> bool:
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        user_id: str = "default_user",
+        metadata: Optional[dict] = None,
+    ) -> bool:
         """
         Add a message into the memory system.
         
@@ -92,19 +133,25 @@ class MemoryAdapter:
             return False
         
         try:
+            scoped_sid = scoped_session_id(session_id, user_id)
             with self._hot_layer_lock:
                 # Update stateful hot-layer with current session/user
-                self.hot_layer.session_id = session_id
+                self.hot_layer.session_id = scoped_sid
                 self.hot_layer.user_id = user_id
                 
                 # Build lightweight context from cache
-                context = self._get_context(session_id)
+                context = self._get_context(scoped_sid)
                 
                 # Call into memory system
-                stats = self.hot_layer.process_message(role, content, context)
+                stats = self.hot_layer.process_message(
+                    role,
+                    content,
+                    context,
+                    metadata=metadata,
+                )
                 
                 # Update cache
-                self._update_cache(session_id, role, content)
+                self._update_cache(scoped_sid, role, content)
                 
                 logger.debug(f"Memory stored with stats: {stats}")
             return True
@@ -149,7 +196,8 @@ class MemoryAdapter:
             return ""
         
         try:
-            return self.recall_engine.recall(query, session_id, user_id)
+            scoped_sid = scoped_session_id(session_id, user_id)
+            return self.recall_engine.recall(query, scoped_sid, user_id)
         except Exception as e:
             logger.error(f"Failed to get memory context: {e}")
             return ""
@@ -186,47 +234,189 @@ class MemoryAdapter:
                 state = {
                     'messages': 0,
                     'messages_since_cluster': 0,
+                    'last_message_at': 0.0,
                     'last_cluster_at': 0.0,
                     'last_summary_at': 0.0,
                     'last_decay_at': 0.0,
                     'cluster_running': False,
                     'summary_running': False,
                     'decay_running': False,
+                    'maintenance_queued': False,
                 }
+                persisted = self._load_maintenance_state(session_id)
+                if persisted:
+                    for key in self._maintenance_persist_keys:
+                        if key in persisted:
+                            state[key] = persisted[key]
                 self._maintenance_state[session_id] = state
             return state
+
+    def _load_maintenance_state(self, session_id: str) -> dict:
+        """
+        Load persisted maintenance state from Session node.
+        This allows process restarts without losing maintenance continuity.
+        """
+        if not self.hot_layer:
+            return {}
+        try:
+            rows = self.hot_layer.connector.query(
+                """
+                MATCH (s:Session {id: $session_id})
+                RETURN
+                    coalesce(s.maint_messages, 0) AS messages,
+                    coalesce(s.maint_messages_since_cluster, 0) AS messages_since_cluster,
+                    coalesce(s.maint_last_message_at, 0.0) AS last_message_at,
+                    coalesce(s.maint_last_cluster_at, 0.0) AS last_cluster_at,
+                    coalesce(s.maint_last_summary_at, 0.0) AS last_summary_at,
+                    coalesce(s.maint_last_decay_at, 0.0) AS last_decay_at
+                LIMIT 1
+                """,
+                {"session_id": f"session_{session_id}"},
+            )
+            if not rows:
+                return {}
+            row = rows[0]
+            return {
+                "messages": int(row.get("messages", 0) or 0),
+                "messages_since_cluster": int(row.get("messages_since_cluster", 0) or 0),
+                "last_message_at": float(row.get("last_message_at", 0.0) or 0.0),
+                "last_cluster_at": float(row.get("last_cluster_at", 0.0) or 0.0),
+                "last_summary_at": float(row.get("last_summary_at", 0.0) or 0.0),
+                "last_decay_at": float(row.get("last_decay_at", 0.0) or 0.0),
+            }
+        except Exception as e:
+            logger.debug(f"Load persisted maintenance state failed: {e}")
+            return {}
+
+    def _persist_maintenance_state(self, session_id: str, state: dict):
+        if not self.hot_layer:
+            return
+        try:
+            self.hot_layer.connector.query(
+                """
+                MATCH (s:Session {id: $session_id})
+                SET
+                    s.maint_messages = $messages,
+                    s.maint_messages_since_cluster = $messages_since_cluster,
+                    s.maint_last_message_at = $last_message_at,
+                    s.maint_last_cluster_at = $last_cluster_at,
+                    s.maint_last_summary_at = $last_summary_at,
+                    s.maint_last_decay_at = $last_decay_at
+                """,
+                {
+                    "session_id": f"session_{session_id}",
+                    "messages": int(state.get("messages", 0)),
+                    "messages_since_cluster": int(state.get("messages_since_cluster", 0)),
+                    "last_message_at": float(state.get("last_message_at", 0.0)),
+                    "last_cluster_at": float(state.get("last_cluster_at", 0.0)),
+                    "last_summary_at": float(state.get("last_summary_at", 0.0)),
+                    "last_decay_at": float(state.get("last_decay_at", 0.0)),
+                },
+            )
+        except Exception as e:
+            logger.debug(f"Persist maintenance state failed: {e}")
 
     def on_message_saved(self, session_id: str, role: str, user_id: str = 'default_user'):
         if not self.enabled or not self.hot_layer:
             return
 
         try:
+            scoped_sid = scoped_session_id(session_id, user_id)
             self._ensure_managers()
-            state = self._get_maintenance_state(session_id)
+            state = self._get_maintenance_state(scoped_sid)
             state['messages'] += 1
             state['messages_since_cluster'] += 1
-            now = time.time()
+            state['last_message_at'] = time.time()
+            self._persist_maintenance_state(scoped_sid, state)
+            self._schedule_maintenance(scoped_sid, state)
+            if self._config and getattr(self._config.memory.warm_layer, 'enabled', False):
+                self._schedule_idle_cluster_check(scoped_sid)
+        except Exception as e:
+            logger.debug(f"Memory maintenance skipped: {e}")
 
+    def _schedule_maintenance(self, session_id: str, state: dict):
+        with self._maintenance_lock:
+            if state.get('maintenance_queued'):
+                return
+            state['maintenance_queued'] = True
+
+        worker = threading.Thread(
+            target=self._run_maintenance_worker,
+            args=(session_id,),
+            daemon=True,
+        )
+        worker.start()
+
+    def _schedule_idle_cluster_check(self, session_id: str):
+        delay_s = self._maintenance_defaults['idle_cluster_delay_s']
+
+        with self._idle_timer_lock:
+            prev = self._idle_timers.get(session_id)
+            if prev:
+                prev.cancel()
+
+            timer = threading.Timer(delay_s, self._run_idle_cluster_check, args=(session_id,))
+            timer.daemon = True
+            self._idle_timers[session_id] = timer
+            timer.start()
+
+    def _run_idle_cluster_check(self, session_id: str):
+        try:
+            self._ensure_managers()
+            state = self._get_maintenance_state(session_id)
+            now = time.time()
+            last_message_at = float(state.get('last_message_at', 0.0))
+            delay_s = self._maintenance_defaults['idle_cluster_delay_s']
+            if now - last_message_at < delay_s:
+                return
+            self._maybe_cluster(session_id, state, now, force_on_idle=True)
+        except Exception as e:
+            logger.debug(f"Idle warm-layer check skipped: {e}")
+        finally:
+            with self._idle_timer_lock:
+                current = self._idle_timers.get(session_id)
+                if current and not current.is_alive():
+                    self._idle_timers.pop(session_id, None)
+
+    def _run_maintenance_worker(self, session_id: str):
+        try:
+            state = self._get_maintenance_state(session_id)
+            now = time.time()
             self._maybe_cluster(session_id, state, now)
             self._maybe_summarize(session_id, state, now)
             self._maybe_decay(session_id, state, now)
         except Exception as e:
-            logger.debug(f"Memory maintenance skipped: {e}")
+            logger.debug(f"Memory maintenance worker skipped: {e}")
+        finally:
+            with self._maintenance_lock:
+                state = self._maintenance_state.get(session_id)
+                if state:
+                    state['maintenance_queued'] = False
 
-    def _maybe_cluster(self, session_id: str, state: dict, now: float):
+    def _maybe_cluster(self, session_id: str, state: dict, now: float, force_on_idle: bool = False):
         if not self._warm_layer or not self._config:
             return
         if not getattr(self._config.memory.warm_layer, 'enabled', False):
             return
 
         min_cluster = getattr(self._config.memory.warm_layer, 'min_cluster_size', 3)
-        cluster_every = max(self._maintenance_defaults['cluster_every_messages'], min_cluster * 4)
-        min_interval = self._maintenance_defaults['cluster_min_interval_s']
-
-        if state['messages_since_cluster'] < cluster_every:
-            return
-        if now - state['last_cluster_at'] < min_interval:
-            return
+        if force_on_idle:
+            min_messages = max(
+                min_cluster,
+                self._maintenance_defaults['idle_cluster_min_messages'],
+            )
+            min_interval = self._maintenance_defaults['idle_cluster_min_interval_s']
+            if state['messages_since_cluster'] < min_messages:
+                return
+            if now - state['last_cluster_at'] < min_interval:
+                return
+        else:
+            cluster_every = max(self._maintenance_defaults['cluster_every_messages'], min_cluster * 4)
+            min_interval = self._maintenance_defaults['cluster_min_interval_s']
+            if state['messages_since_cluster'] < cluster_every:
+                return
+            if now - state['last_cluster_at'] < min_interval:
+                return
 
         with self._maintenance_lock:
             if state['cluster_running']:
@@ -239,6 +429,7 @@ class MemoryAdapter:
                 logger.info(f"Warm layer clustered: session={session_id}, concepts={created}")
             state['messages_since_cluster'] = 0
             state['last_cluster_at'] = now
+            self._persist_maintenance_state(session_id, state)
         finally:
             with self._maintenance_lock:
                 state['cluster_running'] = False
@@ -262,6 +453,7 @@ class MemoryAdapter:
                 if summary_id:
                     logger.info(f"Cold layer summary created: session={session_id}, summary={summary_id}")
                 state['last_summary_at'] = now
+                self._persist_maintenance_state(session_id, state)
         finally:
             with self._maintenance_lock:
                 state['summary_running'] = False
@@ -283,6 +475,7 @@ class MemoryAdapter:
             self._forgetting.apply_time_decay(session_id)
             self._forgetting.cleanup_forgotten(session_id)
             state['last_decay_at'] = now
+            self._persist_maintenance_state(session_id, state)
         finally:
             with self._maintenance_lock:
                 state['decay_running'] = False

@@ -1,7 +1,7 @@
 {
   "name": "promethea",
   "version": "1.0.0",
-  "description": "Promethea AI Agent - 智能对话助手",
+  "description": "Promethea AI Agent - intelligent conversation assistant",
   "scripts": {
     "tauri": "tauri",
     "dev": "tauri dev",
@@ -14,4 +14,3 @@
     "@tauri-apps/cli": "^1.5.0"
   }
 }
-

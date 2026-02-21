@@ -1,4 +1,4 @@
-"""记忆遗忘机制"""
+﻿"""Memory forgetting/decay controller."""
 
 import math
 import logging
@@ -10,61 +10,85 @@ logger = logging.getLogger(__name__)
 
 
 class ForgettingManager:
-    """记忆遗忘管理器"""
+    """Manager for memory forgetting and decay."""
     
     def __init__(self, connector: Neo4jConnector):
         self.connector = connector
         
-        # 遗忘曲线参数（天数 -> 衰减比例）
+        # Time-decay curve parameters: days -> decay factor.
         self.decay_curve = {
-            1: 1.0,      # 1天内：100%
-            7: 0.9,      # 1周：90%
-            30: 0.7,     # 1个月：70%
-            90: 0.5,     # 3个月：50%
-            365: 0.3,    # 1年：30%
-            float('inf'): 0.2  # 1年后：20%（最低）
+            1: 1.0,      # within 1 day: 100%
+            7: 0.9,      # within 1 week: 90%
+            30: 0.7,     # within 1 month: 70%
+            90: 0.5,     # within 3 months: 50%
+            365: 0.3,    # within 1 year: 30%
+            float("inf"): 0.2,  # after 1 year: 20% (minimum)
         }
         
-        # 访问强化参数
-        self.access_boost = 0.05  # 每次访问增加5%
+        # Access-boost parameters.
+        self.access_boost = 0.05  # each 10 accesses adds 5%
         self.max_importance = 1.0
         
-        # 清理阈值
-        self.min_importance = 0.15  # 低于15%视为遗忘
-        self.cleanup_batch = 100     # 每次清理100个节点
+        # Cleanup thresholds.
+        self.min_importance = 0.15  # below 15% is considered forgotten
+        self.cleanup_batch = 100    # delete at most 100 nodes per run
     
     def calculate_decay_factor(self, days_passed: float) -> float:
         """
-        计算时间衰减因子
-        
+        Calculate time-decay factor.
+
         Args:
-            days_passed: 经过的天数
-            
+            days_passed: Number of days passed.
+
         Returns:
-            衰减因子（0.2-1.0）
+            Decay factor in range [0.2, 1.0].
         """
         for threshold, factor in sorted(self.decay_curve.items()):
             if days_passed <= threshold:
                 return factor
         return 0.2
+
+    def _to_python_datetime(self, value):
+        """Best-effort conversion for Neo4j temporal values."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value)
+            except Exception:
+                return None
+        if hasattr(value, "to_native"):
+            try:
+                native = value.to_native()
+                if isinstance(native, datetime):
+                    return native
+            except Exception:
+                return None
+        return None
     
     def apply_time_decay(self, session_id: str = None) -> Dict:
         """
-        应用时间衰减到所有节点
-        
+        Apply time-based decay to all eligible nodes.
+
         Args:
-            session_id: 可选，只处理特定会话
-            
+            session_id: Optional; if provided, only process nodes of that session.
+
         Returns:
-            统计信息
+            Statistics about the update.
         """
         try:
-            # 构建查询
             if session_id:
                 query = """
-                MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
-                WHERE n.layer IN [0, 1]  // 只衰减热层和温层
+                MATCH (s:Session {id: $session_id})
+                MATCH (n)
+                WHERE n.layer IN [0, 1]  // only base-layer and warm-layer
                 AND n.created_at IS NOT NULL
+                AND (
+                    EXISTS { MATCH (n)-[:PART_OF_SESSION]->(s) }
+                    OR EXISTS { MATCH (n)-[:FROM_MESSAGE]->(:Message)-[:PART_OF_SESSION]->(s) }
+                )
                 RETURN n.id as id, n.created_at as created_at, 
                        n.importance as importance, n.access_count as access_count
                 """
@@ -85,30 +109,26 @@ class ForgettingManager:
             updated_count = 0
             
             for node in nodes:
-                created_at = node['created_at']
-                if isinstance(created_at, str):
-                    created_at = datetime.fromisoformat(created_at)
+                created_at = self._to_python_datetime(node['created_at'])
+                if created_at is None:
+                    continue
                 
-                # 计算天数差
                 days_passed = (now - created_at).total_seconds() / 86400
                 
-                # 计算时间衰减
                 decay_factor = self.calculate_decay_factor(days_passed)
                 
-                # 计算访问强化（每10次访问+5%，上限20%）
+                # Compute access boost (each 10 accesses adds 5%, capped at 20%).
                 access_count = node.get('access_count', 0)
                 access_boost = min(0.2, (access_count // 10) * self.access_boost)
                 
-                # 原始重要性
                 original_importance = node.get('importance', 0.5)
                 
-                # 新重要性 = 原始值 * 时间衰减 + 访问强化
+                # new_importance = original * time_decay + access_boost
                 new_importance = min(
                     self.max_importance,
                     original_importance * decay_factor + access_boost
                 )
                 
-                # 更新节点
                 update_query = """
                 MATCH (n {id: $id})
                 SET n.importance = $importance
@@ -120,7 +140,7 @@ class ForgettingManager:
                 
                 updated_count += 1
             
-            logger.info(f"时间衰减完成：更新了 {updated_count} 个节点")
+            logger.info(f"Time-decay update complete: {updated_count} nodes")
             
             return {
                 'updated_count': updated_count,
@@ -128,7 +148,7 @@ class ForgettingManager:
             }
             
         except Exception as e:
-            logger.error(f"时间衰减失败: {e}")
+            logger.error(f"Time-decay update failed: {e}")
             return {
                 'updated_count': 0,
                 'status': 'error',
@@ -137,22 +157,26 @@ class ForgettingManager:
     
     def cleanup_forgotten(self, session_id: str = None) -> Dict:
         """
-        清理遗忘的节点（importance < min_importance）
-        
+        Clean up nodes that are considered forgotten (importance < min_importance).
+
         Args:
-            session_id: 可选，只清理特定会话
-            
+            session_id: Optional; if provided, clean only that session.
+
         Returns:
-            统计信息
+            Statistics about deleted nodes.
         """
         try:
-            # 查找低importance节点
             if session_id:
                 query = """
-                MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
-                WHERE n.layer = 0  // 只清理热层
-                AND NOT n:Message  // 保留原始消息（使用标签过滤）
+                MATCH (s:Session {id: $session_id})
+                MATCH (n)
+                WHERE n.layer = 0  // only base-layer
+                AND NOT n:Message  // keep original messages (filter by labels)
                 AND n.importance < $min_importance
+                AND (
+                    EXISTS { MATCH (n)-[:PART_OF_SESSION]->(s) }
+                    OR EXISTS { MATCH (n)-[:FROM_MESSAGE]->(:Message)-[:PART_OF_SESSION]->(s) }
+                )
                 RETURN n.id as id
                 LIMIT $limit
                 """
@@ -179,7 +203,7 @@ class ForgettingManager:
             
             deleted_count = 0
             for node in nodes_to_delete:
-                # 删除节点及其关系
+                # Delete node and all its relations.
                 delete_query = """
                 MATCH (n {id: $id})
                 DETACH DELETE n
@@ -187,7 +211,7 @@ class ForgettingManager:
                 self.connector.query(delete_query, {'id': node['id']})
                 deleted_count += 1
             
-            logger.info(f"清理遗忘节点：删除了 {deleted_count} 个节点")
+            logger.info(f"Forgotten-node cleanup complete: {deleted_count} nodes")
             
             return {
                 'deleted_count': deleted_count,
@@ -195,7 +219,7 @@ class ForgettingManager:
             }
             
         except Exception as e:
-            logger.error(f"清理遗忘节点失败: {e}")
+            logger.error(f"Forgotten-node cleanup failed: {e}")
             return {
                 'deleted_count': 0,
                 'status': 'error',
@@ -204,19 +228,24 @@ class ForgettingManager:
     
     def get_forgetting_stats(self, session_id: str = None) -> Dict:
         """
-        获取遗忘统计信息
-        
+        Get statistics for forgetting/decay.
+
         Args:
-            session_id: 可选，只统计特定会话
-            
+            session_id: Optional; if provided, compute stats for that session only.
+
         Returns:
-            统计信息
+            Statistics dictionary.
         """
         try:
             if session_id:
                 query = """
-                MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
+                MATCH (s:Session {id: $session_id})
+                MATCH (n)
                 WHERE n.layer IN [0, 1]
+                AND (
+                    EXISTS { MATCH (n)-[:PART_OF_SESSION]->(s) }
+                    OR EXISTS { MATCH (n)-[:FROM_MESSAGE]->(:Message)-[:PART_OF_SESSION]->(s) }
+                )
                 RETURN 
                     count(n) as total_nodes,
                     avg(n.importance) as avg_importance,
@@ -248,14 +277,14 @@ class ForgettingManager:
                     'status': 'success'
                 }
             
-            return {'status': 'no_data'}
+            return {"status": "no_data"}
             
         except Exception as e:
-            logger.error(f"获取遗忘统计失败: {e}")
-            return {'status': 'error', 'error': str(e)}
+            logger.error(f"Get forgetting stats failed: {e}")
+            return {"status": "error", "error": str(e)}
 
 
 def create_forgetting_manager(connector: Neo4jConnector) -> ForgettingManager:
-    """工厂函数"""
+    """Factory function to create a ForgettingManager."""
     return ForgettingManager(connector)
 

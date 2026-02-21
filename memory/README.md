@@ -1,193 +1,83 @@
-# Memory 模块
+﻿# Memory 模块使用说明
 
-记忆系统是 Promethea Agent 的核心能力之一，基于 Neo4j 实现**三层记忆架构**。
+`memory` 是基于 Neo4j 的图记忆系统，支持多层记忆与长期维护。
 
-## 架构设计
+## 目标
 
-```
-┌─────────────────────────────────────────┐
-│          MemoryAdapter (适配器)          │
-│  统一接口，适配对话系统和记忆系统          │
-└─────────────────────────────────────────┘
-              │
-    ┌─────────┼─────────┬──────────────┐
-    ▼         ▼         ▼              ▼
-Hot Layer  Warm Layer  Cold Layer   Forgetting
-(热层)      (温层)      (冷层)        (遗忘层)
-```
+- 记录用户长期有价值信息
+- 在对话中按需召回
+- 控制记忆成本（去重、聚类、摘要、遗忘）
 
-## 三层记忆系统
+## 架构
 
-### 1. Hot Layer (热层) - `hot_layer.py`
-
-- **职责**: 实时提取结构化信息
-- **功能**:
-  - 从消息中提取实体（Entity）
-  - 提取事实元组（Fact Tuple）：`(主体, 关系, 客体, 时间, 置信度)`
-  - 实时存储到 Neo4j
-- **特点**: 
-  - 低延迟，实时处理
-  - 结构化存储，便于查询
-
-### 2. Warm Layer (温层) - `warm_layer.py`
-
-- **职责**: 异步语义聚类
-- **功能**:
-  - 将热层的实体聚类成概念（Concept）
-  - 使用 Embedding 模型计算相似度
-  - 自动发现实体间的关联
-- **特点**:
-  - 异步处理，不阻塞对话
-  - 可配置聚类阈值和最小聚类大小
-
-### 3. Cold Layer (冷层) - `cold_layer.py`
-
-- **职责**: 长期记忆压缩和摘要
-- **功能**:
-  - 当消息数量达到阈值时，生成会话摘要
-  - 压缩历史消息，保留关键信息
-  - 支持增量摘要和全量摘要
-- **特点**:
-  - 节省存储空间
-  - 保留长期记忆的关键信息
-
-### 4. Forgetting Layer (遗忘层) - `forgetting.py`
-
-- **职责**: 记忆衰减和清理
-- **功能**:
-  - 基于时间的记忆衰减
-  - 清理已遗忘的记忆节点
-  - 保持记忆系统的健康
-
-## 核心组件
-
-### MemoryAdapter (`adapter.py`)
-
-- **职责**: 适配器，统一记忆系统接口
-- **功能**:
-  - 适配 `MessageManager` 的简单接口到复杂的三层记忆系统
-  - 自动触发温层聚类、冷层摘要、遗忘层清理
-  - 提供记忆召回接口
-
-### Neo4jConnector (`neo4j_connector.py`)
-
-- **职责**: Neo4j 数据库连接管理
-- **功能**:
-  - 连接池管理
-  - 查询封装
-  - 事务处理
-
-### LLMExtractor (`llm_extractor.py`)
-
-- **职责**: 使用 LLM 提取结构化信息
-- **功能**:
-  - 从消息中提取实体和关系
-  - 支持指代消解
-  - 时间规范化
-
-### AutoRecall (`auto_recall.py`)
-
-- **职责**: 自动记忆召回
-- **功能**:
-  - 根据查询自动召回相关记忆
-  - 构建上下文供 LLM 使用
-
-## 使用示例
-
-### 初始化记忆系统
-
-```python
-from memory.adapter import MemoryAdapter
-
-adapter = MemoryAdapter()
-if adapter.is_enabled():
-    print("记忆系统已启用")
+```text
+MemoryAdapter
+├─ Hot Layer      # 实时抽取与入图
+├─ Warm Layer     # 概念聚类
+├─ Cold Layer     # 摘要压缩
+└─ Forgetting     # 时间衰减与清理
 ```
 
-### 保存消息到记忆
+## 关键文件
 
-```python
-adapter.add_message(
-    session_id="session_123",
-    role="user",
-    content="我叫张三，喜欢编程",
-    user_id="user_123"
-)
-```
+- `adapter.py`：对外统一入口
+- `hot_layer.py`：消息抽取与图写入
+- `warm_layer.py`：概念聚类
+- `cold_layer.py`：会话摘要
+- `forgetting.py`：衰减与清理
+- `auto_recall.py`：召回
+- `neo4j_connector.py`：图数据库访问
+- `session_scope.py`：用户作用域会话工具
 
-### 查询记忆
+## 用户隔离设计（重点）
 
-```python
-context = adapter.get_context(
-    query="用户喜欢什么？",
-    session_id="session_123",
-    user_id="user_123"
-)
-```
+- 记忆会话 ID 使用 `user_id::session_id` 逻辑作用域。
+- Session 节点与 User 节点存在 `OWNED_BY` 关系。
+- 查询时必须校验“该 session 是否属于当前 user”。
+- 同名 session 在不同用户下不会共享记忆。
 
-### 手动触发聚类
+## 写入流程
 
-```python
-from memory import create_warm_layer_manager
+1. 监听一轮完整交互（用户输入 + 助手输出）
+2. 记忆分类器判断是否值得写入
+3. 去重（内容级 + 图级语义检测）
+4. 写入 Hot Layer
+5. 异步触发 warm/cold/forgetting 维护
 
-warm_layer = create_warm_layer_manager(adapter.hot_layer.connector)
-concepts = warm_layer.cluster_entities("session_123")
-```
+## 召回流程
 
-## 配置
+1. 对当前 query 做轻量判断（是否值得召回）
+2. 必要时使用模型判定 recall
+3. 在当前用户作用域内检索图数据
+4. 组装上下文拼接到 system prompt
 
-记忆系统配置在 `config/default.json` 中：
+## 配置项（常用）
 
-```json
-{
-  "memory": {
-    "enabled": true,
-    "neo4j": {
-      "uri": "bolt://localhost:7687",
-      "username": "neo4j",
-      "password": "password"
-    },
-    "hot_layer": {
-      "max_tuples_per_message": 10,
-      "min_confidence": 0.5
-    },
-    "warm_layer": {
-      "enabled": true,
-      "clustering_threshold": 0.7
-    },
-    "cold_layer": {
-      "compression_threshold": 50
-    }
-  }
-}
-```
+- `memory.enabled`
+- `memory.neo4j.*`
+- `memory.api.use_main_api`
+- `memory.api.api_key/base_url/model`（可选独立记忆模型）
+- `memory.warm_layer.*`
+- `memory.cold_layer.*`
+- `memory.gating.*`
 
-## 数据模型
+## 本地连通检查
 
-### Neo4j 节点类型
+1. Neo4j Desktop 数据库已启动
+2. `.env` 中 `MEMORY__NEO4J__*` 正确
+3. 应用日志无连接异常
+4. 触发一轮对话后，图中出现 `session_*`、`message_*` 节点
 
-- `Message` - 消息节点
-- `Entity` - 实体节点
-- `Concept` - 概念节点（温层聚类结果）
-- `Summary` - 摘要节点（冷层生成）
-- `Session` - 会话节点
+## 常见问题
 
-### 关系类型
+### 1) 写入了但召回不到
 
-- `PART_OF_SESSION` - 属于会话
-- `HAS_ENTITY` - 包含实体
-- `RELATED_TO` - 相关关系
-- `CLUSTERED_INTO` - 聚类到概念
+先查 recall gating 阈值是否过严，再看 query 是否被判定为无需召回。
 
-## 性能优化
+### 2) warm/cold 层不触发
 
-1. **异步处理**: 温层聚类、冷层摘要都是异步执行
-2. **连接池**: Neo4j 连接使用连接池，避免频繁创建连接
-3. **缓存**: 会话级别的消息缓存，减少数据库查询
-4. **批量操作**: 支持批量插入和查询
+通常是消息量未达到阈值，或维护任务间隔尚未到达。
 
-## 相关文档
+### 3) 想单独给记忆配置模型
 
-- [主 README](../README.md)
-- [架构文档](../docs/ARCHITECTURE.md)
-- [Gateway MemoryService](../gateway/README.md#memoryservice)
+将 `memory.api.use_main_api=false`，并填写 `memory.api` 三项。

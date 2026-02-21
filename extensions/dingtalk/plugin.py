@@ -1,4 +1,4 @@
-from channels.dingtalk_channel import DingTalkChannel
+﻿from channels.dingtalk_channel import DingTalkChannel
 from channels.base import ChannelConfig
 
 

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Gateway protocol definition - WebSocket communication protocol.
 
 Loosely inspired by the Clawdbot Gateway Protocol design.
@@ -42,6 +42,9 @@ class RequestType(str, Enum):
     
     # Follow-up system
     FOLLOWUP = "followup"            # Bubble follow-up query
+    CHAT = "chat"                    # Chat turn
+    CHAT_CONFIRM = "chat.confirm"    # Confirm sensitive tool execution
+    BATCH = "batch"                  # Batch gateway request
     
     # Tool system
     TOOLS_LIST = "tools.list"        # Tool list
@@ -93,6 +96,9 @@ class EventType(str, Enum):
     # Configuration lifecycle events
     CONFIG_CHANGED = "config.changed"              # Configuration changed (per-user)
     CONFIG_RELOADED = "config.reloaded"            # Configuration reloaded (system-wide)
+    REQUEST_RECEIVED = "request.received"
+    REQUEST_COMPLETED = "request.completed"
+    REQUEST_FAILED = "request.failed"
     
 
 class DeviceRole(str, Enum):
@@ -125,7 +131,7 @@ class DeviceIdentity(BaseModel):
 class ConnectParams(BaseModel):
     """Connection parameters for the initial handshake."""
     identity: DeviceIdentity
-    token: Optional[str] = None  # 认证令牌
+    token: Optional[str] = None  # Optional authentication token
     protocol_version: str = "1.0"
     client_version: Optional[str] = None
     
@@ -195,6 +201,18 @@ class FollowupParams(BaseModel):
     query_type: str = "why"  # why, risk, alternative, custom
     custom_query: Optional[str] = None
     session_id: str = "default"
+
+
+class ChatParams(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    stream: bool = False
+
+
+class ChatConfirmParams(BaseModel):
+    session_id: str
+    tool_call_id: str
+    action: str
 
 
 class SessionParams(BaseModel):

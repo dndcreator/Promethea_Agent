@@ -1,6 +1,4 @@
-"""
-企业微信通道 - 支持企业微信应用和群机器人
-参考: https://developer.work.weixin.qq.com/document/
+﻿"""
 """
 import time
 from typing import Dict, Any, Optional
@@ -13,33 +11,28 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class WeComChannel(BaseChannel):
-    """企业微信通道实现"""
+    """TODO: add docstring."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("wecom", ChannelType.WECOM, config)
         
-        # 企业微信配置
-        self.corpid = config.extra.get("corpid")  # 企业ID
-        self.corpsecret = config.app_secret  # 应用Secret
-        self.agentid = config.extra.get("agentid")  # 应用AgentID
-        self.webhook_url = config.webhook_url  # 群机器人webhook
+        self.corpid = config.extra.get("corpid")
+        self.corpsecret = config.app_secret
+        self.agentid = config.extra.get("agentid")
+        self.webhook_url = config.webhook_url
         
-        # API端点
         self.api_base = config.api_endpoint or "https://qyapi.weixin.qq.com/cgi-bin"
         
-        # 访问令牌
         self.access_token = None
         self.token_expires_at = 0
         
-        # HTTP会话
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def connect(self) -> bool:
-        """连接企业微信"""
+        """TODO: add docstring."""
         try:
             self.session = aiohttp.ClientSession()
             
-            # 如果配置了corpid，获取access_token
             if self.corpid and self.corpsecret:
                 await self._refresh_access_token()
             
@@ -52,7 +45,7 @@ class WeComChannel(BaseChannel):
             return False
     
     async def disconnect(self) -> bool:
-        """断开连接"""
+        """TODO: add docstring."""
         if self.session:
             await self.session.close()
             self.session = None
@@ -62,7 +55,7 @@ class WeComChannel(BaseChannel):
         return True
     
     async def _refresh_access_token(self):
-        """刷新访问令牌"""
+        """TODO: add docstring."""
         url = f"{self.api_base}/gettoken"
         params = {
             "corpid": self.corpid,
@@ -79,7 +72,7 @@ class WeComChannel(BaseChannel):
                 raise Exception(f"Failed to get access token: {data}")
     
     async def _ensure_token(self):
-        """确保令牌有效"""
+        """TODO: add docstring."""
         if not self.access_token or time.time() >= self.token_expires_at:
             await self._refresh_access_token()
     
@@ -90,13 +83,11 @@ class WeComChannel(BaseChannel):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """发送消息"""
+        """TODO: add docstring."""
         try:
-            # 通过webhook发送（群机器人）
             if self.webhook_url and kwargs.get("use_webhook", True):
                 return await self._send_webhook_message(content, message_type, **kwargs)
             
-            # 通过API发送（应用消息）
             else:
                 await self._ensure_token()
                 return await self._send_api_message(receiver_id, content, message_type, **kwargs)
@@ -111,11 +102,9 @@ class WeComChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """通过Webhook发送消息（群机器人）"""
         if not self.webhook_url:
             return {"success": False, "error": "Webhook URL not configured"}
         
-        # 构造消息体
         if message_type == MessageType.TEXT:
             payload = {
                 "msgtype": "text",
@@ -124,7 +113,6 @@ class WeComChannel(BaseChannel):
                 }
             }
             
-            # @ 特定用户
             mentioned_list = kwargs.get("mentioned_list", [])
             mentioned_mobile_list = kwargs.get("mentioned_mobile_list", [])
             if mentioned_list or mentioned_mobile_list:
@@ -160,11 +148,10 @@ class WeComChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """通过API发送消息（应用消息）"""
+        """TODO: add docstring."""
         url = f"{self.api_base}/message/send"
         params = {"access_token": self.access_token}
         
-        # 构造消息
         if message_type == MessageType.TEXT:
             msg_data = {
                 "content": content
@@ -181,10 +168,6 @@ class WeComChannel(BaseChannel):
             }
             msgtype = "text"
         
-        # 确定接收者类型
-        touser = kwargs.get("touser", receiver_id)  # 成员ID列表
-        toparty = kwargs.get("toparty", "")  # 部门ID列表
-        totag = kwargs.get("totag", "")  # 标签ID列表
         
         payload = {
             "touser": touser,
@@ -210,14 +193,12 @@ class WeComChannel(BaseChannel):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """发送交互卡片（模板消息）"""
         try:
             await self._ensure_token()
             
             url = f"{self.api_base}/message/send"
             params = {"access_token": self.access_token}
             
-            # 企业微信使用textcard或template_card
             payload = {
                 "touser": kwargs.get("touser", receiver_id),
                 "toparty": kwargs.get("toparty", ""),
@@ -225,10 +206,10 @@ class WeComChannel(BaseChannel):
                 "msgtype": "textcard",
                 "agentid": self.agentid,
                 "textcard": {
-                    "title": card_data.get("title", "消息"),
+                    "title": card_data.get("title", "Message"),
                     "description": card_data.get("description", ""),
                     "url": card_data.get("url", ""),
-                    "btntxt": card_data.get("btntxt", "详情")
+                    "btntxt": card_data.get("btntxt", "Details")
                 }
             }
             
@@ -246,7 +227,7 @@ class WeComChannel(BaseChannel):
             return {"success": False, "error": str(e)}
     
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """获取用户信息"""
+        """TODO: add docstring."""
         try:
             await self._ensure_token()
             
@@ -270,11 +251,10 @@ class WeComChannel(BaseChannel):
             return None
     
     async def validate_config(self) -> bool:
-        """验证配置"""
+        """TODO: add docstring."""
         if not self.config.enabled:
             return True
         
-        # 至少需要webhook_url或(corpid+corpsecret+agentid)
         has_webhook = bool(self.webhook_url)
         has_app = bool(self.corpid and self.corpsecret and self.agentid)
         
