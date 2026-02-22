@@ -474,6 +474,7 @@ class MemoryAdapter:
         try:
             self._forgetting.apply_time_decay(session_id)
             self._forgetting.cleanup_forgotten(session_id)
+            self._forgetting.cleanup_episodic_messages(session_id)
             state['last_decay_at'] = now
             self._persist_maintenance_state(session_id, state)
         finally:

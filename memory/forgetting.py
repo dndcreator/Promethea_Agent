@@ -2,7 +2,7 @@
 
 import math
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List
 from .neo4j_connector import Neo4jConnector
 
@@ -32,6 +32,28 @@ class ForgettingManager:
         # Cleanup thresholds.
         self.min_importance = 0.15  # below 15% is considered forgotten
         self.cleanup_batch = 100    # delete at most 100 nodes per run
+
+        # Episodic message retention (hot-layer raw text).
+        # Messages are deleted only when:
+        # 1) old enough, and
+        # 2) already covered by at least one summary in that session.
+        self.message_retention_days = 30
+        self.message_cleanup_batch = 200
+        try:
+            from config import load_config
+
+            cfg = load_config()
+            hot_cfg = getattr(cfg.memory, "hot_layer", None)
+            if hot_cfg is not None:
+                self.message_retention_days = max(
+                    1, int(getattr(hot_cfg, "message_retention_days", self.message_retention_days))
+                )
+                self.message_cleanup_batch = max(
+                    20, int(getattr(hot_cfg, "message_cleanup_batch", self.message_cleanup_batch))
+                )
+        except Exception:
+            # Keep defaults when config load is unavailable.
+            pass
     
     def calculate_decay_factor(self, days_passed: float) -> float:
         """
@@ -105,7 +127,7 @@ class ForgettingManager:
             
             nodes = self.connector.query(query, params)
             
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             updated_count = 0
             
             for node in nodes:
@@ -113,6 +135,12 @@ class ForgettingManager:
                 if created_at is None:
                     continue
                 
+                # Normalize timezone-awareness before subtraction.
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                else:
+                    created_at = created_at.astimezone(timezone.utc)
+
                 days_passed = (now - created_at).total_seconds() / 86400
                 
                 decay_factor = self.calculate_decay_factor(days_passed)
@@ -225,6 +253,81 @@ class ForgettingManager:
                 'status': 'error',
                 'error': str(e)
             }
+
+    def cleanup_episodic_messages(self, session_id: str = None) -> Dict:
+        """
+        Cleanup old raw Message nodes that have already been summarized.
+
+        Rules:
+        - only Message nodes
+        - only older than message_retention_days
+        - only earliest messages that are already covered by summary.message_count
+        """
+        try:
+            if session_id:
+                session_ids = [f"session_{session_id}"]
+            else:
+                rows = self.connector.query("MATCH (s:Session) RETURN s.id AS id")
+                session_ids = [str(r.get("id")) for r in rows if r.get("id")]
+
+            deleted_total = 0
+            for sid in session_ids:
+                if deleted_total >= self.message_cleanup_batch:
+                    break
+                deleted_total += self._cleanup_episodic_messages_for_session(
+                    sid,
+                    self.message_cleanup_batch - deleted_total,
+                )
+
+            if deleted_total:
+                logger.info("Episodic message cleanup complete: %s nodes", deleted_total)
+            return {"deleted_count": deleted_total, "status": "success"}
+        except Exception as e:
+            logger.error(f"Episodic message cleanup failed: {e}")
+            return {"deleted_count": 0, "status": "error", "error": str(e)}
+
+    def _cleanup_episodic_messages_for_session(self, session_node_id: str, limit: int) -> int:
+        if limit <= 0:
+            return 0
+        # Get latest summary coverage for this session.
+        summary_row = self.connector.query(
+            """
+            MATCH (sum:Summary)-[:SUMMARIZES]->(s:Session {id: $session_id})
+            RETURN coalesce(max(sum.message_count), 0) AS covered_count
+            """,
+            {"session_id": session_node_id},
+        )
+        covered_count = int(summary_row[0].get("covered_count", 0) or 0) if summary_row else 0
+        if covered_count <= 0:
+            return 0
+
+        rows = self.connector.query(
+            """
+            MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)
+            WHERE m.created_at < datetime() - duration({days: $retention_days})
+            WITH m
+            ORDER BY m.created_at ASC
+            WITH collect(m) AS aged_msgs
+            MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(allm:Message)
+            WITH aged_msgs, allm
+            ORDER BY allm.created_at ASC
+            WITH aged_msgs, collect(allm) AS ordered_msgs
+            WITH aged_msgs, ordered_msgs[0..$covered_count] AS summarized_msgs
+            WITH [m IN aged_msgs WHERE m IN summarized_msgs][0..$limit] AS deletable
+            UNWIND deletable AS d
+            DETACH DELETE d
+            RETURN count(d) AS deleted_count
+            """,
+            {
+                "session_id": session_node_id,
+                "retention_days": int(self.message_retention_days),
+                "covered_count": int(covered_count),
+                "limit": int(limit),
+            },
+        )
+        if not rows:
+            return 0
+        return int(rows[0].get("deleted_count", 0) or 0)
     
     def get_forgetting_stats(self, session_id: str = None) -> Dict:
         """

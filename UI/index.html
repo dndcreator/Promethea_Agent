@@ -1,255 +1,258 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>普罗米娅AI助手 - 终端版</title>
-    <link rel="stylesheet" href="style.css">
+    <title>Promethea AI Assistant - Terminal</title>
+    <link rel="stylesheet" href="style.css?v=20260222b">
 </head>
-<body>
+<body class="app-loading">
+    <div id="startupOverlay" class="startup-overlay">
+        <div class="startup-spinner"></div>
+        <div class="startup-text">Loading Promethea...</div>
+    </div>
     <div class="app-root">
-    <!-- 左侧会话列表 -->
-    <aside class="sidebar" id="sidebar">
-        <div class="sidebar-header">
-            <div class="logo">
-                <span class="logo-icon">🔥</span>
-                <span class="logo-text">普罗米娅</span>
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <span class="logo-icon">AI</span>
+                    <span class="logo-text" id="logoText">Promethea</span>
+                </div>
+                <button id="newChatBtn" class="new-chat-btn" title="New chat">
+                    <span>+</span>
+                </button>
             </div>
-            <button id="newChatBtn" class="new-chat-btn" title="新建会话">
-                <span>+</span>
-            </button>
-        </div>
-        
-        <!-- 虚拟形象窗口 -->
-        <div class="avatar-container">
-            <div class="avatar-placeholder" id="avatarPlaceholder">
-                <img id="avatarImage" class="avatar-image" style="display: none;" />
-                <div class="avatar-icon" id="avatarIcon">👤</div>
-                <div class="avatar-hint" id="avatarHint">点击上传形象</div>
-                <input type="file" id="avatarUpload" accept="image/*" style="display: none;" />
-                
-                <!-- 状态指示器 -->
-                <div class="avatar-status" id="avatarStatus"></div>
-            </div>
-            <button id="removeAvatarBtn" class="remove-avatar-btn" style="display: none;" title="移除形象">✕</button>
-        </div>
-        
-        <div class="session-list-container">
-            <div class="session-list-header">
-                <span>会话历史</span>
-                <span class="session-count" id="sessionCount">0</span>
-            </div>
-            <ul id="sessionList" class="session-list"></ul>
-        </div>
-        
-        <!-- 系统状态栏 -->
-        <div class="system-status-bar">
-            <div class="status-indicator" id="apiStatus" title="API连接状态">
-                <span class="dot"></span> API
-            </div>
-            <div class="status-indicator" id="memoryStatus" title="记忆系统状态">
-                <span class="dot"></span> Memory
-            </div>
-            <button id="logoutBtn" class="logout-btn" title="退出登录">
-                🚪
-            </button>
-        </div>
-    </aside>
 
-    <!-- 右侧终端风格聊天窗口 -->
-    <main class="terminal-container">
-        <div class="terminal-header">
-            <button id="sidebarToggle" class="sidebar-toggle">☰</button>
-            <div class="terminal-tabs">
-                <div class="tab active">
-                    <span class="tab-icon">💬</span>
-                    <span class="tab-title">对话</span>
+            <div class="avatar-container">
+                <div class="avatar-placeholder" id="avatarPlaceholder">
+                    <img id="avatarImage" class="avatar-image" style="display: none;" alt="avatar">
+                    <div class="avatar-icon" id="avatarIcon">USER</div>
+                    <div class="avatar-hint" id="avatarHint">Click to upload avatar</div>
+                    <input type="file" id="avatarUpload" accept="image/*" style="display: none;">
+                    <div class="avatar-status" id="avatarStatus"></div>
+                </div>
+                <button id="removeAvatarBtn" class="remove-avatar-btn" style="display: none;" title="Remove avatar">x</button>
+            </div>
+
+            <div class="session-list-container">
+                <div class="session-list-header">
+                    <span id="sessionListTitle">Sessions</span>
+                    <span class="session-count" id="sessionCount">0</span>
+                </div>
+                <ul id="sessionList" class="session-list"></ul>
+            </div>
+
+            <div class="system-status-bar">
+                <div class="status-health">
+                    <div class="status-indicator" id="apiStatus" title="API connection status">
+                        <span class="dot"></span> API
+                    </div>
+                    <div class="status-indicator" id="memoryStatus" title="Memory status">
+                        <span class="dot"></span> Memory
+                    </div>
+                </div>
+                <div class="account-row">
+                    <div class="user-controls">
+                        <span class="current-username" id="currentUsername">@user</span>
+                        <button id="userDeleteBtn" class="user-delete-btn" title="Delete account">Delete</button>
+                    </div>
+                    <button id="logoutBtn" class="logout-btn" title="Logout">Logout</button>
                 </div>
             </div>
-            <div class="terminal-controls">
-                <button id="doctorBtn" class="doctor-btn" title="系统自检 Doctor">🩺</button>
-                <button id="metricsBtn" class="metrics-btn" title="性能统计">📊</button>
-                <button id="settingsBtn" class="settings-btn" title="系统设置">⚙️</button>
-                <button id="langSwitchBtn" class="lang-switch-btn" title="Language / 语言">🌐</button>
-                <button id="memoryGraphBtn" class="memory-graph-btn" title="查看记忆图">🧠</button>
-                <div class="control-btn minimize"></div>
-                <div class="control-btn maximize"></div>
-                <div class="control-btn close"></div>
-            </div>
-        </div>
-        
-        <div class="terminal-body">
-            <div class="chat-messages" id="chatMessages">
-                <!-- 消息会在这里显示 -->
-            </div>
-            
-            <div class="terminal-input-wrapper">
-                <div class="terminal-input-line">
-                    <input type="text" id="messageInput" placeholder="输入你的问题..." />
-                    <button id="sendButton" class="send-btn">↵</button>
+        </aside>
+
+        <main class="terminal-container">
+            <div class="terminal-header">
+                <button id="sidebarToggle" class="sidebar-toggle">|||</button>
+                <div class="terminal-tabs">
+                    <div class="tab active">
+                        <span class="tab-icon">CHAT</span>
+                        <span class="tab-title" id="chatTabTitle">Chat</span>
+                    </div>
+                </div>
+                <div class="terminal-controls">
+                    <button id="doctorBtn" class="doctor-btn" title="System doctor">Doctor</button>
+                    <button id="metricsBtn" class="metrics-btn" title="Metrics">Metrics</button>
+                    <button id="settingsBtn" class="settings-btn" title="Settings">Settings</button>
+                    <button id="langSwitchBtn" class="lang-switch-btn" title="Language">Language</button>
+                    <button id="memoryGraphBtn" class="memory-graph-btn" title="Memory graph">Memory</button>
+                    <div class="control-btn minimize"></div>
+                    <div class="control-btn maximize"></div>
+                    <div class="control-btn close"></div>
                 </div>
             </div>
-        </div>
-        
-        <div class="terminal-status">
-            <span class="status-item"><span id="currentSessionLabel">当前会话</span>: <span id="currentSession">未开始</span></span>
-        </div>
-    </main>
+
+            <div class="terminal-body">
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="terminal-input-wrapper">
+                    <div class="terminal-input-line">
+                        <input type="text" id="messageInput" placeholder="Type your message...">
+                        <button id="sendButton" class="send-btn">-></button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="terminal-status">
+                <span class="status-item">
+                    <span id="currentSessionLabel">Current Session</span>:
+                    <span id="currentSession">Not Started</span>
+                </span>
+                <span class="status-item" id="connectionStatus"></span>
+            </div>
+        </main>
     </div>
 
-    <!-- 敏感操作确认模态窗口 -->
     <div id="confirmModal" class="modal">
         <div class="modal-content confirm-modal-content">
             <div class="modal-header">
-                <h2>⚠️ 敏感操作确认</h2>
+                <h2>Sensitive Action Confirmation</h2>
             </div>
             <div class="modal-body">
-                <p>Agent 尝试执行以下高风险操作，需要您的批准：</p>
+                <p>The agent requests approval for this action:</p>
                 <div class="confirm-details">
                     <div class="detail-row">
-                        <span class="label">工具:</span>
+                        <span class="label">Tool:</span>
                         <span class="value" id="confirmToolName"></span>
                     </div>
                     <div class="detail-row">
-                        <span class="label">参数:</span>
+                        <span class="label">Args:</span>
                         <pre class="value-code" id="confirmToolArgs"></pre>
                     </div>
                 </div>
                 <div class="form-actions">
-                    <button type="button" class="btn-secondary" id="rejectToolBtn">拒绝</button>
-                    <button type="button" class="btn-primary btn-danger" id="approveToolBtn">批准执行</button>
+                    <button type="button" class="btn-secondary" id="rejectToolBtn">Reject</button>
+                    <button type="button" class="btn-primary btn-danger" id="approveToolBtn">Approve</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 语言选择模态窗口 -->
     <div id="languageModal" class="modal">
         <div class="modal-content language-modal-content">
             <div class="modal-header">
-                <h2 id="languageTitle">选择语言 / Choose Language</h2>
+                <h2 id="languageTitle">Choose Language</h2>
             </div>
             <div class="modal-body">
-                <p id="languageDesc" class="settings-hint">请选择界面语言（后端日志不受影响）</p>
+                <p id="languageDesc" class="settings-hint">Choose UI language.</p>
                 <div class="language-actions">
-                    <button id="langZhBtn" class="btn-secondary">简体中文</button>
+                    <button id="langZhBtn" class="btn-secondary">Chinese</button>
                     <button id="langEnBtn" class="btn-primary">English</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 登录/注册模态窗口 -->
     <div id="authModal" class="modal">
         <div class="modal-content auth-modal-content">
             <div class="modal-header">
-                <h2 id="authTitle">🔐 登录</h2>
+                <h2 id="authTitle">Sign In</h2>
             </div>
             <div class="modal-body">
                 <form id="authForm">
                     <div class="form-group">
-                        <label for="username">用户名</label>
-                        <input type="text" id="username" name="username" required placeholder="请输入用户名">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username" required placeholder="Enter username">
                     </div>
                     <div class="form-group">
-                        <label for="password">密码</label>
-                        <input type="password" id="password" name="password" required placeholder="请输入密码">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" required placeholder="Enter password">
                     </div>
                     <div class="form-group" id="agentNameGroup" style="display: none;">
-                        <label for="agentName">Agent 名字</label>
-                        <input type="text" id="agentName" name="agent_name" placeholder="给你的助手起个名字 (默认: Promethea)">
+                        <label for="agentName">Agent Name</label>
+                        <input type="text" id="agentName" name="agent_name" placeholder="Default: Promethea">
                     </div>
                     <div class="form-actions">
-                        <button type="submit" class="btn-primary" id="authSubmitBtn">登录</button>
+                        <button type="submit" class="btn-primary" id="authSubmitBtn">Sign In</button>
                     </div>
                     <div class="auth-switch">
-                        <span id="authSwitchText">还没有账号？</span>
-                        <a href="#" id="authSwitchLink">去注册</a>
+                        <span id="authSwitchText">No account yet?</span>
+                        <a href="#" id="authSwitchLink">Sign up</a>
+                    </div>
+                    <div class="remembered-users" id="rememberedUsersSection" style="display: none;">
+                        <div class="remembered-users-title">Remembered Accounts</div>
+                        <div class="remembered-users-list" id="rememberedUsersList"></div>
                     </div>
                 </form>
             </div>
         </div>
     </div>
 
-    <!-- 性能统计模态窗口 -->
     <div id="metricsModal" class="modal">
         <div class="modal-content metrics-modal">
             <div class="modal-header">
-                <h2>📊 性能统计</h2>
+                <h2>Metrics</h2>
                 <span class="close-modal">&times;</span>
             </div>
             <div class="modal-body">
                 <div class="metrics-grid">
                     <div class="metric-card">
-                        <div class="metric-label">Token消耗</div>
+                        <div class="metric-label">Token Usage</div>
                         <div class="metric-value" id="totalTokens">0</div>
-                        <div class="metric-sub">估算成本: $<span id="estimatedCost">0.00</span></div>
+                        <div class="metric-sub">Estimated Cost: $<span id="estimatedCost">0.00</span></div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">LLM调用</div>
+                        <div class="metric-label">LLM Calls</div>
                         <div class="metric-value" id="llmCalls">0</div>
-                        <div class="metric-sub">平均: <span id="avgLlmTime">0</span>ms</div>
+                        <div class="metric-sub">Average: <span id="avgLlmTime">0</span>ms</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">记忆召回</div>
+                        <div class="metric-label">Memory Recalls</div>
                         <div class="metric-value" id="memoryRecalls">0</div>
-                        <div class="metric-sub">平均: <span id="avgMemoryTime">0</span>ms</div>
+                        <div class="metric-sub">Average: <span id="avgMemoryTime">0</span>ms</div>
                     </div>
                     <div class="metric-card">
-                        <div class="metric-label">会话/消息</div>
+                        <div class="metric-label">Sessions / Messages</div>
                         <div class="metric-value"><span id="sessionsCount">0</span>/<span id="messagesCount">0</span></div>
-                        <div class="metric-sub">运行时长: <span id="uptime">0</span>s</div>
+                        <div class="metric-sub">Uptime: <span id="uptime">0</span>s</div>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 系统自检（Doctor）模态窗口 -->
     <div id="doctorModal" class="modal">
         <div class="modal-content metrics-modal">
             <div class="modal-header">
-                <h2>🩺 系统自检 Doctor</h2>
+                <h2>System Doctor</h2>
                 <span class="close-modal">&times;</span>
             </div>
             <div class="modal-body">
                 <div class="doctor-actions">
-                    <button id="doctorRunBtn" class="btn-secondary">重新体检</button>
-                    <button id="doctorFixConfigBtn" class="btn-primary">修复 / 迁移配置</button>
+                    <button id="doctorRunBtn" class="btn-secondary">Run Again</button>
+                    <button id="doctorFixConfigBtn" class="btn-primary">Fix / Migrate Config</button>
                 </div>
                 <pre id="doctorOutput" class="doctor-output"></pre>
             </div>
         </div>
     </div>
 
-    <!-- 记忆工作台模态窗口 -->
     <div id="memoryGraphModal" class="modal">
         <div class="modal-content memory-workbench-modal">
             <div class="modal-header">
-                <h2>🧠 记忆工作台</h2>
+                <h2 id="memoryWorkbenchTitle">Memory Workbench</h2>
                 <span class="close-modal">&times;</span>
             </div>
             <div class="modal-body memory-workbench-body">
                 <div class="memory-toolbar">
                     <div class="memory-toolbar-left">
-                        <input type="search" id="memorySearchInput" class="memory-search" placeholder="搜索记忆内容 / 节点ID / 类型..." />
+                        <input type="search" id="memorySearchInput" class="memory-search" placeholder="Search content / node id / type...">
                         <select id="memoryLayerFilter" class="memory-filter">
-                            <option value="all">全部层级</option>
-                            <option value="0">热层 Hot</option>
-                            <option value="1">温层 Warm</option>
-                            <option value="2">冷层 Cold</option>
+                            <option value="all">All Layers</option>
+                            <option value="0">Hot</option>
+                            <option value="1">Warm</option>
+                            <option value="2">Cold</option>
                         </select>
                         <select id="memoryTypeFilter" class="memory-filter">
-                            <option value="all">全部类型</option>
+                            <option value="all">All Types</option>
                         </select>
                     </div>
                     <div class="memory-toolbar-right">
                         <button id="memoryOpenNeo4jBtn" class="btn-secondary">Neo4j</button>
-                        <button id="memoryClusterBtn" class="btn-secondary">聚类</button>
-                        <button id="memorySummarizeBtn" class="btn-secondary">摘要</button>
-                        <button id="memoryDecayBtn" class="btn-secondary">衰减</button>
-                        <button id="memoryCleanupBtn" class="btn-secondary">清理</button>
-                        <button id="memoryRefreshBtn" class="btn-primary">刷新</button>
+                        <button id="memoryClusterBtn" class="btn-secondary">Cluster</button>
+                        <button id="memorySummarizeBtn" class="btn-secondary">Summarize</button>
+                        <button id="memoryDecayBtn" class="btn-secondary">Decay</button>
+                        <button id="memoryCleanupBtn" class="btn-secondary">Cleanup</button>
+                        <button id="memoryRefreshBtn" class="btn-primary">Refresh</button>
                     </div>
                 </div>
 
@@ -261,49 +264,44 @@
                     </div>
                     <aside class="memory-side-panel">
                         <div class="memory-side-header">
-                            <h3 id="memoryNodeListTitle">节点列表</h3>
+                            <h3 id="memoryNodeListTitle">Node List</h3>
                             <span id="memoryNodeCount" class="memory-node-count">0</span>
                         </div>
                         <div id="memoryNodeList" class="memory-node-list"></div>
                         <div class="memory-side-header">
-                            <h3 id="memoryNodeDetailTitle">节点详情</h3>
+                            <h3 id="memoryNodeDetailTitle">Node Details</h3>
                         </div>
-                        <div id="memoryNodeDetail" class="memory-node-detail">
-                            选择左侧节点查看详情
-                        </div>
+                        <div id="memoryNodeDetail" class="memory-node-detail">Select a node to view details.</div>
                     </aside>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- 设置模态窗口 -->
     <div id="settingsModal" class="modal">
         <div class="modal-content settings-modal-content">
             <div class="modal-header">
-                <h2>⚙️ 系统设置</h2>
+                <h2>Settings</h2>
                 <span class="close-modal">&times;</span>
             </div>
             <div class="modal-body settings-modal-body">
-                <div class="settings-loading">正在加载配置...</div>
+                <div class="settings-loading">Loading configuration...</div>
                 <form id="settingsForm" style="display: none;">
-                    <!-- 用户个性化设置 -->
                     <div class="settings-section">
-                        <h3>👤 个性化设置</h3>
+                        <h3>Personalization</h3>
                         <div class="form-group">
-                            <label for="userAgentName">Agent 名字</label>
+                            <label for="userAgentName">Agent Name</label>
                             <input type="text" id="userAgentName" name="user.agent_name" placeholder="Promethea">
                         </div>
                         <div class="form-group">
-                            <label for="userSystemPrompt">自定义 System Prompt</label>
-                            <textarea id="userSystemPrompt" name="user.system_prompt" rows="5" placeholder="自定义你的 Agent 人设..."></textarea>
+                            <label for="userSystemPrompt">Custom System Prompt</label>
+                            <textarea id="userSystemPrompt" name="user.system_prompt" rows="5" placeholder="Customize your assistant persona..."></textarea>
                         </div>
                     </div>
 
-                    <!-- 用户 API 设置 (覆盖全局) -->
                     <div class="settings-section">
-                        <h3>🔑 个人 API 配置 (可选)</h3>
-                        <p class="settings-hint">在此填写的配置将覆盖系统默认值。留空则使用默认配置。</p>
+                        <h3>Personal API Override (optional)</h3>
+                        <p class="settings-hint">If set, these values override system defaults for your account.</p>
                         <div class="form-group">
                             <label for="userApiKey">API Key</label>
                             <input type="password" id="userApiKey" name="user.api.api_key" placeholder="sk-...">
@@ -313,8 +311,8 @@
                             <input type="text" id="userBaseUrl" name="user.api.base_url" placeholder="https://openrouter.ai/api/v1">
                         </div>
                         <div class="form-group">
-                            <label for="userModel">模型名称</label>
-                            <input type="text" id="userModel" name="user.api.model" placeholder="nvidia/nemotron-3-nano-30b-a3b:free">
+                            <label for="userModel">Model</label>
+                            <input type="text" id="userModel" name="user.api.model" placeholder="model-id">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -328,9 +326,8 @@
                         </div>
                     </div>
 
-                    <!-- 社交账号绑定 -->
                     <div class="settings-section">
-                        <h3>🔗 社交账号绑定</h3>
+                        <h3>Social Account Binding</h3>
                         <div class="channel-bind-container">
                             <div class="bind-row">
                                 <select id="bindChannelType">
@@ -339,28 +336,25 @@
                                     <option value="dingtalk">DingTalk</option>
                                     <option value="feishu">Feishu</option>
                                 </select>
-                                <input type="text" id="bindAccountId" placeholder="输入账号ID (如 Telegram User ID)">
-                                <button type="button" id="bindBtn" class="btn-secondary">绑定</button>
+                                <input type="text" id="bindAccountId" placeholder="Account ID">
+                                <button type="button" id="bindBtn" class="btn-secondary">Bind</button>
                             </div>
-                            <div id="boundChannelsList" class="bound-list">
-                                <!-- 已绑定的账号列表 -->
-                            </div>
+                            <div id="boundChannelsList" class="bound-list"></div>
                         </div>
                     </div>
 
-                    <!-- 系统 API 设置 (仅管理员可见 - 暂不隐藏) -->
                     <div class="settings-section">
-                        <h3>🔑 API 配置</h3>
+                        <h3>System Default API</h3>
                         <div class="form-group">
                             <label for="apiKey">API Key</label>
-                            <input type="password" id="apiKey" name="api.api_key" placeholder="输入API密钥">
+                            <input type="password" id="apiKey" name="api.api_key" placeholder="Global default API key">
                         </div>
                         <div class="form-group">
                             <label for="baseUrl">Base URL</label>
                             <input type="text" id="baseUrl" name="api.base_url" placeholder="https://api.openai.com/v1">
                         </div>
                         <div class="form-group">
-                            <label for="model">模型</label>
+                            <label for="model">Model</label>
                             <input type="text" id="model" name="api.model" placeholder="gpt-4">
                         </div>
                         <div class="form-row">
@@ -374,28 +368,27 @@
                             </div>
                         </div>
                         <div class="form-group">
-                            <label for="maxHistoryRounds">历史轮数</label>
+                            <label for="maxHistoryRounds">History Rounds</label>
                             <input type="number" id="maxHistoryRounds" name="api.max_history_rounds" min="1" max="50">
                         </div>
                     </div>
 
-                    <!-- 系统设置 -->
                     <div class="settings-section">
-                        <h3>⚡ 系统配置</h3>
+                        <h3>System</h3>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="streamMode" name="system.stream_mode">
-                                <span>流式输出</span>
+                                <span>Streaming Output</span>
                             </label>
                         </div>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="debugMode" name="system.debug">
-                                <span>调试模式</span>
+                                <span>Debug Mode</span>
                             </label>
                         </div>
                         <div class="form-group">
-                            <label for="logLevel">日志级别</label>
+                            <label for="logLevel">Log Level</label>
                             <select id="logLevel" name="system.log_level">
                                 <option value="DEBUG">DEBUG</option>
                                 <option value="INFO">INFO</option>
@@ -405,19 +398,18 @@
                         </div>
                     </div>
 
-                    <!-- 记忆系统设置 -->
                     <div class="settings-section">
-                        <h3>🧠 记忆系统</h3>
+                        <h3>Memory</h3>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="memoryEnabled" name="memory.enabled">
-                                <span>启用记忆系统</span>
+                                <span>Enable Memory</span>
                             </label>
                         </div>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="neo4jEnabled" name="memory.neo4j.enabled">
-                                <span>启用Neo4j</span>
+                                <span>Enable Neo4j</span>
                             </label>
                         </div>
                         <div class="form-group">
@@ -426,59 +418,74 @@
                         </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="neo4jUsername">用户名</label>
+                                <label for="neo4jUsername">Neo4j Username</label>
                                 <input type="text" id="neo4jUsername" name="memory.neo4j.username" placeholder="neo4j">
                             </div>
                             <div class="form-group">
-                                <label for="neo4jDatabase">数据库</label>
+                                <label for="neo4jDatabase">Neo4j Database</label>
                                 <input type="text" id="neo4jDatabase" name="memory.neo4j.database" placeholder="neo4j">
                             </div>
                         </div>
                         <div class="form-group checkbox-group">
                             <label>
+                                <input type="checkbox" id="memoryUseMainApi" name="memory.api.use_main_api">
+                                <span>Memory uses main chat API</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="memoryApiKey">Memory API Key (optional)</label>
+                            <input type="password" id="memoryApiKey" name="memory.api.api_key" placeholder="Leave empty to use defaults">
+                        </div>
+                        <div class="form-group">
+                            <label for="memoryBaseUrl">Memory API Base URL</label>
+                            <input type="text" id="memoryBaseUrl" name="memory.api.base_url" placeholder="https://openrouter.ai/api/v1">
+                        </div>
+                        <div class="form-group">
+                            <label for="memoryModel">Memory API Model</label>
+                            <input type="text" id="memoryModel" name="memory.api.model" placeholder="Optional dedicated model">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
                                 <input type="checkbox" id="warmLayerEnabled" name="memory.warm_layer.enabled">
-                                <span>启用温层</span>
+                                <span>Enable Warm Layer</span>
                             </label>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="clusteringThreshold">聚类阈值</label>
+                                <label for="clusteringThreshold">Clustering Threshold</label>
                                 <input type="number" id="clusteringThreshold" name="memory.warm_layer.clustering_threshold" step="0.1" min="0" max="1">
                             </div>
                             <div class="form-group">
-                                <label for="minClusterSize">最小簇大小</label>
+                                <label for="minClusterSize">Min Cluster Size</label>
                                 <input type="number" id="minClusterSize" name="memory.warm_layer.min_cluster_size" min="1" max="20">
                             </div>
                         </div>
                         <div class="form-row">
                             <div class="form-group">
-                                <label for="maxSummaryLength">摘要长度</label>
+                                <label for="maxSummaryLength">Max Summary Length</label>
                                 <input type="number" id="maxSummaryLength" name="memory.cold_layer.max_summary_length" min="100" max="2000">
                             </div>
                             <div class="form-group">
-                                <label for="compressionThreshold">压缩阈值</label>
+                                <label for="compressionThreshold">Compression Threshold</label>
                                 <input type="number" id="compressionThreshold" name="memory.cold_layer.compression_threshold" min="10" max="200">
                             </div>
                         </div>
                     </div>
 
-
-                    <!-- 按钮 -->
                     <div class="settings-actions">
-                        <button type="button" class="btn-secondary" id="resetBtn">重置</button>
-                        <button type="submit" class="btn-primary">保存并应用</button>
+                        <button type="button" class="btn-secondary" id="resetBtn">Reset</button>
+                        <button type="submit" class="btn-primary">Save and Apply</button>
                     </div>
                 </form>
             </div>
         </div>
     </div>
 
-    <!-- 悬浮追问按钮 -->
     <div id="selectionMenu" class="selection-menu" style="display: none;">
-        <button id="quickAskBtn" class="quick-ask-btn">🤔 追问</button>
+        <button id="quickAskBtn" class="quick-ask-btn">Follow-up</button>
     </div>
 
     <script src="https://d3js.org/d3.v7.min.js"></script>
-    <script src="script.js"></script>
+    <script src="script.js?v=20260222b" charset="UTF-8"></script>
 </body>
 </html>

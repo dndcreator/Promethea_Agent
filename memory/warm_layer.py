@@ -36,6 +36,9 @@ class WarmLayerManager:
         # LLM clustering parameters.
         self.min_cluster_size = config.memory.warm_layer.min_cluster_size
         self.max_concepts = getattr(config.memory.warm_layer, "max_concepts", 100)
+        self.stabilize_min_sessions = getattr(config.memory.warm_layer, "stabilize_min_sessions", 2)
+        self.stabilize_min_mentions = getattr(config.memory.warm_layer, "stabilize_min_mentions", 3)
+        self.stabilize_importance_floor = getattr(config.memory.warm_layer, "stabilize_importance_floor", 0.8)
         self.cluster_model = memory_api["model"]
         
         logger.info("Warm-layer manager initialized")
@@ -175,7 +178,86 @@ class WarmLayerManager:
                 concepts_created += 1
 
         logger.info(f"Warm-layer clustering complete, created {concepts_created} concepts")
+        stabilized = self._promote_stable_entities(session_id)
+        if stabilized:
+            logger.info("Warm-layer semantic stabilization complete: session=%s entities=%s", session_id, stabilized)
         return concepts_created
+
+    def _promote_stable_entities(self, session_id: str) -> int:
+        """
+        Promote repeated cross-session entities to stable semantic memory.
+
+        Criteria are configured by:
+        - warm_layer.stabilize_min_sessions
+        - warm_layer.stabilize_min_mentions
+        - warm_layer.stabilize_importance_floor
+        """
+        try:
+            owner_rows = self.connector.query(
+                """
+                MATCH (s:Session {id: $session_id})-[:OWNED_BY]->(u:User)
+                RETURN u.id AS user_id
+                LIMIT 1
+                """,
+                {"session_id": f"session_{session_id}"},
+            )
+            if not owner_rows:
+                return 0
+            uid = owner_rows[0].get("user_id")
+            if not uid:
+                return 0
+
+            candidates = self.connector.query(
+                """
+                MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)<-[:FROM_MESSAGE]-(e:Entity)
+                WITH DISTINCT e.content AS content
+                MATCH (u:User {id: $user_id})<-[:OWNED_BY]-(s2:Session)<-[:PART_OF_SESSION]-(m2:Message)<-[:FROM_MESSAGE]-(e2:Entity {content: content})
+                RETURN
+                    content,
+                    count(DISTINCT s2) AS session_hits,
+                    count(m2) AS mention_hits
+                """,
+                {"session_id": f"session_{session_id}", "user_id": uid},
+            )
+            if not candidates:
+                return 0
+
+            promoted = 0
+            for row in candidates:
+                content = row.get("content")
+                if not content:
+                    continue
+                session_hits = int(row.get("session_hits", 0) or 0)
+                mention_hits = int(row.get("mention_hits", 0) or 0)
+                if session_hits < int(self.stabilize_min_sessions):
+                    continue
+                if mention_hits < int(self.stabilize_min_mentions):
+                    continue
+
+                self.connector.query(
+                    """
+                    MATCH (u:User {id: $user_id})<-[:OWNED_BY]-(s:Session)<-[:PART_OF_SESSION]-(m:Message)<-[:FROM_MESSAGE]-(e:Entity {content: $content})
+                    SET
+                        e.importance = CASE
+                            WHEN coalesce(e.importance, 0) < $importance_floor THEN $importance_floor
+                            ELSE e.importance
+                        END,
+                        e.semantic_stable = true,
+                        e.semantic_stable_at = datetime()
+                    RETURN count(e) AS count
+                    """,
+                    {
+                        "user_id": uid,
+                        "content": content,
+                        "importance_floor": float(self.stabilize_importance_floor),
+                    },
+                )
+                promoted += 1
+
+            return promoted
+        except Exception as e:
+            logger.debug(f"Semantic stabilization skipped: {e}")
+            return 0
 
     def _get_session_entities(self, session_id: str) -> List[Dict]:
         """Get all entity nodes for a session."""

@@ -1,60 +1,71 @@
-﻿# Core 模块使用说明
+# Core Module
 
-`core` 提供插件注册与运行时服务发现能力。
+---
 
-## 主要职责
+## 中文文档
 
-- 插件发现与加载
-- 运行时服务注册表
-- 统一服务获取接口
+### 1. 模块职责
 
-## 目录
+`core` 提供插件框架：发现、加载、注册、运行时访问。
 
-```text
-core/
-├─ plugins/
-│  ├─ discovery.py
-│  ├─ loader.py
-│  ├─ registry.py
-│  └─ runtime.py
-└─ services.py
-```
+### 2. 关键文件
 
-## 插件基本结构
+- `core/services.py`：核心服务访问入口
+- `core/plugins/discovery.py`：插件发现
+- `core/plugins/loader.py`：插件加载
+- `core/plugins/manifest.py`：插件元数据
+- `core/plugins/registry.py`：能力注册中心
+- `core/plugins/runtime.py`：运行态管理
+- `core/plugins/types.py`：插件相关类型定义
 
-```text
-extensions/<plugin-id>/
-├─ promethea.plugin.json
-└─ plugin.py
-```
+### 3. 工作流
 
-## 插件入口约定
+1. 扫描 `extensions/*`
+2. 读取 `promethea.plugin.json`
+3. 导入 `plugin.py`
+4. 执行注册并挂到 registry
 
-`plugin.py` 需要提供 `register(api)`：
+### 4. 示例
 
-- 注册服务
-- 注册工具
-- 可订阅事件
+新增插件后重启服务，日志出现 `registered channel/service` 即表示接入成功。
 
-## 典型用法
+### 5. 注意事项
 
-### 获取核心服务
+- 插件失败应可隔离，不拖垮主系统
+- 注册名必须唯一
+- 插件尽量通过接口依赖，避免硬耦合
 
-```python
-from core.services import get_memory_service
+---
 
-memory_service = get_memory_service()
-```
+## English Documentation
 
-### 新增插件能力
+### 1. Purpose
 
-1. 在 `extensions/` 下建插件目录
-2. 写 `promethea.plugin.json`
-3. 实现 `register(api)`
-4. 重启服务
+`core` implements the plugin framework: discovery, loading, registration, and runtime access.
 
-## 设计建议
+### 2. Key Files
 
-- 插件尽量无状态或状态可恢复
-- 服务注册要有唯一名称
-- 避免在插件里直接硬编码全局配置路径
+- `core/services.py`: service access entrypoint
+- `core/plugins/discovery.py`: plugin discovery
+- `core/plugins/loader.py`: plugin loading
+- `core/plugins/manifest.py`: plugin metadata model
+- `core/plugins/registry.py`: capability registry
+- `core/plugins/runtime.py`: runtime management
+- `core/plugins/types.py`: plugin-related types
+
+### 3. Workflow
+
+1. Scan `extensions/*`
+2. Parse `promethea.plugin.json`
+3. Import `plugin.py`
+4. Register capabilities into registry
+
+### 4. Example
+
+After adding a plugin, restart the service and verify `registered channel/service` logs.
+
+### 5. Notes
+
+- plugin failures should be isolated
+- registration keys must be unique
+- prefer interface-based dependency over hard coupling

@@ -7,6 +7,7 @@ from jose import JWTError, jwt
 
 from ..schemas import (
     ChannelBindRequest,
+    UserDeleteRequest,
     UserConfigUpdate,
     UserLogin,
     UserRegister,
@@ -158,4 +159,29 @@ async def bind_channel(
 async def get_channels(user_id: str = Depends(get_current_user_id)):
     channels = user_manager.get_bound_channels(user_id)
     return {"status": "success", "channels": channels}
+
+
+@router.post("/user/delete")
+async def delete_user_account(
+    req: UserDeleteRequest,
+    user_id: str = Depends(get_current_user_id),
+):
+    if not req.confirm:
+        raise HTTPException(status_code=400, detail="confirm must be true")
+
+    # Best-effort clear in-memory/persisted chat sessions for this user.
+    try:
+        from gateway.http.message_manager import message_manager
+
+        sessions = message_manager.get_all_sessions_info(user_id=user_id)
+        for sid in list(sessions.keys()):
+            raw_sid = sid.split("::", 1)[-1] if "::" in sid else sid
+            message_manager.delete_session(raw_sid, user_id=user_id)
+    except Exception:
+        pass
+
+    success = user_manager.delete_user(user_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Delete user failed")
+    return {"status": "success", "message": "User account deleted"}
 

@@ -190,7 +190,11 @@ class ConfigService:
                 params_obj = params_or_user_id
                 user_id = user_id or kwargs.get("user_id")
                 config_updates = getattr(params_obj, "config_data", {}) or {}
-                validate = getattr(params_obj, "validate", validate)
+                validate = getattr(
+                    params_obj,
+                    "validate_config",
+                    getattr(params_obj, "validate", validate),
+                )
             else:
                 user_id = params_or_user_id
 

@@ -165,7 +165,16 @@ class HotLayerManager:
     def _store_fact_tuple(self, fact: FactTuple, message_id: str):
         """TODO: add docstring."""
         edge_suffix = message_id
+        subject_id = self.connector.find_node_by_content(
             NodeType.ENTITY, fact.subject, user_id=self.user_id
+        )
+        
+        action_id = self.connector.find_node_by_content(
+            NodeType.ACTION, fact.predicate, user_id=self.user_id
+        )
+        
+        object_id = self.connector.find_node_by_content(
+            NodeType.ENTITY, fact.object_, user_id=self.user_id
         )
         if not subject_id:
             subject_node = Neo4jNode(
@@ -177,8 +186,6 @@ class HotLayerManager:
             )
             subject_id = self.connector.create_node(subject_node)
         
-            NodeType.ACTION, fact.predicate, user_id=self.user_id
-        )
         if not action_id:
             action_node = Neo4jNode(
                 type=NodeType.ACTION,
@@ -189,8 +196,6 @@ class HotLayerManager:
             )
             action_id = self.connector.create_node(action_node)
         
-            NodeType.ENTITY, fact.object_, user_id=self.user_id
-        )
         if not object_id:
             object_node = Neo4jNode(
                 type=NodeType.ENTITY,

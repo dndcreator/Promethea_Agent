@@ -3,7 +3,6 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 18789,
-    "auth_token": null,
     "auto_start_channels": true
   },
   "channels": {

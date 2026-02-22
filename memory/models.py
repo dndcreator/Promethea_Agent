@@ -1,69 +1,77 @@
-﻿"""
-"""
-from enum import Enum
-from typing import Optional, Dict, Any, List
-from pydantic import BaseModel, Field
+"""Memory graph data models."""
+
 from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class NodeType(str, Enum):
-    """TODO: add docstring."""
     ENTITY = "Entity"
     ACTION = "Action"
-    TIME = "Time"               # TODO: comment cleaned
+    TIME = "Time"
     LOCATION = "Location"
-    MESSAGE = "Message"         # Raw message node
-    
-    CONCEPT = "Concept"         # TODO: comment cleaned
-    
+    MESSAGE = "Message"
+    CONCEPT = "Concept"
     SUMMARY = "Summary"
     SESSION = "Session"
     USER = "User"
 
 
 class RelationType(str, Enum):
-    """TODO: add docstring."""
     SUBJECT_OF = "SUBJECT_OF"
-    ACTION_OF = "ACTION_OF"         # TODO: comment cleaned
+    ACTION_OF = "ACTION_OF"
     OBJECT_OF = "OBJECT_OF"
-    AT_TIME = "AT_TIME"             # TODO: comment cleaned
+    AT_TIME = "AT_TIME"
     AT_LOCATION = "AT_LOCATION"
-    FROM_MESSAGE = "FROM_MESSAGE"   # Source message relation
-    
+    FROM_MESSAGE = "FROM_MESSAGE"
     BELONGS_TO = "BELONGS_TO"
-    SIMILAR_TO = "SIMILAR_TO"       # TODO: comment cleaned
-    
-    SUMMARIZES = "SUMMARIZES"       # TODO: comment cleaned
+    SIMILAR_TO = "SIMILAR_TO"
+    SUMMARIZES = "SUMMARIZES"
     PART_OF_SESSION = "PART_OF_SESSION"
     OWNED_BY = "OWNED_BY"
 
 
 class FactTuple(BaseModel):
-    """TODO: add docstring."""
-    
+    subject: str
+    predicate: str
+    object_: str = Field(default="", alias="object")
+    time: Optional[str] = None
+    location: Optional[str] = None
+    confidence: float = 0.8
+    source_text: Optional[str] = None
+
     class Config:
         populate_by_name = True
 
 
 class Neo4jNode(BaseModel):
+    id: Optional[str] = None
+    type: NodeType
+    content: str
+    layer: int = 0
+    importance: float = 0.5
+    access_count: int = 1
     properties: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
-    
+
     class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class Neo4jRelation(BaseModel):
     id: Optional[str] = None
     type: RelationType
+    source_id: str
+    target_id: str
+    weight: float = 1.0
+    edge_key: Optional[str] = None
+    properties: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
-    
+
     class Config:
-        json_encoders = {
-            datetime: lambda v: v.isoformat()
-        }
+        json_encoders = {datetime: lambda v: v.isoformat()}
 
 
 class ExtractionResult(BaseModel):

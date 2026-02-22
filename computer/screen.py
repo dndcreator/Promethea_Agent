@@ -30,7 +30,7 @@ class ScreenController(ComputerController):
             
             # Configure safety options.
             self.pyautogui.FAILSAFE = True  # Move mouse to corner to abort.
-        self.pyautogui.PAUSE = 0.1      # Small pause after each action.
+            self.pyautogui.PAUSE = 0.1      # Small pause after each action.
             
             self.is_initialized = True
             logger.info("Screen controller initialized")

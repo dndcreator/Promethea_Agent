@@ -34,7 +34,9 @@
             "max_tuples_per_message": 10,
             "min_confidence": 0.5,
             "enable_coreference": false,
-            "enable_time_normalization": true
+            "enable_time_normalization": true,
+            "message_retention_days": 30,
+            "message_cleanup_batch": 200
         },
         "warm_layer": {
             "enabled": true,
@@ -42,6 +44,9 @@
             "clustering_threshold": 0.7,
             "min_cluster_size": 3,
             "max_concepts": 100,
+            "stabilize_min_sessions": 2,
+            "stabilize_min_mentions": 3,
+            "stabilize_importance_floor": 0.8,
             "cluster_every_messages": 12,
             "cluster_min_interval_s": 300,
             "idle_cluster_delay_s": 120,

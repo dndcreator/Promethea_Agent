@@ -29,24 +29,24 @@ Rules:
 5. Extract key entities and keywords.
 
 Return strict JSON only:
-{
+{{
   "facts": [
-    {
+    {{
       "subject": "...",
       "predicate": "...",
       "object": "...",
       "time": "...",
       "location": "...",
       "confidence": 0.9
-    }
+    }}
   ],
-  "emotion": {"primary": "neutral", "intensity": 0.5, "description": "..."},
+  "emotion": {{"primary": "neutral", "intensity": 0.5, "description": "..."}},
   "intent": "...",
   "entities": ["..."],
   "time_expressions": ["..."],
   "locations": ["..."],
   "keywords": ["..."]
-}
+}}
 
 Role: {role}
 Content: {content}

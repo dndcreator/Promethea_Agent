@@ -55,18 +55,24 @@ class ColdLayerManager:
         
         # 1. Collect conversation messages.
         messages = self._get_session_messages(session_id)
-        
-        if len(messages) < 5:
-            logger.info(f"Not enough messages ({len(messages)} < 5), skip summary")
+
+        # 2. Fetch semantic snapshot (warm-first inputs).
+        semantic = self._get_session_semantic_snapshot(session_id, include_concepts=include_concepts)
+        concepts = semantic.get("concepts", [])
+
+        # Gate: allow summary when either messages are sufficient or semantics are rich enough.
+        has_rich_semantics = len(semantic.get("facts", [])) >= 3 or len(concepts) >= 2
+        if len(messages) < 5 and not has_rich_semantics:
+            logger.info(
+                "Not enough evidence for summary (messages=%s concepts=%s facts=%s), skip",
+                len(messages),
+                len(concepts),
+                len(semantic.get("facts", [])),
+            )
             return None
-        
-        # 2. Optionally fetch concept nodes from warm layer.
-        concepts = []
-        if include_concepts:
-            concepts = self._get_session_concepts(session_id)
-        
+
         # 3. Call LLM to generate summary text.
-        summary_text = self._generate_summary(messages, concepts)
+        summary_text = self._generate_summary(messages, semantic)
         
         if not summary_text:
             logger.warning("Summary generation failed")
@@ -115,7 +121,7 @@ class ColdLayerManager:
         results = self.connector.query(query, {"session_id": f"session_{session_id}"})
         return [r["content"] for r in results]
     
-    def _generate_summary(self, messages: List[Dict], concepts: List[str]) -> Optional[str]:
+    def _generate_summary(self, messages: List[Dict], semantic: Dict) -> Optional[str]:
         """
         Generate a summary using the LLM.
 
@@ -126,32 +132,7 @@ class ColdLayerManager:
         Returns:
             Summary text, or None on failure.
         """
-        # Build conversation history text.
-        conversation_text = "\n".join(
-            [
-                f"{msg['role']}: {msg['content']}"
-                for msg in messages
-            ]
-        )
-        
-        # Build LLM prompt.
-        prompt = (
-            "Please write a concise summary for the following dialog.\n"
-            "Focus on:\n"
-            "1. Main topics and content.\n"
-            "2. The user's key needs or questions.\n"
-            "3. Important information and conclusions.\n\n"
-            f"Conversation:\n{conversation_text}\n"
-        )
-        
-        # If we have concept information, add it to the prompt.
-        if concepts:
-            concepts_text = " | ".join(concepts)
-            prompt += f"\n\nDetected topics: {concepts_text}\n"
-        
-        prompt += (
-            f"\nPlease keep the summary under {self.max_summary_length} characters."
-        )
+        prompt = self._build_summary_prompt(messages, semantic)
         
         try:
             response = self.client.chat.completions.create(
@@ -159,7 +140,10 @@ class ColdLayerManager:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a concise dialog summarization assistant.",
+                        "content": (
+                            "You are a concise memory summarization assistant. "
+                            "Prioritize stable semantic facts and concepts, then use raw dialog only to disambiguate."
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -225,10 +209,12 @@ class ColdLayerManager:
     def get_summaries(self, session_id: str) -> List[Dict]:
         """Get all summaries for a session."""
         query = """
-        MATCH (s:Session {id: $session_id})<-[:SUMMARIZES]-(sum:Summary)
+        MATCH (s:Session {id: $session_id})
+        MATCH (sum:Summary)
+        WHERE EXISTS { MATCH (sum)-[r]->(s) WHERE type(r) = 'SUMMARIZES' }
         RETURN sum.id as id, sum.content as content, 
                sum.importance as importance, 
-               sum.message_count as message_count,
+               coalesce(properties(sum)['message_count'], 0) as message_count,
                sum.created_at as created_at
         ORDER BY sum.created_at DESC
         """
@@ -244,8 +230,8 @@ class ColdLayerManager:
                sum.id as id,
                sum.content as content,
                sum.importance as importance,
-               sum.session_id as session_id,
-               sum.message_count as message_count,
+               coalesce(properties(sum)['session_id'], '') as session_id,
+               coalesce(properties(sum)['message_count'], 0) as message_count,
                sum.created_at as created_at
         """
         
@@ -264,8 +250,12 @@ class ColdLayerManager:
         """
         # Check total message count.
         messages = self._get_session_messages(session_id)
-        
-        if len(messages) < self.compression_threshold:
+        semantic = self._get_session_semantic_snapshot(session_id, include_concepts=True)
+        concepts = semantic.get("concepts", [])
+        facts = semantic.get("facts", [])
+        has_rich_semantics = len(facts) >= max(2, self.compression_threshold // 10) or len(concepts) >= 2
+
+        if len(messages) < self.compression_threshold and not has_rich_semantics:
             return False
         
         # Check if there is a recent summary and whether enough new messages were added.
@@ -275,8 +265,8 @@ class ColdLayerManager:
             summarized_count = latest_summary.get('message_count', 0)
             new_messages = len(messages) - summarized_count
             
-            # If new messages less than half of threshold, skip.
-            if new_messages < self.compression_threshold // 2:
+            # If new messages less than half of threshold and semantics not rich, skip.
+            if new_messages < self.compression_threshold // 2 and not has_rich_semantics:
                 return False
         
         return True
@@ -311,11 +301,13 @@ class ColdLayerManager:
             logger.info("Not enough new messages, skip incremental summary")
             return None
         
-        # Generate incremental summary, using previous summary as context.
+        semantic = self._get_session_semantic_snapshot(session_id, include_concepts=True)
+        # Generate incremental summary, using previous summary + fresh semantics.
         previous_summary = latest_summary['content']
         incremental_summary = self._generate_incremental_summary(
             previous_summary, 
-            new_messages
+            new_messages,
+            semantic,
         )
         
         if not incremental_summary:
@@ -332,21 +324,17 @@ class ColdLayerManager:
         
         return summary_id
     
-    def _generate_incremental_summary(self, previous_summary: str, new_messages: List[Dict]) -> Optional[str]:
+    def _generate_incremental_summary(self, previous_summary: str, new_messages: List[Dict], semantic: Dict) -> Optional[str]:
         """Generate an incremental summary based on previous summary and new messages."""
-        conversation_text = "\n".join(
-            [
-                f"{msg['role']}: {msg['content']}"
-                for msg in new_messages
-            ]
-        )
-        
+        delta_messages = self._format_messages_for_prompt(new_messages, limit=30)
         prompt = (
             "Here is the previous dialog summary:\n"
             f"{previous_summary}\n\n"
-            "Here is the new dialog content:\n"
-            f"{conversation_text}\n\n"
-            f"Please merge them into an updated summary, under {self.max_summary_length} characters."
+            "New semantic evidence:\n"
+            f"{self._format_semantic_for_prompt(semantic)}\n\n"
+            "Recent dialog delta:\n"
+            f"{delta_messages}\n\n"
+            f"Please merge into an updated memory summary under {self.max_summary_length} characters."
         )
         
         try:
@@ -368,6 +356,96 @@ class ColdLayerManager:
         except Exception as e:
             logger.error(f"Incremental summary generation failed: {e}")
             return None
+
+    def _get_session_semantic_snapshot(self, session_id: str, include_concepts: bool = True) -> Dict[str, List]:
+        """Collect semantic memory signals for summary generation."""
+        concepts = self._get_session_concepts(session_id) if include_concepts else []
+        entities = self._get_session_entities(session_id)
+        facts = self._get_session_facts(session_id)
+        return {
+            "concepts": concepts,
+            "entities": entities,
+            "facts": facts,
+        }
+
+    def _get_session_entities(self, session_id: str) -> List[Dict]:
+        query = """
+        MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)<-[:FROM_MESSAGE]-(e:Entity)
+        RETURN e.content AS content,
+               count(m) AS mentions,
+               max(coalesce(e.importance, 0.0)) AS importance
+        ORDER BY mentions DESC, importance DESC
+        LIMIT 20
+        """
+        return [dict(r) for r in self.connector.query(query, {"session_id": f"session_{session_id}"})]
+
+    def _get_session_facts(self, session_id: str) -> List[Dict]:
+        query = """
+        MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(m:Message)<-[:FROM_MESSAGE]-(a:Action)
+        OPTIONAL MATCH (sub:Entity)-[:SUBJECT_OF]->(a)
+        OPTIONAL MATCH (a)-[:OBJECT_OF]->(obj:Entity)
+        RETURN
+            coalesce(sub.content, '') AS subject,
+            a.content AS predicate,
+            coalesce(obj.content, '') AS object,
+            count(m) AS mentions,
+            max(coalesce(a.importance, 0.0)) AS importance
+        ORDER BY mentions DESC, importance DESC
+        LIMIT 20
+        """
+        rows = self.connector.query(query, {"session_id": f"session_{session_id}"})
+        # Keep only rows with at least predicate.
+        return [dict(r) for r in rows if r.get("predicate")]
+
+    def _format_messages_for_prompt(self, messages: List[Dict], limit: int = 40) -> str:
+        if not messages:
+            return "(none)"
+        tail = messages[-limit:]
+        return "\n".join([f"{msg.get('role', 'unknown')}: {msg.get('content', '')}" for msg in tail])
+
+    def _format_semantic_for_prompt(self, semantic: Dict) -> str:
+        concepts = semantic.get("concepts", []) or []
+        entities = semantic.get("entities", []) or []
+        facts = semantic.get("facts", []) or []
+
+        parts = []
+        if concepts:
+            parts.append("Concepts: " + " | ".join(concepts[:12]))
+        if entities:
+            ent_text = ", ".join(
+                [f"{e.get('content')} (x{int(e.get('mentions', 0) or 0)})" for e in entities[:15] if e.get("content")]
+            )
+            if ent_text:
+                parts.append("Entities: " + ent_text)
+        if facts:
+            fact_text = "; ".join(
+                [
+                    f"{f.get('subject', '').strip()} - {f.get('predicate', '').strip()} - {f.get('object', '').strip()} "
+                    f"(x{int(f.get('mentions', 0) or 0)})"
+                    for f in facts[:12]
+                    if f.get("predicate")
+                ]
+            )
+            if fact_text:
+                parts.append("Facts: " + fact_text)
+        return "\n".join(parts) if parts else "(no semantic snapshot)"
+
+    def _build_summary_prompt(self, messages: List[Dict], semantic: Dict) -> str:
+        semantic_text = self._format_semantic_for_prompt(semantic)
+        conversation_text = self._format_messages_for_prompt(messages, limit=40)
+        return (
+            "Create a compact long-term memory summary for this user session.\n"
+            "Priority order:\n"
+            "1) Stable semantic facts and concepts\n"
+            "2) User goals/preferences/identity\n"
+            "3) Decisions and pending actions\n"
+            "Use raw dialog only to disambiguate details.\n\n"
+            "Semantic memory snapshot:\n"
+            f"{semantic_text}\n\n"
+            "Recent dialog (for disambiguation only):\n"
+            f"{conversation_text}\n\n"
+            f"Keep it under {self.max_summary_length} characters."
+        )
 
 
 def create_cold_layer_manager(connector):

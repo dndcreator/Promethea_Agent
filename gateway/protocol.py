@@ -239,7 +239,7 @@ class ConfigReloadParams(BaseModel):
 class ConfigUpdateParams(BaseModel):
     """User config update params"""
     config_data: Dict[str, Any] = Field(default_factory=dict)
-    validate: bool = True
+    validate_config: bool = Field(default=True, alias="validate")
 
 
 class ConfigSwitchModelParams(BaseModel):

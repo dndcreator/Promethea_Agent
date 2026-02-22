@@ -61,7 +61,7 @@ class AutoRecallEngine:
         return params
     
     def _three_layer_query(self, entities: List[str], session_id: str, user_id: str, recent_days: int = 7) -> Dict:
-        """Three-layer Cypher query (supports cross-session, user-scoped recall)."""
+        """Recall query across all sessions of one user (excluding current session)."""
         
         # Important: query must match current graph schema.
         # - User node id uses "user_{user_id}"
@@ -70,54 +70,90 @@ class AutoRecallEngine:
         # - Message belongs to Session: (:Message)-[:PART_OF_SESSION]->(:Session)
         
         cypher = """
-        // Find user node
-        WITH $entities AS query_entities, $user_node_id AS uid, $session_node_id as current_sid
-        
-        // Layer 1: Direct entity matches (cross-session, but limited to this user)
-        // Path: Entity -> Message -> Session -> User
+        WITH $entities AS query_entities, $user_node_id AS uid, $session_node_id AS current_sid
         OPTIONAL MATCH (u:User {id: uid})
+
+        // Cold layer first: summaries across sessions
+        OPTIONAL MATCH (sum:Summary)
+        OPTIONAL MATCH (sum_s:Session)-[:OWNED_BY]->(u)
+        WHERE EXISTS { MATCH (sum)-[rel]->(sum_s) WHERE type(rel) = 'SUMMARIZES' }
+          AND sum_s.id <> current_sid
+        WITH u, query_entities, current_sid, collect(DISTINCT {
+            content: sum.content,
+            time: sum.created_at,
+            importance: sum.importance,
+            layer: 'summary',
+            session_id: sum_s.session_id
+        }) AS summary_results
+
+        // Warm layer next: concept nodes across sessions
+        OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(concept_s:Session)-[:OWNED_BY]->(u)
+        WHERE concept_s.id <> current_sid
+        WITH u, query_entities, current_sid, summary_results, collect(DISTINCT {
+            content: c.content,
+            time: c.created_at,
+            importance: c.importance,
+            layer: 'concept',
+            session_id: concept_s.session_id
+        }) AS concept_results
+
+        // Layer 1: direct entity-hit memories (cross-session, user-scoped)
         OPTIONAL MATCH (e:Entity)
-        WHERE e.content IN query_entities
-        OPTIONAL MATCH (e)-[:FROM_MESSAGE]->(direct_msg:Message)-[:PART_OF_SESSION]->(s:Session)-[:OWNED_BY]->(u)
-        WITH collect(DISTINCT {
+        WHERE size(query_entities) > 0 AND e.content IN query_entities
+        OPTIONAL MATCH (e)-[:FROM_MESSAGE]->(direct_msg:Message)-[:PART_OF_SESSION]->(direct_s:Session)-[:OWNED_BY]->(u)
+        WITH u, query_entities, current_sid, summary_results, concept_results, collect(DISTINCT {
             content: direct_msg.content,
             time: direct_msg.created_at,
             importance: direct_msg.importance,
             layer: 'direct',
-            session_id: s.session_id
-        }) AS layer1_results, uid, current_sid
+            session_id: direct_s.session_id
+        }) AS layer1_results
 
-        // Layer 2: Indirect matches via Action graph
-        OPTIONAL MATCH (u:User {id: uid})
+        // Layer 2: related memories via action/entity graph
         OPTIONAL MATCH (e0:Entity)
-        WHERE e0.content IN $entities
+        WHERE size(query_entities) > 0 AND e0.content IN query_entities
         OPTIONAL MATCH (e0)-[:SUBJECT_OF|OBJECT_OF]-(a:Action)-[:SUBJECT_OF|OBJECT_OF]-(related:Entity)
         WHERE related.content IS NOT NULL AND related.content <> e0.content
-        OPTIONAL MATCH (related)-[:FROM_MESSAGE]->(related_msg:Message)-[:PART_OF_SESSION]->(s:Session)-[:OWNED_BY]->(u)
-        WITH layer1_results, collect(DISTINCT {
+        OPTIONAL MATCH (related)-[:FROM_MESSAGE]->(related_msg:Message)-[:PART_OF_SESSION]->(related_s:Session)-[:OWNED_BY]->(u)
+        WITH u, current_sid, summary_results, concept_results, layer1_results, collect(DISTINCT {
             content: related_msg.content,
             time: related_msg.created_at,
             importance: related_msg.importance,
             layer: 'related',
             via: related.content,
-            session_id: s.session_id
-        }) AS layer2_results, uid, current_sid
+            session_id: related_s.session_id
+        }) AS layer2_results
 
-        // Layer 3: Recent context window (current session only, preserve recency)
-        OPTIONAL MATCH (s:Session {id: current_sid})
-        OPTIONAL MATCH (recent_msg:Message)-[:PART_OF_SESSION]->(s)
+        // Layer 3 fallback: salient raw messages across sessions (keep this as fallback only)
+        OPTIONAL MATCH (salient_msg:Message)-[:PART_OF_SESSION]->(salient_s:Session)-[:OWNED_BY]->(u)
+        WHERE salient_s.id <> current_sid
+        WITH u, current_sid, summary_results, concept_results, layer1_results, layer2_results, collect(DISTINCT {
+            content: salient_msg.content,
+            time: salient_msg.created_at,
+            importance: salient_msg.importance,
+            layer: 'salient',
+            session_id: salient_s.session_id
+        }) AS salient_results
+
+        // Layer 4: recent memories across user history (exclude current session)
+        OPTIONAL MATCH (recent_msg:Message)-[:PART_OF_SESSION]->(recent_s:Session)-[:OWNED_BY]->(u)
         WHERE recent_msg.created_at > datetime() - duration({days: $recent_days})
-        WITH layer1_results, layer2_results, collect(DISTINCT {
+          AND recent_s.id <> current_sid
+        WITH summary_results, concept_results, layer1_results, layer2_results, salient_results, collect(DISTINCT {
             content: recent_msg.content,
             time: recent_msg.created_at,
             importance: recent_msg.importance,
-            layer: 'recent'
-        }) AS layer3_results
+            layer: 'recent',
+            session_id: recent_s.session_id
+        }) AS recent_results
 
         RETURN {
+            summary: [r IN summary_results WHERE r.content IS NOT NULL],
+            concept: [r IN concept_results WHERE r.content IS NOT NULL],
             direct: [r IN layer1_results WHERE r.content IS NOT NULL],
             related: [r IN layer2_results WHERE r.content IS NOT NULL],
-            recent: [r IN layer3_results WHERE r.content IS NOT NULL]
+            salient: [r IN salient_results WHERE r.content IS NOT NULL],
+            recent: [r IN recent_results WHERE r.content IS NOT NULL]
         } AS results
         """
         
@@ -133,11 +169,11 @@ class AutoRecallEngine:
             )
             
             return result[0]['results'] if result else {
-                'direct': [], 'related': [], 'recent': []
+                'summary': [], 'concept': [], 'direct': [], 'related': [], 'salient': [], 'recent': []
             }
         except Exception as e:
             logger.error(f"Auto-recall Cypher query failed: {e}")
-            return {'direct': [], 'related': [], 'recent': []}
+            return {'summary': [], 'concept': [], 'direct': [], 'related': [], 'salient': [], 'recent': []}
     
     def _format_context(self, results: Dict, max_tokens: int = 1500, items_per_layer: int = 3) -> str:
         """Format recalled results into a compact context string."""
@@ -146,8 +182,11 @@ class AutoRecallEngine:
         
         # Process in order of priority.
         priorities = [
+            ('summary', results.get('summary', []), '[Long-term summaries]'),
+            ('concept', results.get('concept', []), '[Topic concepts]'),
             ('direct', results.get('direct', []), '[Direct memories]'),
             ('related', results.get('related', []), '[Related knowledge]'),
+            ('salient', results.get('salient', []), '[Long-term memories]'),
             ('recent', results.get('recent', []), '[Recent dialog]')
         ]
         

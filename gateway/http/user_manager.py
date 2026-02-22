@@ -1,17 +1,24 @@
 ﻿import json
 import uuid
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from loguru import logger
 from passlib.context import CryptContext
+from passlib.exc import MissingBackendError
 
 from config import load_config
 from memory.models import Neo4jNode, NodeType
 from memory.neo4j_connector import Neo4jConnectionPool
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Prefer bcrypt, with PBKDF2 fallback when bcrypt backend is unavailable.
+pwd_context = CryptContext(
+    schemes=["bcrypt", "pbkdf2_sha256"],
+    default="bcrypt",
+    deprecated="auto",
+)
 
 
 class UserManager:
@@ -52,7 +59,16 @@ class UserManager:
             logger.warning(f"User already exists: {username}")
             return None
 
-        password_hash = pwd_context.hash(password)
+        try:
+            password_hash = pwd_context.hash(password)
+        except (MissingBackendError, ValueError):
+            # Fallback when bcrypt backend is missing or runtime-incompatible.
+            fallback_ctx = CryptContext(
+                schemes=["pbkdf2_sha256"],
+                default="pbkdf2_sha256",
+                deprecated="auto",
+            )
+            password_hash = fallback_ctx.hash(password)
         raw_uuid = str(uuid.uuid4())
         user_id = f"user_{raw_uuid}"
 
@@ -160,8 +176,18 @@ class UserManager:
         user = self.get_user_by_username(username)
         if not user:
             return None
-        if pwd_context.verify(password, user.get("password_hash")):
-            return user
+        try:
+            if pwd_context.verify(password, user.get("password_hash")):
+                return user
+        except (MissingBackendError, ValueError):
+            # Verify PBKDF2 hashes even if bcrypt backend is unavailable/incompatible.
+            fallback_ctx = CryptContext(
+                schemes=["pbkdf2_sha256"],
+                default="pbkdf2_sha256",
+                deprecated="auto",
+            )
+            if fallback_ctx.verify(password, user.get("password_hash")):
+                return user
         return None
 
     def update_user_config(
@@ -255,6 +281,42 @@ class UserManager:
         except Exception as e:
             logger.error(f"Get user by channel account failed: {e}")
             return None
+
+    def delete_user(self, user_id: str) -> bool:
+        """
+        Delete a user account and related local config files.
+        """
+        if not self.connector:
+            logger.error("Neo4j is unavailable, cannot delete user")
+            return False
+
+        graph_user_id = user_id if user_id.startswith("user_") else f"user_{user_id}"
+        raw_user_id = graph_user_id.replace("user_", "", 1)
+        try:
+            self.connector.query(
+                """
+                MATCH (u:User {id: $user_id})
+                OPTIONAL MATCH (s:Session)-[:OWNED_BY]->(u)
+                DETACH DELETE s, u
+                """,
+                {"user_id": graph_user_id},
+            )
+        except Exception as e:
+            logger.error(f"Delete user graph data failed: {e}")
+            return False
+
+        try:
+            config_dir = self._current_config_path(raw_user_id).parent
+            if config_dir.exists():
+                shutil.rmtree(config_dir, ignore_errors=True)
+            legacy_path = self._legacy_config_path(raw_user_id)
+            if legacy_path.exists():
+                legacy_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"Delete user local config cleanup failed: {e}")
+
+        logger.info(f"User deleted: {graph_user_id}")
+        return True
 
 
 user_manager = UserManager()

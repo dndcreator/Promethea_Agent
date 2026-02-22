@@ -208,6 +208,16 @@ UI_dir = os.path.join(os.path.dirname(__file__), "..", "UI")
 app.mount("/UI", StaticFiles(directory=UI_dir, html=True), name="UI")
 
 
+@app.middleware("http")
+async def ui_cache_control(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/UI/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.websocket("/ws/mcplog")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)

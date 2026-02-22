@@ -61,6 +61,8 @@ class HotLayerConfig(BaseSettings):
     min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     enable_coreference: bool = Field(default=False)
     enable_time_normalization: bool = Field(default=True)
+    message_retention_days: int = Field(default=30, ge=1)
+    message_cleanup_batch: int = Field(default=200, ge=20)
 
 
 class WarmLayerConfig(BaseSettings):
@@ -69,6 +71,9 @@ class WarmLayerConfig(BaseSettings):
     clustering_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
     min_cluster_size: int = Field(default=3, ge=1)
     max_concepts: int = Field(default=100, ge=1)
+    stabilize_min_sessions: int = Field(default=2, ge=1)
+    stabilize_min_mentions: int = Field(default=3, ge=1)
+    stabilize_importance_floor: float = Field(default=0.8, ge=0.0, le=1.0)
     cluster_every_messages: int = Field(default=12, ge=1)
     cluster_min_interval_s: int = Field(default=300, ge=0)
     idle_cluster_delay_s: int = Field(default=120, ge=10)

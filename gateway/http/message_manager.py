@@ -35,6 +35,7 @@ class Session(BaseModel):
 
     created_at: float = Field(default_factory=time.time)
     last_activity: float = Field(default_factory=time.time)
+    title: str = "New Chat"
     agent_type: str = "default"
     messages: List[Message] = Field(default_factory=list)
 
@@ -140,6 +141,14 @@ class MessageManager:
     def generate_session_id(self) -> str:
         """Generate a new session ID."""
         return str(uuid.uuid4())
+
+    @staticmethod
+    def _generate_session_title(text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return "New Chat"
+        one_line = " ".join(raw.split())
+        return one_line[:40] + ("..." if len(one_line) > 40 else "")
     
     def create_session(
         self,
@@ -172,6 +181,7 @@ class MessageManager:
         return {
             "created_at": session.created_at,
             "last_activity": session.last_activity,
+            "title": session.title,
             "agent_type": session.agent_type,
             "messages": [_model_to_dict(m) for m in session.messages],
         }
@@ -262,6 +272,8 @@ class MessageManager:
             "user_id": user_id,
             "started_at": time.time(),
         }
+        if not session.messages and (not session.title or session.title == "New Chat"):
+            session.title = self._generate_session_title(user_content)
         session.last_activity = time.time()
         self.session_store.save_all(self.session)
         return True
@@ -310,6 +322,35 @@ class MessageManager:
             session.completed_turn_ids = session.completed_turn_ids[-1000:]
 
         self.session_store.save_all(self.session)
+
+        # Keep memory graph consistent with turn-based write path.
+        if self.memory_adapter and self.memory_adapter.is_enabled():
+            import asyncio
+
+            user_role = turn.get("user_role", "user")
+            user_content = turn.get("user_content", "")
+            assistant_content_safe = assistant_content or ""
+            try:
+                loop = asyncio.get_running_loop()
+                loop.run_in_executor(
+                    None,
+                    self._sync_to_memory,
+                    session_id,
+                    user_role,
+                    user_content,
+                    user_id,
+                )
+                loop.run_in_executor(
+                    None,
+                    self._sync_to_memory,
+                    session_id,
+                    "assistant",
+                    assistant_content_safe,
+                    user_id,
+                )
+                logger.debug(f"Triggered memory sync from commit_turn for session {session_id}")
+            except Exception as e:
+                logger.warning(f"Memory sync trigger from commit_turn failed: {e}")
         return True
 
     def abort_turn(
@@ -421,6 +462,7 @@ class MessageManager:
             "user_id": owner_user_id or "default_user",
             "created_at": session.created_at,
             "last_activity": session.last_activity,
+            "title": session.title,
             "message_count": len(session.messages),
             "conversation_rounds": len(session.messages) // 2,
             "agent_type": session.agent_type,

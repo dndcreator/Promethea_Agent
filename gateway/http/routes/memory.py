@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
 from gateway.protocol import RequestType
-from memory.session_scope import ensure_session_owned
+from memory.session_scope import ensure_session_owned, user_node_id
 
 from ..dispatcher import get_gateway_server, dispatch_gateway_method
 from .auth import get_current_user_id
@@ -172,17 +172,124 @@ async def get_summary(
         raise HTTPException(status_code=500, detail=f"Get summary failed: {e}")
 
 
+@router.get("/memory/graph")
+async def get_memory_graph_global(
+    user_id: str = Depends(get_current_user_id),
+):
+    """
+    Return user-scoped full memory graph across all sessions.
+    """
+    try:
+        connector = _get_memory_connector()
+        uid = user_node_id(user_id)
+
+        nodes_query = """
+        MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
+        OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
+        OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (sum:Summary)
+        WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
+        WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
+        UNWIND all_nodes AS node
+        WITH DISTINCT node
+        WHERE node IS NOT NULL
+        RETURN node.id AS id, labels(node)[0] AS type, node.content AS content,
+               node.layer AS layer, node.importance AS importance,
+               node.access_count AS access_count, node.created_at AS created_at
+        """
+
+        edges_query = """
+        MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
+        OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
+        OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
+        OPTIONAL MATCH (sum:Summary)
+        WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
+        WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
+        UNWIND all_nodes AS node
+        WITH collect(DISTINCT node.id) AS node_ids
+        MATCH (a)-[r]->(b)
+        WHERE a.id IN node_ids AND b.id IN node_ids
+        RETURN a.id AS source, b.id AS target, type(r) AS type, r.weight AS weight
+        """
+
+        params = {"user_node_id": uid}
+        nodes_raw = connector.query(nodes_query, params)
+        edges_raw = connector.query(edges_query, params)
+
+        nodes = [
+            {
+                "id": n.get("id"),
+                "type": (n.get("type", "") or "").lower(),
+                "content": n.get("content", ""),
+                "layer": n.get("layer", 0),
+                "importance": n.get("importance", 0.5),
+                "access_count": n.get("access_count", 0),
+                "created_at": n.get("created_at"),
+            }
+            for n in nodes_raw
+        ]
+        edges = [
+            {
+                "source": e.get("source"),
+                "target": e.get("target"),
+                "type": e.get("type", ""),
+                "weight": e.get("weight", 1.0),
+            }
+            for e in edges_raw
+        ]
+
+        layer_counts = {"hot": 0, "warm": 0, "cold": 0}
+        for node in nodes:
+            layer = node.get("layer", 0)
+            if layer == 0:
+                layer_counts["hot"] += 1
+            elif layer == 1:
+                layer_counts["warm"] += 1
+            elif layer == 2:
+                layer_counts["cold"] += 1
+
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "layers": layer_counts,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Get global memory graph failed: {e}")
+
+
 @router.get("/memory/graph/{session_id}")
 async def get_memory_graph(
     session_id: str,
     user_id: str = Depends(get_current_user_id),
 ):
-    payload = await dispatch_gateway_method(
-        RequestType.MEMORY_GRAPH,
-        {"session_id": session_id},
-        user_id=user_id,
-    )
-    return {"status": "success", **payload}
+    try:
+        payload = await dispatch_gateway_method(
+            RequestType.MEMORY_GRAPH,
+            {"session_id": session_id},
+            user_id=user_id,
+        )
+        return {"status": "success", **payload}
+    except HTTPException as e:
+        # Fresh sessions may not have memory nodes yet. Keep UI stable with empty graph.
+        if e.status_code == 404:
+            return {
+                "status": "success",
+                "session_id": session_id,
+                "nodes": [],
+                "edges": [],
+                "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
+            }
+        raise
 
 
 @router.post("/memory/decay/{session_id}")

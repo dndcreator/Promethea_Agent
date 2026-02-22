@@ -24,6 +24,13 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
     """
     """
     logger.remove()
+
+    # Ensure Windows console/file output keeps UTF-8 Chinese text readable.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     
     Path(log_dir).mkdir(parents=True, exist_ok=True)
     
@@ -40,7 +47,8 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
         compression="zip",
         enqueue=True,
         level="DEBUG",         # Log all details
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} | {extra} | {message}"
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} | {extra} | {message}",
+        encoding="utf-8",
     )
     
     logger.add(
@@ -49,7 +57,8 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
         retention="30 days",
         level="ERROR",
         backtrace=True,        # Include detailed stack traces
-        diagnose=True          # Enable diagnose mode
+        diagnose=True,         # Enable diagnose mode
+        encoding="utf-8",
     )
 
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)

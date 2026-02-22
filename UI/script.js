@@ -146,6 +146,10 @@ const I18N = {
         ui_label_compress_threshold: "压缩阈值",
         ui_status_running_doctor: "正在运行系统自检，请稍候...",
         ui_status_running_migrate: "正在修复 / 迁移配置，请稍候...",
+        ui_memory_btn_short: "记忆",
+        ui_api_short: "API",
+        ui_memory_short: "记忆",
+        ui_delete_user: "注销",
     },
     en: {
         lang_name: "English",
@@ -294,6 +298,10 @@ const I18N = {
         ui_label_compress_threshold: "Compression Threshold",
         ui_status_running_doctor: "Running system doctor, please wait...",
         ui_status_running_migrate: "Fixing / migrating configuration, please wait...",
+        ui_memory_btn_short: "Memory",
+        ui_api_short: "API",
+        ui_memory_short: "Memory",
+        ui_delete_user: "Delete",
     },
 };
 
@@ -363,6 +371,8 @@ class LanguageManager {
         if (apiStatus) apiStatus.title = t("ui_api_status_title");
         const memoryStatus = document.getElementById("memoryStatus");
         if (memoryStatus) memoryStatus.title = t("ui_memory_status_title");
+        if (apiStatus) apiStatus.innerHTML = `<span class="dot"></span> ${t("ui_api_short")}`;
+        if (memoryStatus) memoryStatus.innerHTML = `<span class="dot"></span> ${t("ui_memory_short")}`;
         const logoutBtn = document.getElementById("logoutBtn");
         if (logoutBtn) logoutBtn.title = t("ui_logout_title");
         const doctorBtn = document.getElementById("doctorBtn");
@@ -373,8 +383,17 @@ class LanguageManager {
         if (settingsBtn) settingsBtn.title = t("ui_settings_title");
         const memoryGraphBtn = document.getElementById("memoryGraphBtn");
         if (memoryGraphBtn) memoryGraphBtn.title = t("ui_memory_graph_title");
+        if (doctorBtn) doctorBtn.textContent = t("ui_doctor");
+        if (metricsBtn) metricsBtn.textContent = t("ui_metrics");
+        if (settingsBtn) settingsBtn.textContent = t("ui_settings");
+        if (memoryGraphBtn) memoryGraphBtn.textContent = t("ui_memory_btn_short");
         const langSwitchBtn = document.getElementById("langSwitchBtn");
         if (langSwitchBtn) langSwitchBtn.title = getCurrentLang() === "en" ? "Language" : "语言";
+        if (langSwitchBtn) langSwitchBtn.textContent = t("lang_name");
+        const logoutBtnText = document.getElementById("logoutBtn");
+        if (logoutBtnText) logoutBtnText.textContent = t("ui_logout_title");
+        const userDeleteBtn = document.getElementById("userDeleteBtn");
+        if (userDeleteBtn) userDeleteBtn.textContent = t("ui_delete_user");
 
         if (this.langTitle) this.langTitle.textContent = t("ui_lang_title");
         if (this.langDesc) this.langDesc.textContent = t("ui_lang_desc");
@@ -563,6 +582,7 @@ class AuthManager {
             if (this.onLoginSuccess) this.onLoginSuccess();
         } else {
             this.modal.style.display = 'flex'; // Use flex layout so the modal stays centered
+            hideStartupOverlay();
         }
     }
     
@@ -601,6 +621,9 @@ class AuthManager {
                 localStorage.setItem('auth_token', result.access_token);
                 localStorage.setItem('user_id', result.user_id);
                 localStorage.setItem('agent_name', result.agent_name);
+                if (result.username) {
+                    localStorage.setItem('username', result.username);
+                }
                 
                 this.modal.style.display = 'none';
                 if (this.onLoginSuccess) this.onLoginSuccess();
@@ -638,6 +661,7 @@ class AuthManager {
         localStorage.removeItem('auth_token');
         localStorage.removeItem('user_id');
         localStorage.removeItem('agent_name');
+        localStorage.removeItem('username');
         location.reload();
     }
 }
@@ -699,13 +723,18 @@ class TerminalChatApp {
     }
     
     async initializeApp() {
-        this.addWelcomeMessage();
-        await this.checkApiStatus();
-        await this.refreshSessions();
-        this.focusInput();
-        
-        // Periodically refresh API/memory status (every 30 seconds)
-        setInterval(() => this.checkApiStatus(), 30000);
+        try {
+            await this.refreshCurrentUser();
+            this.addWelcomeMessage();
+            await this.checkApiStatus();
+            await this.refreshSessions();
+            this.focusInput();
+            
+            // Periodically refresh API/memory status (every 30 seconds)
+            setInterval(() => this.checkApiStatus(), 30000);
+        } finally {
+            hideStartupOverlay();
+        }
     }
     
     bindEvents() {
@@ -837,7 +866,7 @@ class TerminalChatApp {
             if (data.status === 'needs_confirmation') {
                 // 再次需要确认（链式调用）
                 this.showConfirmation(data);
-            } else if (data.status === 'success') {
+            } else if (response.ok && (data.status === 'success' || data.success === true)) {
                 // 显示结果
                 this.addMessage('assistant', data.response);
                 this.sendButton.disabled = false;
@@ -927,7 +956,8 @@ class TerminalChatApp {
         this.addMessage('assistant', t("app_welcome"));
     }
     
-    addMessage(role, content) {
+    addMessage(role, content, options = {}) {
+        const animate = options.animate !== false;
         const messageDiv = document.createElement('div');
         messageDiv.className = `message ${role}`;
         
@@ -946,8 +976,36 @@ class TerminalChatApp {
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
         
         // 添加打字机效果
-        if (role === 'assistant') {
+        if (role === 'assistant' && animate) {
             this.addTypingEffect(contentDiv, content);
+        }
+    }
+
+    async refreshCurrentUser() {
+        const usernameEl = document.getElementById('currentUsername');
+        if (!usernameEl) return;
+
+        const cached = localStorage.getItem('username');
+        if (cached) {
+            usernameEl.textContent = `@${cached}`;
+        }
+
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/user/profile`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const username = (data?.username || '').trim();
+            if (username) {
+                localStorage.setItem('username', username);
+                usernameEl.textContent = `@${username}`;
+                return;
+            }
+        } catch (_) {
+            // Keep cached/placeholder username if profile fetch fails.
+        }
+
+        if (!cached) {
+            usernameEl.textContent = '@user';
         }
     }
     
@@ -1050,7 +1108,7 @@ class TerminalChatApp {
                 this.addWelcomeMessage();
             } else {
                 messages.forEach(msg => {
-                    this.addMessage(msg.role, msg.content);
+                    this.addMessage(msg.role, msg.content, { animate: false });
                 });
             }
             
@@ -1131,6 +1189,19 @@ class TerminalChatApp {
             }
             
             // 处理SSE流式响应
+            const contentType = (response.headers.get('content-type') || '').toLowerCase();
+            if (!response.body || contentType.includes('application/json')) {
+                const data = await response.json().catch(() => ({}));
+                const text = data?.response || data?.content || data?.message || '';
+                textArea.innerHTML = String(text).replace(/\n/g, '<br>');
+                this.setAvatarStatus('idle');
+                if (data?.session_id) {
+                    this.currentSessionId = data.session_id;
+                    this.currentSessionEl.textContent = data.session_id.slice(0, 8) + '...';
+                }
+                await this.refreshSessions();
+                return;
+            }
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
@@ -1148,8 +1219,13 @@ class TerminalChatApp {
                 buffer = lines.pop() || '';  // 保留不完整的行
 
                 for (const line of lines) {
-                    const trimmed = line.trim();
+                    let trimmed = line.trim();
                     if (!trimmed) continue;
+                    // Support standard SSE framing: "data: {...}".
+                    if (trimmed.startsWith('data:')) {
+                        trimmed = trimmed.slice(5).trim();
+                    }
+                    if (!trimmed || trimmed === '[DONE]') continue;
 
                     let data;
                     try {
@@ -1177,12 +1253,6 @@ class TerminalChatApp {
                                         <div class="thought-content">${content}</div>
                                     </details>`;
                                 }
-                            );
-                        } else if (fullText.includes('<thinking>')) {
-                            // 正在思考中（未闭合）
-                            displayHtml = displayHtml.replace(
-                                /&lt;thinking&gt;[\s\S]*|<thinking>[\s\S]*/,
-                                `<div class="thinking-status">${t("ui_thinking_deep")}</div>`
                             );
                         }
 
@@ -1290,11 +1360,6 @@ class TerminalChatApp {
                                         <div class="thought-content">${content}</div>
                                     </details>`;
                                 }
-                            );
-                        } else if (fullText.includes('<thinking>')) {
-                            displayHtml = displayHtml.replace(
-                                /&lt;thinking&gt;[\s\S]*|<thinking>[\s\S]*/,
-                                `<div class="thinking-status">${t("ui_thinking_deep")}</div>`
                             );
                         }
                         textArea.innerHTML = displayHtml;
@@ -1555,12 +1620,7 @@ class MemoryGraphVisualization {
     }
     
     async show(sessionId) {
-        if (!sessionId) {
-            alert(t("chat_need_session"));
-            return;
-        }
-
-        this.currentSessionId = sessionId;
+        this.currentSessionId = sessionId || null;
         this.modal.style.display = 'flex';
         await this.refreshGraph();
     }
@@ -1583,7 +1643,10 @@ class MemoryGraphVisualization {
         try {
             const token = localStorage.getItem('auth_token');
             const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
-            const response = await fetch(`${this.apiBaseUrl}/api/memory/graph/${this.currentSessionId}`, { headers });
+            const graphUrl = this.currentSessionId
+                ? `${this.apiBaseUrl}/api/memory/graph/${this.currentSessionId}`
+                : `${this.apiBaseUrl}/api/memory/graph`;
+            const response = await fetch(graphUrl, { headers });
             let data = null;
             try {
                 data = await response.json();
@@ -1956,28 +2019,10 @@ class SettingsManager {
             const response = await fetch(`${this.apiBaseUrl}/api/config`, { headers });
             const data = await response.json();
             
-            if (data.status === 'success') {
+            if (response.ok && (data.status === 'success' || data.success === true)) {
                 this.originalConfig = data.config;
                 this.populateForm(data.config);
             }
-            
-            // 加载用户配置
-            const userResp = await fetch(`${this.apiBaseUrl}/api/user/profile`, { headers });
-            if (userResp.ok) {
-                const userData = await userResp.json();
-                this.setFieldValue('userAgentName', userData.agent_name);
-                this.setFieldValue('userSystemPrompt', userData.system_prompt);
-                
-                // 填充用户 API 配置
-                if (userData.api) {
-                    this.setFieldValue('userApiKey', userData.api.api_key);
-                    this.setFieldValue('userBaseUrl', userData.api.base_url);
-                    this.setFieldValue('userModel', userData.api.model);
-                    this.setFieldValue('userTemperature', userData.api.temperature);
-                    this.setFieldValue('userMaxTokens', userData.api.max_tokens);
-                }
-            }
-            
                 this.loadingEl.style.display = 'none';
                 this.form.style.display = 'block';
             
@@ -2061,6 +2106,17 @@ class SettingsManager {
     }
     
     populateForm(config) {
+        // personal settings
+        this.setFieldValue('userAgentName', config.agent_name || '');
+        this.setFieldValue('userSystemPrompt', config.system_prompt || '');
+
+        const userApi = (config.user && config.user.api) || {};
+        this.setFieldValue('userApiKey', userApi.api_key || '');
+        this.setFieldValue('userBaseUrl', userApi.base_url || '');
+        this.setFieldValue('userModel', userApi.model || '');
+        this.setFieldValue('userTemperature', userApi.temperature || '');
+        this.setFieldValue('userMaxTokens', userApi.max_tokens || '');
+
         // API配置
         this.setFieldValue('apiKey', config.api.api_key);
         this.setFieldValue('baseUrl', config.api.base_url);
@@ -2102,7 +2158,7 @@ class SettingsManager {
         event.preventDefault();
         
         const formData = new FormData(this.form);
-        const config = this.buildConfigObject(formData);
+        const config = this.normalizeConfigForGateway(this.buildConfigObject(formData));
         const token = localStorage.getItem('auth_token');
         const headers = {
             'Content-Type': 'application/json',
@@ -2114,40 +2170,18 @@ class SettingsManager {
             submitBtn.disabled = true;
             submitBtn.textContent = t("ui_save_progress");
             
-            // 1. 保存用户配置
-            const userConfig = {
-                agent_name: formData.get('user.agent_name'),
-                system_prompt: formData.get('user.system_prompt'),
-                api: {
-                    api_key: formData.get('user.api.api_key') || null,
-                    base_url: formData.get('user.api.base_url') || null,
-                    model: formData.get('user.api.model') || null,
-                    temperature: formData.get('user.api.temperature') ? parseFloat(formData.get('user.api.temperature')) : null,
-                    max_tokens: formData.get('user.api.max_tokens') ? parseInt(formData.get('user.api.max_tokens')) : null
-                }
-            };
-            
-            await fetch(`${this.apiBaseUrl}/api/user/config`, {
-                method: 'POST',
-                headers: headers,
-                body: JSON.stringify(userConfig)
-            });
-            
-            // 更新本地缓存
-            if (userConfig.agent_name) {
-                localStorage.setItem('agent_name', userConfig.agent_name);
-            }
-            
-            // 2. 保存系统配置
-            const response = await fetch(`${this.apiBaseUrl}/api/config`, {
+            const response = await fetch(`${this.apiBaseUrl}/api/config/update`, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify({ config })
             });
-            
+
             const data = await response.json();
             
-            if (data.status === 'success') {
+            if (response.ok && (data.status === 'success' || data.success === true)) {
+                if (config.agent_name) {
+                    localStorage.setItem('agent_name', config.agent_name);
+                }
                 alert(t("ui_save_success"));
                 this.hide();
             } else {
@@ -2197,6 +2231,26 @@ class SettingsManager {
         }
         
         return config;
+    }
+
+    normalizeConfigForGateway(config) {
+        const normalized = { ...config };
+        const userConfig = normalized.user || {};
+
+        if (typeof userConfig.agent_name === 'string') {
+            normalized.agent_name = userConfig.agent_name;
+        }
+        if (typeof userConfig.system_prompt === 'string') {
+            normalized.system_prompt = userConfig.system_prompt;
+        }
+
+        if (userConfig.api && typeof userConfig.api === 'object') {
+            normalized.user = { ...normalized.user, api: userConfig.api };
+        } else {
+            delete normalized.user;
+        }
+
+        return normalized;
     }
 }
 
@@ -2486,6 +2540,35 @@ class AvatarManager {
 }
 
 // 启动应用
+const STARTUP_OVERLAY_MIN_MS = 800;
+const STARTUP_BOOT_TS = Date.now();
+let STARTUP_OVERLAY_HIDDEN = false;
+
+function hideStartupOverlay() {
+    if (STARTUP_OVERLAY_HIDDEN) return;
+    STARTUP_OVERLAY_HIDDEN = true;
+
+    const elapsed = Date.now() - STARTUP_BOOT_TS;
+    const delay = Math.max(0, STARTUP_OVERLAY_MIN_MS - elapsed);
+    const applyHide = () => {
+        const overlay = document.getElementById('startupOverlay');
+        if (overlay) {
+            overlay.style.display = 'none';
+        }
+        document.body.classList.remove('app-loading');
+    };
+
+    if (delay > 0) {
+        setTimeout(applyHide, delay);
+        return;
+    }
+    const overlay = document.getElementById('startupOverlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
+    document.body.classList.remove('app-loading');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const languageManager = new LanguageManager();
     languageManager.init();
@@ -2497,8 +2580,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const doctorManager = new DoctorManager(app.apiBaseUrl);
     const avatarManager = new AvatarManager();
     
-    document.getElementById('memoryGraphBtn').addEventListener('click', () => {
-        memoryViz.show(app.currentSessionId);
+    document.getElementById('memoryGraphBtn').addEventListener('click', (event) => {
+        // Default: global user memory. Hold Alt to inspect current session scope.
+        if (event.altKey && app.currentSessionId) {
+            memoryViz.show(app.currentSessionId);
+            return;
+        }
+        memoryViz.show();
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {

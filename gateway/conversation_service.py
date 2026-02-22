@@ -342,26 +342,13 @@ class ConversationService:
                     )
                 )
 
-        memory_context = ""
-        should_recall = await self._should_recall_memory(
+        system_prompt = await self.build_system_prompt_with_memory(
             query=user_message,
-            user_config=user_config,
+            session_id=session_id,
             user_id=user_id,
+            user_config=user_config,
+            base_system_prompt=base_system_prompt,
         )
-        if should_recall and self.memory_service and self.memory_service.is_enabled():
-            memory_context = await self.memory_service.get_context(
-                query=user_message,
-                session_id=session_id,
-                user_id=user_id,
-            )
-
-        system_prompt = base_system_prompt
-        if memory_context:
-            system_prompt = (
-                f"{base_system_prompt}\n\n{memory_context}"
-                if base_system_prompt
-                else memory_context
-            )
 
         if self.message_manager:
             if not self.message_manager.get_session(session_id, user_id=user_id):
@@ -548,12 +535,80 @@ class ConversationService:
         except Exception:
             pass
 
+        if self._is_explicit_memory_query(text):
+            # Explicit memory/profile lookup should bypass short-query rejection.
+            return True
         if len(text) < min_chars:
             return False
         if len(text) > max_chars:
             return False
 
         return None
+
+    @staticmethod
+    def _is_explicit_memory_query(text: str) -> bool:
+        lowered = (text or "").strip().lower()
+        if not lowered:
+            return False
+        cn_markers = (
+            "我叫什么",
+            "我叫啥",
+            "我的名字",
+            "你记得我",
+            "你还记得",
+            "我是谁",
+            "我的偏好",
+            "我的设定",
+        )
+        en_markers = (
+            "what is my name",
+            "who am i",
+            "do you remember me",
+            "remember my name",
+            "my preference",
+            "my profile",
+        )
+        return any(m in lowered for m in cn_markers) or any(
+            m in lowered for m in en_markers
+        )
+
+    async def build_system_prompt_with_memory(
+        self,
+        query: str,
+        session_id: str,
+        user_id: Optional[str],
+        user_config: Optional[Dict[str, Any]] = None,
+        base_system_prompt: str = "",
+    ) -> str:
+        """
+        Build final system prompt with optional memory recall context.
+        Keeps recall-gating logic shared between stream and non-stream paths.
+        """
+        should_recall = await self._should_recall_memory(
+            query=query,
+            user_config=user_config,
+            user_id=user_id,
+        )
+        memory_context = ""
+        if (
+            should_recall
+            and self.memory_service
+            and self.memory_service.is_enabled()
+            and session_id
+            and user_id
+        ):
+            memory_context = await self.memory_service.get_context(
+                query=query,
+                session_id=session_id,
+                user_id=user_id,
+            )
+        if memory_context:
+            return (
+                f"{base_system_prompt}\n\n{memory_context}"
+                if base_system_prompt
+                else memory_context
+            )
+        return base_system_prompt
 
     async def run_chat_loop(
         self,

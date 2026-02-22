@@ -56,6 +56,11 @@ class ChannelBindRequest(BaseModel):
     channel: str
     account_id: str
 
+
+class UserDeleteRequest(BaseModel):
+    confirm: bool = False
+
+
 class ConfirmToolRequest(BaseModel):
     session_id: str
     tool_call_id: str

@@ -1,66 +1,123 @@
-﻿# Gateway 使用说明
+# Gateway Module
 
-`gateway` 是系统的运行编排层，负责：
-- 协议处理（WebSocket 请求/响应）
-- 事件总线
-- 会话任务排队与重试
-- 调用 Tool/Memory/Conversation/Config 四类服务
+---
 
-## 核心组件
+## 中文文档
 
-```text
-gateway/
-├─ server.py              # GatewayServer
-├─ protocol.py            # 请求/事件协议
-├─ events.py              # EventEmitter
-├─ connection.py          # 连接管理
-├─ conversation_service.py
-├─ memory_service.py
-├─ tool_service.py
-└─ config_service.py
-```
+### 1. 这个模块是做什么的
 
-## 运行模型
+`gateway` 是系统运行时中枢，负责把各子系统串成一条稳定链路：
+- 接请求
+- 调服务
+- 管状态
+- 回响应
 
-1. 客户端发送请求到 Gateway
-2. Gateway 解析请求并路由到对应 Service
-3. Service 执行业务逻辑
-4. 结果通过响应或事件返回
+它的职责是“编排”，不是“所有业务细节都写在这里”。
 
-## 会话处理机制
+### 2. 包含哪些关键文件
 
-`conversation_service.py` 已实现：
-- 按 session 的队列化处理
-- 可配置重试次数和重试间隔
-- worker 空闲自动回收
-- 回合原子提交（begin/commit/abort）
+- `gateway/app.py`：网关生命周期与初始化顺序
+- `gateway/server.py`：网关主服务与核心处理入口
+- `gateway/config_service.py`：配置读取、合并、更新、重置
+- `gateway/conversation_service.py`：会话与对话编排
+- `gateway/memory_service.py`：记忆服务接入层
+- `gateway/tool_service.py`：工具调用协调层
+- `gateway/events.py`：事件总线
+- `gateway/protocol.py`：协议数据结构
+- `gateway/connection.py`：连接管理辅助
 
-## 用户隔离（Gateway 侧）
+### 3. 架构设计与工作流
 
-- 默认优先用连接身份（device/session 绑定）解析用户。
-- 会话相关请求会做会话归属校验。
-- 记忆相关请求会在调用前校验当前用户是否拥有该 session。
+标准流：
 
-## 记忆事件流
+1. 请求进入 HTTP 路由层
+2. 进入 gateway service（配置/会话/工具/记忆）
+3. 服务间通过统一协议传递数据
+4. 产出响应并记录日志/指标
 
-- `interaction.completed` 触发记忆候选提取
-- 候选经过去重和变更检测后写入图
-- 后续触发 warm/cold/forgetting 维护
+设计重点：
+- 服务边界清晰（Config/Conversation/Memory/Tool）
+- 用户上下文贯穿全链路
+- 支持后续替换单个子服务而不推翻整体
 
-## 常用请求类型
+### 4. 一个简单例子
 
-见 `protocol.py`：
-- `memory.query`
-- `memory.cluster`
-- `memory.summarize`
-- `memory.graph`
-- `sessions.list`
-- `session.detail`
-- `followup`
-- `config.*`
+用户点“保存设置”：
 
-## 调试建议
+1. 前端发 `POST /api/config/update`
+2. 路由把请求交给 `ConfigService`
+3. `ConfigService` 做合并和校验
+4. 持久化到用户配置文件
+5. 返回成功并让前端更新状态
 
-1. 开启 info 日志观察请求链路。
-2. 先验证 sessions，再验证 memory，最后验证工具调用。
-3. 遇到隔离问题先查 user_id 解析和 session 归属。
+### 5. 使用注意事项
+
+- 配置更新尽量走单入口，避免双写冲突
+- 不要在 Route 层写太多业务逻辑
+- 用户隔离逻辑不能省略（必须带 `user_id`）
+
+### 6. 修改注意事项
+
+- 新增能力优先放到对应 service，再由 route 调用
+- 改协议字段时同步更新前端和测试
+- 改会话处理时回归 `tests/test_message_manager_turns.py`
+
+---
+
+## English Documentation
+
+### 1. Purpose
+
+`gateway` is the runtime orchestrator. It wires all major subsystems together:
+- receive requests
+- call services
+- manage state
+- return normalized responses
+
+Its job is orchestration, not storing every business detail in one place.
+
+### 2. Key Files
+
+- `gateway/app.py`: lifecycle and startup order
+- `gateway/server.py`: main server orchestration entry
+- `gateway/config_service.py`: config merge/update/reset
+- `gateway/conversation_service.py`: conversation/session orchestration
+- `gateway/memory_service.py`: memory integration façade
+- `gateway/tool_service.py`: tool-call coordination
+- `gateway/events.py`: event bus
+- `gateway/protocol.py`: protocol data structures
+- `gateway/connection.py`: connection helpers
+
+### 3. Architecture & Flow
+
+1. Request enters HTTP routes
+2. Routed to gateway services
+3. Data moves through stable protocol shapes
+4. Response is returned with logging/metrics
+
+Design principles:
+- clear service boundaries
+- user context across the full path
+- replaceable internals with stable external behavior
+
+### 4. Simple Example
+
+Settings save flow:
+
+1. UI calls `POST /api/config/update`
+2. Route delegates to `ConfigService`
+3. `ConfigService` validates + merges updates
+4. Persists into user config file
+5. Returns success for UI state refresh
+
+### 5. Operational Notes
+
+- Prefer single update path for config writes
+- Keep route layer thin
+- Never bypass `user_id`-based isolation checks
+
+### 6. Change Notes
+
+- Add new features in service layer first, then expose via routes
+- When protocol fields change, sync frontend and tests
+- Re-run turn/session regression tests after conversation changes

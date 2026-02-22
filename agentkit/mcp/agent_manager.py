@@ -237,7 +237,7 @@ class AgentManager:
             available_agents = list(self.agents.keys())
             error_msg = f"Requested agent {agent_name} is not found or not configured."
             if available_agents:
-                error_msg += f" Loaded agents: {\", \".join(available_agents)}."
+                error_msg += f" Loaded agents: {', '.join(available_agents)}."
             else:
                 error_msg += " No agent is currently loaded."
             error_msg += " Please verify the agent name."
@@ -281,7 +281,7 @@ class AgentManager:
             available_agents = list(self.agents.keys())
             error_msg = f"Requested agent {agent_name} is not found or not configured."
             if available_agents:
-                error_msg += f" Loaded agents: {\", \".join(available_agents)}."
+                error_msg += f" Loaded agents: {', '.join(available_agents)}."
             else:
                 error_msg += " No agent is currently loaded."
             error_msg += " Please verify the agent name."

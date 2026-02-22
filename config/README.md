@@ -1,50 +1,73 @@
-﻿# 配置说明
+# Config Module
 
-本项目采用“默认配置 + 用户配置 + 环境变量”的分层配置模型。
+---
 
-## 配置来源与优先级
+## 中文文档
 
-从低到高：
-1. `config/default.json`（系统默认）
-2. `config/users/<user_id>/config.json`（用户非敏感配置）
-3. `.env` / 系统环境变量（敏感配置优先）
+### 1. 配置模型
 
-## 当前安全策略
+配置优先级（低 -> 高）：
+1. `config/default.json`
+2. `config/users/<user_id>/config.json`
+3. 环境变量（`.env`）
 
-- API Key 等敏感信息：只放 `.env`（全局共享）
-- 用户配置文件：仅存非敏感项（如 agent 名称、系统提示词等）
+### 2. 关键目标
 
-## 常用环境变量（示例）
+- 让默认配置稳定可复用
+- 允许用户覆盖非敏感项
+- 敏感项（如 API key）由环境变量统一管理
 
-```env
-API__API_KEY=...
-API__BASE_URL=https://openrouter.ai/api/v1
-API__MODEL=nvidia/nemotron-3-nano-30b-a3b:free
+### 3. 关键文件
 
-MEMORY__ENABLED=true
-MEMORY__NEO4J__ENABLED=true
-MEMORY__NEO4J__URI=bolt://127.0.0.1:7687
-MEMORY__NEO4J__USERNAME=neo4j
-MEMORY__NEO4J__PASSWORD=...
-MEMORY__NEO4J__DATABASE=neo4j
-```
+- `config/default.json`：系统默认配置
+- `config/users/<user_id>/config.json`：用户覆盖配置
+- `config.py`：配置模型与加载逻辑
 
-## 用户配置文件位置
+### 4. 示例
 
-```text
-config/
-├─ default.json
-└─ users/
-   └─ <user_id>/
-      └─ config.json
-```
+用户修改 agent 名称：
+- 前端调用配置更新接口
+- 后端写入 `config/users/<user_id>/config.json`
+- 下次加载时自动合并并生效
 
-## 常见问题
+### 5. 修改注意事项
 
-### 1) 为什么用户配置里改了 api 仍不生效
+- 新字段要同步更新：默认值 + schema + 前端表单
+- 避免新增“并行写入入口”
+- 变更前后都要验证合并优先级是否符合预期
 
-因为当前策略是全局 `.env` 控制敏感 key，用户配置中的敏感字段会被过滤。
+---
 
-### 2) 如何恢复默认配置
+## English Documentation
 
-可通过配置接口 reset，或手动删除对应用户配置文件后重启服务。
+### 1. Config Model
+
+Config precedence (low -> high):
+1. `config/default.json`
+2. `config/users/<user_id>/config.json`
+3. environment variables (`.env`)
+
+### 2. Key Objectives
+
+- stable reusable defaults
+- user-level non-secret overrides
+- centralized secret management via environment variables
+
+### 3. Key Files
+
+- `config/default.json`: default system config
+- `config/users/<user_id>/config.json`: user overrides
+- `config.py`: schema + loading logic
+
+### 4. Example
+
+User updates agent name:
+- frontend calls config update endpoint
+- backend persists to per-user config file
+- next load merges and applies automatically
+
+### 5. Change Notes
+
+- keep defaults, schema, and UI fields in sync
+- avoid introducing parallel write paths
+- verify precedence behavior after each config change
