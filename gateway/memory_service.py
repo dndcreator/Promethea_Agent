@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -42,6 +43,22 @@ class MemoryService:
         self._recent_write_keys: List[str] = []
         self._recent_write_index: set[str] = set()
         self._recent_write_limit = 2000
+        self._sync_defaults = {
+            "max_queue_size": 32,
+            "drain_timeout_s": 20.0,
+        }
+        self._sync_queue: Optional[asyncio.Queue] = None
+        self._sync_worker: Optional[asyncio.Task] = None
+        self._sync_lock = asyncio.Lock()
+        self._sync_active = 0
+        self._sync_enqueued = 0
+        self._sync_completed = 0
+        self._sync_failed = 0
+        self._sync_dropped = 0
+        self._sync_last_error = ""
+        self._sync_last_activity_ts = 0.0
+        self._sync_current_item: Optional[Dict[str, Any]] = None
+        self._sync_shutdown_requested = False
 
         if not self.memory_adapter:
             logger.warning(
@@ -67,7 +84,7 @@ class MemoryService:
         if not self.event_emitter:
             return
         self.event_emitter.on(
-            EventType.INTERACTION_COMPLETED, self._on_interaction_completed
+            EventType.INTERACTION_COMPLETED, self._enqueue_interaction_completed
         )
         self.event_emitter.on(EventType.CONFIG_CHANGED, self._on_config_changed)
         self.event_emitter.on(EventType.CONFIG_RELOADED, self._on_config_reloaded)
@@ -134,6 +151,35 @@ class MemoryService:
             )
         except Exception:
             pass
+
+    def _resolve_sync_policy(self, user_id: Optional[str] = None) -> Dict[str, float]:
+        policy = dict(self._sync_defaults)
+        try:
+            cfg = self._get_merged_config(user_id=user_id) or {}
+            sync_cfg = cfg.get("memory", {}).get("sync", {})
+            policy["max_queue_size"] = int(
+                sync_cfg.get("max_queue_size", policy["max_queue_size"])
+            )
+            policy["drain_timeout_s"] = float(
+                sync_cfg.get("drain_timeout_s", policy["drain_timeout_s"])
+            )
+        except Exception:
+            pass
+        policy["max_queue_size"] = max(1, int(policy["max_queue_size"]))
+        policy["drain_timeout_s"] = max(1.0, float(policy["drain_timeout_s"]))
+        return policy
+
+    async def _ensure_sync_queue(self, user_id: Optional[str] = None) -> asyncio.Queue:
+        policy = self._resolve_sync_policy(user_id=user_id)
+        async with self._sync_lock:
+            queue = self._sync_queue
+            if queue is None or queue.maxsize != int(policy["max_queue_size"]):
+                queue = asyncio.Queue(maxsize=int(policy["max_queue_size"]))
+                self._sync_queue = queue
+            if self._sync_worker is None or self._sync_worker.done():
+                self._sync_shutdown_requested = False
+                self._sync_worker = asyncio.create_task(self._sync_worker_loop())
+            return queue
 
     def _make_write_key(self, user_id: str, memory_type: str, content: str) -> str:
         normalized = self._normalize_content(content)
@@ -503,7 +549,74 @@ class MemoryService:
             )
             return True
 
-    async def _on_interaction_completed(self, event_msg) -> None:
+    async def _enqueue_interaction_completed(self, event_msg) -> None:
+        if not self.enabled or not self.memory_adapter:
+            return
+
+        payload = dict(getattr(event_msg, "payload", {}) or {})
+        session_id = payload.get("session_id")
+        user_id = payload.get("user_id") or "default_user"
+        user_input = (payload.get("user_input") or "").strip()
+        assistant_output = (payload.get("assistant_output") or "").strip()
+        if not session_id or (not user_input and not assistant_output):
+            return
+
+        queue = await self._ensure_sync_queue(user_id=user_id)
+        item = {
+            "session_id": session_id,
+            "user_id": user_id,
+            "channel": payload.get("channel"),
+            "user_input": user_input,
+            "assistant_output": assistant_output,
+            "queued_at": time.time(),
+        }
+
+        if queue.full():
+            self._sync_dropped += 1
+            self._sync_last_activity_ts = time.time()
+            self._sync_last_error = "memory sync queue full"
+            logger.warning(
+                "MemoryService: memory sync queue full, drop interaction session={} user={}",
+                session_id,
+                user_id,
+            )
+            return
+
+        queue.put_nowait(item)
+        self._sync_enqueued += 1
+        self._sync_last_activity_ts = time.time()
+
+    async def _sync_worker_loop(self) -> None:
+        logger.info("MemoryService: memory sync worker started")
+        try:
+            while not self._sync_shutdown_requested:
+                queue = self._sync_queue
+                if queue is None:
+                    return
+                item = await queue.get()
+                self._sync_active += 1
+                self._sync_current_item = item
+                self._sync_last_activity_ts = time.time()
+                try:
+                    await self._process_interaction_completed(item)
+                    self._sync_completed += 1
+                    self._sync_last_error = ""
+                except Exception as e:
+                    self._sync_failed += 1
+                    self._sync_last_error = str(e)
+                    logger.error("MemoryService: background memory sync failed: {}", e)
+                finally:
+                    self._sync_active = max(0, self._sync_active - 1)
+                    self._sync_current_item = None
+                    self._sync_last_activity_ts = time.time()
+                    queue.task_done()
+        except asyncio.CancelledError:
+            logger.info("MemoryService: memory sync worker cancelled")
+            raise
+        finally:
+            self._sync_worker = None
+
+    async def _process_interaction_completed(self, payload: Dict[str, Any]) -> None:
         """
         Interaction-level write path.
         Unit of judgement is one full turn:
@@ -513,84 +626,123 @@ class MemoryService:
         if not self.enabled or not self.memory_adapter:
             return
 
-        try:
-            payload = event_msg.payload
-            session_id = payload.get("session_id")
-            user_id = payload.get("user_id") or "default_user"
-            channel = payload.get("channel")
-            user_input = (payload.get("user_input") or "").strip()
-            assistant_output = (payload.get("assistant_output") or "").strip()
+        session_id = payload.get("session_id")
+        user_id = payload.get("user_id") or "default_user"
+        channel = payload.get("channel")
+        user_input = (payload.get("user_input") or "").strip()
+        assistant_output = (payload.get("assistant_output") or "").strip()
 
-            if not session_id or (not user_input and not assistant_output):
-                return
+        if not session_id or (not user_input and not assistant_output):
+            return
 
-            # Only user input + assistant output is considered here;
-            # tool logs are intentionally excluded by event payload design.
-            classification = await self._classify_interaction(
-                user_input=user_input,
-                assistant_output=assistant_output,
+        classification = await self._classify_interaction(
+            user_input=user_input,
+            assistant_output=assistant_output,
+            user_id=user_id,
+        )
+        if not classification.get("has_long_term_state", False):
+            return
+
+        candidates = classification.get("candidates", [])
+        saved_count = 0
+        for item in candidates:
+            memory_type = item["type"]
+            content = item["content"]
+            semantic_keys = item.get("semantic_keys", [])
+            write_key = self._make_write_key(user_id, memory_type, content)
+            if not self._should_write_candidate(user_id, memory_type, content):
+                continue
+            if not self._graph_memory_state_changed(
                 user_id=user_id,
+                memory_type=memory_type,
+                content=content,
+                semantic_keys=semantic_keys,
+            ):
+                continue
+
+            success = self.memory_adapter.add_message(
+                session_id=session_id,
+                role="user",
+                content=content,
+                user_id=user_id,
+                metadata={
+                    "memory_type": memory_type,
+                    "semantic_keys": semantic_keys,
+                    "memory_source": "interaction.completed",
+                },
             )
-            if not classification.get("has_long_term_state", False):
-                return
+            if not success:
+                continue
 
-            candidates = classification.get("candidates", [])
-            saved_count = 0
-            for item in candidates:
-                memory_type = item["type"]
-                content = item["content"]
-                semantic_keys = item.get("semantic_keys", [])
-                write_key = self._make_write_key(user_id, memory_type, content)
-                if not self._should_write_candidate(user_id, memory_type, content):
-                    continue
-                if not self._graph_memory_state_changed(
-                    user_id=user_id,
-                    memory_type=memory_type,
-                    content=content,
-                    semantic_keys=semantic_keys,
-                ):
-                    continue
+            self._remember_write_key(write_key)
+            self.memory_adapter.on_message_saved(session_id, "user", user_id)
+            saved_count += 1
 
-                success = self.memory_adapter.add_message(
-                    session_id=session_id,
-                    role="user",
-                    content=content,
-                    user_id=user_id,
-                    metadata={
+            if self.event_emitter:
+                await self.event_emitter.emit(
+                    EventType.MEMORY_SAVED,
+                    {
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "channel": channel,
+                        "source": "interaction.completed",
                         "memory_type": memory_type,
                         "semantic_keys": semantic_keys,
-                        "memory_source": "interaction.completed",
+                        "content_length": len(content),
                     },
                 )
-                if not success:
-                    continue
 
-                self._remember_write_key(write_key)
-                self.memory_adapter.on_message_saved(session_id, "user", user_id)
-                saved_count += 1
+        if saved_count:
+            logger.info(
+                "MemoryService: Saved {} memory item(s) from interaction, session={}",
+                saved_count,
+                session_id,
+            )
 
-                if self.event_emitter:
-                    await self.event_emitter.emit(
-                        EventType.MEMORY_SAVED,
-                        {
-                            "session_id": session_id,
-                            "user_id": user_id,
-                            "channel": channel,
-                            "source": "interaction.completed",
-                            "memory_type": memory_type,
-                            "semantic_keys": semantic_keys,
-                            "content_length": len(content),
-                        },
-                    )
+    def get_sync_stats(self) -> Dict[str, Any]:
+        queue_size = self._sync_queue.qsize() if self._sync_queue else 0
+        pending = queue_size + self._sync_active
+        return {
+            "enabled": self.enabled and self.memory_adapter is not None,
+            "pending": pending,
+            "queued": queue_size,
+            "active": self._sync_active,
+            "idle": pending == 0,
+            "worker_running": bool(self._sync_worker and not self._sync_worker.done()),
+            "enqueued": self._sync_enqueued,
+            "completed": self._sync_completed,
+            "failed": self._sync_failed,
+            "dropped": self._sync_dropped,
+            "last_error": self._sync_last_error,
+            "last_activity_ts": self._sync_last_activity_ts,
+            "current_session_id": (
+                self._sync_current_item.get("session_id")
+                if isinstance(self._sync_current_item, dict)
+                else None
+            ),
+        }
 
-            if saved_count:
-                logger.info(
-                    "MemoryService: Saved {} memory item(s) from interaction, session={}",
-                    saved_count,
-                    session_id,
-                )
-        except Exception as e:
-            logger.error("MemoryService: Error handling interaction.completed: {}", e)
+    async def wait_until_idle(self, timeout_s: Optional[float] = None) -> bool:
+        deadline = time.time() + timeout_s if timeout_s else None
+        while True:
+            if self.get_sync_stats()["pending"] == 0:
+                return True
+            if deadline is not None and time.time() >= deadline:
+                return False
+            await asyncio.sleep(0.1)
+
+    async def shutdown(self) -> bool:
+        timeout_s = self._resolve_sync_policy().get("drain_timeout_s", 20.0)
+        drained = await self.wait_until_idle(timeout_s=timeout_s)
+        self._sync_shutdown_requested = True
+        worker = self._sync_worker
+        if worker and not worker.done():
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        return drained
 
     # ===== Memory query API =====
 

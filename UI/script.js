@@ -150,6 +150,10 @@ const I18N = {
         ui_api_short: "API",
         ui_memory_short: "记忆",
         ui_delete_user: "注销",
+        memory_sync_idle: "记忆同步空闲",
+        memory_sync_running: "记忆同步中: {pending}",
+        memory_sync_error: "记忆同步异常",
+        memory_sync_wait_close: "记忆同步尚未完成，请稍候再关闭页面。",
     },
     en: {
         lang_name: "English",
@@ -302,6 +306,10 @@ const I18N = {
         ui_api_short: "API",
         ui_memory_short: "Memory",
         ui_delete_user: "Delete",
+        memory_sync_idle: "Memory sync idle",
+        memory_sync_running: "Memory syncing: {pending}",
+        memory_sync_error: "Memory sync error",
+        memory_sync_wait_close: "Memory sync is still running. Please wait before leaving.",
     },
 };
 
@@ -680,6 +688,8 @@ class TerminalChatApp {
         // Additional UI elements
         this.apiStatusEl = document.getElementById('apiStatus');
         this.memoryStatusEl = document.getElementById('memoryStatus');
+        this.memorySyncIndicatorEl = document.getElementById('memorySyncIndicator');
+        this.memorySyncTextEl = document.getElementById('memorySyncText');
         this.sidebar = document.getElementById('sidebar');
         this.sidebarToggle = document.getElementById('sidebarToggle');
         this.avatarPlaceholder = document.getElementById('avatarPlaceholder');
@@ -696,6 +706,14 @@ class TerminalChatApp {
         this.apiBaseUrl = 'http://127.0.0.1:8000';
         this.currentSessionId = null;
         this.isTyping = false;
+        this.memorySyncState = {
+            pending: 0,
+            queued: 0,
+            active: 0,
+            idle: true,
+            last_error: '',
+        };
+        this.statusPollTimer = null;
         // Mapping: tool_call_id -> corresponding DOM elements
         this.toolCallElements = new Map();
         
@@ -730,8 +748,10 @@ class TerminalChatApp {
             await this.refreshSessions();
             this.focusInput();
             
-            // Periodically refresh API/memory status (every 30 seconds)
-            setInterval(() => this.checkApiStatus(), 30000);
+            if (this.statusPollTimer) {
+                clearInterval(this.statusPollTimer);
+            }
+            this.statusPollTimer = setInterval(() => this.checkApiStatus(), 5000);
         } finally {
             hideStartupOverlay();
         }
@@ -818,11 +838,27 @@ class TerminalChatApp {
         // Logout button
         if (this.logoutBtn) {
             this.logoutBtn.addEventListener('click', () => {
+                if (this.hasPendingMemorySync()) {
+                    const proceed = confirm(
+                        `${t("memory_sync_wait_close")}\n${t("memory_sync_running", { pending: this.memorySyncState.pending })}`
+                    );
+                    if (!proceed) {
+                        return;
+                    }
+                }
                 if (confirm(t("logout_confirm"))) {
                     this.authManager.logout();
                 }
             });
         }
+
+        window.addEventListener('beforeunload', (e) => {
+            if (!this.hasPendingMemorySync()) {
+                return;
+            }
+            e.preventDefault();
+            e.returnValue = t("memory_sync_wait_close");
+        });
 
         // Confirmation modal actions
         this.approveToolBtn.addEventListener('click', () => this.handleToolConfirmation('approve'));
@@ -918,13 +954,16 @@ class TerminalChatApp {
                 if (data.memory_active !== undefined) {
                     this.updateStatus(this.memoryStatusEl, data.memory_active);
                 }
+                this.updateMemorySyncIndicator(data.memory_sync || null);
             } else {
                 this.updateStatus(this.apiStatusEl, false);
                 this.updateStatus(this.memoryStatusEl, false);
+                this.updateMemorySyncIndicator(null);
             }
         } catch (error) {
             this.updateStatus(this.apiStatusEl, false);
             this.updateStatus(this.memoryStatusEl, false);
+            this.updateMemorySyncIndicator(null);
             console.log('❌ 无法连接到API服务');
         }
     }
@@ -942,6 +981,53 @@ class TerminalChatApp {
             element.classList.remove('active');
             element.classList.add('error');
         }
+    }
+
+    hasPendingMemorySync() {
+        return Number(this.memorySyncState?.pending || 0) > 0;
+    }
+
+    updateMemorySyncIndicator(syncStats) {
+        if (!this.memorySyncIndicatorEl || !this.memorySyncTextEl) {
+            return;
+        }
+
+        const fallback = {
+            enabled: false,
+            pending: 0,
+            queued: 0,
+            active: 0,
+            idle: true,
+            last_error: '',
+        };
+        const nextState = Object.assign({}, fallback, syncStats || {});
+        nextState.pending = Number(nextState.pending || 0);
+        nextState.queued = Number(nextState.queued || 0);
+        nextState.active = Number(nextState.active || 0);
+        nextState.idle = Boolean(nextState.idle);
+        nextState.last_error = String(nextState.last_error || '');
+        this.memorySyncState = nextState;
+
+        this.memorySyncIndicatorEl.classList.remove('idle', 'syncing', 'error');
+
+        let text = t("memory_sync_idle");
+        if (!nextState.enabled) {
+            this.memorySyncIndicatorEl.classList.add('idle');
+        } else if (nextState.last_error) {
+            this.memorySyncIndicatorEl.classList.add('error');
+            text = `${t("memory_sync_error")}: ${nextState.last_error}`;
+        } else if (nextState.pending > 0 || !nextState.idle) {
+            this.memorySyncIndicatorEl.classList.add('syncing');
+            text = t("memory_sync_running", { pending: nextState.pending });
+            if (nextState.active > 0 || nextState.queued > 0) {
+                text += ` (${nextState.active} active / ${nextState.queued} queued)`;
+            }
+        } else {
+            this.memorySyncIndicatorEl.classList.add('idle');
+        }
+
+        this.memorySyncTextEl.textContent = text;
+        this.memorySyncIndicatorEl.title = text;
     }
     
     setAvatarStatus(status) {

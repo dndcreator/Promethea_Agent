@@ -1,11 +1,13 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from dotenv import dotenv_values
 
 
 class SystemConfig(BaseSettings):
@@ -165,6 +167,55 @@ def _deep_merge(target: dict, source: dict) -> dict:
     return target
 
 
+def _set_nested_value(target: dict, path: tuple[str, ...], value: Any) -> None:
+    current = target
+    for segment in path[:-1]:
+        current = current.setdefault(segment, {})
+    current[path[-1]] = value
+
+
+def _overlay_explicit_env_values(merged_data: dict, base_from_env: PrometheaConfig) -> None:
+    env_map = {
+        ("api", "api_key"): "API__API_KEY",
+        ("api", "base_url"): "API__BASE_URL",
+        ("api", "model"): "API__MODEL",
+        ("api", "temperature"): "API__TEMPERATURE",
+        ("api", "max_tokens"): "API__MAX_TOKENS",
+        ("api", "max_history_rounds"): "API__MAX_HISTORY_ROUNDS",
+        ("api", "timeout"): "API__TIMEOUT",
+        ("api", "retry_count"): "API__RETRY_COUNT",
+        ("system", "log_level"): "SYSTEM__LOG_LEVEL",
+        ("system", "debug"): "SYSTEM__DEBUG",
+        ("system", "stream_mode"): "SYSTEM__STREAM_MODE",
+        ("system", "session_ttl_hours"): "SYSTEM__SESSION_TTL_HOURS",
+        ("memory", "enabled"): "MEMORY__ENABLED",
+        ("memory", "api", "use_main_api"): "MEMORY__API__USE_MAIN_API",
+        ("memory", "api", "api_key"): "MEMORY__API__API_KEY",
+        ("memory", "api", "base_url"): "MEMORY__API__BASE_URL",
+        ("memory", "api", "model"): "MEMORY__API__MODEL",
+        ("memory", "neo4j", "enabled"): "MEMORY__NEO4J__ENABLED",
+        ("memory", "neo4j", "uri"): "MEMORY__NEO4J__URI",
+        ("memory", "neo4j", "username"): "MEMORY__NEO4J__USERNAME",
+        ("memory", "neo4j", "password"): "MEMORY__NEO4J__PASSWORD",
+        ("memory", "neo4j", "database"): "MEMORY__NEO4J__DATABASE",
+        ("memory", "neo4j", "connection_timeout"): "MEMORY__NEO4J__CONNECTION_TIMEOUT",
+        ("memory", "cold_layer", "summary_model"): "MEMORY__COLD_LAYER__SUMMARY_MODEL",
+    }
+
+    env_data = base_from_env.model_dump()
+    explicit_env_keys = set(os.environ.keys())
+    env_file = dotenv_values(".env")
+    explicit_env_keys.update(str(k) for k in env_file.keys() if k)
+    for path, env_name in env_map.items():
+        if env_name not in explicit_env_keys:
+            continue
+
+        value: Any = env_data
+        for segment in path:
+            value = value[segment]
+        _set_nested_value(merged_data, path, value)
+
+
 def load_config() -> PrometheaConfig:
     base_from_env = PrometheaConfig()
     merged_data = base_from_env.model_dump()
@@ -182,10 +233,8 @@ def load_config() -> PrometheaConfig:
         except Exception as e:
             print(f"Warning: failed to load {config_path}: {e}")
 
-    # Sensitive values stay sourced from env/.env.
-    merged_data.setdefault("api", {})["api_key"] = base_from_env.api.api_key
-    merged_data.setdefault("memory", {}).setdefault("neo4j", {})["password"] = base_from_env.memory.neo4j.password
-    merged_data.setdefault("memory", {}).setdefault("api", {})["api_key"] = base_from_env.memory.api.api_key
+    # .env values should always win when explicitly provided; default.json only fills gaps.
+    _overlay_explicit_env_values(merged_data, base_from_env)
 
     cfg = PrometheaConfig(**merged_data)
 

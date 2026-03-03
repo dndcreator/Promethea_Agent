@@ -21,6 +21,11 @@ async def get_metrics():
             if gateway_server.conversation_service
             else {}
         ),
+        "memory_sync": (
+            gateway_server.memory_service.get_sync_stats()
+            if gateway_server.memory_service
+            else {}
+        ),
         "channels": len(gateway_server.channels),
     }
     metrics = state.metrics.get_stats()

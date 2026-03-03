@@ -323,6 +323,10 @@ class GatewayIntegration:
         """Shutdown gateway system."""
         try:
             logger.info("Shutting down gateway system...")
+            if self.gateway_server and self.gateway_server.memory_service:
+                drained = await self.gateway_server.memory_service.shutdown()
+                if not drained:
+                    logger.warning("MemoryService did not drain fully before shutdown timeout")
             for name, controller in self.computer_controllers.items():
                 try:
                     await controller.cleanup()

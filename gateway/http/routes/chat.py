@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 
@@ -15,6 +16,26 @@ from .auth import get_current_user_id
 
 
 router = APIRouter()
+
+
+def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
+    event_emitter = getattr(gateway_server, "event_emitter", None)
+    if not event_emitter:
+        return
+
+    task = asyncio.create_task(
+        event_emitter.emit(EventType.INTERACTION_COMPLETED, payload)
+    )
+
+    def _log_background_failure(done_task: asyncio.Task) -> None:
+        try:
+            exc = done_task.exception()
+        except asyncio.CancelledError:
+            return
+        if exc:
+            logger.error(f"background interaction.completed failed: {exc}")
+
+    task.add_done_callback(_log_background_failure)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -129,9 +150,10 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                         yield _sse({"type": "error", "content": "failed to commit turn"})
                         return
 
-                    if gateway_server.event_emitter and not stream_failed:
-                        await gateway_server.event_emitter.emit(
-                            EventType.INTERACTION_COMPLETED,
+                    yield _sse({"type": "done", "session_id": session_id})
+                    if not stream_failed:
+                        _emit_interaction_completed_async(
+                            gateway_server,
                             {
                                 "session_id": session_id,
                                 "user_id": user_id,
@@ -140,8 +162,6 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                                 "assistant_output": full_text,
                             },
                         )
-
-                    yield _sse({"type": "done", "session_id": session_id})
                 except Exception as e:
                     message_manager.abort_turn(session_id, turn_id, user_id=user_id)
                     logger.error(f"chat stream failed: {e}")

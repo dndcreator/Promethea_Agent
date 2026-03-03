@@ -15,10 +15,22 @@ async def get_status():
         gateway_server.memory_service and gateway_server.memory_service.is_enabled()
     )
     conversation_ready = gateway_server.conversation_service is not None
+    memory_sync = (
+        gateway_server.memory_service.get_sync_stats()
+        if gateway_server.memory_service
+        else {
+            "enabled": False,
+            "pending": 0,
+            "queued": 0,
+            "active": 0,
+            "idle": True,
+        }
+    )
     return {
         "status": "running",
         "conversation_ready": conversation_ready,
         "memory_active": memory_status,
+        "memory_sync": memory_sync,
     }
 
 
