@@ -26,6 +26,7 @@ from gateway import EventType, GatewayServer
 from gateway.config_service import ConfigService
 from gateway.conversation_service import ConversationService
 from gateway.memory_service import MemoryService
+from gateway.reasoning_service import ReasoningService
 
 
 class GatewayIntegration:
@@ -161,11 +162,19 @@ class GatewayIntegration:
             config_service=self.gateway_server.config_service,
         )
         self.gateway_server.memory_system = memory_adapter
+        self.gateway_server.reasoning_service = ReasoningService(
+            event_emitter=event_emitter,
+            conversation_core=conversation_core,
+            memory_service=self.gateway_server.memory_service,
+            tool_service=self.gateway_server.tool_service,
+            config_service=self.gateway_server.config_service,
+        )
 
         self.gateway_server.conversation_service = ConversationService(
             event_emitter=event_emitter,
             conversation_core=conversation_core,
             memory_service=self.gateway_server.memory_service,
+            reasoning_service=self.gateway_server.reasoning_service,
             message_manager=message_manager,
             config_service=self.gateway_server.config_service,
         )

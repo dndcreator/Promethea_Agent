@@ -75,5 +75,21 @@
                 "min_candidate_chars": 8
             }
         }
+    },
+    "reasoning": {
+        "enabled": false,
+        "mode": "react_tot",
+        "max_depth": 4,
+        "max_nodes": 24,
+        "max_iterations": 10,
+        "max_memory_calls": 4,
+        "max_tool_calls": 4,
+        "max_replan_rounds": 3,
+        "plan_max_steps": 5,
+        "beam_width": 3,
+        "branch_factor": 3,
+        "candidate_votes": 3,
+        "min_branch_score": 0.0,
+        "debug_log": false
     }
 }

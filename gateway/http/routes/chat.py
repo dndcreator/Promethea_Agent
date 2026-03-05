@@ -77,37 +77,15 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                         yield _sse({"type": "error", "content": "failed to start turn"})
                         return
 
-                    recent = message_manager.get_recent_messages(session_id, user_id=user_id)
-                    messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-                    messages.append({"role": "user", "content": user_text})
-
-                    user_config = None
-                    base_system_prompt = ""
-                    if gateway_server.config_service:
-                        user_config = gateway_server.config_service.get_merged_config(user_id)
-                        base_system_prompt = (
-                            user_config.get("prompts", {}).get("Promethea_system_prompt", "")
-                        )
-                        custom_prompt = user_config.get("system_prompt")
-                        agent_name = user_config.get("agent_name")
-                        if custom_prompt:
-                            base_system_prompt = custom_prompt
-                        if agent_name:
-                            base_system_prompt = (
-                                base_system_prompt.replace("Promethea", agent_name).replace(
-                                    "your assistant", agent_name
-                                )
-                            )
-
-                    system_prompt = await gateway_server.conversation_service.build_system_prompt_with_memory(
-                        query=user_text,
+                    prepared = await gateway_server.conversation_service.prepare_chat_turn(
                         session_id=session_id,
                         user_id=user_id,
-                        user_config=user_config,
-                        base_system_prompt=base_system_prompt,
+                        user_message=user_text,
+                        channel="web",
+                        include_recent=True,
                     )
-                    if system_prompt:
-                        messages = [{"role": "system", "content": system_prompt}] + messages
+                    messages = prepared["messages"]
+                    user_config = prepared["user_config"]
 
                     full_text = ""
                     stream_failed = False

@@ -130,6 +130,31 @@ class MemoryConfig(BaseSettings):
     gating: MemoryGatingConfig = Field(default_factory=MemoryGatingConfig)
 
 
+class ReasoningConfig(BaseSettings):
+    enabled: bool = Field(default=False)
+    mode: str = Field(default="react_tot")
+    max_depth: int = Field(default=4, ge=1, le=12)
+    max_nodes: int = Field(default=24, ge=4, le=256)
+    max_iterations: int = Field(default=10, ge=1, le=256)
+    max_memory_calls: int = Field(default=4, ge=0, le=64)
+    max_tool_calls: int = Field(default=4, ge=0, le=64)
+    max_replan_rounds: int = Field(default=3, ge=0, le=32)
+    plan_max_steps: int = Field(default=5, ge=1, le=32)
+    beam_width: int = Field(default=3, ge=1, le=16)
+    branch_factor: int = Field(default=3, ge=1, le=16)
+    candidate_votes: int = Field(default=3, ge=1, le=9)
+    min_branch_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    debug_log: bool = Field(default=False)
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        value = (v or "").strip().lower()
+        if value not in {"react_tot"}:
+            raise ValueError("reasoning.mode must be 'react_tot'")
+        return value
+
+
 class SystemPrompts(BaseSettings):
     Promethea_system_prompt: str = Field(
         default=(
@@ -145,6 +170,7 @@ class PrometheaConfig(BaseSettings):
     api: APIConfig = Field(default_factory=APIConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -177,29 +203,8 @@ def _set_nested_value(target: dict, path: tuple[str, ...], value: Any) -> None:
 def _overlay_explicit_env_values(merged_data: dict, base_from_env: PrometheaConfig) -> None:
     env_map = {
         ("api", "api_key"): "API__API_KEY",
-        ("api", "base_url"): "API__BASE_URL",
-        ("api", "model"): "API__MODEL",
-        ("api", "temperature"): "API__TEMPERATURE",
-        ("api", "max_tokens"): "API__MAX_TOKENS",
-        ("api", "max_history_rounds"): "API__MAX_HISTORY_ROUNDS",
-        ("api", "timeout"): "API__TIMEOUT",
-        ("api", "retry_count"): "API__RETRY_COUNT",
-        ("system", "log_level"): "SYSTEM__LOG_LEVEL",
-        ("system", "debug"): "SYSTEM__DEBUG",
-        ("system", "stream_mode"): "SYSTEM__STREAM_MODE",
-        ("system", "session_ttl_hours"): "SYSTEM__SESSION_TTL_HOURS",
-        ("memory", "enabled"): "MEMORY__ENABLED",
-        ("memory", "api", "use_main_api"): "MEMORY__API__USE_MAIN_API",
         ("memory", "api", "api_key"): "MEMORY__API__API_KEY",
-        ("memory", "api", "base_url"): "MEMORY__API__BASE_URL",
-        ("memory", "api", "model"): "MEMORY__API__MODEL",
-        ("memory", "neo4j", "enabled"): "MEMORY__NEO4J__ENABLED",
-        ("memory", "neo4j", "uri"): "MEMORY__NEO4J__URI",
-        ("memory", "neo4j", "username"): "MEMORY__NEO4J__USERNAME",
         ("memory", "neo4j", "password"): "MEMORY__NEO4J__PASSWORD",
-        ("memory", "neo4j", "database"): "MEMORY__NEO4J__DATABASE",
-        ("memory", "neo4j", "connection_timeout"): "MEMORY__NEO4J__CONNECTION_TIMEOUT",
-        ("memory", "cold_layer", "summary_model"): "MEMORY__COLD_LAYER__SUMMARY_MODEL",
     }
 
     env_data = base_from_env.model_dump()

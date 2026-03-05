@@ -20,12 +20,14 @@ class ConversationService:
         event_emitter: Optional[EventEmitter] = None,
         conversation_core: Optional[PrometheaConversation] = None,
         memory_service: Optional[Any] = None,
+        reasoning_service: Optional[Any] = None,
         message_manager: Optional[Any] = None,
         config_service: Optional[Any] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core or PrometheaConversation()
         self.memory_service = memory_service
+        self.reasoning_service = reasoning_service
         self.message_manager = message_manager
         self.config_service = config_service
         self._session_queues: Dict[str, asyncio.Queue] = {}
@@ -315,16 +317,16 @@ class ConversationService:
 
         return base_system_prompt, user_config
 
-    async def _process_conversation_once(
+    async def prepare_chat_turn(
         self,
+        *,
         session_id: str,
         user_id: str,
         user_message: str,
         channel: str,
-        turn_id: Optional[str] = None,
-    ) -> None:
+        include_recent: bool = True,
+    ) -> Dict[str, Any]:
         user_config: Optional[Dict[str, Any]] = None
-        system_prompt = ""
         messages: List[Dict[str, Any]] = []
 
         base_system_prompt, user_config = await self._get_user_prompt_and_config(
@@ -342,13 +344,59 @@ class ConversationService:
                     )
                 )
 
-        system_prompt = await self.build_system_prompt_with_memory(
-            query=user_message,
-            session_id=session_id,
-            user_id=user_id,
-            user_config=user_config,
-            base_system_prompt=base_system_prompt,
-        )
+        recent_messages: List[Dict[str, Any]] = []
+        if include_recent and self.message_manager:
+            recent_messages = self.message_manager.get_recent_messages(
+                session_id, user_id=user_id
+            )
+
+        reasoning_result: Dict[str, Any] = {"used_reasoning": False}
+        system_prompt = ""
+        if self.reasoning_service and self.reasoning_service.is_enabled(user_id=user_id):
+            reasoning_result = await self.reasoning_service.run(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                recent_messages=recent_messages,
+                base_system_prompt=base_system_prompt,
+                user_config=user_config,
+            )
+            if reasoning_result.get("used_reasoning"):
+                system_prompt = reasoning_result.get("system_prompt", "")
+
+        if not system_prompt:
+            system_prompt = await self.build_system_prompt_with_memory(
+                query=user_message,
+                session_id=session_id,
+                user_id=user_id,
+                user_config=user_config,
+                base_system_prompt=base_system_prompt,
+            )
+
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(recent_messages)
+        messages.append({"role": "user", "content": user_message})
+
+        return {
+            "messages": messages,
+            "user_config": user_config,
+            "system_prompt": system_prompt,
+            "base_system_prompt": base_system_prompt,
+            "recent_messages": recent_messages,
+            "reasoning": reasoning_result,
+        }
+
+    async def _process_conversation_once(
+        self,
+        session_id: str,
+        user_id: str,
+        user_message: str,
+        channel: str,
+        turn_id: Optional[str] = None,
+    ) -> None:
+        user_config: Optional[Dict[str, Any]] = None
+        messages: List[Dict[str, Any]] = []
 
         if self.message_manager:
             if not self.message_manager.get_session(session_id, user_id=user_id):
@@ -365,25 +413,28 @@ class ConversationService:
                     raise RuntimeError(
                         f"failed to begin conversation turn: {session_id}:{turn_id}"
                     )
-            recent_messages = self.message_manager.get_recent_messages(
-                session_id, user_id=user_id
+            prepared = await self.prepare_chat_turn(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                channel=channel,
+                include_recent=True,
             )
-            messages = (
-                [{"role": "system", "content": system_prompt}]
-                + recent_messages
-                + [{"role": "user", "content": user_message}]
-            )
+            user_config = prepared["user_config"]
+            messages = prepared["messages"]
         else:
             logger.warning(
                 "ConversationService: MessageManager not available, using stateless mode"
             )
-            if system_prompt:
-                messages = [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message},
-                ]
-            else:
-                messages = [{"role": "user", "content": user_message}]
+            prepared = await self.prepare_chat_turn(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                channel=channel,
+                include_recent=False,
+            )
+            user_config = prepared["user_config"]
+            messages = prepared["messages"]
 
         logger.info(
             "ConversationService: Processing conversation for session {}",

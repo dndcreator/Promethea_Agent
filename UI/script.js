@@ -313,6 +313,22 @@ const I18N = {
     },
 };
 
+Object.assign(I18N.zh, {
+    ui_tools_live: "工具",
+    ui_tools_loading: "正在加载工具...",
+    ui_tools_empty: "暂无可用工具",
+    ui_tools_error: "工具列表加载失败",
+    ui_tools_more: "还有 {count} 个工具",
+});
+
+Object.assign(I18N.en, {
+    ui_tools_live: "Tools",
+    ui_tools_loading: "Loading tools...",
+    ui_tools_empty: "No tools available",
+    ui_tools_error: "Failed to load tools",
+    ui_tools_more: "{count} more tools",
+});
+
 function getCurrentLang() {
     return localStorage.getItem("ui_lang") || "zh";
 }
@@ -381,6 +397,10 @@ class LanguageManager {
         if (memoryStatus) memoryStatus.title = t("ui_memory_status_title");
         if (apiStatus) apiStatus.innerHTML = `<span class="dot"></span> ${t("ui_api_short")}`;
         if (memoryStatus) memoryStatus.innerHTML = `<span class="dot"></span> ${t("ui_memory_short")}`;
+        const toolsLiveTitle = document.getElementById("toolsLiveTitle");
+        if (toolsLiveTitle) toolsLiveTitle.textContent = t("ui_tools_live");
+        const toolsLiveEmpty = document.getElementById("toolsLiveEmpty");
+        if (toolsLiveEmpty) toolsLiveEmpty.textContent = t("ui_tools_loading");
         const logoutBtn = document.getElementById("logoutBtn");
         if (logoutBtn) logoutBtn.title = t("ui_logout_title");
         const doctorBtn = document.getElementById("doctorBtn");
@@ -688,6 +708,8 @@ class TerminalChatApp {
         // Additional UI elements
         this.apiStatusEl = document.getElementById('apiStatus');
         this.memoryStatusEl = document.getElementById('memoryStatus');
+        this.toolsLiveCountEl = document.getElementById('toolsLiveCount');
+        this.toolsLiveListEl = document.getElementById('toolsLiveList');
         this.memorySyncIndicatorEl = document.getElementById('memorySyncIndicator');
         this.memorySyncTextEl = document.getElementById('memorySyncText');
         this.sidebar = document.getElementById('sidebar');
@@ -713,6 +735,7 @@ class TerminalChatApp {
             idle: true,
             last_error: '',
         };
+        this.toolCatalog = [];
         this.statusPollTimer = null;
         // Mapping: tool_call_id -> corresponding DOM elements
         this.toolCallElements = new Map();
@@ -955,15 +978,18 @@ class TerminalChatApp {
                     this.updateStatus(this.memoryStatusEl, data.memory_active);
                 }
                 this.updateMemorySyncIndicator(data.memory_sync || null);
+                await this.refreshToolsList();
             } else {
                 this.updateStatus(this.apiStatusEl, false);
                 this.updateStatus(this.memoryStatusEl, false);
                 this.updateMemorySyncIndicator(null);
+                this.renderToolsList([], t("ui_tools_error"));
             }
         } catch (error) {
             this.updateStatus(this.apiStatusEl, false);
             this.updateStatus(this.memoryStatusEl, false);
             this.updateMemorySyncIndicator(null);
+            this.renderToolsList([], t("ui_tools_error"));
             console.log('❌ 无法连接到API服务');
         }
     }
@@ -980,6 +1006,89 @@ class TerminalChatApp {
         } else {
             element.classList.remove('active');
             element.classList.add('error');
+        }
+    }
+
+    async refreshToolsList() {
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/status/tools`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
+            const tools = Array.isArray(data.tools) ? data.tools : [];
+            this.toolCatalog = tools;
+            this.renderToolsList(tools);
+        } catch (error) {
+            this.renderToolsList([], t("ui_tools_error"));
+        }
+    }
+
+    renderToolsList(tools = [], errorMessage = "") {
+        if (!this.toolsLiveListEl || !this.toolsLiveCountEl) {
+            return;
+        }
+
+        this.toolsLiveCountEl.textContent = String(tools.length || 0);
+        this.toolsLiveListEl.innerHTML = "";
+
+        if (errorMessage) {
+            const empty = document.createElement("div");
+            empty.className = "tools-live-empty";
+            empty.textContent = errorMessage;
+            this.toolsLiveListEl.appendChild(empty);
+            return;
+        }
+
+        if (!tools.length) {
+            const empty = document.createElement("div");
+            empty.className = "tools-live-empty";
+            empty.textContent = t("ui_tools_empty");
+            this.toolsLiveListEl.appendChild(empty);
+            return;
+        }
+
+        const maxVisible = 8;
+        const visible = tools.slice(0, maxVisible);
+        for (const item of visible) {
+            const row = document.createElement("div");
+            row.className = "tools-live-item";
+
+            const header = document.createElement("div");
+            header.className = "tools-live-item-row";
+
+            const name = document.createElement("div");
+            name.className = "tools-live-name";
+            const serviceName = String(item.service_name || "");
+            const toolName = String(item.tool_name || "");
+            name.textContent = serviceName && toolName && serviceName !== toolName
+                ? `${serviceName}.${toolName}`
+                : (toolName || serviceName || "unknown");
+
+            const type = document.createElement("span");
+            type.className = "tools-live-type";
+            type.textContent = String(item.tool_type || "unknown");
+
+            header.appendChild(name);
+            header.appendChild(type);
+            row.appendChild(header);
+
+            const description = String(item.description || "").trim();
+            if (description) {
+                const desc = document.createElement("div");
+                desc.className = "tools-live-desc";
+                desc.textContent = description;
+                row.appendChild(desc);
+            }
+
+            this.toolsLiveListEl.appendChild(row);
+        }
+
+        if (tools.length > maxVisible) {
+            const more = document.createElement("div");
+            more.className = "tools-live-empty";
+            more.textContent = t("ui_tools_more", { count: tools.length - maxVisible });
+            this.toolsLiveListEl.appendChild(more);
         }
     }
 

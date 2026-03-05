@@ -140,11 +140,30 @@ class UserManager:
 
         current_config = self.get_user_config(user_uuid)
         sanitized = dict(config_data or {})
-        # API credentials are global (env), never persisted per-user.
-        sanitized.pop("api", None)
+        # API credentials are env-only, never persisted per-user.
+        if isinstance(sanitized.get("api"), dict):
+            api_cfg = dict(sanitized["api"])
+            api_cfg.pop("api_key", None)
+            if api_cfg:
+                sanitized["api"] = api_cfg
+            else:
+                sanitized.pop("api", None)
         if isinstance(sanitized.get("memory"), dict):
             mem = dict(sanitized["memory"])
-            mem.pop("api", None)
+            if isinstance(mem.get("api"), dict):
+                mem_api = dict(mem["api"])
+                mem_api.pop("api_key", None)
+                if mem_api:
+                    mem["api"] = mem_api
+                else:
+                    mem.pop("api", None)
+            if isinstance(mem.get("neo4j"), dict):
+                neo = dict(mem["neo4j"])
+                neo.pop("password", None)
+                if neo:
+                    mem["neo4j"] = neo
+                else:
+                    mem.pop("neo4j", None)
             if mem:
                 sanitized["memory"] = mem
             else:

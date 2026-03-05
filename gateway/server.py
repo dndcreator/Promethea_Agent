@@ -24,6 +24,7 @@ from .events import EventEmitter
 from .tool_service import ToolService, ToolInvocationContext
 from .memory_service import MemoryService
 from .conversation_service import ConversationService
+from .reasoning_service import ReasoningService
 from .config_service import ConfigService
 from memory.session_scope import ensure_session_owned
 
@@ -75,6 +76,7 @@ class GatewayServer:
         # GatewayIntegration.
         self.tool_service: Optional[ToolService] = None
         self.memory_service: Optional[MemoryService] = None
+        self.reasoning_service: Optional[ReasoningService] = None
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
         
@@ -307,6 +309,7 @@ class GatewayServer:
         return {
             "tool_service": bool(self.tool_service),
             "memory_service": bool(self.memory_service and self.memory_service.is_enabled()),
+            "reasoning_service": bool(self.reasoning_service and self.reasoning_service.is_enabled()),
             "conversation_service": bool(self.conversation_service),
             "config_service": bool(self.config_service),
             "message_manager": bool(self.message_manager),
@@ -1324,13 +1327,15 @@ class GatewayServer:
                     request.id, False, error="failed to start turn"
                 )
 
-            recent = self.message_manager.get_recent_messages(session_id, user_id=user_id)
-            messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-            messages.append({"role": "user", "content": user_text})
-
-            user_config = None
-            if self.config_service:
-                user_config = self.config_service.get_merged_config(user_id)
+            prepared = await self.conversation_service.prepare_chat_turn(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_text,
+                channel="web",
+                include_recent=True,
+            )
+            messages = prepared["messages"]
+            user_config = prepared["user_config"]
 
             tool_call_outcome = await self.conversation_service.run_chat_loop(
                 messages,

@@ -59,6 +59,7 @@
 - `agentkit/security/policy.py`: security policy
 - `agentkit/tools/computer/*`: computer tool definitions
 - `agentkit/tools/web/*`: web tool definitions
+- `agentkit/tools/FEWSHOT_TOOL_SCRIPT_EXAMPLE.md`: LLM-ready few-shot template for generating new tools
 
 ### 3. Workflow
 

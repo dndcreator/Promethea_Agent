@@ -6,6 +6,7 @@ from .connection import ConnectionManager
 from .events import EventEmitter
 from .tool_service import ToolService, ToolInvocationContext, Tool
 from .memory_service import MemoryService
+from .reasoning_service import ReasoningService
 from .conversation_service import ConversationService
 from .config_service import ConfigService
 
@@ -18,6 +19,7 @@ __all__ = [
     'ToolInvocationContext',
     'Tool',
     'MemoryService',
+    'ReasoningService',
     'ConversationService',
     'ConfigService',
     'MessageType',

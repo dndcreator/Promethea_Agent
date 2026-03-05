@@ -105,6 +105,35 @@ class ToolService:
 
         return {"tools": tools, "total": len(tools)}
 
+    async def get_tool_catalog(self) -> List[Dict[str, Any]]:
+        raw = await self.list_tools()
+        catalog: List[Dict[str, Any]] = []
+        for service in raw.get("tools", []):
+            service_name = service.get("service") or service.get("name")
+            service_desc = service.get("description", "")
+            tool_type = service.get("type", "unknown")
+            actions = service.get("actions") or []
+            if not actions:
+                catalog.append(
+                    {
+                        "tool_type": tool_type,
+                        "service_name": service_name,
+                        "tool_name": service_name,
+                        "description": service_desc,
+                    }
+                )
+                continue
+            for action in actions:
+                catalog.append(
+                    {
+                        "tool_type": tool_type,
+                        "service_name": service_name,
+                        "tool_name": action.get("name") or service_name,
+                        "description": action.get("description") or service_desc,
+                    }
+                )
+        return catalog
+
     async def call_tool(
         self,
         tool_name: str,

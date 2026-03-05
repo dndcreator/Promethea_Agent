@@ -93,6 +93,16 @@ class EventType(str, Enum):
     CONVERSATION_ERROR = "conversation.error"      # Conversation error
     # Full interaction event (user input + assistant output)
     INTERACTION_COMPLETED = "interaction.completed"
+    # Reasoning lifecycle events
+    REASONING_START = "reasoning.start"
+    REASONING_NODE_CREATED = "reasoning.node.created"
+    REASONING_NODE_COMPLETED = "reasoning.node.completed"
+    REASONING_MEMORY_REQUESTED = "reasoning.memory.requested"
+    REASONING_TOOL_REQUESTED = "reasoning.tool.requested"
+    REASONING_OBSERVATION_RECEIVED = "reasoning.observation.received"
+    REASONING_REPLAN = "reasoning.replan"
+    REASONING_COMPLETE = "reasoning.complete"
+    REASONING_ERROR = "reasoning.error"
     # Configuration lifecycle events
     CONFIG_CHANGED = "config.changed"              # Configuration changed (per-user)
     CONFIG_RELOADED = "config.reloaded"            # Configuration reloaded (system-wide)

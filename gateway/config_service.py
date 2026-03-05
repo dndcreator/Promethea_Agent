@@ -407,14 +407,18 @@ class ConfigService:
         if not model:
             return {"success": False, "message": "model is required", "config": {}}
 
+        if api_key:
+            return {
+                "success": False,
+                "message": "api_key is env-only; set API__API_KEY in .env",
+                "config": {},
+            }
+
         updates = {
             "api": {
                 "model": model
             }
         }
-        
-        if api_key:
-            updates["api"]["api_key"] = api_key
         
         if base_url:
             updates["api"]["base_url"] = base_url

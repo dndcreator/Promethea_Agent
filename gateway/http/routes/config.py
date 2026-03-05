@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+import copy
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -58,6 +59,19 @@ def _deep_update(base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> None
             base_dict[key] = value
 
 
+def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    sanitized = copy.deepcopy(config_data or {})
+    if isinstance(sanitized.get("api"), dict):
+        sanitized["api"]["api_key"] = ""
+    if isinstance(sanitized.get("memory"), dict):
+        mem = sanitized["memory"]
+        if isinstance(mem.get("api"), dict):
+            mem["api"]["api_key"] = ""
+        if isinstance(mem.get("neo4j"), dict):
+            mem["neo4j"]["password"] = ""
+    return sanitized
+
+
 def _load_default_config_dict() -> tuple[Path, Dict[str, Any]]:
     config_path = Path("config/default.json")
     if not config_path.exists():
@@ -85,6 +99,7 @@ async def get_config(
     config_service = _get_config_service()
     resolved_user_id = _resolve_user_id(user_id, current_user_id)
     config_data = config_service.get_merged_config(resolved_user_id)
+    config_data = _sanitize_config_for_client(config_data)
     if raw:
         return config_data
     return {"status": "success", "user_id": resolved_user_id, "config": config_data}
@@ -108,7 +123,7 @@ async def update_config_legacy(
         "status": "success",
         "user_id": resolved_user_id,
         "message": result.get("message", "Config updated"),
-        "config": result.get("config", {}),
+        "config": _sanitize_config_for_client(result.get("config", {})),
     }
 
 
@@ -123,7 +138,7 @@ async def update_config(
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Update failed"))
-    return {**result, "user_id": resolved_user_id}
+    return {**result, "user_id": resolved_user_id, "config": _sanitize_config_for_client(result.get("config", {}))}
 
 
 @router.post("/config/reset")
@@ -156,7 +171,7 @@ async def switch_model(
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Switch model failed"))
-    return {**result, "user_id": resolved_user_id}
+    return {**result, "user_id": resolved_user_id, "config": _sanitize_config_for_client(result.get("config", {}))}
 
 
 @router.get("/config/diagnose")
