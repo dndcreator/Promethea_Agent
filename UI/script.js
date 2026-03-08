@@ -1564,6 +1564,14 @@ class TerminalChatApp {
                             this.currentSessionId = data.session_id;
                             this.currentSessionEl.textContent = data.session_id.slice(0, 8) + '...';
                         }
+                        if (data.status === 'needs_confirmation') {
+                            this.showConfirmation({
+                                session_id: data.session_id,
+                                tool_call_id: data.tool_call_id,
+                                tool_name: data.tool_name || 'reasoning.success_label',
+                                args: data.args || {}
+                            });
+                        }
                         doneReceived = true;
                         break;
                     } else if (data.type === 'error') {

@@ -484,6 +484,20 @@ class ConversationService:
                     sync_memory=False,
                 )
 
+        try:
+            reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+            tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
+            if self.reasoning_service and tree_id:
+                await self.reasoning_service.assess_outcome(
+                    tree_id=tree_id,
+                    assistant_output=reply_content or "",
+                    user_config=user_config,
+                    user_id=user_id,
+                    allow_human_review=False,
+                )
+        except Exception as e:
+            logger.debug("ConversationService: Failed to record reasoning outcome: {}", e)
+
         if self.event_emitter:
             await self.event_emitter.emit(
                 EventType.CONVERSATION_COMPLETE,

@@ -1384,6 +1384,47 @@ class GatewayServer:
                     request.id, False, error="failed to commit turn"
                 )
 
+            reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+            tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
+            if self.reasoning_service and tree_id:
+                assessment = await self.reasoning_service.assess_outcome(
+                    tree_id=tree_id,
+                    assistant_output=final_content,
+                    user_config=user_config,
+                    user_id=user_id,
+                    allow_human_review=True,
+                )
+                if assessment.get("status") == "needs_confirmation":
+                    review_id = assessment.get("review_id")
+                    pending = {
+                        "confirmation_type": "reasoning_outcome",
+                        "status": "needs_confirmation",
+                        "tool_call_id": review_id,
+                        "tool_name": "reasoning.success_label",
+                        "args": {
+                            "question": "Was the previous answer successful?",
+                            "judge_outcome": assessment.get("outcome", "unsure"),
+                            "judge_confidence": assessment.get("confidence", 0.0),
+                            "judge_reason": assessment.get("reason", ""),
+                        },
+                        "turn_id": None,
+                    }
+                    self.message_manager.set_pending_confirmation(
+                        session_id, pending, user_id=user_id
+                    )
+                    return GatewayProtocol.create_response(
+                        request.id,
+                        True,
+                        {
+                            "status": "needs_confirmation",
+                            "session_id": session_id,
+                            "tool_call_id": review_id,
+                            "tool_name": "reasoning.success_label",
+                            "args": pending["args"],
+                            "response": final_content,
+                        },
+                    )
+
             return GatewayProtocol.create_response(
                 request.id,
                 True,
@@ -1426,6 +1467,43 @@ class GatewayServer:
             if pending.get("tool_call_id") != tool_call_id:
                 return GatewayProtocol.create_response(
                     request.id, False, error="tool_call_id mismatch"
+                )
+
+            confirmation_type = str(pending.get("confirmation_type", "tool")).strip().lower()
+            if confirmation_type == "reasoning_outcome":
+                if action not in {"approve", "reject"}:
+                    return GatewayProtocol.create_response(
+                        request.id, False, error="action must be approve or reject"
+                    )
+                approved = action == "approve"
+                if not self.reasoning_service:
+                    return GatewayProtocol.create_response(
+                        request.id, False, error="Reasoning service not initialized"
+                    )
+                saved = self.reasoning_service.confirm_outcome(
+                    review_id=tool_call_id,
+                    approve=approved,
+                )
+                self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
+                if approved:
+                    note = (
+                        "Reasoning path marked as successful and saved as reusable template."
+                        if saved
+                        else "Marked as successful, but failed to save template."
+                    )
+                    return GatewayProtocol.create_response(
+                        request.id,
+                        True,
+                        {"status": "success", "session_id": session_id, "response": note},
+                    )
+                return GatewayProtocol.create_response(
+                    request.id,
+                    True,
+                    {
+                        "status": "rejected",
+                        "session_id": session_id,
+                        "response": "Marked as not successful. Reasoning template was not saved.",
+                    },
                 )
 
             if action == "reject":

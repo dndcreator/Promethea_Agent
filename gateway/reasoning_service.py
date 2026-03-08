@@ -14,6 +14,7 @@ from config import config as global_config
 
 from .events import EventEmitter
 from .protocol import EventType
+from .reasoning_template_memory import ReasoningTemplateMemory
 from .tool_service import ToolInvocationContext
 
 
@@ -64,13 +65,24 @@ class ReasoningService:
         memory_service: Optional[Any] = None,
         tool_service: Optional[Any] = None,
         config_service: Optional[Any] = None,
+        template_memory: Optional[ReasoningTemplateMemory] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core
         self.memory_service = memory_service
         self.tool_service = tool_service
         self.config_service = config_service
+        if template_memory is not None:
+            self.template_memory = template_memory
+        else:
+            try:
+                self.template_memory = ReasoningTemplateMemory()
+            except Exception as e:
+                logger.warning("ReasoningService: template memory init failed, disabled: {}", e)
+                self.template_memory = None
         self._active_trees: Dict[str, ReasoningTree] = {}
+        self._pending_outcomes: Dict[str, Dict[str, Any]] = {}
+        self._pending_human_reviews: Dict[str, Dict[str, Any]] = {}
         self._completed_runs = 0
         self._failed_runs = 0
 
@@ -87,9 +99,147 @@ class ReasoningService:
         return {
             "enabled": enabled,
             "active_trees": len(self._active_trees),
+            "pending_outcomes": len(self._pending_outcomes),
+            "pending_human_reviews": len(self._pending_human_reviews),
             "completed_runs": self._completed_runs,
             "failed_runs": self._failed_runs,
         }
+
+    def record_outcome(
+        self,
+        *,
+        tree_id: Optional[str],
+        success: bool,
+        assistant_output: str = "",
+    ) -> bool:
+        # Backward-compatible adapter. New flow should call `assess_outcome`.
+        if not tree_id:
+            return False
+        data = self._pending_outcomes.pop(tree_id, None)
+        if not data or not success:
+            return False
+        if not self.template_memory:
+            return False
+        try:
+            self.template_memory.record_success(
+                user_id=data.get("user_id", "default_user"),
+                session_id=data.get("session_id", ""),
+                user_message=data.get("user_message", ""),
+                assistant_output=assistant_output or "",
+                gate=data.get("gate", {}) or {},
+                policy=data.get("policy", {}) or {},
+                tree_payload=data.get("tree", {}) or {},
+            )
+            return True
+        except Exception as e:
+            logger.debug("ReasoningService: record_outcome failed: {}", e)
+            return False
+
+    async def assess_outcome(
+        self,
+        *,
+        tree_id: Optional[str],
+        assistant_output: str,
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+        allow_human_review: bool = True,
+    ) -> Dict[str, Any]:
+        if not tree_id:
+            return {"status": "ignored", "reason": "missing_tree_id"}
+        data = self._pending_outcomes.pop(tree_id, None)
+        if not data:
+            return {"status": "ignored", "reason": "missing_pending_outcome"}
+
+        verdict = await self._judge_task_success(
+            user_message=str(data.get("user_message", "") or ""),
+            assistant_output=assistant_output or "",
+            gate=data.get("gate", {}) or {},
+            policy=data.get("policy", {}) or {},
+            tree_stats=(data.get("tree", {}) or {}).get("stats", {}) or {},
+            user_config=user_config,
+            user_id=user_id,
+        )
+        outcome = str(verdict.get("outcome", "unsure") or "unsure").strip().lower()
+        confidence = float(verdict.get("confidence", 0.0) or 0.0)
+
+        if outcome == "success" and confidence >= 0.75:
+            if self.template_memory:
+                self.template_memory.record_success(
+                    user_id=str(data.get("user_id", user_id or "default_user")),
+                    session_id=str(data.get("session_id", "") or ""),
+                    user_message=str(data.get("user_message", "") or ""),
+                    assistant_output=assistant_output or "",
+                    gate=data.get("gate", {}) or {},
+                    policy=data.get("policy", {}) or {},
+                    tree_payload=data.get("tree", {}) or {},
+                )
+            return {
+                "status": "recorded",
+                "outcome": outcome,
+                "confidence": confidence,
+                "reason": str(verdict.get("reason", "") or ""),
+            }
+
+        if outcome == "failure" and confidence >= 0.75:
+            return {
+                "status": "discarded",
+                "outcome": outcome,
+                "confidence": confidence,
+                "reason": str(verdict.get("reason", "") or ""),
+            }
+
+        if not allow_human_review:
+            return {
+                "status": "discarded",
+                "outcome": "unsure",
+                "confidence": confidence,
+                "reason": "human_review_disabled",
+            }
+
+        review_id = f"reasoning_review_{uuid.uuid4().hex}"
+        self._pending_human_reviews[review_id] = {
+            **data,
+            "assistant_output": assistant_output or "",
+            "judge": verdict,
+            "created_at": time.time(),
+        }
+        return {
+            "status": "needs_confirmation",
+            "review_id": review_id,
+            "outcome": outcome,
+            "confidence": confidence,
+            "reason": str(verdict.get("reason", "") or ""),
+        }
+
+    def confirm_outcome(
+        self,
+        *,
+        review_id: str,
+        approve: bool,
+    ) -> bool:
+        if not review_id:
+            return False
+        data = self._pending_human_reviews.pop(review_id, None)
+        if not data:
+            return False
+        if not approve:
+            return True
+        if not self.template_memory:
+            return False
+        try:
+            self.template_memory.record_success(
+                user_id=str(data.get("user_id", "default_user")),
+                session_id=str(data.get("session_id", "") or ""),
+                user_message=str(data.get("user_message", "") or ""),
+                assistant_output=str(data.get("assistant_output", "") or ""),
+                gate=data.get("gate", {}) or {},
+                policy=data.get("policy", {}) or {},
+                tree_payload=data.get("tree", {}) or {},
+            )
+            return True
+        except Exception as e:
+            logger.debug("ReasoningService: confirm_outcome failed: {}", e)
+            return False
 
     def _resolve_policy(
         self,
@@ -256,6 +406,17 @@ class ReasoningService:
             user_config=user_config,
             user_id=user_id,
         )
+        template_match = {"matched": False, "score": 0.0, "template": None}
+        strategy_hints: Dict[str, Any] = {}
+        if self.template_memory:
+            try:
+                template_match = self.template_memory.match_template(
+                    user_id=user_id,
+                    task=user_message,
+                )
+                strategy_hints = self.template_memory.get_strategy_hints(user_id=user_id)
+            except Exception as e:
+                logger.debug("ReasoningService: template memory unavailable: {}", e)
         is_complex = self._to_bool(gate.get("needs_reasoning", False), default=False)
         needs_memory = self._to_bool(gate.get("needs_memory", False), default=False)
         needs_tools = self._to_bool(gate.get("needs_tools", False), default=False)
@@ -280,31 +441,54 @@ class ReasoningService:
         )
         try:
             steps: List[Dict[str, Any]] = []
+            template_steps: List[Dict[str, Any]] = []
+            if template_match.get("matched"):
+                tmpl = template_match.get("template") or {}
+                raw_steps = tmpl.get("steps", []) if isinstance(tmpl, dict) else []
+                if isinstance(raw_steps, list):
+                    for step in raw_steps[: policy["plan_max_steps"]]:
+                        if not isinstance(step, dict):
+                            continue
+                        template_steps.append(
+                            {
+                                "title": str(step.get("title", "")).strip() or "template step",
+                                "goal": str(step.get("goal", "")).strip() or str(step.get("title", "")).strip() or "continue",
+                                "requires_memory": self._to_bool(step.get("requires_memory", False), default=False),
+                                "memory_query": str(step.get("memory_query", "")).strip(),
+                                "requires_tools": self._to_bool(step.get("requires_tools", False), default=False),
+                                "tool_intent": str(step.get("tool_intent", "")).strip(),
+                                "notes": str(step.get("notes", "")).strip(),
+                            }
+                        )
             if is_complex:
-                steps = await self._plan_steps(
+                generated_steps = await self._plan_steps(
                     tree=tree,
                     user_message=user_message,
                     recent_messages=recent_messages,
                     user_config=user_config,
                     user_id=user_id,
                     policy=policy,
+                    strategy_hints=strategy_hints,
                     max_candidates=max(
                         policy["plan_max_steps"],
                         policy["beam_width"] * policy["branch_factor"],
                     ),
                 )
+                steps = self._merge_steps(template_steps, generated_steps, policy["plan_max_steps"])
             else:
-                steps = [
-                    {
-                        "title": "direct react loop",
-                        "goal": user_message,
-                        "requires_memory": needs_memory,
-                        "memory_query": user_message if needs_memory else "",
-                        "requires_tools": needs_tools,
-                        "tool_intent": user_message,
-                        "notes": "simple task, skip ToT planning and execute ReAct directly",
-                    }
-                ]
+                steps = template_steps[:1] if template_steps else []
+                if not steps:
+                    steps = [
+                        {
+                            "title": "direct react loop",
+                            "goal": user_message,
+                            "requires_memory": needs_memory,
+                            "memory_query": user_message if needs_memory else "",
+                            "requires_tools": needs_tools,
+                            "tool_intent": user_message,
+                            "notes": "simple task, skip ToT planning and execute ReAct directly",
+                        }
+                    ]
             if not steps:
                 tree.status = "completed"
                 return {"used_reasoning": False, "gate": gate}
@@ -413,17 +597,53 @@ class ReasoningService:
                 },
             )
             await self._write_debug_snapshot(tree, user_id=user_id, policy=policy)
+            self._pending_outcomes[tree.tree_id] = {
+                "user_id": user_id,
+                "session_id": session_id,
+                "user_message": user_message,
+                "gate": gate,
+                "policy": policy,
+                "template_match": {
+                    "matched": bool(template_match.get("matched")),
+                    "score": float(template_match.get("score", 0.0) or 0.0),
+                    "template_id": (
+                        (template_match.get("template") or {}).get("template_id")
+                        if isinstance(template_match.get("template"), dict)
+                        else None
+                    ),
+                },
+                "tree": {
+                    "tree_id": tree.tree_id,
+                    "session_id": tree.session_id,
+                    "user_id": tree.user_id,
+                    "root_goal": tree.root_goal,
+                    "status": tree.status,
+                    "created_at": tree.created_at,
+                    "updated_at": tree.updated_at,
+                    "stats": dict(tree.stats),
+                    "root_node_id": tree.root_node_id,
+                    "nodes": [asdict(node) for node in tree.nodes.values()],
+                },
+            }
+            if len(self._pending_outcomes) > 512:
+                oldest = next(iter(self._pending_outcomes.keys()))
+                self._pending_outcomes.pop(oldest, None)
             return {
                 "used_reasoning": True,
                 "tree_id": tree.tree_id,
                 "system_prompt": final_prompt,
                 "reasoning_summary": reasoning_summary,
                 "gate": gate,
+                "template_match": {
+                    "matched": bool(template_match.get("matched")),
+                    "score": float(template_match.get("score", 0.0) or 0.0),
+                },
                 "status": tree.status,
             }
         except Exception:
             tree.status = "failed"
             self._failed_runs += 1
+            self._pending_outcomes.pop(tree.tree_id, None)
             await self._emit(
                 EventType.REASONING_ERROR,
                 {
@@ -472,8 +692,17 @@ class ReasoningService:
             return heuristic
         merged = dict(heuristic)
         merged.update({k: v for k, v in llm_result.items() if v is not None})
-        merged["needs_reasoning"] = bool(
-            merged.get("needs_reasoning", heuristic["needs_reasoning"])
+        merged["needs_reasoning"] = self._to_bool(
+            merged.get("needs_reasoning", heuristic["needs_reasoning"]),
+            default=heuristic["needs_reasoning"],
+        )
+        merged["needs_memory"] = self._to_bool(
+            merged.get("needs_memory", heuristic["needs_memory"]),
+            default=heuristic["needs_memory"],
+        )
+        merged["needs_tools"] = self._to_bool(
+            merged.get("needs_tools", heuristic["needs_tools"]),
+            default=heuristic["needs_tools"],
         )
         return merged
 
@@ -520,6 +749,7 @@ class ReasoningService:
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
         policy: Dict[str, Any],
+        strategy_hints: Optional[Dict[str, Any]] = None,
         max_candidates: Optional[int] = None,
         observation_context: str = "",
     ) -> List[Dict[str, Any]]:
@@ -541,6 +771,7 @@ class ReasoningService:
                     "content": (
                         f"Task:\n{user_message}\n\n"
                         f"Recent context:\n{self._format_recent_messages(recent_messages)}\n\n"
+                        f"Historical strategy hints:\n{json.dumps(strategy_hints or {}, ensure_ascii=False)}\n\n"
                         f"Current observations:\n{self._truncate_text(observation_context, 2500)}\n\n"
                         f"Current tree stats:\n{json.dumps(tree.stats, ensure_ascii=False)}"
                     ),
@@ -689,6 +920,7 @@ class ReasoningService:
                 user_config=user_config,
                 user_id=user_id,
                 policy=policy,
+                strategy_hints=strategy_hints,
                 max_candidates=policy["branch_factor"],
                 observation_context="\n\n".join(observations),
             )
@@ -787,9 +1019,15 @@ class ReasoningService:
             "Return strict JSON: {\"score\": number, \"rationale\": string}.\n"
             "score range is 0.0 to 1.0. Higher is better."
         )
+        strategy_hints = (
+            self.template_memory.get_strategy_hints(user_id=user_id)
+            if (self.template_memory and user_id)
+            else {}
+        )
         payload = {
             "stage": stage,
             "task": user_message,
+            "strategy_hints": strategy_hints,
             "candidate": {
                 "title": node.title,
                 "kind": node.kind,
@@ -971,6 +1209,11 @@ class ReasoningService:
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
     ) -> Dict[str, Any]:
+        strategy_hints = (
+            self.template_memory.get_strategy_hints(user_id=user_id)
+            if (self.template_memory and user_id)
+            else {}
+        )
         catalog_text = "\n".join(
             f"- type={item.get('tool_type', 'unknown')} service={item['service_name']} "
             f"tool={item['tool_name']} desc={item.get('description', '')}"
@@ -989,6 +1232,7 @@ class ReasoningService:
                     "content": (
                         f"Overall task:\n{user_message}\n\n"
                         f"Current step:\n{json.dumps(step, ensure_ascii=False)}\n\n"
+                        f"Historical tool hints:\n{json.dumps(strategy_hints.get('preferred_tools', []), ensure_ascii=False)}\n\n"
                         f"Current observations:\n{self._truncate_text(chr(10).join(observations), 2000)}\n\n"
                         f"Available tools:\n{catalog_text}"
                     ),
@@ -999,7 +1243,13 @@ class ReasoningService:
         )
         if not isinstance(result, dict):
             return {"use_tool": False}
-        result["use_tool"] = bool(result.get("use_tool"))
+        result["use_tool"] = self._to_bool(result.get("use_tool"), default=False)
+        if result["use_tool"]:
+            if not result.get("service_name") or not result.get("tool_name"):
+                preferred = (strategy_hints.get("preferred_tools", []) or [{}])[0]
+                if isinstance(preferred, dict):
+                    result["service_name"] = result.get("service_name") or preferred.get("service_name")
+                    result["tool_name"] = result.get("tool_name") or preferred.get("tool_name")
         return result
 
     async def _run_think_step(
@@ -1143,6 +1393,59 @@ class ReasoningService:
         text = await self._call_text(messages, user_config=user_config, user_id=user_id)
         return self._extract_json(text)
 
+    async def _judge_task_success(
+        self,
+        *,
+        user_message: str,
+        assistant_output: str,
+        gate: Dict[str, Any],
+        policy: Dict[str, Any],
+        tree_stats: Dict[str, Any],
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        prompt = (
+            "You evaluate whether an assistant response successfully completed the user's task.\n"
+            "Return strict JSON: {\"outcome\":\"success|failure|unsure\",\"confidence\":0..1,\"reason\":string}.\n"
+            "Choose 'unsure' if information is insufficient."
+        )
+        payload = {
+            "user_task": user_message,
+            "assistant_output": self._truncate_text(assistant_output or "", 3000),
+            "gate": gate,
+            "reasoning_policy": {
+                "max_depth": policy.get("max_depth"),
+                "max_nodes": policy.get("max_nodes"),
+                "max_iterations": policy.get("max_iterations"),
+                "max_memory_calls": policy.get("max_memory_calls"),
+                "max_tool_calls": policy.get("max_tool_calls"),
+            },
+            "tree_stats": tree_stats,
+        }
+        result = await self._call_json(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            user_config=user_config,
+            user_id=user_id,
+        )
+        if not isinstance(result, dict):
+            return {"outcome": "unsure", "confidence": 0.0, "reason": "invalid_judge_output"}
+        outcome = str(result.get("outcome", "unsure") or "unsure").strip().lower()
+        if outcome not in {"success", "failure", "unsure"}:
+            outcome = "unsure"
+        try:
+            confidence = float(result.get("confidence", 0.0))
+        except Exception:
+            confidence = 0.0
+        confidence = min(1.0, max(0.0, confidence))
+        return {
+            "outcome": outcome,
+            "confidence": confidence,
+            "reason": str(result.get("reason", "") or ""),
+        }
+
     async def _call_text(
         self,
         messages: List[Dict[str, str]],
@@ -1213,6 +1516,28 @@ class ReasoningService:
                 return False
             return default
         return bool(value)
+
+    def _merge_steps(
+        self,
+        template_steps: List[Dict[str, Any]],
+        generated_steps: List[Dict[str, Any]],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+        for item in (template_steps or []) + (generated_steps or []):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title", "")).strip().lower()
+            goal = str(item.get("goal", "")).strip().lower()
+            key = (title, goal)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= max(1, int(limit)):
+                break
+        return merged
 
     async def _write_debug_snapshot(
         self,

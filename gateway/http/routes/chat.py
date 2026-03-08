@@ -128,7 +128,45 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                         yield _sse({"type": "error", "content": "failed to commit turn"})
                         return
 
-                    yield _sse({"type": "done", "session_id": session_id})
+                    done_payload = {"type": "done", "session_id": session_id}
+                    reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+                    tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
+                    if gateway_server.reasoning_service and tree_id:
+                        assessment = await gateway_server.reasoning_service.assess_outcome(
+                            tree_id=tree_id,
+                            assistant_output=full_text,
+                            user_config=user_config,
+                            user_id=user_id,
+                            allow_human_review=True,
+                        )
+                        if assessment.get("status") == "needs_confirmation":
+                            review_id = assessment.get("review_id")
+                            pending = {
+                                "confirmation_type": "reasoning_outcome",
+                                "status": "needs_confirmation",
+                                "tool_call_id": review_id,
+                                "tool_name": "reasoning.success_label",
+                                "args": {
+                                    "question": "Was the previous answer successful?",
+                                    "judge_outcome": assessment.get("outcome", "unsure"),
+                                    "judge_confidence": assessment.get("confidence", 0.0),
+                                    "judge_reason": assessment.get("reason", ""),
+                                },
+                                "turn_id": None,
+                            }
+                            message_manager.set_pending_confirmation(
+                                session_id, pending, user_id=user_id
+                            )
+                            done_payload.update(
+                                {
+                                    "status": "needs_confirmation",
+                                    "tool_call_id": review_id,
+                                    "tool_name": "reasoning.success_label",
+                                    "args": pending["args"],
+                                }
+                            )
+
+                    yield _sse(done_payload)
                     if not stream_failed:
                         _emit_interaction_completed_async(
                             gateway_server,
