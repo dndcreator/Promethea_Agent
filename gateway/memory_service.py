@@ -284,6 +284,101 @@ class MemoryService:
             )
         return result
 
+    def _verify_candidates_fallback(
+        self,
+        user_input: str,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Lightweight guard when verifier LLM is unavailable.
+        Keep candidates with minimum semantic overlap against user input.
+        """
+        user_tokens = set(self._extract_tokens(user_input))
+        if not user_tokens:
+            return []
+        accepted: List[Dict[str, Any]] = []
+        for c in candidates or []:
+            cand_tokens = set(self._extract_tokens(str(c.get("content", ""))))
+            if not cand_tokens:
+                continue
+            overlap = len(user_tokens.intersection(cand_tokens)) / max(1, len(cand_tokens))
+            if overlap < 0.25:
+                continue
+            row = dict(c)
+            row["verify_confidence"] = round(float(overlap), 3)
+            row["verify_reason"] = "fallback_overlap"
+            row["verify_evidence"] = ""
+            row["verify_attribution"] = "user"
+            accepted.append(row)
+        return accepted
+
+    async def _verify_candidates_with_llm(
+        self,
+        user_id: str,
+        user_input: str,
+        assistant_output: str,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Verify candidate meaning/attribution before writing to memory.
+        This prevents memory drift caused by assistant-side interpretations.
+        """
+        if not candidates:
+            return []
+        prompt = (
+            "You are a memory write verifier.\n"
+            "Given USER_INPUT, ASSISTANT_OUTPUT and candidate memories, decide whether each candidate can be safely written.\n"
+            "Acceptance requirements:\n"
+            "1) Candidate meaning is supported by the interaction.\n"
+            "2) Attribution is correct: should not convert assistant explanation into user preference.\n"
+            "3) It looks durable (not temporary tool/runtime artifact).\n"
+            "Return strict JSON:\n"
+            "{\"decisions\":[{\"index\":0,\"accept\":true|false,\"confidence\":0..1,"
+            "\"reason\":\"...\",\"evidence\":\"...\",\"attribution\":\"user|assistant|project|unclear\"}]}\n"
+            "Prefer rejecting uncertain candidates."
+        )
+        cands_json = json.dumps(candidates, ensure_ascii=False)
+        query = (
+            f"[USER_INPUT]\n{user_input}\n\n"
+            f"[ASSISTANT_OUTPUT]\n{assistant_output}\n\n"
+            f"[CANDIDATES]\n{cands_json}\n"
+        )
+        text = await self._call_memory_classifier_llm(user_id, prompt, query)
+        if not text:
+            return self._verify_candidates_fallback(user_input, candidates)
+        obj = self._extract_json(text)
+        if not isinstance(obj, dict):
+            return self._verify_candidates_fallback(user_input, candidates)
+        decisions = obj.get("decisions")
+        if not isinstance(decisions, list):
+            return self._verify_candidates_fallback(user_input, candidates)
+
+        accepted: List[Dict[str, Any]] = []
+        by_index: Dict[int, Dict[str, Any]] = {}
+        for d in decisions:
+            if not isinstance(d, dict):
+                continue
+            try:
+                idx = int(d.get("index"))
+            except Exception:
+                continue
+            by_index[idx] = d
+
+        for idx, c in enumerate(candidates):
+            d = by_index.get(idx, {})
+            accept = bool(d.get("accept", False))
+            conf = float(d.get("confidence", 0.0) or 0.0)
+            attribution = str(d.get("attribution", "unclear")).strip().lower()
+            if (not accept) or conf < 0.55 or attribution in {"assistant", "unclear"}:
+                continue
+            row = dict(c)
+            row["verify_confidence"] = round(conf, 3)
+            row["verify_reason"] = str(d.get("reason", "")).strip()[:300]
+            row["verify_evidence"] = str(d.get("evidence", "")).strip()[:500]
+            row["verify_attribution"] = attribution
+            accepted.append(row)
+        return accepted
+
     def _heuristic_classify(
         self, user_input: str, assistant_output: str
     ) -> Dict[str, Any]:
@@ -431,7 +526,8 @@ class MemoryService:
             "- Keep each content concise and factual.\n"
             "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
             "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
-            "- Do not include temporary tool/output details."
+            "- Do not include temporary tool/output details.\n"
+            "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference."
         )
         query = (
             f"[USER_INPUT]\n{user_input}\n\n"
@@ -549,6 +645,11 @@ class MemoryService:
             )
             return True
 
+    async def _on_interaction_completed(self, event_msg) -> None:
+        """Backward-compatible entrypoint for tests and direct callers."""
+        payload = dict(getattr(event_msg, "payload", {}) or {})
+        await self._process_interaction_completed(payload)
+
     async def _enqueue_interaction_completed(self, event_msg) -> None:
         if not self.enabled or not self.memory_adapter:
             return
@@ -643,7 +744,13 @@ class MemoryService:
         if not classification.get("has_long_term_state", False):
             return
 
-        candidates = classification.get("candidates", [])
+        raw_candidates = classification.get("candidates", [])
+        candidates = await self._verify_candidates_with_llm(
+            user_id=user_id,
+            user_input=user_input,
+            assistant_output=assistant_output,
+            candidates=raw_candidates,
+        )
         saved_count = 0
         for item in candidates:
             memory_type = item["type"]
@@ -669,6 +776,10 @@ class MemoryService:
                     "memory_type": memory_type,
                     "semantic_keys": semantic_keys,
                     "memory_source": "interaction.completed",
+                    "verify_confidence": item.get("verify_confidence"),
+                    "verify_reason": item.get("verify_reason", ""),
+                    "verify_evidence": item.get("verify_evidence", ""),
+                    "verify_attribution": item.get("verify_attribution", ""),
                 },
             )
             if not success:
@@ -945,3 +1056,7 @@ class MemoryService:
 
     def is_enabled(self) -> bool:
         return self.enabled and self.memory_adapter is not None
+
+
+
+

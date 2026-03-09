@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import asyncio
 import time
 import uuid
@@ -32,6 +32,10 @@ class ConversationService:
         self.config_service = config_service
         self._session_queues: Dict[str, asyncio.Queue] = {}
         self._session_workers: Dict[str, asyncio.Task] = {}
+        self._session_urgent: Dict[str, Dict[str, Any]] = {}
+        self._session_collect_latest: Dict[str, Dict[str, Any]] = {}
+        self._queue_dropped = 0
+        self._queue_coalesced = 0
         self._queue_lock = asyncio.Lock()
         self._processing_defaults = {
             "max_queue_size": 32,
@@ -39,6 +43,9 @@ class ConversationService:
             "retry_base_delay_s": 0.8,
             "retry_max_delay_s": 8.0,
             "worker_idle_ttl_s": 300.0,
+            "collect_debounce_ms": 250,
+            "queue_overflow_mode": "reject_newest",
+            "allow_queue_command": True,
         }
 
         logger.info("ConversationService: Initialized")
@@ -84,16 +91,24 @@ class ConversationService:
             session_id = f"{channel}_{sender}"
             user_id = sender
             policy = self._resolve_processing_policy(user_id)
+            queue_mode, normalized_content = self._parse_queue_hint(
+                content=content,
+                payload_queue_mode=payload.get("queue_mode"),
+                policy=policy,
+            )
+            if not normalized_content:
+                return
             enqueued = await self._enqueue_message(
                 session_id=session_id,
                 item={
                     "session_id": session_id,
                     "user_id": user_id,
-                    "content": content,
+                    "content": normalized_content,
                     "channel": channel,
                     "turn_id": str(uuid.uuid4()),
                     "attempt": 0,
                     "enqueued_at": time.time(),
+                    "queue_mode": queue_mode,
                 },
                 policy=policy,
             )
@@ -120,7 +135,7 @@ class ConversationService:
                         "session_id": session_id,
                         "user_id": user_id,
                         "channel": channel,
-                        "content": content,
+                        "content": normalized_content,
                         "queued": True,
                     },
                 )
@@ -153,6 +168,15 @@ class ConversationService:
                 policy["worker_idle_ttl_s"] = float(
                     proc.get("worker_idle_ttl_s", policy["worker_idle_ttl_s"])
                 )
+                policy["collect_debounce_ms"] = int(
+                    proc.get("collect_debounce_ms", policy["collect_debounce_ms"])
+                )
+                policy["queue_overflow_mode"] = str(
+                    proc.get("queue_overflow_mode", policy["queue_overflow_mode"])
+                )
+                policy["allow_queue_command"] = bool(
+                    proc.get("allow_queue_command", policy["allow_queue_command"])
+                )
         except Exception as e:
             logger.debug("ConversationService: Using default processing policy: {}", e)
 
@@ -163,7 +187,63 @@ class ConversationService:
             policy["retry_base_delay_s"], float(policy["retry_max_delay_s"])
         )
         policy["worker_idle_ttl_s"] = max(5.0, float(policy["worker_idle_ttl_s"]))
+        policy["collect_debounce_ms"] = max(0, int(policy["collect_debounce_ms"]))
+        overflow = str(policy.get("queue_overflow_mode", "reject_newest")).strip().lower()
+        if overflow not in {"reject_newest", "drop_oldest", "collect_latest"}:
+            overflow = "reject_newest"
+        policy["queue_overflow_mode"] = overflow
         return policy
+
+    @staticmethod
+    def _parse_queue_hint(
+        *,
+        content: str,
+        payload_queue_mode: Optional[str],
+        policy: Dict[str, Any],
+    ) -> tuple[str, str]:
+        queue_mode = str(payload_queue_mode or "followup").strip().lower()
+        if queue_mode not in {"followup", "collect", "steer_backlog"}:
+            queue_mode = "followup"
+
+        text = str(content or "")
+        if not bool(policy.get("allow_queue_command", True)):
+            return queue_mode, text.strip()
+
+        raw = text.strip()
+        if not raw.lower().startswith("/queue"):
+            return queue_mode, raw
+
+        tail = raw[len("/queue"):].strip()
+        if not tail:
+            return queue_mode, ""
+
+        parts = tail.split(None, 1)
+        head = parts[0].strip().lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        aliases = {
+            "followup": "followup",
+            "normal": "followup",
+            "collect": "collect",
+            "coalesce": "collect",
+            "steer": "steer_backlog",
+            "urgent": "steer_backlog",
+            "steer_backlog": "steer_backlog",
+        }
+        if "=" in head:
+            key, _, value = head.partition("=")
+            if key.strip().lower() == "mode":
+                mapped = aliases.get(value.strip().lower())
+                if mapped:
+                    queue_mode = mapped
+                    return queue_mode, rest
+            return queue_mode, tail
+
+        mapped = aliases.get(head)
+        if mapped:
+            queue_mode = mapped
+            return queue_mode, rest
+        return queue_mode, tail
 
     async def _enqueue_message(
         self,
@@ -171,14 +251,52 @@ class ConversationService:
         item: Dict[str, Any],
         policy: Dict[str, float],
     ) -> bool:
+        queue_mode = str(item.get("queue_mode", "followup")).strip().lower()
+        if queue_mode not in {"followup", "collect", "steer_backlog"}:
+            queue_mode = "followup"
+
         async with self._queue_lock:
             queue = self._session_queues.get(session_id)
             if queue is None:
                 queue = asyncio.Queue(maxsize=int(policy["max_queue_size"]))
                 self._session_queues[session_id] = queue
-            if queue.full():
-                return False
-            queue.put_nowait(item)
+
+            if queue_mode == "steer_backlog":
+                self._session_urgent[session_id] = item
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                        queue.task_done()
+                    except Exception:
+                        break
+                self._session_collect_latest.pop(session_id, None)
+            elif queue_mode == "collect":
+                debounce_ms = max(0, int(policy.get("collect_debounce_ms", 0)))
+                item["collect_ready_at"] = time.time() + (float(debounce_ms) / 1000.0)
+                self._session_collect_latest[session_id] = item
+                self._queue_coalesced += 1
+            else:
+                if queue.full():
+                    overflow_mode = str(policy.get("queue_overflow_mode", "reject_newest"))
+                    if overflow_mode == "drop_oldest":
+                        try:
+                            queue.get_nowait()
+                            queue.task_done()
+                            self._queue_dropped += 1
+                        except Exception:
+                            return False
+                    elif overflow_mode == "collect_latest":
+                        collect_item = dict(item)
+                        collect_item["queue_mode"] = "collect"
+                        collect_item["collect_ready_at"] = time.time()
+                        self._session_collect_latest[session_id] = collect_item
+                        self._queue_coalesced += 1
+                        return True
+                    else:
+                        self._queue_dropped += 1
+                        return False
+                queue.put_nowait(item)
+
             if session_id not in self._session_workers:
                 worker = asyncio.create_task(
                     self._session_worker(session_id, policy)
@@ -191,22 +309,51 @@ class ConversationService:
         queue = self._session_queues[session_id]
         try:
             while True:
-                try:
-                    item = await asyncio.wait_for(queue.get(), timeout=idle_ttl)
-                except asyncio.TimeoutError:
-                    if queue.empty():
-                        break
-                    continue
+                item: Optional[Dict[str, Any]] = None
+                from_queue = False
+                async with self._queue_lock:
+                    urgent = self._session_urgent.pop(session_id, None)
+                    if urgent is not None:
+                        item = urgent
+                    elif queue.empty():
+                        latest = self._session_collect_latest.get(session_id)
+                        if latest is not None:
+                            ready_at = float(latest.get("collect_ready_at") or 0.0)
+                            if ready_at <= time.time():
+                                item = self._session_collect_latest.pop(session_id, None)
+                if item is None:
+                    try:
+                        timeout = idle_ttl
+                        async with self._queue_lock:
+                            latest = self._session_collect_latest.get(session_id)
+                            if latest is not None:
+                                ready_at = float(latest.get("collect_ready_at") or 0.0)
+                                wait_collect = max(0.01, ready_at - time.time())
+                                timeout = max(0.01, min(idle_ttl, wait_collect))
+                        item = await asyncio.wait_for(queue.get(), timeout=timeout)
+                        from_queue = True
+                    except asyncio.TimeoutError:
+                        async with self._queue_lock:
+                            if (
+                                queue.empty()
+                                and session_id not in self._session_urgent
+                                and session_id not in self._session_collect_latest
+                            ):
+                                break
+                        continue
                 try:
                     await self._process_with_retry(item, policy)
                 finally:
-                    queue.task_done()
+                    if from_queue:
+                        queue.task_done()
         finally:
             async with self._queue_lock:
                 self._session_workers.pop(session_id, None)
                 q = self._session_queues.get(session_id)
                 if q is not None and q.empty():
                     self._session_queues.pop(session_id, None)
+                self._session_urgent.pop(session_id, None)
+                self._session_collect_latest.pop(session_id, None)
 
     async def _process_with_retry(
         self,
@@ -738,4 +885,9 @@ class ConversationService:
             "active_workers": len(self._session_workers),
             "queued_messages": sum(queue_sizes.values()),
             "queue_sizes": queue_sizes,
+            "urgent_sessions": len(self._session_urgent),
+            "collect_pending_sessions": len(self._session_collect_latest),
+            "queue_dropped": self._queue_dropped,
+            "queue_coalesced": self._queue_coalesced,
         }
+

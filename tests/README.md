@@ -1,73 +1,53 @@
-# Tests Module
+﻿# Tests
 
----
+## 中文
 
-## 中文文档
+### 目标
+`tests/` 用于保护核心能力：对话编排、工具调用、Moirai 工作流、记忆系统、配置与策略。
 
-### 1. 模块目标
+### 分层约定
+- 单元测试：纯逻辑与边界行为，无外部依赖。
+- 集成测试：跨模块协作（网关、工具服务、策略引擎）。
+- Live 测试：依赖运行中的服务或外部组件（通过 `PROMETHEA_LIVE_TEST=1` 启用）。
 
-`tests` 用于保护核心路径：对话、记忆、配置、网关协同。
-
-### 2. 常见测试文件
-
-- `test_message_manager_turns.py`：回合写入一致性
-- `test_memory_regressions.py`：记忆写入与召回回归
-- `test_memory_forgetting_regressions.py`：遗忘机制回归
-- `test_config_service.py`：配置服务行为
-- `test_conversation_queue.py`：会话队列与并发行为
-- `test_gateway_integration_unit.py`：网关集成单元
-
-### 3. 运行方式
-
+### 常用命令
 ```powershell
-pip install -e .[dev]
-pytest -q tests/
+# 全量（默认不跑 live）
+python tests/run_all_tests.py
+
+# 全量 + 覆盖率
+python tests/run_all_tests.py --coverage
+
+# 单文件
+python tests/run_all_tests.py --file test_moirai_service.py
+
+# 按关键字过滤
+python tests/run_all_tests.py --pattern "memory and not live"
+
+# 开启 live 测试
+python tests/run_all_tests.py --live
 ```
 
-### 4. 最小回归集（推荐）
-
+### 最小回归集合（推荐）
 ```powershell
-pytest -q tests/test_message_manager_turns.py tests/test_memory_regressions.py tests/test_conversation_queue.py
+pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_tool_service.py
 ```
 
-### 5. 注意事项
+## English
 
-- 涉及 Neo4j 的测试应使用独立测试库
-- 修改 recall/forgetting 逻辑后必须跑记忆回归
-- 接口返回结构改动后补充 API 兼容测试
+### Purpose
+`tests/` protects critical paths: orchestration, tool execution, Moirai workflows, memory behavior, and policy/config logic.
 
----
+### Test Layers
+- Unit: pure logic and boundary behavior.
+- Integration: cross-module behavior.
+- Live: requires running services or external dependencies (enabled by `PROMETHEA_LIVE_TEST=1`).
 
-## English Documentation
-
-### 1. Purpose
-
-`tests` protects critical paths: conversation flow, memory behavior, config logic, and gateway integration.
-
-### 2. Common Test Files
-
-- `test_message_manager_turns.py`: turn consistency
-- `test_memory_regressions.py`: memory write/recall regressions
-- `test_memory_forgetting_regressions.py`: forgetting regressions
-- `test_config_service.py`: config behavior
-- `test_conversation_queue.py`: queue/concurrency behavior
-- `test_gateway_integration_unit.py`: gateway integration unit tests
-
-### 3. Run
-
+### Common Commands
 ```powershell
-pip install -e .[dev]
-pytest -q tests/
+python tests/run_all_tests.py
+python tests/run_all_tests.py --coverage
+python tests/run_all_tests.py --file test_moirai_service.py
+python tests/run_all_tests.py --pattern "memory and not live"
+python tests/run_all_tests.py --live
 ```
-
-### 4. Recommended Minimal Regression Set
-
-```powershell
-pytest -q tests/test_message_manager_turns.py tests/test_memory_regressions.py tests/test_conversation_queue.py
-```
-
-### 5. Notes
-
-- use isolated Neo4j DB for graph-related tests
-- always run memory regressions after recall/forgetting changes
-- add compatibility tests when API response shapes change

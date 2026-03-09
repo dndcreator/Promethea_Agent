@@ -230,3 +230,118 @@ async def test_assess_outcome_requires_confirmation_on_unsure(monkeypatch):
     assert result["status"] == "needs_confirmation"
     assert result["review_id"]
 
+
+class DummyToolService:
+    def __init__(self):
+        self.calls = []
+
+    async def call_tool(self, tool_name, params, ctx=None, request_id=None, connection_id=None):
+        self.calls.append(
+            {
+                "tool_name": tool_name,
+                "params": params,
+                "request_id": request_id,
+                "ctx": ctx,
+            }
+        )
+        return {"run_id": "wf_test"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_policy_normalizes_moirai_flags():
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+    policy = svc._resolve_policy(
+        user_id="u1",
+        user_config={
+            "reasoning": {
+                "enabled": True,
+                "moirai_export_plan": "true",
+                "moirai_auto_start": "0",
+            }
+        },
+    )
+
+    assert policy["moirai_export_plan"] is True
+    assert policy["moirai_auto_start"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
+    tool_service = DummyToolService()
+    svc = ReasoningService(conversation_core=DummyConversationCore(), tool_service=tool_service)
+
+    async def fake_gate(**kwargs):
+        return {
+            "needs_reasoning": False,
+            "needs_memory": False,
+            "needs_tools": True,
+            "complexity": "low",
+            "reason": "test",
+        }
+
+    async def fake_execute_step(**kwargs):
+        return []
+
+    async def fake_summarize_tree(**kwargs):
+        return ""
+
+    monkeypatch.setattr(svc, "_gate_reasoning", fake_gate)
+    monkeypatch.setattr(svc, "_execute_step", fake_execute_step)
+    monkeypatch.setattr(svc, "_summarize_tree", fake_summarize_tree)
+
+    result = await svc.run(
+        session_id="s1",
+        user_id="u1",
+        user_message="help me with tooling",
+        recent_messages=[],
+        base_system_prompt="You are helpful.",
+        user_config={
+            "reasoning": {
+                "enabled": True,
+                "moirai_export_plan": True,
+                "moirai_auto_start": False,
+            }
+        },
+    )
+
+    assert result["used_reasoning"] is True
+    assert result["moirai_run_id"] == "wf_test"
+    assert len(tool_service.calls) == 1
+    call = tool_service.calls[0]
+    assert call["tool_name"] == "create_flow"
+    assert call["params"]["service_name"] == "moirai"
+    assert call["params"]["tool_name"] == "create_flow"
+
+@pytest.mark.asyncio
+async def test_select_tool_falls_back_to_strategy_when_llm_choice_invalid(monkeypatch):
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+
+    async def fake_call_json(messages, user_config=None, user_id=None):
+        return {
+            "use_tool": True,
+            "service_name": "non_exist",
+            "tool_name": "missing",
+            "args": {},
+        }
+
+    monkeypatch.setattr(svc, "_call_json", fake_call_json)
+
+    selected = await svc._select_tool(
+        step={"title": "download", "goal": "open website and click download"},
+        user_message="open the download website",
+        observations=[],
+        catalog=[
+            {
+                "tool_type": "mcp",
+                "service_name": "computer_control",
+                "tool_name": "browser_action",
+                "description": "browser goto click type",
+            }
+        ],
+        user_config={"reasoning": {"enabled": True}},
+        user_id="u1",
+    )
+
+    assert selected["use_tool"] is True
+    assert selected["service_name"] == "computer_control"
+    assert selected["tool_name"] == "browser_action"

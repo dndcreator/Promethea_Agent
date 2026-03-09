@@ -5,19 +5,31 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from agentkit.security.sandbox import get_sandbox_policy
+
 logger = logging.getLogger(__name__)
 
 
 class WebSearchService:
-    """Simple DuckDuckGo search wrapper."""
+    """Simple DuckDuckGo search wrapper with sandbox-aware network guard."""
 
     def __init__(self):
         self.name = "websearch"
         self.max_results = 5
+        self._sandbox = get_sandbox_policy()
         logger.info("WebSearchService initialized")
+
+    def _ensure_network_allowed(self) -> Optional[str]:
+        decision = self._sandbox.check_url("https://duckduckgo.com")
+        if not decision.allowed:
+            return f"Sandbox blocked web search: {decision.reason}"
+        return None
 
     async def search(self, query: str, max_results: Optional[int] = None) -> str:
         """Run a general web search."""
+        blocked = self._ensure_network_allowed()
+        if blocked:
+            return blocked
         try:
             if not query or not query.strip():
                 return "Error: query cannot be empty"
@@ -55,6 +67,9 @@ class WebSearchService:
 
     async def quick_answer(self, query: str) -> str:
         """Try instant answer first, fallback to normal search."""
+        blocked = self._ensure_network_allowed()
+        if blocked:
+            return blocked
         try:
             from duckduckgo_search import DDGS
 
@@ -77,6 +92,9 @@ class WebSearchService:
 
     async def news_search(self, query: str, max_results: Optional[int] = None) -> str:
         """Search news results."""
+        blocked = self._ensure_network_allowed()
+        if blocked:
+            return blocked
         try:
             from duckduckgo_search import DDGS
 

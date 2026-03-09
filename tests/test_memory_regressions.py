@@ -91,6 +91,9 @@ async def test_interaction_completed_remembers_write_key_only_after_success(monk
         svc = MemoryService(memory_adapter=memory_adapter)
 
         monkeypatch.setattr(svc, "_classify_interaction", _fake_classify)
+        async def _passthrough_verify(**kwargs):
+            return kwargs.get("candidates", [])
+        monkeypatch.setattr(svc, "_verify_candidates_with_llm", _passthrough_verify)
         monkeypatch.setattr(
             svc,
             "_graph_memory_state_changed",
@@ -135,6 +138,9 @@ async def test_interaction_completed_passes_memory_metadata(monkeypatch):
     svc = MemoryService(memory_adapter=memory_adapter)
 
     monkeypatch.setattr(svc, "_classify_interaction", _fake_classify)
+    async def _passthrough_verify(**kwargs):
+        return kwargs.get("candidates", [])
+    monkeypatch.setattr(svc, "_verify_candidates_with_llm", _passthrough_verify)
     monkeypatch.setattr(svc, "_graph_memory_state_changed", lambda **kwargs: True)
 
     await svc._on_interaction_completed(event)
@@ -237,3 +243,103 @@ def test_idle_cluster_uses_idle_thresholds():
     adapter._maybe_cluster("s1", state, now=1000.0, force_on_idle=True)
 
     adapter._warm_layer.cluster_entities.assert_called_once_with("s1")
+
+@pytest.mark.asyncio
+async def test_interaction_completed_rejects_assistant_attributed_candidate(monkeypatch):
+    from gateway.memory_service import MemoryService
+
+    async def _fake_classify(*args, **kwargs):
+        return {
+            "has_long_term_state": True,
+            "candidates": [
+                {
+                    "type": "preference",
+                    "content": "user does not like calculator tools",
+                    "semantic_keys": ["calculator", "preference"],
+                }
+            ],
+        }
+
+    async def _fake_verify_call(*args, **kwargs):
+        return (
+            '{"decisions":[{"index":0,"accept":true,"confidence":0.91,'
+            '"reason":"derived mainly from assistant explanation",'
+            '"evidence":"assistant said no tool needed",'
+            '"attribution":"assistant"}]}'
+        )
+
+    event = SimpleNamespace(
+        payload={
+            "session_id": "s1",
+            "user_id": "u1",
+            "channel": "web",
+            "user_input": "帮我算一下 12*13",
+            "assistant_output": "这个我不用工具也能算",
+        }
+    )
+
+    memory_adapter = MagicMock()
+    memory_adapter.is_enabled.return_value = True
+    memory_adapter.add_message.return_value = True
+    svc = MemoryService(memory_adapter=memory_adapter)
+
+    monkeypatch.setattr(svc, "_classify_interaction", _fake_classify)
+    monkeypatch.setattr(svc, "_call_memory_classifier_llm", _fake_verify_call)
+    monkeypatch.setattr(svc, "_graph_memory_state_changed", lambda **kwargs: True)
+
+    await svc._on_interaction_completed(event)
+
+    memory_adapter.add_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_interaction_completed_persists_verifier_metadata(monkeypatch):
+    from gateway.memory_service import MemoryService
+
+    async def _fake_classify(*args, **kwargs):
+        return {
+            "has_long_term_state": True,
+            "candidates": [
+                {
+                    "type": "preference",
+                    "content": "prefer concise answers",
+                    "semantic_keys": ["prefer", "concise"],
+                }
+            ],
+        }
+
+    async def _fake_verify_call(*args, **kwargs):
+        return (
+            '{"decisions":[{"index":0,"accept":true,"confidence":0.88,'
+            '"reason":"explicit user preference",'
+            '"evidence":"please keep it concise",'
+            '"attribution":"user"}]}'
+        )
+
+    event = SimpleNamespace(
+        payload={
+            "session_id": "s1",
+            "user_id": "u1",
+            "channel": "web",
+            "user_input": "please keep it concise",
+            "assistant_output": "ok",
+        }
+    )
+
+    memory_adapter = MagicMock()
+    memory_adapter.is_enabled.return_value = True
+    memory_adapter.add_message.return_value = True
+    svc = MemoryService(memory_adapter=memory_adapter)
+
+    monkeypatch.setattr(svc, "_classify_interaction", _fake_classify)
+    monkeypatch.setattr(svc, "_call_memory_classifier_llm", _fake_verify_call)
+    monkeypatch.setattr(svc, "_graph_memory_state_changed", lambda **kwargs: True)
+
+    await svc._on_interaction_completed(event)
+
+    kwargs = memory_adapter.add_message.call_args.kwargs
+    metadata = kwargs["metadata"]
+    assert metadata["verify_confidence"] == 0.88
+    assert metadata["verify_reason"] == "explicit user preference"
+    assert metadata["verify_evidence"] == "please keep it concise"
+    assert metadata["verify_attribution"] == "user"

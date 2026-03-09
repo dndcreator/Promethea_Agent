@@ -1,95 +1,131 @@
 {
-    "system": {
-        "version": "1.0",
-        "stream_mode": true,
-        "debug": false,
-        "log_level": "INFO"
-    },
-    "api": {
-        "base_url": "https://openrouter.ai/api/v1",
-        "model": "nvidia/nemotron-3-nano-30b-a3b:free",
-        "temperature": 0.7,
-        "max_tokens": 2000,
-        "max_history_rounds": 10,
-        "timeout": null,
-        "retry_count": null
-    },
-    "memory": {
-        "enabled": true,
-        "api": {
-            "use_main_api": true,
-            "api_key": "",
-            "base_url": "https://openrouter.ai/api/v1",
-            "model": ""
-        },
-        "neo4j": {
-            "enabled": true,
-            "uri": "bolt://127.0.0.1:7687",
-            "username": "neo4j",
-            "password": "",
-            "database": "neo4j",
-            "connection_timeout": 3
-        },
-        "hot_layer": {
-            "max_tuples_per_message": 10,
-            "min_confidence": 0.5,
-            "enable_coreference": false,
-            "enable_time_normalization": true,
-            "message_retention_days": 30,
-            "message_cleanup_batch": 200
-        },
-        "warm_layer": {
-            "enabled": true,
-            "embedding_model": "text-embedding-3-small",
-            "clustering_threshold": 0.7,
-            "min_cluster_size": 3,
-            "max_concepts": 100,
-            "stabilize_min_sessions": 2,
-            "stabilize_min_mentions": 3,
-            "stabilize_importance_floor": 0.8,
-            "cluster_every_messages": 12,
-            "cluster_min_interval_s": 300,
-            "idle_cluster_delay_s": 120,
-            "idle_cluster_min_messages": 2,
-            "idle_cluster_min_interval_s": 60
-        },
-        "cold_layer": {
-            "summary_model": "nvidia/nemotron-3-nano-30b-a3b:free",
-            "max_summary_length": 500,
-            "compression_threshold": 50
-        },
-        "gating": {
-            "recall_filter": {
-                "enabled": true,
-                "min_query_chars": 6,
-                "max_query_chars": 4000
+    "system":  {
+                   "version":  "1.0",
+                   "stream_mode":  true,
+                   "debug":  false,
+                   "log_level":  "INFO"
+               },
+    "api":  {
+                "base_url":  "https://openrouter.ai/api/v1",
+                "model":  "nvidia/nemotron-3-nano-30b-a3b:free",
+                "temperature":  0.7,
+                "max_tokens":  2000,
+                "max_history_rounds":  10,
+                "timeout":  null,
+                "retry_count": null,
+                "failover_models": []
             },
-            "write_filter": {
-                "enabled": true,
-                "min_user_chars": 4,
-                "min_assistant_chars_for_short_user": 20,
-                "max_combined_chars": 8000
-            },
-            "dedupe": {
-                "recent_write_cache_size": 2000,
-                "min_candidate_chars": 8
-            }
-        }
-    },
-    "reasoning": {
-        "enabled": false,
-        "mode": "react_tot",
-        "max_depth": 4,
-        "max_nodes": 24,
-        "max_iterations": 10,
-        "max_memory_calls": 4,
-        "max_tool_calls": 4,
-        "max_replan_rounds": 3,
-        "plan_max_steps": 5,
-        "beam_width": 3,
-        "branch_factor": 3,
-        "candidate_votes": 3,
-        "min_branch_score": 0.0,
-        "debug_log": false
-    }
+    "memory":  {
+                   "enabled":  true,
+                   "api":  {
+                               "use_main_api":  true,
+                               "api_key":  "",
+                               "base_url":  "https://openrouter.ai/api/v1",
+                               "model":  ""
+                           },
+                   "neo4j":  {
+                                 "enabled":  true,
+                                 "uri":  "bolt://127.0.0.1:7687",
+                                 "username":  "neo4j",
+                                 "password":  "",
+                                 "database":  "neo4j",
+                                 "connection_timeout":  3
+                             },
+                   "hot_layer":  {
+                                     "max_tuples_per_message":  10,
+                                     "min_confidence":  0.5,
+                                     "enable_coreference":  false,
+                                     "enable_time_normalization":  true,
+                                     "message_retention_days":  30,
+                                     "message_cleanup_batch":  200
+                                 },
+                   "warm_layer":  {
+                                      "enabled":  true,
+                                      "embedding_model":  "text-embedding-3-small",
+                                      "clustering_threshold":  0.7,
+                                      "min_cluster_size":  3,
+                                      "max_concepts":  100,
+                                      "stabilize_min_sessions":  2,
+                                      "stabilize_min_mentions":  3,
+                                      "stabilize_importance_floor":  0.8,
+                                      "cluster_every_messages":  12,
+                                      "cluster_min_interval_s":  300,
+                                      "idle_cluster_delay_s":  120,
+                                      "idle_cluster_min_messages":  2,
+                                      "idle_cluster_min_interval_s":  60
+                                  },
+                   "cold_layer":  {
+                                      "summary_model":  "nvidia/nemotron-3-nano-30b-a3b:free",
+                                      "max_summary_length":  500,
+                                      "compression_threshold":  50
+                                  },
+                   "gating":  {
+                                  "recall_filter":  {
+                                                        "enabled":  true,
+                                                        "min_query_chars":  6,
+                                                        "max_query_chars":  4000
+                                                    },
+                                  "write_filter":  {
+                                                       "enabled":  true,
+                                                       "min_user_chars":  4,
+                                                       "min_assistant_chars_for_short_user":  20,
+                                                       "max_combined_chars":  8000
+                                                   },
+                                  "dedupe":  {
+                                                 "recent_write_cache_size":  2000,
+                                                 "min_candidate_chars":  8
+                                             }
+                              }
+               },
+    "reasoning":  {
+                      "enabled":  false,
+                      "mode":  "react_tot",
+                      "max_depth":  4,
+                      "max_nodes":  24,
+                      "max_iterations":  10,
+                      "max_memory_calls":  4,
+                      "max_tool_calls":  4,
+                      "max_replan_rounds":  3,
+                      "plan_max_steps":  5,
+                      "beam_width":  3,
+                      "branch_factor":  3,
+                      "candidate_votes":  3,
+                      "min_branch_score":  0.0,
+                      "moirai_export_plan":  false,
+                      "moirai_auto_start":  false,
+                      "debug_log":  false
+                  },
+    "sandbox":  {
+                    "enabled":  false,
+                    "profile":  "off",
+                    "workspace_access":  "rw",
+                    "command_mode":  "allowlist",
+                    "allowed_commands":  [
+                                             "python",
+                                             "pytest",
+                                             "pip",
+                                             "uv",
+                                             "git",
+                                             "rg",
+                                             "cmd",
+                                             "powershell"
+                                         ],
+                    "deny_fragments":  [
+                                           "rm -rf",
+                                           "del /f /q",
+                                           "format ",
+                                           "shutdown",
+                                           "reboot",
+                                           "mkfs",
+                                           "diskpart",
+                                           "net user",
+                                           "reg add"
+                                       ],
+                    "network_mode":  "restricted",
+                    "allowed_domains":  [
+
+                                        ],
+                    "block_private_network":  true
+                }
 }
+

@@ -1,0 +1,65 @@
+﻿{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "browser_download_page",
+      "user_message": "Open the website and click the download button",
+      "step": {"goal": "open page and click download"},
+      "expect": {"service_name": "computer_control", "tool_name": "browser_action"}
+    },
+    {
+      "id": "visual_locate_button",
+      "user_message": "Find the submit button on screen and locate it",
+      "step": {"goal": "locate UI target"},
+      "expect": {"service_name": "computer_control", "tool_name": "perception_action"}
+    },
+    {
+      "id": "save_file_dir",
+      "user_message": "Save this file into target directory and verify path exists",
+      "step": {"goal": "save file to folder"},
+      "expect": {"service_name": "computer_control", "tool_name": "fs_action"}
+    },
+    {
+      "id": "launch_client",
+      "user_message": "Launch the client process and keep it running",
+      "step": {"goal": "start app process"},
+      "expect": {"service_name": "computer_control", "tool_name": "process_action"}
+    },
+    {
+      "id": "fetch_web_content",
+      "user_message": "Fetch the web page and parse pdf details",
+      "step": {"goal": "fetch content from web"},
+      "expect": {"service_name": "computer_control", "tool_name": "content_action"}
+    },
+    {
+      "id": "resume_workflow",
+      "user_message": "Resume the workflow from checkpoint and retry failed step",
+      "step": {"goal": "workflow resume and retry"},
+      "expect": {"service_name": "moirai", "tool_name": "flow_resume"}
+    },
+    {
+      "id": "runtime_status",
+      "user_message": "Check runtime status of agent memory and plugins",
+      "step": {"goal": "inspect runtime state"},
+      "expect": {"service_name": "computer_control", "tool_name": "runtime_action"}
+    },
+    {
+      "id": "schedule_job",
+      "user_message": "Create a recurring cron job every hour",
+      "step": {"goal": "configure schedule"},
+      "expect": {"service_name": "computer_control", "tool_name": "schedule_action"}
+    },
+    {
+      "id": "graph_relations",
+      "user_message": "Build a node graph and link relation dependencies",
+      "step": {"goal": "graph relation updates"},
+      "expect": {"service_name": "computer_control", "tool_name": "graph_action"}
+    },
+    {
+      "id": "self_modify",
+      "user_message": "Modify agent code and run targeted tests",
+      "step": {"goal": "self evolve with code patch"},
+      "expect": {"service_name": "self_evolve", "tool_name": "self_evolve"}
+    }
+  ]
+}

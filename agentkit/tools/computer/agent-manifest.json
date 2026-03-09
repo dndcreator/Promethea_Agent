@@ -1,44 +1,146 @@
 {
-    "name": "computer_control",
-    "label": "Computer Control",
-    "version": "1.0.0",
-    "description": "Control the local computer including browser, mouse, keyboard, and filesystem.",
-    "serviceType": "mcp",
-    "entryPoint": {
-        "module": "agentkit.tools.computer.computer_control",
-        "class": "ComputerControlService"
-    },
-    "capabilities": {
-        "invocation_commands": [
-            {
-                "command": "browser_action",
-                "description": "Control the browser (goto, click, type, screenshot). Actions: goto, click, type, scroll, screenshot, content.",
-                "example": "browser_action(action='goto', url='https://google.com')"
-            },
-            {
-                "command": "screen_action",
-                "description": "Control mouse and keyboard or take screenshots. Actions: move, click, type, press, screenshot.",
-                "example": "screen_action(action='screenshot')"
-            },
-            {
-                "command": "fs_action",
-                "description": "File system operations. Actions: read, write, list, delete, mkdir.",
-                "example": "fs_action(action='read', path='C:/test.txt')"
-            }
-        ]
-    },
-    "inputSchema": {
-        "type": "object",
-        "properties": {
-            "action": { "type": "string", "description": "Specific operation to perform" },
-            "url": { "type": "string" },
-            "selector": { "type": "string", "description": "CSS selector for browser elements" },
-            "text": { "type": "string" },
-            "x": { "type": "integer" },
-            "y": { "type": "integer" },
-            "key": { "type": "string" },
-            "path": { "type": "string" },
-            "content": { "type": "string" }
-        }
+  "name": "computer_control",
+  "label": "Computer Control",
+  "version": "1.3.0",
+  "description": "Unified control plane for browser/screen/filesystem/process plus content, runtime, scheduler, and graph operations.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.computer.computer_control",
+    "class": "ComputerControlService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "browser_action",
+        "description": "Browser operations (goto/click/type/content/get_url/get_title + snapshot/act/wait_download).",
+        "example": "browser_action(action='snapshot', query='Download', max_nodes=30)"
+      },
+      {
+        "command": "screen_action",
+        "description": "Screen, mouse and keyboard operations.",
+        "example": "screen_action(action='screenshot')"
+      },
+      {
+        "command": "fs_action",
+        "description": "Filesystem operations via action (read, write, append, list, search, stat, exists, delete, move, copy, mkdir).",
+        "example": "fs_action(action='read', path='README.md')"
+      },
+      {
+        "command": "process_action",
+        "description": "Process/runtime operations via action (run, run_async, list, get, kill, terminate, wait, get_output, system_info).",
+        "example": "process_action(action='run', command='python --version')"
+      },
+      {
+        "command": "perception_action",
+        "description": "Perception helpers (observe/find/ocr/fallback execution).",
+        "example": "perception_action(mode='find_text_on_screen', target_text='Download', max_candidates=5)"
+      },
+      {
+        "command": "content_action",
+        "description": "Content operations unified under control (web_fetch/pdf/image).",
+        "example": "content_action(action='web_fetch', url='https://example.com')"
+      },
+      {
+        "command": "runtime_action",
+        "description": "Gateway/runtime operations (sessions/agents/memory/message/plugins).",
+        "example": "runtime_action(action='sessions_list', user_id='default_user')"
+      },
+      {
+        "command": "schedule_action",
+        "description": "Persistent scheduler operations (create/list/pause/resume/run jobs).",
+        "example": "schedule_action(action='create_job', name='health', interval_seconds=60, service_name='runtime_tools', tool_name='gateway_action')"
+      },
+      {
+        "command": "graph_action",
+        "description": "Generic node graph operations (upsert/link/list/delete).",
+        "example": "graph_action(action='upsert_node', node_id='task_1', kind='task')"
+      },
+      {
+        "command": "read_file",
+        "description": "Read text file quickly.",
+        "example": "read_file(path='gateway/server.py')"
+      },
+      {
+        "command": "write_file",
+        "description": "Write text file quickly.",
+        "example": "write_file(path='notes/todo.txt', content='hello')"
+      },
+      {
+        "command": "list_files",
+        "description": "List directory contents quickly.",
+        "example": "list_files(path='.', recursive=false)"
+      },
+      {
+        "command": "delete_file",
+        "description": "Delete file quickly.",
+        "example": "delete_file(path='tmp.txt')"
+      },
+      {
+        "command": "execute_command",
+        "description": "Run command and capture output.",
+        "example": "execute_command(command='python -m pytest -q')"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string", "description": "Specific operation to perform" },
+      "url": { "type": "string" },
+      "ref": { "type": "string", "description": "Snapshot node ref id for browser act" },
+      "selector": { "type": "string", "description": "CSS selector for browser elements" },
+      "value": { "type": "string" },
+      "text": { "type": "string" },
+      "x": { "type": "integer" },
+      "y": { "type": "integer" },
+      "key": { "type": "string" },
+      "path": { "type": "string" },
+      "content": { "type": "string" },
+      "recursive": { "type": "boolean" },
+      "pattern": { "type": "string" },
+      "src": { "type": "string" },
+      "dst": { "type": "string" },
+      "command": { "type": "string" },
+      "cwd": { "type": "string" },
+      "timeout": { "type": "integer" },
+      "mode": { "type": "string" },
+      "target_text": { "type": "string" },
+      "image_path": { "type": "string" },
+      "max_nodes": { "type": "integer" },
+      "query": { "type": "string" },
+      "download_dir": { "type": "string" },
+      "poll_interval_ms": { "type": "integer" },
+      "max_candidates": { "type": "integer" },
+      "include_screenshot": { "type": "boolean" },
+      "tab_id": { "type": "string" },
+      "page": { "type": "integer" },
+      "max_pages": { "type": "integer" },
+      "max_chars": { "type": "integer" },
+      "include_links": { "type": "boolean" },
+      "session_id": { "type": "string" },
+      "user_id": { "type": "string" },
+      "agent_name": { "type": "string" },
+      "agent_type": { "type": "string" },
+      "channel": { "type": "string" },
+      "receiver_id": { "type": "string" },
+      "job_id": { "type": "string" },
+      "name": { "type": "string" },
+      "interval_seconds": { "type": "integer" },
+      "service_name": { "type": "string" },
+      "tool_name": { "type": "string" },
+      "args": { "type": "object" },
+      "enabled": { "type": "boolean" },
+      "enabled_only": { "type": "boolean" },
+      "max_jobs": { "type": "integer" },
+      "node_id": { "type": "string" },
+      "kind": { "type": "string" },
+      "data": { "type": "object" },
+      "tags": { "type": "array" },
+      "tag": { "type": "string" },
+      "source": { "type": "string" },
+      "target": { "type": "string" },
+      "relation": { "type": "string" },
+      "weight": { "type": "number" }
     }
+  }
 }

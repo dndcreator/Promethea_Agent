@@ -1,0 +1,136 @@
+{
+  "run_id": "wf_e7812ccfe3a84c41b66b61b1a65f70a4",
+  "name": "bench_web_pipeline",
+  "goal": "Complete browser task on https://example.com targeting 'Download'",
+  "status": "paused",
+  "cursor": 0,
+  "steps": [
+    {
+      "id": "open_page",
+      "name": "Open task page",
+      "kind": "mcp_call",
+      "require_approval": false,
+      "continue_on_error": false,
+      "retries": 0,
+      "attempts": 0,
+      "params": {
+        "service_name": "computer_control",
+        "tool_name": "browser_action",
+        "args": {
+          "action": "goto",
+          "url": "https://example.com"
+        }
+      },
+      "status": "pending",
+      "output": null,
+      "error": null,
+      "started_at": null,
+      "ended_at": null
+    },
+    {
+      "id": "snapshot_target",
+      "name": "Snapshot interactive nodes",
+      "kind": "mcp_call",
+      "require_approval": false,
+      "continue_on_error": false,
+      "retries": 0,
+      "attempts": 0,
+      "params": {
+        "service_name": "computer_control",
+        "tool_name": "browser_action",
+        "args": {
+          "action": "snapshot",
+          "query": "Download",
+          "max_nodes": 50
+        }
+      },
+      "status": "pending",
+      "output": null,
+      "error": null,
+      "started_at": null,
+      "ended_at": null
+    },
+    {
+      "id": "act_target",
+      "name": "Act on top candidate",
+      "kind": "mcp_call",
+      "require_approval": false,
+      "continue_on_error": false,
+      "retries": 0,
+      "attempts": 0,
+      "params": {
+        "service_name": "computer_control",
+        "tool_name": "browser_action",
+        "args": {
+          "action": "act",
+          "ref": "n1"
+        }
+      },
+      "status": "pending",
+      "output": null,
+      "error": null,
+      "started_at": null,
+      "ended_at": null
+    },
+    {
+      "id": "verify_page_contains_hint",
+      "name": "Verify page changed as expected",
+      "kind": "verify_command",
+      "require_approval": false,
+      "continue_on_error": true,
+      "retries": 0,
+      "attempts": 0,
+      "params": {
+        "command": "cmd /c echo browser pipeline verification",
+        "expect_contains": "verification"
+      },
+      "status": "pending",
+      "output": null,
+      "error": null,
+      "started_at": null,
+      "ended_at": null
+    },
+    {
+      "id": "manual_verify_gate",
+      "name": "Manual verify gate",
+      "kind": "note",
+      "require_approval": true,
+      "continue_on_error": false,
+      "retries": 0,
+      "attempts": 0,
+      "params": {
+        "text": "Confirm the page reflects expected state containing: Download"
+      },
+      "status": "pending",
+      "output": null,
+      "error": null,
+      "started_at": null,
+      "ended_at": null
+    }
+  ],
+  "pending_approval": null,
+  "approved_steps": {},
+  "checkpoints": [],
+  "events": [
+    {
+      "ts": 1773071518.9727287,
+      "event": "flow.created",
+      "payload": {
+        "name": "bench_web_pipeline",
+        "steps": 5
+      }
+    }
+  ],
+  "max_events": 500,
+  "metadata": {
+    "template": "web_task_pipeline",
+    "start_url": "https://example.com",
+    "target_text": "Download",
+    "success_hint": "Download"
+  },
+  "created_at": 1773071518.972725,
+  "updated_at": 1773071518.972725,
+  "ended_at": null,
+  "last_error": null,
+  "cancel_reason": null
+}

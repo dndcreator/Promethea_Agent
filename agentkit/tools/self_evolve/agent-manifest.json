@@ -1,0 +1,65 @@
+{
+  "name": "self_evolve",
+  "label": "Self Evolve",
+  "version": "2.0.0",
+  "description": "Agent self-evolution workflow: plan scoped tasks, apply controlled patches, and validate changes.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.self_evolve.self_evolve",
+    "class": "SelfEvolveService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "evolve_create_task",
+        "description": "Create a scoped self-evolution task with explicit target files.",
+        "example": "evolve_create_task(goal='improve retry logic', target_files=['gateway/reasoning_service.py'])"
+      },
+      {
+        "command": "evolve_get_task",
+        "description": "Get one self-evolution task and its audit trail.",
+        "example": "evolve_get_task(task_id='se_xxx')"
+      },
+      {
+        "command": "evolve_list_tasks",
+        "description": "List recent self-evolution tasks.",
+        "example": "evolve_list_tasks(limit=20, status='editing')"
+      },
+      {
+        "command": "evolve_collect_context",
+        "description": "Collect bounded context from target files in a task.",
+        "example": "evolve_collect_context(task_id='se_xxx', max_chars_per_file=3000)"
+      },
+      {
+        "command": "evolve_apply_patch",
+        "description": "Apply controlled text replacement to a task-declared file.",
+        "example": "evolve_apply_patch(task_id='se_xxx', path='gateway/reasoning_service.py', old='a', new='b', count=1)"
+      },
+      {
+        "command": "evolve_validate",
+        "description": "Run validation command and attach result to task audit trail.",
+        "example": "evolve_validate(task_id='se_xxx', command='python -m pytest -q tests/test_reasoning_service.py')"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "task_id": { "type": "string" },
+      "goal": { "type": "string" },
+      "target_files": { "type": "array" },
+      "acceptance_criteria": { "type": "array" },
+      "limit": { "type": "integer" },
+      "status": { "type": "string" },
+      "max_chars_per_file": { "type": "integer" },
+      "path": { "type": "string" },
+      "old": { "type": "string" },
+      "new": { "type": "string" },
+      "count": { "type": "integer" },
+      "create_backup": { "type": "boolean" },
+      "command": { "type": "string" },
+      "cwd": { "type": "string" },
+      "timeout": { "type": "integer" }
+    }
+  }
+}

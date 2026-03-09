@@ -1,75 +1,84 @@
-﻿"""
-?- ?
+﻿"""Unified test runner for local development.
 
-:
-  python tests/run_all_tests.py              # TODO: comment cleaned
-  python tests/run_all_tests.py --live       # TODO: comment cleaned
-  python tests/run_all_tests.py --file test_gateway_basic.py  # TODO: comment cleaned
-  python tests/run_all_tests.py --verbose     # TODO: comment cleaned
+Examples:
+  python tests/run_all_tests.py
+  python tests/run_all_tests.py --live
+  python tests/run_all_tests.py --file test_gateway_basic.py
+  python tests/run_all_tests.py --pattern "test_memory_*.py"
+  python tests/run_all_tests.py --coverage
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import argparse
-import unittest
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 
+def _build_pytest_args(args: argparse.Namespace, root: Path) -> list[str]:
+    test_target: str
+    if args.file:
+        target = (root / "tests" / args.file).resolve()
+        if not target.exists():
+            raise FileNotFoundError(f"test file not found: {target}")
+        test_target = str(target)
+    else:
+        test_target = str((root / "tests").resolve())
+
+    cmd = [sys.executable, "-m", "pytest", test_target]
+
+    if args.pattern:
+        cmd.extend(["-k", args.pattern])
+
+    if args.coverage:
+        cmd.extend(["--cov=.", "--cov-report=term-missing", "--cov-report=xml"])
+
+    if args.verbose:
+        cmd.append("-vv")
+    else:
+        cmd.append("-q")
+
+    return cmd
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Promethea Agent ?)
-    parser.add_argument("--live", action="store_true", help="?Neo4j?)
-    parser.add_argument("--file", type=str, help="")
-    parser.add_argument("--verbose", "-v", action="store_true", help="")
-    parser.add_argument("--pattern", type=str, default="test_*.py", help="")
-    
+    parser = argparse.ArgumentParser(description="Promethea Agent test runner")
+    parser.add_argument("--live", action="store_true", help="run live integration tests")
+    parser.add_argument("--file", type=str, help="run a single test file under tests/")
+    parser.add_argument(
+        "--pattern",
+        type=str,
+        default="",
+        help="pytest -k expression for selecting tests",
+    )
+    parser.add_argument("--coverage", action="store_true", help="enable coverage report")
+    parser.add_argument("--verbose", "-v", action="store_true", help="verbose pytest output")
     args = parser.parse_args()
-    
+
     root = Path(__file__).resolve().parent.parent
-    tests_dir = root / "tests"
-    
+
+    if args.live:
+        os.environ["PROMETHEA_LIVE_TEST"] = "1"
+    else:
+        os.environ.pop("PROMETHEA_LIVE_TEST", None)
+
+    try:
+        cmd = _build_pytest_args(args, root)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        return 1
+
     print("=" * 80)
     print("Promethea Agent - Test Runner")
     print("=" * 80)
-    
-    # TODO: comment cleaned
-    if args.live:
-        os.environ["PROMETHEA_LIVE_TEST"] = "1"
-        print("Mode: LIVE ()")
-    else:
-        os.environ.pop("PROMETHEA_LIVE_TEST", None)
-        print("Mode: UNIT (?")
-    
-    # TODO: comment cleaned
-    if args.file:
-        # TODO: comment cleaned
-        test_file = tests_dir / args.file
-        if not test_file.exists():
-            print(f": ? {test_file}")
-            return 1
-        suite = unittest.defaultTestLoader.loadTestsFromName(
-            f"tests.{args.file.replace('.py', '').replace('/', '.')}"
-        )
-    else:
-        # TODO: comment cleaned
-        suite = unittest.defaultTestLoader.discover(
-            str(tests_dir),
-            pattern=args.pattern
-        )
-    
-    verbosity = 2 if args.verbose else 1
-    runner = unittest.TextTestRunner(verbosity=verbosity)
-    result = runner.run(suite)
-    
-    # TODO: comment cleaned
-    print("\n" + "=" * 80)
-    if result.wasSuccessful():
-        print(f"? ({result.testsRun} ?")
-        return 0
-    else:
-        print(f"?: {len(result.failures)} ? {len(result.errors)} ?)
-        return 1
+    print(f"mode: {'LIVE' if args.live else 'UNIT'}")
+    print("command:", " ".join(cmd))
+
+    result = subprocess.run(cmd, cwd=str(root), check=False)
+    return int(result.returncode)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

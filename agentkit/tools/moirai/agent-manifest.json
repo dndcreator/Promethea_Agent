@@ -1,0 +1,149 @@
+{
+    "name":  "moirai",
+    "label":  "Moirai Workflow",
+    "version":  "1.2.0",
+    "description":  "Resumable workflow runner with checkpoints, approval gates, retries, cancellation, and recovery.",
+    "serviceType":  "mcp",
+    "entryPoint":  {
+                       "module":  "agentkit.tools.moirai.moirai",
+                       "class":  "MoiraiService"
+                   },
+    "capabilities":  {
+                         "invocation_commands":  [
+                                                     {
+                                                         "command":  "create_flow",
+                                                         "description":  "Create a resumable workflow run from steps with retry policy.",
+                                                         "example":  "create_flow(name=\u0027fix-bug\u0027, goal=\u0027fix failing tests\u0027, steps=[...], default_retries=1)"
+                                                     },
+                                                     {
+                                                         "command":  "run_until_pause",
+                                                         "description":  "Run workflow from checkpoint until completion, failure, approval pause, or max-steps pause.",
+                                                         "example":  "run_until_pause(run_id=\u0027wf_xxx\u0027, max_steps=3)"
+                                                     },
+                                                     {
+                                                         "command":  "approve_step",
+                                                         "description":  "Approve or reject the currently waiting step.",
+                                                         "example":  "approve_step(run_id=\u0027wf_xxx\u0027, approved=true, note=\u0027safe to continue\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "resume_flow",
+                                                         "description":  "Resume a paused workflow after approval or interruption.",
+                                                         "example":  "resume_flow(run_id=\u0027wf_xxx\u0027, max_steps=5)"
+                                                     },
+                                                     {
+                                                         "command":  "cancel_flow",
+                                                         "description":  "Cancel a running or paused workflow.",
+                                                         "example":  "cancel_flow(run_id=\u0027wf_xxx\u0027, reason=\u0027manual stop\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "retry_from_step",
+                                                         "description":  "Reset state from a step index and make the run resumable again.",
+                                                         "example":  "retry_from_step(run_id=\u0027wf_xxx\u0027, step_index=2)"
+                                                     },
+                                                     {
+                                                         "command":  "get_flow",
+                                                         "description":  "Get workflow run state, checkpoints, events and step outputs.",
+                                                         "example":  "get_flow(run_id=\u0027wf_xxx\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "list_flows",
+                                                         "description":  "List recent workflow runs.",
+                                                         "example":  "list_flows(limit=20, status=\u0027paused\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "create_download_pipeline",
+                                                         "description":  "Create a resumable legal download workflow template (open page, trigger download, start client, verify).",
+                                                         "example":  "create_download_pipeline(name=\u0027ubuntu-download\u0027, source_url=\u0027https://ubuntu.com/download\u0027, target_dir=\u0027D:/Downloads\u0027, client_command=\u0027BitComet.exe\u0027, process_name=\u0027BitComet\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "create_web_task_pipeline",
+                                                         "description":  "Create a resumable browser task workflow (open, snapshot, act, verify, manual gate).",
+                                                         "example":  "create_web_task_pipeline(name=\u0027portal-login\u0027, start_url=\u0027https://example.com\u0027, target_text=\u0027Login\u0027, success_hint=\u0027Dashboard\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "create_visual_text_pipeline",
+                                                         "description":  "Create a resumable OCR-based visual task workflow (scan text, click text, manual verify).",
+                                                         "example":  "create_visual_text_pipeline(name=\u0027visual-click\u0027, target_text=\u0027Download\u0027, success_hint=\u0027Opened\u0027)"
+                                                     },
+                                                     {
+                                                         "command":  "create_general_web_agent_pipeline",
+                                                         "description":  "Create a resilient web-agent workflow with DOM-first and OCR fallback execution.",
+                                                         "example":  "create_general_web_agent_pipeline(name=\u0027generic-web-task\u0027, start_url=\u0027https://example.com\u0027, target_text=\u0027Download\u0027, success_hint=\u0027Completed\u0027)"
+                                                     }
+                                                 ]
+                     },
+    "inputSchema":  {
+                        "type":  "object",
+                        "properties":  {
+                                           "run_id":  {
+                                                          "type":  "string"
+                                                      },
+                                           "name":  {
+                                                        "type":  "string"
+                                                    },
+                                           "goal":  {
+                                                        "type":  "string"
+                                                    },
+                                           "steps":  {
+                                                         "type":  "array"
+                                                     },
+                                           "metadata":  {
+                                                            "type":  "object"
+                                                        },
+                                           "auto_start":  {
+                                                              "type":  "boolean"
+                                                          },
+                                           "default_retries":  {
+                                                                   "type":  "integer"
+                                                               },
+                                           "max_events":  {
+                                                              "type":  "integer"
+                                                          },
+                                           "max_steps":  {
+                                                             "type":  "integer"
+                                                         },
+                                           "approved":  {
+                                                            "type":  "boolean"
+                                                        },
+                                           "note":  {
+                                                        "type":  "string"
+                                                    },
+                                           "reason":  {
+                                                          "type":  "string"
+                                                      },
+                                           "step_index":  {
+                                                              "type":  "integer"
+                                                          },
+                                           "limit":  {
+                                                         "type":  "integer"
+                                                     },
+                                           "status":  {
+                                                          "type":  "string"
+                                                      },
+                                           "source_url":  {
+                                                              "type":  "string"
+                                                          },
+                                           "target_dir":  {
+                                                              "type":  "string"
+                                                          },
+                                           "client_command":  {
+                                                                  "type":  "string"
+                                                              },
+                                           "process_name":  {
+                                                                "type":  "string"
+                                                            },
+                                           "download_selector":  {
+                                                                     "type":  "string"
+                                                                 },
+                                           "start_url":  {
+                                                             "type":  "string"
+                                                         },
+                                           "target_text":  {
+                                                               "type":  "string"
+                                                           },
+                                           "success_hint":  {
+                                                                "type":  "string"
+                                                            }
+                                       }
+                    }
+}

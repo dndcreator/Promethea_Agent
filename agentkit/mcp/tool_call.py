@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 from typing import List, Dict, Any, Tuple, Optional, Set, Callable, Awaitable
 from loguru import logger
@@ -59,38 +59,41 @@ def parse_tool_calls(content: str) -> list:
 def _process_single_tool_call(tool_args: dict, tool_calls: list):
     """Process a single tool-call dictionary and append to the list if valid."""
     try:
-        agent_type = tool_args.get('agentType', 'mcp').lower()
-        if agent_type == 'agent':
-            agent_name = tool_args.get('agent_name')
-            prompt = tool_args.get('prompt')
+        agent_type = str(tool_args.get("agentType", "mcp")).lower()
+        if agent_type == "agent":
+            agent_name = tool_args.get("agent_name")
+            prompt = tool_args.get("prompt")
             if agent_name and prompt:
                 tool_call = {
-                    'name': 'agent_call',
-                    'args': {
-                        'agentType': 'agent',
-                        'agent_name': agent_name,
-                        'prompt': prompt
-                    }
+                    "name": "agent_call",
+                    "args": {
+                        "agentType": "agent",
+                        "agent_name": agent_name,
+                        "prompt": prompt,
+                    },
                 }
                 tool_calls.append(tool_call)
-        else:
-            tool_name = tool_args.get('tool_name')
-            if tool_name:
-                if 'service_name' in tool_args:
-                    tool_call = {
-                        'name': tool_name,
-                        'args': tool_args
-                    }
-                    tool_calls.append(tool_call)
-                else:
-                    service_name = tool_name
-                    tool_args['service_name'] = service_name
-                    tool_args['agentType'] = 'mcp'
-                    tool_call = {
-                        'name': tool_name,
-                        'args': tool_args
-                    }
-                    tool_calls.append(tool_call)
+            return
+
+        tool_name = tool_args.get("tool_name")
+        if not tool_name:
+            return
+
+        nested_args = tool_args.get("args")
+        effective_args = {}
+        if isinstance(nested_args, dict):
+            effective_args.update(nested_args)
+        for k, v in tool_args.items():
+            if k != "args":
+                effective_args[k] = v
+
+        if "service_name" not in effective_args:
+            effective_args["service_name"] = tool_name
+        if "agentType" not in effective_args:
+            effective_args["agentType"] = "mcp"
+
+        tool_call = {"name": tool_name, "args": effective_args}
+        tool_calls.append(tool_call)
     except Exception as e:
         logger.warning(f"Failed to process tool call arguments: {e}")
 
@@ -374,3 +377,4 @@ async def tool_call_loop(
         'messages': current_messages,
         'usage': final_usage if final_usage['prompt_tokens'] > 0 else None
     }
+

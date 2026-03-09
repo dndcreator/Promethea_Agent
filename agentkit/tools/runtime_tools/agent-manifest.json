@@ -1,0 +1,59 @@
+{
+  "name": "runtime_tools",
+  "label": "Runtime Tools",
+  "version": "1.0.0",
+  "description": "Gateway/runtime operations for sessions, agents, memory, messaging, and plugins.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.runtime_tools.runtime_tools",
+    "class": "RuntimeToolsService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "gateway_action",
+        "description": "Inspect gateway status/routes/tools.",
+        "example": "gateway_action(action='status')"
+      },
+      {
+        "command": "sessions_action",
+        "description": "List/query/update/delete chat sessions.",
+        "example": "sessions_action(action='list', user_id='default_user')"
+      },
+      {
+        "command": "agents_action",
+        "description": "List or query registered agents.",
+        "example": "agents_action(action='list')"
+      },
+      {
+        "command": "memory_action",
+        "description": "Search or maintain memory state.",
+        "example": "memory_action(action='search', session_id='s1', query='project goal')"
+      },
+      {
+        "command": "message_action",
+        "description": "List channels or send a channel message.",
+        "example": "message_action(action='send', channel='web', receiver_id='u1', content='hello')"
+      },
+      {
+        "command": "plugins_action",
+        "description": "List plugin runtime state and diagnostics.",
+        "example": "plugins_action(action='list')"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": { "type": "string" },
+      "session_id": { "type": "string" },
+      "user_id": { "type": "string" },
+      "agent_type": { "type": "string" },
+      "agent_name": { "type": "string" },
+      "query": { "type": "string" },
+      "channel": { "type": "string" },
+      "receiver_id": { "type": "string" },
+      "content": { "type": "string" }
+    }
+  }
+}

@@ -1,164 +1,164 @@
-const I18N = {
+﻿const I18N = {
     zh: {
-        lang_name: "简体中文",
-        auth_login: "🔐 登录",
-        auth_register: "📝 注册",
-        auth_submit_login: "登录",
-        auth_submit_register: "注册并创建 Agent",
-        auth_switch_to_register: "去注册",
-        auth_switch_to_login: "去登录",
-        auth_no_account: "还没有账号？",
-        auth_has_account: "已有账号？",
-        auth_register_success: "注册成功，请登录",
-        auth_welcome_back: "欢迎回来！{agent} 已准备就绪。",
-        auth_failed: "操作失败",
-        auth_invalid: "认证失效，请重新登录",
-        logout_confirm: "确定要退出登录吗？",
-        chat_placeholder: "输入你的问题...",
-        chat_need_session: "请先开始一个会话",
-        memory_loading: "正在加载记忆图...",
-        memory_disabled: "记忆系统未启用或未就绪",
-        memory_fail: "加载失败: {msg}",
-        memory_no_data: "当前筛选条件无数据",
-        memory_no_nodes: "暂无可展示的记忆节点",
-        memory_select_detail: "选择左侧节点查看详情",
-        memory_action_fail: "{label}失败: {msg}",
-        app_welcome: "欢迎使用普罗米娅AI助手！\n\n我是你的智能对话伙伴，可以帮你：\n• 回答问题\n• 分析文档\n• 编写代码\n• 创意写作\n\n开始对话吧！",
-        ui_memory_workbench: "🧠 记忆工作台",
-        ui_lang_title: "选择语言 / Choose Language",
-        ui_lang_desc: "请选择界面语言（后端日志不受影响）",
-        ui_metrics: "📊 性能统计",
-        ui_doctor: "🩺 系统自检 Doctor",
-        ui_settings: "⚙️ 系统设置",
-        ui_memory: "🧠 记忆工作台",
-        ui_memory_cluster: "聚类",
-        ui_memory_summary: "摘要",
-        ui_memory_decay: "衰减",
-        ui_memory_cleanup: "清理",
-        ui_memory_refresh: "刷新",
-        ui_memory_node_list: "节点列表",
-        ui_memory_node_detail: "节点详情",
-        ui_memory_filter_all_layers: "全部层级",
-        ui_memory_filter_all_types: "全部类型",
-        ui_memory_search_placeholder: "搜索记忆内容 / 节点ID / 类型...",
-        ui_memory_total_nodes: "总节点",
-        ui_memory_total_edges: "总关系",
-        ui_memory_hot: "热层 Hot",
-        ui_memory_warm: "温层 Warm",
-        ui_memory_cold: "冷层 Cold",
+        lang_name: "绠€浣撲腑鏂?,
+        auth_login: "馃攼 鐧诲綍",
+        auth_register: "馃摑 娉ㄥ唽",
+        auth_submit_login: "鐧诲綍",
+        auth_submit_register: "娉ㄥ唽骞跺垱寤?Agent",
+        auth_switch_to_register: "鍘绘敞鍐?,
+        auth_switch_to_login: "鍘荤櫥褰?,
+        auth_no_account: "杩樻病鏈夎处鍙凤紵",
+        auth_has_account: "宸叉湁璐﹀彿锛?,
+        auth_register_success: "娉ㄥ唽鎴愬姛锛岃鐧诲綍",
+        auth_welcome_back: "娆㈣繋鍥炴潵锛亄agent} 宸插噯澶囧氨缁€?,
+        auth_failed: "鎿嶄綔澶辫触",
+        auth_invalid: "璁よ瘉澶辨晥锛岃閲嶆柊鐧诲綍",
+        logout_confirm: "纭畾瑕侀€€鍑虹櫥褰曞悧锛?,
+        chat_placeholder: "杈撳叆浣犵殑闂...",
+        chat_need_session: "璇峰厛寮€濮嬩竴涓細璇?,
+        memory_loading: "姝ｅ湪鍔犺浇璁板繂鍥?..",
+        memory_disabled: "璁板繂绯荤粺鏈惎鐢ㄦ垨鏈氨缁?,
+        memory_fail: "鍔犺浇澶辫触: {msg}",
+        memory_no_data: "褰撳墠绛涢€夋潯浠舵棤鏁版嵁",
+        memory_no_nodes: "鏆傛棤鍙睍绀虹殑璁板繂鑺傜偣",
+        memory_select_detail: "閫夋嫨宸︿晶鑺傜偣鏌ョ湅璇︽儏",
+        memory_action_fail: "{label}澶辫触: {msg}",
+        app_welcome: "娆㈣繋浣跨敤鏅綏绫冲▍AI鍔╂墜锛乗n\n鎴戞槸浣犵殑鏅鸿兘瀵硅瘽浼欎即锛屽彲浠ュ府浣狅細\n鈥?鍥炵瓟闂\n鈥?鍒嗘瀽鏂囨。\n鈥?缂栧啓浠ｇ爜\n鈥?鍒涙剰鍐欎綔\n\n寮€濮嬪璇濆惂锛?,
+        ui_memory_workbench: "馃 璁板繂宸ヤ綔鍙?,
+        ui_lang_title: "閫夋嫨璇█ / Choose Language",
+        ui_lang_desc: "璇烽€夋嫨鐣岄潰璇█锛堝悗绔棩蹇椾笉鍙楀奖鍝嶏級",
+        ui_metrics: "馃搳 鎬ц兘缁熻",
+        ui_doctor: "馃┖ 绯荤粺鑷 Doctor",
+        ui_settings: "鈿欙笍 绯荤粺璁剧疆",
+        ui_memory: "馃 璁板繂宸ヤ綔鍙?,
+        ui_memory_cluster: "鑱氱被",
+        ui_memory_summary: "鎽樿",
+        ui_memory_decay: "琛板噺",
+        ui_memory_cleanup: "娓呯悊",
+        ui_memory_refresh: "鍒锋柊",
+        ui_memory_node_list: "鑺傜偣鍒楄〃",
+        ui_memory_node_detail: "鑺傜偣璇︽儏",
+        ui_memory_filter_all_layers: "鍏ㄩ儴灞傜骇",
+        ui_memory_filter_all_types: "鍏ㄩ儴绫诲瀷",
+        ui_memory_search_placeholder: "鎼滅储璁板繂鍐呭 / 鑺傜偣ID / 绫诲瀷...",
+        ui_memory_total_nodes: "鎬昏妭鐐?,
+        ui_memory_total_edges: "鎬诲叧绯?,
+        ui_memory_hot: "鐑眰 Hot",
+        ui_memory_warm: "娓╁眰 Warm",
+        ui_memory_cold: "鍐峰眰 Cold",
         ui_memory_detail_id: "ID",
-        ui_memory_detail_type: "类型",
-        ui_memory_detail_layer: "层级",
-        ui_memory_detail_importance: "重要性",
-        ui_memory_detail_access: "访问次数",
-        ui_memory_detail_edges: "关联边",
-        ui_sessions: "会话历史",
-        ui_chat_tab: "对话",
-        ui_current_session: "当前会话",
-        ui_not_started: "未开始",
-        ui_auth_username: "用户名",
-        ui_auth_password: "密码",
-        ui_auth_agent_name: "Agent 名字",
-        ui_auth_username_placeholder: "请输入用户名",
-        ui_auth_password_placeholder: "请输入密码",
-        ui_auth_agent_placeholder: "给你的助手起个名字 (默认: Promethea)",
-        ui_app_title: "普罗米娅AI助手 - 终端版",
-        ui_logo_text: "普罗米娅",
-        ui_new_chat_title: "新建会话",
-        ui_avatar_hint: "点击上传形象",
-        ui_avatar_remove_title: "移除形象",
-        ui_api_status_title: "API连接状态",
-        ui_memory_status_title: "记忆系统状态",
-        ui_logout_title: "退出登录",
-        ui_doctor_title: "系统自检 Doctor",
-        ui_metrics_title: "性能统计",
-        ui_settings_title: "系统设置",
-        ui_memory_graph_title: "查看记忆图",
-        ui_confirm_title: "⚠️ 敏感操作确认",
-        ui_confirm_desc: "Agent 尝试执行以下高风险操作，需要您的批准：",
-        ui_confirm_tool: "工具:",
-        ui_confirm_args: "参数:",
-        ui_confirm_reject: "拒绝",
-        ui_confirm_approve: "批准执行",
-        ui_metrics_token: "Token消耗",
-        ui_metrics_cost: "估算成本",
-        ui_metrics_llm: "LLM调用",
-        ui_metrics_avg: "平均",
-        ui_metrics_memory: "记忆召回",
-        ui_metrics_session_message: "会话/消息",
-        ui_metrics_uptime: "运行时长",
-        ui_doctor_run: "重新体检",
-        ui_doctor_fix: "修复 / 迁移配置",
-        ui_quickask_btn: "🤔 追问",
-        ui_thinking: "正在思考...",
-        ui_thinking_deep: "🧠 正在深度思考...",
-        ui_thinking_process: "💭 深度思考过程",
-        ui_tool_detected: "检测到工具调用...",
-        ui_followup_title: "💬 针对此内容追问",
-        ui_followup_why: "❓ 为什么",
-        ui_followup_risk: "⚠️ 有啥坑",
-        ui_followup_alt: "🔄 替代方案",
-        ui_followup_custom: "或者自定义追问...",
-        ui_followup_send: "发送",
-        ui_followup_fail: "追问失败，请重试",
-        ui_bind_need_id: "请输入账号ID",
-        ui_bind_success: "✅ 绑定成功！",
-        ui_bind_fail: "❌ 绑定失败: {msg}",
-        ui_save_progress: "正在保存...",
-        ui_save_success: "✅ 配置已保存并生效！",
-        ui_save_fail: "❌ 保存失败: {msg}",
-        ui_save_btn: "保存并应用",
-        ui_settings_loading: "正在加载配置...",
-        ui_settings_load_fail: "加载失败: {msg}",
-        ui_settings_reset: "重置",
-        ui_rejected: "❌ 已拒绝执行该操作。",
-        ui_tool_running: "🔧 调用工具：{name}（运行中）",
-        ui_tool_done: "🔧 调用工具：{name}（已完成）",
-        ui_tool_failed: "工具调用失败",
-        ui_error_unknown: "未知错误",
-        ui_switch_session_fail: "切换会话失败: {msg}",
-        ui_settings_personal: "👤 个性化设置",
-        ui_settings_personal_api: "🔑 个人 API 配置 (可选)",
-        ui_settings_personal_api_hint: "在此填写的配置将覆盖系统默认值。留空则使用默认配置。",
-        ui_settings_bind: "🔗 社交账号绑定",
-        ui_settings_sys_api: "🔑 API 配置",
-        ui_settings_sys: "⚡ 系统配置",
-        ui_settings_memory: "🧠 记忆系统",
-        ui_label_user_agent: "Agent 名字",
-        ui_label_user_prompt: "自定义 System Prompt",
-        ui_placeholder_user_prompt: "自定义你的 Agent 人设...",
-        ui_label_user_model: "模型名称",
-        ui_label_bind_account: "输入账号ID (如 Telegram User ID)",
-        ui_bind_btn: "绑定",
-        ui_label_model: "模型",
-        ui_label_history_rounds: "历史轮数",
-        ui_label_stream_mode: "流式输出",
-        ui_label_debug_mode: "调试模式",
-        ui_label_log_level: "日志级别",
-        ui_label_memory_enabled: "启用记忆系统",
-        ui_label_neo4j_enabled: "启用Neo4j",
-        ui_label_neo4j_user: "用户名",
-        ui_label_neo4j_db: "数据库",
-        ui_label_warm_enabled: "启用温层",
-        ui_label_cluster_threshold: "聚类阈值",
-        ui_label_min_cluster: "最小簇大小",
-        ui_label_summary_len: "摘要长度",
-        ui_label_compress_threshold: "压缩阈值",
-        ui_status_running_doctor: "正在运行系统自检，请稍候...",
-        ui_status_running_migrate: "正在修复 / 迁移配置，请稍候...",
-        ui_memory_btn_short: "记忆",
+        ui_memory_detail_type: "绫诲瀷",
+        ui_memory_detail_layer: "灞傜骇",
+        ui_memory_detail_importance: "閲嶈鎬?,
+        ui_memory_detail_access: "璁块棶娆℃暟",
+        ui_memory_detail_edges: "鍏宠仈杈?,
+        ui_sessions: "浼氳瘽鍘嗗彶",
+        ui_chat_tab: "瀵硅瘽",
+        ui_current_session: "褰撳墠浼氳瘽",
+        ui_not_started: "鏈紑濮?,
+        ui_auth_username: "鐢ㄦ埛鍚?,
+        ui_auth_password: "瀵嗙爜",
+        ui_auth_agent_name: "Agent 鍚嶅瓧",
+        ui_auth_username_placeholder: "璇疯緭鍏ョ敤鎴峰悕",
+        ui_auth_password_placeholder: "璇疯緭鍏ュ瘑鐮?,
+        ui_auth_agent_placeholder: "缁欎綘鐨勫姪鎵嬭捣涓悕瀛?(榛樿: Promethea)",
+        ui_app_title: "鏅綏绫冲▍AI鍔╂墜 - 缁堢鐗?,
+        ui_logo_text: "鏅綏绫冲▍",
+        ui_new_chat_title: "鏂板缓浼氳瘽",
+        ui_avatar_hint: "鐐瑰嚮涓婁紶褰㈣薄",
+        ui_avatar_remove_title: "绉婚櫎褰㈣薄",
+        ui_api_status_title: "API杩炴帴鐘舵€?,
+        ui_memory_status_title: "璁板繂绯荤粺鐘舵€?,
+        ui_logout_title: "閫€鍑虹櫥褰?,
+        ui_doctor_title: "绯荤粺鑷 Doctor",
+        ui_metrics_title: "鎬ц兘缁熻",
+        ui_settings_title: "绯荤粺璁剧疆",
+        ui_memory_graph_title: "鏌ョ湅璁板繂鍥?,
+        ui_confirm_title: "鈿狅笍 鏁忔劅鎿嶄綔纭",
+        ui_confirm_desc: "Agent 灏濊瘯鎵ц浠ヤ笅楂橀闄╂搷浣滐紝闇€瑕佹偍鐨勬壒鍑嗭細",
+        ui_confirm_tool: "宸ュ叿:",
+        ui_confirm_args: "鍙傛暟:",
+        ui_confirm_reject: "鎷掔粷",
+        ui_confirm_approve: "鎵瑰噯鎵ц",
+        ui_metrics_token: "Token娑堣€?,
+        ui_metrics_cost: "浼扮畻鎴愭湰",
+        ui_metrics_llm: "LLM璋冪敤",
+        ui_metrics_avg: "骞冲潎",
+        ui_metrics_memory: "璁板繂鍙洖",
+        ui_metrics_session_message: "浼氳瘽/娑堟伅",
+        ui_metrics_uptime: "杩愯鏃堕暱",
+        ui_doctor_run: "閲嶆柊浣撴",
+        ui_doctor_fix: "淇 / 杩佺Щ閰嶇疆",
+        ui_quickask_btn: "馃 杩介棶",
+        ui_thinking: "姝ｅ湪鎬濊€?..",
+        ui_thinking_deep: "馃 姝ｅ湪娣卞害鎬濊€?..",
+        ui_thinking_process: "馃挱 娣卞害鎬濊€冭繃绋?,
+        ui_tool_detected: "妫€娴嬪埌宸ュ叿璋冪敤...",
+        ui_followup_title: "馃挰 閽堝姝ゅ唴瀹硅拷闂?,
+        ui_followup_why: "鉂?涓轰粈涔?,
+        ui_followup_risk: "鈿狅笍 鏈夊暐鍧?,
+        ui_followup_alt: "馃攧 鏇夸唬鏂规",
+        ui_followup_custom: "鎴栬€呰嚜瀹氫箟杩介棶...",
+        ui_followup_send: "鍙戦€?,
+        ui_followup_fail: "杩介棶澶辫触锛岃閲嶈瘯",
+        ui_bind_need_id: "璇疯緭鍏ヨ处鍙稩D",
+        ui_bind_success: "鉁?缁戝畾鎴愬姛锛?,
+        ui_bind_fail: "鉂?缁戝畾澶辫触: {msg}",
+        ui_save_progress: "姝ｅ湪淇濆瓨...",
+        ui_save_success: "鉁?閰嶇疆宸蹭繚瀛樺苟鐢熸晥锛?,
+        ui_save_fail: "鉂?淇濆瓨澶辫触: {msg}",
+        ui_save_btn: "淇濆瓨骞跺簲鐢?,
+        ui_settings_loading: "姝ｅ湪鍔犺浇閰嶇疆...",
+        ui_settings_load_fail: "鍔犺浇澶辫触: {msg}",
+        ui_settings_reset: "閲嶇疆",
+        ui_rejected: "鉂?宸叉嫆缁濇墽琛岃鎿嶄綔銆?,
+        ui_tool_running: "馃敡 璋冪敤宸ュ叿锛歿name}锛堣繍琛屼腑锛?,
+        ui_tool_done: "馃敡 璋冪敤宸ュ叿锛歿name}锛堝凡瀹屾垚锛?,
+        ui_tool_failed: "宸ュ叿璋冪敤澶辫触",
+        ui_error_unknown: "鏈煡閿欒",
+        ui_switch_session_fail: "鍒囨崲浼氳瘽澶辫触: {msg}",
+        ui_settings_personal: "馃懁 涓€у寲璁剧疆",
+        ui_settings_personal_api: "馃攽 涓汉 API 閰嶇疆 (鍙€?",
+        ui_settings_personal_api_hint: "鍦ㄦ濉啓鐨勯厤缃皢瑕嗙洊绯荤粺榛樿鍊笺€傜暀绌哄垯浣跨敤榛樿閰嶇疆銆?,
+        ui_settings_bind: "馃敆 绀句氦璐﹀彿缁戝畾",
+        ui_settings_sys_api: "馃攽 API 閰嶇疆",
+        ui_settings_sys: "鈿?绯荤粺閰嶇疆",
+        ui_settings_memory: "馃 璁板繂绯荤粺",
+        ui_label_user_agent: "Agent 鍚嶅瓧",
+        ui_label_user_prompt: "鑷畾涔?System Prompt",
+        ui_placeholder_user_prompt: "鑷畾涔変綘鐨?Agent 浜鸿...",
+        ui_label_user_model: "妯″瀷鍚嶇О",
+        ui_label_bind_account: "杈撳叆璐﹀彿ID (濡?Telegram User ID)",
+        ui_bind_btn: "缁戝畾",
+        ui_label_model: "妯″瀷",
+        ui_label_history_rounds: "鍘嗗彶杞暟",
+        ui_label_stream_mode: "娴佸紡杈撳嚭",
+        ui_label_debug_mode: "璋冭瘯妯″紡",
+        ui_label_log_level: "鏃ュ織绾у埆",
+        ui_label_memory_enabled: "鍚敤璁板繂绯荤粺",
+        ui_label_neo4j_enabled: "鍚敤Neo4j",
+        ui_label_neo4j_user: "鐢ㄦ埛鍚?,
+        ui_label_neo4j_db: "鏁版嵁搴?,
+        ui_label_warm_enabled: "鍚敤娓╁眰",
+        ui_label_cluster_threshold: "鑱氱被闃堝€?,
+        ui_label_min_cluster: "鏈€灏忕皣澶у皬",
+        ui_label_summary_len: "鎽樿闀垮害",
+        ui_label_compress_threshold: "鍘嬬缉闃堝€?,
+        ui_status_running_doctor: "姝ｅ湪杩愯绯荤粺鑷锛岃绋嶅€?..",
+        ui_status_running_migrate: "姝ｅ湪淇 / 杩佺Щ閰嶇疆锛岃绋嶅€?..",
+        ui_memory_btn_short: "璁板繂",
         ui_api_short: "API",
-        ui_memory_short: "记忆",
-        ui_delete_user: "注销",
-        memory_sync_idle: "记忆同步空闲",
-        memory_sync_running: "记忆同步中: {pending}",
-        memory_sync_error: "记忆同步异常",
-        memory_sync_wait_close: "记忆同步尚未完成，请稍候再关闭页面。",
+        ui_memory_short: "璁板繂",
+        ui_delete_user: "娉ㄩ攢",
+        memory_sync_idle: "璁板繂鍚屾绌洪棽",
+        memory_sync_running: "璁板繂鍚屾涓? {pending}",
+        memory_sync_error: "璁板繂鍚屾寮傚父",
+        memory_sync_wait_close: "璁板繂鍚屾灏氭湭瀹屾垚锛岃绋嶅€欏啀鍏抽棴椤甸潰銆?,
     },
     en: {
         lang_name: "English",
-        auth_login: "🔐 Sign In",
-        auth_register: "📝 Sign Up",
+        auth_login: "馃攼 Sign In",
+        auth_register: "馃摑 Sign Up",
         auth_submit_login: "Sign In",
         auth_submit_register: "Sign Up & Create Agent",
         auth_switch_to_register: "Sign Up",
@@ -179,14 +179,14 @@ const I18N = {
         memory_no_nodes: "No memory nodes to display.",
         memory_select_detail: "Select a node to view details",
         memory_action_fail: "{label} failed: {msg}",
-        app_welcome: "Welcome to Promethea AI Assistant!\n\nI can help you with:\n• Q&A\n• Document analysis\n• Coding\n• Creative writing\n\nLet's start.",
-        ui_memory_workbench: "🧠 Memory Workbench",
-        ui_lang_title: "Choose Language / 选择语言",
+        app_welcome: "Welcome to Promethea AI Assistant!\n\nI can help you with:\n鈥?Q&A\n鈥?Document analysis\n鈥?Coding\n鈥?Creative writing\n\nLet's start.",
+        ui_memory_workbench: "馃 Memory Workbench",
+        ui_lang_title: "Choose Language / 閫夋嫨璇█",
         ui_lang_desc: "Choose UI language (backend logs stay unchanged).",
-        ui_metrics: "📊 Metrics",
-        ui_doctor: "🩺 System Doctor",
-        ui_settings: "⚙️ Settings",
-        ui_memory: "🧠 Memory Workbench",
+        ui_metrics: "馃搳 Metrics",
+        ui_doctor: "馃┖ System Doctor",
+        ui_settings: "鈿欙笍 Settings",
+        ui_memory: "馃 Memory Workbench",
         ui_memory_cluster: "Cluster",
         ui_memory_summary: "Summarize",
         ui_memory_decay: "Decay",
@@ -230,7 +230,7 @@ const I18N = {
         ui_metrics_title: "Metrics",
         ui_settings_title: "Settings",
         ui_memory_graph_title: "View memory graph",
-        ui_confirm_title: "⚠️ Sensitive Action Confirmation",
+        ui_confirm_title: "鈿狅笍 Sensitive Action Confirmation",
         ui_confirm_desc: "Agent is requesting to execute the following high-risk action:",
         ui_confirm_tool: "Tool:",
         ui_confirm_args: "Arguments:",
@@ -245,41 +245,41 @@ const I18N = {
         ui_metrics_uptime: "Uptime",
         ui_doctor_run: "Run Again",
         ui_doctor_fix: "Fix / Migrate Config",
-        ui_quickask_btn: "🤔 Follow-up",
+        ui_quickask_btn: "馃 Follow-up",
         ui_thinking: "Thinking...",
-        ui_thinking_deep: "🧠 Deep thinking...",
-        ui_thinking_process: "💭 Thinking Process",
+        ui_thinking_deep: "馃 Deep thinking...",
+        ui_thinking_process: "馃挱 Thinking Process",
         ui_tool_detected: "Tool call detected...",
-        ui_followup_title: "💬 Ask about this selection",
-        ui_followup_why: "❓ Why",
-        ui_followup_risk: "⚠️ Risks",
-        ui_followup_alt: "🔄 Alternatives",
+        ui_followup_title: "馃挰 Ask about this selection",
+        ui_followup_why: "鉂?Why",
+        ui_followup_risk: "鈿狅笍 Risks",
+        ui_followup_alt: "馃攧 Alternatives",
         ui_followup_custom: "Or enter a custom follow-up...",
         ui_followup_send: "Send",
         ui_followup_fail: "Follow-up failed, please retry.",
         ui_bind_need_id: "Please enter account ID.",
-        ui_bind_success: "✅ Bound successfully!",
-        ui_bind_fail: "❌ Bind failed: {msg}",
+        ui_bind_success: "鉁?Bound successfully!",
+        ui_bind_fail: "鉂?Bind failed: {msg}",
         ui_save_progress: "Saving...",
-        ui_save_success: "✅ Configuration saved and applied!",
-        ui_save_fail: "❌ Save failed: {msg}",
+        ui_save_success: "鉁?Configuration saved and applied!",
+        ui_save_fail: "鉂?Save failed: {msg}",
         ui_save_btn: "Save & Apply",
         ui_settings_loading: "Loading configuration...",
         ui_settings_load_fail: "Load failed: {msg}",
         ui_settings_reset: "Reset",
-        ui_rejected: "❌ Action rejected.",
-        ui_tool_running: "🔧 Tool call: {name} (running)",
-        ui_tool_done: "🔧 Tool call: {name} (done)",
+        ui_rejected: "鉂?Action rejected.",
+        ui_tool_running: "馃敡 Tool call: {name} (running)",
+        ui_tool_done: "馃敡 Tool call: {name} (done)",
         ui_tool_failed: "Tool call failed",
         ui_error_unknown: "Unknown error",
         ui_switch_session_fail: "Switch session failed: {msg}",
-        ui_settings_personal: "👤 Personalization",
-        ui_settings_personal_api: "🔑 Personal API Config (Optional)",
+        ui_settings_personal: "馃懁 Personalization",
+        ui_settings_personal_api: "馃攽 Personal API Config (Optional)",
         ui_settings_personal_api_hint: "Values here override system defaults. Leave empty to use defaults.",
-        ui_settings_bind: "🔗 Social Account Binding",
-        ui_settings_sys_api: "🔑 API Config",
-        ui_settings_sys: "⚡ System Config",
-        ui_settings_memory: "🧠 Memory System",
+        ui_settings_bind: "馃敆 Social Account Binding",
+        ui_settings_sys_api: "馃攽 API Config",
+        ui_settings_sys: "鈿?System Config",
+        ui_settings_memory: "馃 Memory System",
         ui_label_user_agent: "Agent Name",
         ui_label_user_prompt: "Custom System Prompt",
         ui_placeholder_user_prompt: "Customize your agent persona...",
@@ -314,11 +314,11 @@ const I18N = {
 };
 
 Object.assign(I18N.zh, {
-    ui_tools_live: "工具",
-    ui_tools_loading: "正在加载工具...",
-    ui_tools_empty: "暂无可用工具",
-    ui_tools_error: "工具列表加载失败",
-    ui_tools_more: "还有 {count} 个工具",
+    ui_tools_live: "宸ュ叿",
+    ui_tools_loading: "姝ｅ湪鍔犺浇宸ュ叿...",
+    ui_tools_empty: "鏆傛棤鍙敤宸ュ叿",
+    ui_tools_error: "宸ュ叿鍒楄〃鍔犺浇澶辫触",
+    ui_tools_more: "杩樻湁 {count} 涓伐鍏?,
 });
 
 Object.assign(I18N.en, {
@@ -416,7 +416,7 @@ class LanguageManager {
         if (settingsBtn) settingsBtn.textContent = t("ui_settings");
         if (memoryGraphBtn) memoryGraphBtn.textContent = t("ui_memory_btn_short");
         const langSwitchBtn = document.getElementById("langSwitchBtn");
-        if (langSwitchBtn) langSwitchBtn.title = getCurrentLang() === "en" ? "Language" : "语言";
+        if (langSwitchBtn) langSwitchBtn.title = getCurrentLang() === "en" ? "Language" : "璇█";
         if (langSwitchBtn) langSwitchBtn.textContent = t("lang_name");
         const logoutBtnText = document.getElementById("logoutBtn");
         if (logoutBtnText) logoutBtnText.textContent = t("ui_logout_title");
@@ -479,7 +479,7 @@ class LanguageManager {
         const currentSessionLabel = document.getElementById("currentSessionLabel");
         if (currentSessionLabel) currentSessionLabel.textContent = t("ui_current_session");
         const currentSessionValue = document.getElementById("currentSession");
-        if (currentSessionValue && (currentSessionValue.textContent === "未开始" || currentSessionValue.textContent === "Not Started")) {
+        if (currentSessionValue && (currentSessionValue.textContent === "鏈紑濮? || currentSessionValue.textContent === "Not Started")) {
             currentSessionValue.textContent = t("ui_not_started");
         }
 
@@ -893,17 +893,17 @@ class TerminalChatApp {
         
         const { session_id, tool_call_id } = this.pendingConfirmation;
         
-        // 隐藏模态窗口
+        // 闅愯棌妯℃€佺獥鍙?
         this.confirmModal.style.display = 'none';
         
-        // 如果是拒绝，直接结束
+        // 濡傛灉鏄嫆缁濓紝鐩存帴缁撴潫
         if (action === 'reject') {
             this.addMessage('assistant', t("ui_rejected"));
             this.sendButton.disabled = false;
             this.isTyping = false;
             this.setAvatarStatus('idle');
         } else {
-            // 如果是批准，继续显示思考状态
+            // 濡傛灉鏄壒鍑嗭紝缁х画鏄剧ず鎬濊€冪姸鎬?
             this.setAvatarStatus('thinking');
         }
 
@@ -923,22 +923,22 @@ class TerminalChatApp {
             const data = await response.json();
             
             if (data.status === 'needs_confirmation') {
-                // 再次需要确认（链式调用）
+                // 鍐嶆闇€瑕佺‘璁わ紙閾惧紡璋冪敤锛?
                 this.showConfirmation(data);
             } else if (response.ok && (data.status === 'success' || data.success === true)) {
-                // 显示结果
+                // 鏄剧ず缁撴灉
                 this.addMessage('assistant', data.response);
                 this.sendButton.disabled = false;
                 this.isTyping = false;
                 this.setAvatarStatus('idle');
             } else if (data.status === 'rejected') {
-                // 已拒绝
+                // 宸叉嫆缁?
             } else {
                 throw new Error(data.message || t("auth_failed"));
             }
             
         } catch (error) {
-            console.error('确认操作失败:', error);
+            console.error('纭鎿嶄綔澶辫触:', error);
             this.addMessage('assistant', `${t("auth_failed")}: ${error.message}`);
             this.sendButton.disabled = false;
             this.isTyping = false;
@@ -961,19 +961,19 @@ class TerminalChatApp {
             this.confirmToolArgs.textContent = String(data.args);
         }
         
-        // 使用 flex 与 .modal 的布局方式保持一致，确保模态在屏幕中居中展示
+        // 浣跨敤 flex 涓?.modal 鐨勫竷灞€鏂瑰紡淇濇寔涓€鑷达紝纭繚妯℃€佸湪灞忓箷涓眳涓睍绀?
         this.confirmModal.style.display = 'flex';
     }
     
     async checkApiStatus() {
         try {
-            // 优先访问后端真实状态接口（挂在 /api 下）
+            // 浼樺厛璁块棶鍚庣鐪熷疄鐘舵€佹帴鍙ｏ紙鎸傚湪 /api 涓嬶級
             const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/status`);
             if (response.ok) {
                 const data = await response.json();
                 this.updateStatus(this.apiStatusEl, true);
                 
-                // 检查记忆系统状态（直接使用后端返回的真实状态）
+                // 妫€鏌ヨ蹇嗙郴缁熺姸鎬侊紙鐩存帴浣跨敤鍚庣杩斿洖鐨勭湡瀹炵姸鎬侊級
                 if (data.memory_active !== undefined) {
                     this.updateStatus(this.memoryStatusEl, data.memory_active);
                 }
@@ -990,7 +990,7 @@ class TerminalChatApp {
             this.updateStatus(this.memoryStatusEl, false);
             this.updateMemorySyncIndicator(null);
             this.renderToolsList([], t("ui_tools_error"));
-            console.log('❌ 无法连接到API服务');
+            console.log('鉂?鏃犳硶杩炴帴鍒癆PI鏈嶅姟');
         }
     }
     
@@ -1159,7 +1159,7 @@ class TerminalChatApp {
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
         
-        // 处理换行符
+        // 澶勭悊鎹㈣绗?
         let formattedContent = content.replace(/\n/g, '<br>');
         
         contentDiv.innerHTML = formattedContent;
@@ -1167,10 +1167,10 @@ class TerminalChatApp {
         messageDiv.appendChild(contentDiv);
         this.chatMessages.appendChild(messageDiv);
         
-        // 滚动到底部
+        // 婊氬姩鍒板簳閮?
         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
         
-        // 添加打字机效果
+        // 娣诲姞鎵撳瓧鏈烘晥鏋?
         if (role === 'assistant' && animate) {
             this.addTypingEffect(contentDiv, content);
         }
@@ -1228,20 +1228,20 @@ class TerminalChatApp {
     async refreshSessions() {
         try {
             const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions`);
-            if (!response.ok) throw new Error(getCurrentLang() === 'en' ? 'Failed to fetch sessions' : '获取会话列表失败');
+            if (!response.ok) throw new Error(getCurrentLang() === 'en' ? 'Failed to fetch sessions' : '鑾峰彇浼氳瘽鍒楄〃澶辫触');
             
             const data = await response.json();
             const sessions = data.sessions || [];
             
-            // 更新会话数量
+            // 鏇存柊浼氳瘽鏁伴噺
             this.sessionCountEl.textContent = sessions.length;
             
-            // 清空并重新渲染会话列表
+            // 娓呯┖骞堕噸鏂版覆鏌撲細璇濆垪琛?
             this.sessionList.innerHTML = '';
             
             if (sessions.length === 0) {
                 const emptyItem = document.createElement('li');
-                emptyItem.textContent = getCurrentLang() === 'en' ? 'No sessions yet' : '暂无会话历史';
+                emptyItem.textContent = getCurrentLang() === 'en' ? 'No sessions yet' : '鏆傛棤浼氳瘽鍘嗗彶';
                 emptyItem.style.textAlign = 'center';
                 emptyItem.style.color = 'var(--text-muted)';
                 emptyItem.style.fontStyle = 'italic';
@@ -1252,23 +1252,23 @@ class TerminalChatApp {
             sessions.forEach(session => {
                 const li = document.createElement('li');
                 
-                // 生成会话标题（使用最后一条消息的前20个字符）
+                // 鐢熸垚浼氳瘽鏍囬锛堜娇鐢ㄦ渶鍚庝竴鏉℃秷鎭殑鍓?0涓瓧绗︼級
                 const title = session.last_message && session.last_message.trim() 
                     ? session.last_message.slice(0, 20) + (session.last_message.length > 20 ? '...' : '')
-                    : (getCurrentLang() === 'en' ? 'New session' : '新的会话');
+                    : (getCurrentLang() === 'en' ? 'New session' : '鏂扮殑浼氳瘽');
                 
                 li.textContent = title;
                 li.title = getCurrentLang() === 'en'
                     ? `Session ID: ${session.session_id}\nCreated: ${new Date(session.created_at * 1000).toLocaleString()}\nMessages: ${session.message_count}`
-                    : `会话ID: ${session.session_id}\n创建时间: ${new Date(session.created_at * 1000).toLocaleString()}\n消息数量: ${session.message_count}`;
+                    : `浼氳瘽ID: ${session.session_id}\n鍒涘缓鏃堕棿: ${new Date(session.created_at * 1000).toLocaleString()}\n娑堟伅鏁伴噺: ${session.message_count}`;
                 li.dataset.sid = session.session_id;
                 
-                // 高亮当前会话
+                // 楂樹寒褰撳墠浼氳瘽
                 if (this.currentSessionId === session.session_id) {
                     li.classList.add('active');
                 }
                 
-                // 点击切换会话
+                // 鐐瑰嚮鍒囨崲浼氳瘽
                 li.addEventListener('click', () => {
                     this.switchSession(session.session_id);
                 });
@@ -1277,7 +1277,7 @@ class TerminalChatApp {
             });
             
         } catch (error) {
-            console.error('刷新会话列表失败:', error);
+            console.error('鍒锋柊浼氳瘽鍒楄〃澶辫触:', error);
             this.sessionCountEl.textContent = '?';
         }
     }
@@ -1287,15 +1287,15 @@ class TerminalChatApp {
         
         try {
             const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions/${sessionId}`);
-            if (!response.ok) throw new Error(getCurrentLang() === 'en' ? 'Failed to fetch session detail' : '获取会话详情失败');
+            if (!response.ok) throw new Error(getCurrentLang() === 'en' ? 'Failed to fetch session detail' : '鑾峰彇浼氳瘽璇︽儏澶辫触');
             
             const data = await response.json();
             
-            // 更新当前会话
+            // 鏇存柊褰撳墠浼氳瘽
             this.currentSessionId = sessionId;
             this.currentSessionEl.textContent = sessionId.slice(0, 8) + '...';
             
-            // 清空消息区域并加载历史
+            // 娓呯┖娑堟伅鍖哄煙骞跺姞杞藉巻鍙?
             this.chatMessages.innerHTML = '';
             
             const messages = data.messages || [];
@@ -1307,16 +1307,16 @@ class TerminalChatApp {
                 });
             }
             
-            // 更新侧边栏高亮
+            // 鏇存柊渚ц竟鏍忛珮浜?
             Array.from(this.sessionList.children).forEach(li => {
                 li.classList.toggle('active', li.dataset.sid === sessionId);
             });
             
-            // 聚焦输入框
+            // 鑱氱劍杈撳叆妗?
             this.focusInput();
             
         } catch (error) {
-            console.error('切换会话失败:', error);
+            console.error('鍒囨崲浼氳瘽澶辫触:', error);
             this.addMessage('assistant', t("ui_switch_session_fail", { msg: error.message }));
         }
     }
@@ -1327,7 +1327,7 @@ class TerminalChatApp {
         this.chatMessages.innerHTML = '';
         this.addWelcomeMessage();
         
-        // 清除侧边栏高亮
+        // 娓呴櫎渚ц竟鏍忛珮浜?
         Array.from(this.sessionList.children).forEach(li => {
             li.classList.remove('active');
         });
@@ -1339,23 +1339,23 @@ class TerminalChatApp {
         const message = this.messageInput.value.trim();
         if (!message || this.isTyping) return;
         
-        // 添加用户消息
+        // 娣诲姞鐢ㄦ埛娑堟伅
         this.addMessage('user', message);
         
-        // 清空输入框并禁用发送按钮
+        // 娓呯┖杈撳叆妗嗗苟绂佺敤鍙戦€佹寜閽?
         this.messageInput.value = '';
         this.sendButton.disabled = true;
         this.isTyping = true;
         
-        // 设置思考状态
+        // 璁剧疆鎬濊€冪姸鎬?
         this.setAvatarStatus('thinking');
         
-        // 创建AI消息容器（用于流式更新）
+        // 鍒涘缓AI娑堟伅瀹瑰櫒锛堢敤浜庢祦寮忔洿鏂帮級
         const messageDiv = document.createElement('div');
         messageDiv.className = 'message assistant';
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        // 分离：工具调用区 + 文本区（避免互相覆盖）
+        // 鍒嗙锛氬伐鍏疯皟鐢ㄥ尯 + 鏂囨湰鍖猴紙閬垮厤浜掔浉瑕嗙洊锛?
         contentDiv.innerHTML = `
             <div class="tool-area"></div>
             <div class="text-area">${t("ui_thinking")}</div>
@@ -1366,7 +1366,7 @@ class TerminalChatApp {
         const textArea = contentDiv.querySelector('.text-area');
         
         try {
-            // 调用后端API（流式）
+            // 璋冪敤鍚庣API锛堟祦寮忥級
             const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/chat`, {
                 method: 'POST',
                 headers: {
@@ -1375,7 +1375,7 @@ class TerminalChatApp {
                 body: JSON.stringify({ 
                     message: message,
                     session_id: this.currentSessionId || null,
-                    stream: true  // 启用流式
+                    stream: true  // 鍚敤娴佸紡
                 })
             });
             
@@ -1383,7 +1383,7 @@ class TerminalChatApp {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            // 处理SSE流式响应
+            // 澶勭悊SSE娴佸紡鍝嶅簲
             const contentType = (response.headers.get('content-type') || '').toLowerCase();
             if (!response.body || contentType.includes('application/json')) {
                 const data = await response.json().catch(() => ({}));
@@ -1402,7 +1402,7 @@ class TerminalChatApp {
             let buffer = '';
             let fullText = '';
             
-            textArea.innerHTML = '';  // 清空"正在思考"
+            textArea.innerHTML = '';  // 娓呯┖"姝ｅ湪鎬濊€?
             
             let doneReceived = false;
             while (true) {
@@ -1411,7 +1411,7 @@ class TerminalChatApp {
 
                 buffer += decoder.decode(value, { stream: true });
                 const lines = buffer.split('\n');
-                buffer = lines.pop() || '';  // 保留不完整的行
+                buffer = lines.pop() || '';  // 淇濈暀涓嶅畬鏁寸殑琛?
 
                 for (const line of lines) {
                     let trimmed = line.trim();
@@ -1426,18 +1426,18 @@ class TerminalChatApp {
                     try {
                         data = JSON.parse(trimmed);
                     } catch (e) {
-                        console.warn('解析SSE数据失败:', trimmed, e);
+                        console.warn('瑙ｆ瀽SSE鏁版嵁澶辫触:', trimmed, e);
                         continue;
                     }
 
                     if (data.type === 'text') {
-                        // 流式文本
+                        // 娴佸紡鏂囨湰
                         fullText += (data.content || '');
 
-                        // 处理思考标签渲染
+                        // 澶勭悊鎬濊€冩爣绛炬覆鏌?
                         let displayHtml = fullText.replace(/\n/g, '<br>');
 
-                        // 检查是否有闭合的思考标签
+                        // 妫€鏌ユ槸鍚︽湁闂悎鐨勬€濊€冩爣绛?
                         if (fullText.includes('<thinking>') && fullText.includes('</thinking>')) {
                             displayHtml = displayHtml.replace(
                                 /&lt;thinking&gt;([\s\S]*?)&lt;\/thinking&gt;|<thinking>([\s\S]*?)<\/thinking>/g,
@@ -1454,17 +1454,17 @@ class TerminalChatApp {
                         textArea.innerHTML = displayHtml;
                         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
 
-                        // 设置说话状态
+                        // 璁剧疆璇磋瘽鐘舵€?
                         this.setAvatarStatus('speaking');
                     } else if (data.type === 'tool_detected') {
-                        // 模型已检测到工具调用（还没拿到具体工具参数）
+                        // 妯″瀷宸叉娴嬪埌宸ュ叿璋冪敤锛堣繕娌℃嬁鍒板叿浣撳伐鍏峰弬鏁帮級
                         const hint = document.createElement('div');
                         hint.className = 'tool-hint';
                         hint.textContent = data.content || t("ui_tool_detected");
                         toolArea.appendChild(hint);
                         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
                     } else if (data.type === 'tool_start') {
-                        // 工具调用开始：显示折叠面板（类似 ChatGPT 工具过程）
+                        // 宸ュ叿璋冪敤寮€濮嬶細鏄剧ず鎶樺彔闈㈡澘锛堢被浼?ChatGPT 宸ュ叿杩囩▼锛?
                         const callId = data.call_id || `${Date.now()}_${Math.random()}`;
                         const toolName = data.tool_name || 'tool';
                         const args = data.args || {};
@@ -1504,9 +1504,9 @@ class TerminalChatApp {
                         if (entry) {
                             entry.resultPre.textContent = resultText;
                             entry.summary.textContent = t("ui_tool_done", { name: data.tool_name || 'tool' });
-                            // 默认折叠；用户可展开查看参数与输出
+                            // 榛樿鎶樺彔锛涚敤鎴峰彲灞曞紑鏌ョ湅鍙傛暟涓庤緭鍑?
                         } else {
-                            // 容错：如果找不到对应卡片，直接追加一条
+                            // 瀹归敊锛氬鏋滄壘涓嶅埌瀵瑰簲鍗＄墖锛岀洿鎺ヨ拷鍔犱竴鏉?
                             const fallback = document.createElement('pre');
                             fallback.className = 'tool-call-result';
                             fallback.textContent = resultText;
@@ -1520,7 +1520,7 @@ class TerminalChatApp {
                         toolArea.appendChild(err);
                         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
                     } else if (data.type === 'done') {
-                        // done 时对最终文本做一次“重复输出”去重并重绘，避免留下 A\n\nA 这种结果
+                        // done 鏃跺鏈€缁堟枃鏈仛涓€娆♀€滈噸澶嶈緭鍑衡€濆幓閲嶅苟閲嶇粯锛岄伩鍏嶇暀涓?A\n\nA 杩欑缁撴灉
                         const dedupeText = (text) => {
                             const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
                             const raw = (text || '').trim();
@@ -1543,7 +1543,7 @@ class TerminalChatApp {
 
                         fullText = dedupeText(fullText);
 
-                        // 复用现有渲染逻辑（思考标签/换行）
+                        // 澶嶇敤鐜版湁娓叉煋閫昏緫锛堟€濊€冩爣绛?鎹㈣锛?
                         let displayHtml = fullText.replace(/\n/g, '<br>');
                         if (fullText.includes('<thinking>') && fullText.includes('</thinking>')) {
                             displayHtml = displayHtml.replace(
@@ -1582,16 +1582,16 @@ class TerminalChatApp {
                 if (doneReceived) break;
             }
 
-            // 流式完成后刷新一次会话列表即可
+            // 娴佸紡瀹屾垚鍚庡埛鏂颁竴娆′細璇濆垪琛ㄥ嵆鍙?
             await this.refreshSessions();
             
         } catch (error) {
-            console.error('发送消息失败:', error);
+            console.error('鍙戦€佹秷鎭け璐?', error);
             contentDiv.innerHTML = `${t("auth_failed")}: ${error.message}`;
             this.setAvatarStatus('idle');
         }
         
-        // 重新启用发送按钮
+        // 閲嶆柊鍚敤鍙戦€佹寜閽?
         this.sendButton.disabled = false;
         this.isTyping = false;
         this.focusInput();
@@ -1604,21 +1604,21 @@ class TerminalChatApp {
     
     showFollowUpBubble(anchorElement, mark) {
         /**
-         * 显示追问气泡
+         * 鏄剧ず杩介棶姘旀场
          */
-        // 移除已存在的气泡
+        // 绉婚櫎宸插瓨鍦ㄧ殑姘旀场
         const existingBubble = document.querySelector('.followup-bubble');
         if (existingBubble) {
             existingBubble.remove();
         }
         
-        // 创建气泡
+        // 鍒涘缓姘旀场
         const bubble = document.createElement('div');
         bubble.className = 'followup-bubble';
         bubble.innerHTML = `
             <div class="bubble-header">
                 <span>${t("ui_followup_title")}</span>
-                <button class="bubble-close">✕</button>
+                <button class="bubble-close">鉁?/button>
             </div>
             <div class="bubble-content">
                 <p class="selected-text">"${mark.text.substring(0, 50)}${mark.text.length > 50 ? '...' : ''}"</p>
@@ -1635,7 +1635,7 @@ class TerminalChatApp {
             </div>
         `;
         
-        // 定位气泡
+        // 瀹氫綅姘旀场
         document.body.appendChild(bubble);
         
         let rect;
@@ -1651,7 +1651,7 @@ class TerminalChatApp {
         bubble.style.left = `${rect.left}px`;
         bubble.style.top = `${rect.bottom + 5}px`;
         
-        // 绑定事件
+        // 缁戝畾浜嬩欢
         bubble.querySelector('.bubble-close').addEventListener('click', () => {
             bubble.remove();
         });
@@ -1682,7 +1682,7 @@ class TerminalChatApp {
             }
         });
         
-        // 点击外部关闭
+        // 鐐瑰嚮澶栭儴鍏抽棴
         const closeOnClickOutside = (e) => {
             const anchorContains =
                 anchorElement &&
@@ -1697,7 +1697,7 @@ class TerminalChatApp {
             document.addEventListener('click', closeOnClickOutside);
         }, 100);
         
-        // ESC键关闭
+        // ESC閿叧闂?
         const closeOnEsc = (e) => {
             if (e.key === 'Escape') {
                 bubble.remove();
@@ -1709,7 +1709,7 @@ class TerminalChatApp {
     
     async sendFollowUpQuery(mark, queryType, customQuery, bubble) {
         /**
-         * 发送追问请求
+         * 鍙戦€佽拷闂姹?
          */
         const responseDiv = bubble.querySelector('.bubble-response');
         responseDiv.innerHTML = `<p class="loading">${t("ui_thinking")}</p>`;
@@ -1732,23 +1732,23 @@ class TerminalChatApp {
                 const data = await response.json();
                 responseDiv.innerHTML = `<p class="ai-response">${data.response}</p>`;
             } else {
-                throw new Error(getCurrentLang() === 'en' ? 'Follow-up request failed' : '追问请求失败');
+                throw new Error(getCurrentLang() === 'en' ? 'Follow-up request failed' : '杩介棶璇锋眰澶辫触');
             }
         } catch (error) {
-            console.error('追问失败:', error);
+            console.error('杩介棶澶辫触:', error);
             responseDiv.innerHTML = `<p class="error">${t("ui_followup_fail")}</p>`;
         }
     }
     handleTextSelection(e) {
         /**
-         * 处理文本选中事件
+         * 澶勭悊鏂囨湰閫変腑浜嬩欢
          */
         const selection = window.getSelection();
         const text = selection.toString().trim();
         
-        // 如果没有选中文本，或选区不在聊天区域内
+        // 濡傛灉娌℃湁閫変腑鏂囨湰锛屾垨閫夊尯涓嶅湪鑱婂ぉ鍖哄煙鍐?
         if (!text || !this.chatMessages.contains(e.target)) {
-            // 如果点击的是悬浮按钮本身，不要隐藏
+            // 濡傛灉鐐瑰嚮鐨勬槸鎮诞鎸夐挳鏈韩锛屼笉瑕侀殣钘?
             if (this.selectionMenu.contains(e.target) || e.target === this.quickAskBtn) {
                 return;
             }
@@ -1756,12 +1756,12 @@ class TerminalChatApp {
             return;
         }
         
-        // 显示悬浮按钮
+        // 鏄剧ず鎮诞鎸夐挳
         const range = selection.getRangeAt(0);
         const rect = range.getBoundingClientRect();
         
-        // 计算位置：在选区上方中间
-        const left = rect.left + (rect.width / 2) - 40; // 按钮宽度约80px
+        // 璁＄畻浣嶇疆锛氬湪閫夊尯涓婃柟涓棿
+        const left = rect.left + (rect.width / 2) - 40; // 鎸夐挳瀹藉害绾?0px
         const top = rect.top - 40;
         
         this.selectionMenu.style.left = `${left}px`;
@@ -1771,7 +1771,7 @@ class TerminalChatApp {
 
 }
 
-// 记忆图可视化
+// 璁板繂鍥惧彲瑙嗗寲
 class MemoryGraphVisualization {
     constructor(apiBaseUrl) {
         this.apiBaseUrl = apiBaseUrl;
@@ -1907,7 +1907,7 @@ class MemoryGraphVisualization {
                 || (node.type || '').toLowerCase().includes(query);
             const hitLayer = layer === 'all' || String(node.layer) === layer;
             const hitType = type === 'all' || node.type === type;
-            return hitQuery && hitLayer && hitType;
+            return hitQuery && hitLayer && hitType && !this.isNoisyMemoryNode(node);
         });
 
         const nodeSet = new Set(this.filteredNodes.map(n => n.id));
@@ -1953,6 +1953,34 @@ class MemoryGraphVisualization {
         `;
     }
 
+    isNoisyMemoryNode(node) {
+        const text = String(node?.content || '').trim();
+        if (!text) return false;
+        const lowered = text.toLowerCase();
+        const noisySignals = ['traceback', 'exception', 'stack trace', 'tool_call', 'tool_result', 'http status', 'status_code', 'stderr', 'stdout'];
+        const hitCount = noisySignals.reduce((acc, s) => acc + (lowered.includes(s) ? 1 : 0), 0);
+        return hitCount >= 2 || lowered.startsWith('error:') || lowered.startsWith('failed:');
+    }
+
+    readableNodeTitle(node) {
+        const type = String(node?.type || '').toLowerCase();
+        const content = String(node?.content || '').trim();
+        const short = content.length > 80 ? `${content.slice(0, 80)}...` : content;
+        if (!content) return `${type || 'node'}(${node?.id || ''})`;
+        if (type === 'message') {
+            const memoryType = String(node?.memory_type || '').trim();
+            if (memoryType) return `[${memoryType}] ${short}`;
+            const role = String(node?.role || '').trim();
+            if (role) return `[${role}] ${short}`;
+            return `[memory] ${short}`;
+        }
+        if (type === 'entity') return `[entity] ${short}`;
+        if (type === 'action') return `[relation] ${short}`;
+        if (type === 'concept') return `[concept] ${short}`;
+        if (type === 'summary') return `[summary] ${short}`;
+        return short;
+    }
+
     renderNodeList(nodes) {
         this.nodeList.innerHTML = '';
         if (!nodes.length) {
@@ -1966,7 +1994,7 @@ class MemoryGraphVisualization {
             item.className = `memory-node-item layer-${node.layer}`;
             item.dataset.nodeId = node.id;
             item.innerHTML = `
-                <div class="memory-node-title">${this.escapeHtml(node.content || '(empty)')}</div>
+                <div class="memory-node-title">${this.escapeHtml(this.readableNodeTitle(node))}</div>
                 <div class="memory-node-meta">
                     <span>${this.escapeHtml(node.type || 'unknown')}</span>
                     <span>imp ${(node.importance || 0).toFixed(2)}</span>
@@ -2177,7 +2205,7 @@ class MemoryGraphVisualization {
     }
 }
 
-// 设置管理
+// 璁剧疆绠＄悊
 class SettingsManager {
     constructor(apiBaseUrl) {
         this.apiBaseUrl = apiBaseUrl;
@@ -2196,7 +2224,7 @@ class SettingsManager {
         this.form.addEventListener('submit', (e) => this.handleSubmit(e));
         this.resetBtn.addEventListener('click', () => this.loadConfig());
         
-        // 绑定按钮事件
+        // 缁戝畾鎸夐挳浜嬩欢
         document.getElementById('bindBtn').addEventListener('click', () => this.handleBindChannel());
     }
     
@@ -2218,7 +2246,7 @@ class SettingsManager {
             const token = localStorage.getItem('auth_token');
             const headers = token ? { 'Authorization': `Bearer ${token}` } : {};
             
-            // 加载系统配置
+            // 鍔犺浇绯荤粺閰嶇疆
             const response = await fetch(`${this.apiBaseUrl}/api/config`, { headers });
             const data = await response.json();
             
@@ -2252,24 +2280,24 @@ class SettingsManager {
                         <span class="channel-icon">${this.getChannelIcon(channel)}</span>
                         <span class="channel-name">${channel}</span>
                         <span class="account-id">${accountId}</span>
-                        <span class="status-badge">${getCurrentLang() === 'en' ? 'Bound' : '已绑定'}</span>
+                        <span class="status-badge">${getCurrentLang() === 'en' ? 'Bound' : '宸茬粦瀹?}</span>
                     `;
                     listEl.appendChild(item);
                 }
             }
         } catch (error) {
-            console.error('加载绑定渠道失败:', error);
+            console.error('鍔犺浇缁戝畾娓犻亾澶辫触:', error);
         }
     }
     
     getChannelIcon(channel) {
         const icons = {
-            'telegram': '✈️',
-            'wechat': '💬',
-            'dingtalk': '钉',
-            'feishu': '🐦'
+            'telegram': '鉁堬笍',
+            'wechat': '馃挰',
+            'dingtalk': '閽?,
+            'feishu': '馃惁'
         };
-        return icons[channel] || '🔗';
+        return icons[channel] || '馃敆';
     }
     
     async handleBindChannel() {
@@ -2301,7 +2329,7 @@ class SettingsManager {
                 document.getElementById('bindAccountId').value = '';
                 this.loadBoundChannels();
             } else {
-                throw new Error(data.detail || (getCurrentLang() === 'en' ? 'Bind failed' : '绑定失败'));
+                throw new Error(data.detail || (getCurrentLang() === 'en' ? 'Bind failed' : '缁戝畾澶辫触'));
             }
         } catch (error) {
             alert(t("ui_bind_fail", { msg: error.message }));
@@ -2320,7 +2348,7 @@ class SettingsManager {
         this.setFieldValue('userTemperature', userApi.temperature || '');
         this.setFieldValue('userMaxTokens', userApi.max_tokens || '');
 
-        // API配置
+        // API閰嶇疆
         this.setFieldValue('apiKey', config.api.api_key);
         this.setFieldValue('baseUrl', config.api.base_url);
         this.setFieldValue('model', config.api.model);
@@ -2328,12 +2356,12 @@ class SettingsManager {
         this.setFieldValue('maxTokens', config.api.max_tokens);
         this.setFieldValue('maxHistoryRounds', config.api.max_history_rounds);
         
-        // 系统配置
+        // 绯荤粺閰嶇疆
         this.setFieldValue('streamMode', config.system.stream_mode, 'checkbox');
         this.setFieldValue('debugMode', config.system.debug, 'checkbox');
         this.setFieldValue('logLevel', config.system.log_level);
         
-        // 记忆系统配置
+        // 璁板繂绯荤粺閰嶇疆
         this.setFieldValue('memoryEnabled', config.memory.enabled, 'checkbox');
         this.setFieldValue('neo4jEnabled', config.memory.neo4j.enabled, 'checkbox');
         this.setFieldValue('neo4jUri', config.memory.neo4j.uri);
@@ -2388,7 +2416,7 @@ class SettingsManager {
                 alert(t("ui_save_success"));
                 this.hide();
             } else {
-                throw new Error(data.message || (getCurrentLang() === 'en' ? 'Save failed' : '保存失败'));
+                throw new Error(data.message || (getCurrentLang() === 'en' ? 'Save failed' : '淇濆瓨澶辫触'));
             }
         } catch (error) {
             alert(t("ui_save_fail", { msg: error.message }));
@@ -2457,7 +2485,7 @@ class SettingsManager {
     }
 }
 
-// 性能统计管理器
+// 鎬ц兘缁熻绠＄悊鍣?
 class MetricsManager {
     constructor(apiBaseUrl) {
         this.apiBaseUrl = apiBaseUrl;
@@ -2499,7 +2527,7 @@ class MetricsManager {
                 this.updateDisplay(data.metrics);
             }
         } catch (error) {
-            console.error('获取统计数据失败:', error);
+            console.error('鑾峰彇缁熻鏁版嵁澶辫触:', error);
         }
     }
     
@@ -2523,7 +2551,7 @@ class MetricsManager {
     }
 }
 
-// 系统自检（Doctor）管理器
+// 绯荤粺鑷锛圖octor锛夌鐞嗗櫒
 class DoctorManager {
     constructor(apiBaseUrl) {
         this.apiBaseUrl = apiBaseUrl;
@@ -2575,20 +2603,20 @@ class DoctorManager {
             const data = await response.json();
 
             const lines = [];
-            lines.push(`${getCurrentLang() === 'en' ? 'Status' : '状态'}: ${data.status || 'unknown'}`);
-            lines.push(`${getCurrentLang() === 'en' ? 'Time' : '时间'}: ${data.timestamp || ''}`);
+            lines.push(`${getCurrentLang() === 'en' ? 'Status' : '鐘舵€?}: ${data.status || 'unknown'}`);
+            lines.push(`${getCurrentLang() === 'en' ? 'Time' : '鏃堕棿'}: ${data.timestamp || ''}`);
             lines.push('');
 
             const checks = data.checks || {};
             for (const [key, value] of Object.entries(checks)) {
                 const ok = value.ok !== false;
-                lines.push(`■ ${key} => ${ok ? 'OK' : 'ERROR'}`);
+                lines.push(`鈻?${key} => ${ok ? 'OK' : 'ERROR'}`);
                 if (value.issues && Array.isArray(value.issues) && value.issues.length > 0) {
                     for (const issue of value.issues) {
                         lines.push(`   - ${issue}`);
                     }
                 }
-                // 对于 config/memory/plugins/mcp 等，附加一些关键字段做简要展示
+                // 瀵逛簬 config/memory/plugins/mcp 绛夛紝闄勫姞涓€浜涘叧閿瓧娈靛仛绠€瑕佸睍绀?
                 if (key === 'config_api') {
                     lines.push(`   base_url: ${value.api_base_url}`);
                     lines.push(`   model: ${value.model}`);
@@ -2614,7 +2642,7 @@ class DoctorManager {
 
             this.outputEl.textContent = lines.join('\n');
         } catch (error) {
-            this.outputEl.textContent = `${getCurrentLang() === 'en' ? 'Doctor failed' : '自检失败'}: ${error.message}`;
+            this.outputEl.textContent = `${getCurrentLang() === 'en' ? 'Doctor failed' : '鑷澶辫触'}: ${error.message}`;
         }
     }
 
@@ -2640,25 +2668,25 @@ class DoctorManager {
 
             const lines = [];
             if (response.ok && data.status === 'success') {
-                lines.push(`${getCurrentLang() === 'en' ? 'Status' : '状态'}: success`);
+                lines.push(`${getCurrentLang() === 'en' ? 'Status' : '鐘舵€?}: success`);
                 if (data.message) lines.push(data.message);
-                if (data.config_path) lines.push(`${getCurrentLang() === 'en' ? 'Config file' : '配置文件'}: ${data.config_path}`);
-                if (data.backup) lines.push(`${getCurrentLang() === 'en' ? 'Backup created' : '已创建备份'}: ${data.backup}`);
+                if (data.config_path) lines.push(`${getCurrentLang() === 'en' ? 'Config file' : '閰嶇疆鏂囦欢'}: ${data.config_path}`);
+                if (data.backup) lines.push(`${getCurrentLang() === 'en' ? 'Backup created' : '宸插垱寤哄浠?}: ${data.backup}`);
             } else {
-                lines.push(`${getCurrentLang() === 'en' ? 'Status' : '状态'}: ${data.status || 'error'}`);
-                lines.push(`${getCurrentLang() === 'en' ? 'Error' : '错误'}: ${data.message || (getCurrentLang() === 'en' ? 'Migration failed' : '修复失败')}`);
-                if (data.config_path) lines.push(`${getCurrentLang() === 'en' ? 'Config file' : '配置文件'}: ${data.config_path}`);
-                if (data.backup) lines.push(`${getCurrentLang() === 'en' ? 'Backup' : '备份'}: ${data.backup}`);
+                lines.push(`${getCurrentLang() === 'en' ? 'Status' : '鐘舵€?}: ${data.status || 'error'}`);
+                lines.push(`${getCurrentLang() === 'en' ? 'Error' : '閿欒'}: ${data.message || (getCurrentLang() === 'en' ? 'Migration failed' : '淇澶辫触')}`);
+                if (data.config_path) lines.push(`${getCurrentLang() === 'en' ? 'Config file' : '閰嶇疆鏂囦欢'}: ${data.config_path}`);
+                if (data.backup) lines.push(`${getCurrentLang() === 'en' ? 'Backup' : '澶囦唤'}: ${data.backup}`);
             }
 
             this.outputEl.textContent = lines.join('\n');
         } catch (error) {
-            this.outputEl.textContent = `${getCurrentLang() === 'en' ? 'Doctor fix failed' : '自检修复失败'}: ${error.message}`;
+            this.outputEl.textContent = `${getCurrentLang() === 'en' ? 'Doctor fix failed' : '鑷淇澶辫触'}: ${error.message}`;
         }
     }
 }
 
-// 虚拟形象管理
+// 铏氭嫙褰㈣薄绠＄悊
 class AvatarManager {
     constructor() {
         this.placeholder = document.getElementById('avatarPlaceholder');
@@ -2673,14 +2701,14 @@ class AvatarManager {
     }
     
     bindEvents() {
-        // 点击占位区域触发上传
+        // 鐐瑰嚮鍗犱綅鍖哄煙瑙﹀彂涓婁紶
         this.placeholder.addEventListener('click', (e) => {
             if (e.target !== this.removeBtn) {
                 this.uploadInput.click();
             }
         });
         
-        // 文件选择
+        // 鏂囦欢閫夋嫨
         this.uploadInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file && file.type.startsWith('image/')) {
@@ -2688,7 +2716,7 @@ class AvatarManager {
             }
         });
         
-        // 移除按钮
+        // 绉婚櫎鎸夐挳
         this.removeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             this.removeAvatar();
@@ -2700,37 +2728,37 @@ class AvatarManager {
         reader.onload = (e) => {
             const imageData = e.target.result;
             
-            // 显示图片
+            // 鏄剧ず鍥剧墖
             this.avatarImage.src = imageData;
             this.avatarImage.style.display = 'block';
             this.avatarIcon.style.display = 'none';
             this.avatarHint.style.display = 'none';
             this.removeBtn.style.display = 'flex';
             
-            // 保存到localStorage
+            // 淇濆瓨鍒發ocalStorage
             localStorage.setItem('avatar_image', imageData);
             
-            console.log('✅ 虚拟形象已设置');
+            console.log('鉁?铏氭嫙褰㈣薄宸茶缃?);
         };
         reader.readAsDataURL(file);
     }
     
     removeAvatar() {
-        // 隐藏图片
+        // 闅愯棌鍥剧墖
         this.avatarImage.style.display = 'none';
         this.avatarImage.src = '';
         this.avatarIcon.style.display = 'block';
         this.avatarHint.style.display = 'block';
         this.removeBtn.style.display = 'none';
         
-        // 从localStorage移除
+        // 浠巐ocalStorage绉婚櫎
         localStorage.removeItem('avatar_image');
         
-        console.log('✅ 虚拟形象已移除');
+        console.log('鉁?铏氭嫙褰㈣薄宸茬Щ闄?);
     }
     
     loadAvatar() {
-        // 从localStorage加载
+        // 浠巐ocalStorage鍔犺浇
         const savedImage = localStorage.getItem('avatar_image');
         if (savedImage) {
             this.avatarImage.src = savedImage;
@@ -2742,7 +2770,7 @@ class AvatarManager {
     }
 }
 
-// 启动应用
+// 鍚姩搴旂敤
 const STARTUP_OVERLAY_MIN_MS = 800;
 const STARTUP_BOOT_TS = Date.now();
 let STARTUP_OVERLAY_HIDDEN = false;

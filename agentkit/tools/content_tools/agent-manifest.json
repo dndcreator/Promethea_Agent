@@ -1,0 +1,43 @@
+{
+  "name": "content_tools",
+  "label": "Content Tools",
+  "version": "1.0.0",
+  "description": "General content tools: web fetch, PDF parsing, and image metadata/OCR.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.content_tools.content_tools",
+    "class": "ContentToolsService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "web_fetch",
+        "description": "Fetch and extract readable content from a web page.",
+        "example": "web_fetch(url='https://example.com', include_links=true)"
+      },
+      {
+        "command": "pdf_action",
+        "description": "Read PDF metadata or extract text.",
+        "example": "pdf_action(action='extract_text', path='docs/spec.pdf', page=0, max_pages=3)"
+      },
+      {
+        "command": "image_action",
+        "description": "Read image metadata or run OCR when available.",
+        "example": "image_action(action='metadata', path='assets/screen.png')"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "url": { "type": "string" },
+      "max_chars": { "type": "integer" },
+      "timeout": { "type": "integer" },
+      "include_links": { "type": "boolean" },
+      "action": { "type": "string" },
+      "path": { "type": "string" },
+      "page": { "type": "integer" },
+      "max_pages": { "type": "integer" }
+    }
+  }
+}

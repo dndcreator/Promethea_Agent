@@ -1,4 +1,4 @@
-﻿"""
+"""
 Browser controller - based on Playwright.
 """
 import asyncio
@@ -228,7 +228,10 @@ class BrowserController(ComputerController):
         if not script:
             raise ValueError("Missing required parameter: script")
         
-        return await self.page.evaluate(script)
+        arg = params.get('arg', None)
+        if arg is None:
+            return await self.page.evaluate(script)
+        return await self.page.evaluate(script, arg)
     
     async def _wait(self, params: Dict[str, Any]) -> str:
         """Wait for a selector or for a fixed time."""

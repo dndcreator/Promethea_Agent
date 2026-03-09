@@ -1988,3 +1988,430 @@ select {
         width: 100%;
     }
 }
+
+
+
+/* =========================================
+   GREEK MYTHOLOGY & LEATHER THEME (OLYMPUS)
+   ========================================= */
+:root {
+    --brand-50: #fdfaf6;
+    --brand-100: #f5eedf;
+    --brand-500: #c2956e; /* Soft Leather / Bronze */
+    --brand-600: #9e7351; /* Deep Leather */
+    --brand-700: #735136; /* Dark Walnut */
+
+    --success-500: #6b8e6b;
+    --danger-500: #a74242;
+    --warning-500: #d6983a;
+
+    --bg-page: #fbf9f6; /* Warm Marble */
+    --bg-panel: rgba(253, 250, 246, 0.75);
+    --bg-card: rgba(255, 255, 255, 0.85);
+    --bg-subtle: rgba(245, 238, 223, 0.4);
+    --bg-overlay: rgba(115, 81, 54, 0.5); /* Leather tint overlay */
+
+    --text-strong: #3b2a1a;
+    --text-normal: #5e4836;
+    --text-muted: #8c735c;
+    --text-invert: #fdfaf6;
+
+    --border-default: rgba(194, 149, 110, 0.25);
+    --border-strong: rgba(194, 149, 110, 0.45);
+
+    --radius-sm: 4px;
+    --radius-md: 8px;
+    --radius-lg: 12px;
+    --radius-xl: 18px;
+    --radius-full: 9999px;
+
+    --shadow-sm: 0 4px 12px rgba(115, 81, 54, 0.05);
+    --shadow-md: 0 8px 24px rgba(115, 81, 54, 0.08);
+    --shadow-lg: 0 16px 48px rgba(115, 81, 54, 0.12);
+    --shadow-glow: 0 0 15px rgba(194, 149, 110, 0.25);
+
+    --ring: 0 0 0 3px rgba(194, 149, 110, 0.2);
+    
+    --header-height: 70px;
+    
+    /* Elegant serif for headings, clean sans for UI */
+    --font-serif: "Cinzel", "Palatino Linotype", "Georgia", serif;
+}
+
+body {
+    background-color: #fbf9f6;
+    background-image: 
+        radial-gradient(circle at 10% 20%, rgba(194, 149, 110, 0.06), transparent 50%),
+        radial-gradient(circle at 90% 80%, rgba(158, 115, 81, 0.04), transparent 50%),
+        linear-gradient(180deg, #fdfaf6 0%, #f4eee3 100%);
+    background-attachment: fixed;
+    color: var(--text-normal);
+}
+
+/* Subtle parchment texture overlay */
+body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    opacity: 0.4;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.08'/%3E%3C/svg%3E");
+    z-index: 0;
+}
+
+/* Base Layout Redesign */
+.app-root {
+    padding: 16px;
+    gap: 16px;
+    background: transparent;
+    backdrop-filter: none;
+}
+
+.sidebar {
+    border-radius: var(--radius-xl);
+    background: var(--bg-panel);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-default);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+}
+
+.terminal-container {
+    border-radius: var(--radius-xl);
+    background: var(--bg-panel);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-default);
+    box-shadow: var(--shadow-md);
+    overflow: hidden;
+}
+
+.terminal-header {
+    background: transparent;
+    border-bottom: 1px solid var(--border-default);
+    box-shadow: none;
+}
+
+/* Olympus Branding */
+.logo-icon {
+    background: linear-gradient(135deg, var(--brand-500), var(--brand-600));
+    color: var(--brand-50);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-glow);
+    font-family: var(--font-serif);
+    font-weight: 700;
+}
+
+.logo-text {
+    font-family: var(--font-serif);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    background: linear-gradient(135deg, var(--text-strong), var(--brand-600));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+/* Controls */
+.new-chat-btn {
+    border-radius: var(--radius-full);
+    border: 1px solid var(--brand-500);
+    color: var(--brand-600);
+    background: rgba(194, 149, 110, 0.1);
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.new-chat-btn:hover {
+    background: var(--brand-500);
+    color: #fff;
+    box-shadow: var(--shadow-glow);
+    transform: rotate(90deg);
+}
+
+.tab {
+    border-radius: var(--radius-sm);
+    background: transparent;
+    border: 1px solid transparent;
+    transition: all 0.3s ease;
+    font-family: var(--font-serif);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 11px;
+}
+
+.tab.active {
+    background: rgba(194, 149, 110, 0.1);
+    border: 1px solid var(--border-default);
+    color: var(--brand-600);
+    box-shadow: inset 0 1px 3px rgba(115, 81, 54, 0.05);
+}
+
+/* Chat Messages */
+.chat-messages {
+    background: transparent;
+}
+
+.message-content {
+    background: var(--bg-card);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--border-default);
+    box-shadow: var(--shadow-sm);
+    border-radius: 4px 16px 16px 16px;
+    transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+
+.message-content:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-md);
+}
+
+.message.user .message-content {
+    background: linear-gradient(135deg, #a88365, #8a6646);
+    color: #fdfaf6;
+    border: none;
+    box-shadow: 0 6px 16px rgba(115, 81, 54, 0.2);
+    border-radius: 16px 4px 16px 16px;
+}
+
+.message.assistant .message-content::before {
+    display: none;
+}
+
+/* Terminal Input */
+.terminal-input-wrapper {
+    background: transparent;
+}
+
+.terminal-input-line {
+    background: rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 4px 16px rgba(115, 81, 54, 0.08);
+    border-radius: var(--radius-full);
+    transition: all 0.3s ease;
+}
+
+.terminal-input-line:focus-within {
+    box-shadow: var(--shadow-glow);
+    border-color: var(--brand-500);
+}
+
+#messageInput {
+    font-size: 15px;
+}
+
+.send-btn {
+    border-radius: var(--radius-full);
+    background: linear-gradient(135deg, var(--brand-500), var(--brand-600));
+    box-shadow: 0 4px 10px rgba(115, 81, 54, 0.2);
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.send-btn:hover {
+    box-shadow: 0 6px 16px rgba(115, 81, 54, 0.3);
+    transform: translateY(-2px) scale(1.05);
+}
+
+/* Modal and Overlays */
+.modal-content {
+    background: rgba(253, 250, 246, 0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 24px 64px rgba(59, 42, 26, 0.2);
+    border-radius: var(--radius-lg);
+}
+
+.modal-header {
+    background: transparent;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.modal-header h2 {
+    font-family: var(--font-serif);
+    color: var(--text-strong);
+}
+
+/* Buttons */
+.btn-primary, .send-query-btn {
+    background: linear-gradient(135deg, var(--brand-500), var(--brand-600));
+    border: none;
+    box-shadow: 0 4px 10px rgba(115, 81, 54, 0.2);
+    transition: all 0.3s ease;
+    color: var(--brand-50);
+}
+
+.btn-primary:hover, .send-query-btn:hover {
+    box-shadow: 0 6px 16px rgba(115, 81, 54, 0.3);
+    transform: translateY(-1px);
+    background: linear-gradient(135deg, var(--brand-600), var(--brand-700));
+}
+
+.btn-secondary, .quick-btn {
+    background: var(--bg-card);
+    border: 1px solid var(--border-strong);
+    color: var(--text-normal);
+}
+
+.btn-secondary:hover, .quick-btn:hover {
+    border-color: var(--brand-600);
+    background: var(--brand-50);
+    color: var(--brand-700);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+}
+::-webkit-scrollbar-thumb {
+    background: rgba(194, 149, 110, 0.3);
+    border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(194, 149, 110, 0.5);
+}
+
+/* Tool Execution Styling */
+.tool-call,
+.thought-process {
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+}
+
+.tool-call summary,
+.thought-process > summary {
+    background: rgba(194, 149, 110, 0.08);
+    color: var(--brand-700);
+}
+
+.tool-call-args,
+.tool-call-result,
+.message-content pre {
+    background: rgba(245, 238, 223, 0.5);
+    border: 1px solid var(--border-default);
+    color: var(--text-normal);
+}
+
+.message-content pre {
+    background: #3b2a1a;
+    color: #f5eedf;
+    border: 1px solid #2a1e12;
+}
+
+/* Graph Canvas for memory */
+#graphCanvas {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+}
+
+/* Typography Overrides */
+.sidebar-header .logo-text,
+#sessionListTitle,
+#toolsLiveTitle,
+.modal-header h2 {
+    font-family: var(--font-serif);
+}
+
+/* Ensure mobile behaves */
+@media (max-width: 900px) {
+    .app-root {
+        padding: 0;
+        gap: 0;
+    }
+    .sidebar, .terminal-container {
+        border-radius: 0;
+        border: none;
+    }
+}
+
+.memory-filter-inline {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.03);
+    font-size: 12px;
+    color: #334155;
+}
+
+.memory-filter-inline input[type="range"] {
+    width: 110px;
+}
+
+.memory-copy-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+
+.memory-raw-json {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.memory-semantic-tooltip {
+    position: fixed;
+    z-index: 3000;
+    width: min(460px, 48vw);
+    max-height: 52vh;
+    overflow: auto;
+    padding: 10px 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(148, 163, 184, 0.45);
+    background: rgba(15, 23, 42, 0.96);
+    color: #e2e8f0;
+    box-shadow: 0 10px 30px rgba(2, 6, 23, 0.45);
+    font-size: 12px;
+    line-height: 1.5;
+    pointer-events: none;
+}
+
+.memory-semantic-tooltip .semantic-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: #f8fafc;
+}
+
+.memory-semantic-tooltip .semantic-line {
+    margin: 3px 0;
+    color: #cbd5e1;
+}
+.voice-btn {
+    width: 38px;
+    height: 38px;
+    border: 1px solid rgba(194, 149, 110, 0.5);
+    border-radius: var(--radius-full);
+    background: rgba(255, 255, 255, 0.92);
+    color: var(--brand-700);
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.18s ease;
+}
+
+.voice-btn:hover {
+    border-color: var(--brand-600);
+    background: #fff;
+    transform: translateY(-1px);
+}
+
+.voice-btn.recording {
+    background: #dc2626;
+    color: #fff;
+    border-color: #b91c1c;
+    box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.2);
+}
+
+.voice-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+}

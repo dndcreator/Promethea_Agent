@@ -3,6 +3,7 @@ import time
 from typing import Dict, List, Optional
 import logging
 import uuid
+import re
 
 try:
     # pydantic v2
@@ -149,6 +150,45 @@ class MessageManager:
             return "New Chat"
         one_line = " ".join(raw.split())
         return one_line[:40] + ("..." if len(one_line) > 40 else "")
+
+    def _is_noisy_memory_content(self, role: str, content: str) -> bool:
+        """Best-effort filter for tool logs / traceback / transport errors."""
+        text = (content or "").strip()
+        if not text:
+            return True
+
+        lowered = text.lower()
+        machine_signals = [
+            "traceback",
+            "exception",
+            "stack trace",
+            "tool_call",
+            "tool_result",
+            "http status",
+            "status_code",
+            "stderr",
+            "stdout",
+            "line ",
+            "file \"",
+            "{\"error\"",
+        ]
+        hit_count = sum(1 for s in machine_signals if s in lowered)
+
+        if role != "user":
+            if hit_count >= 1:
+                return True
+            if lowered.startswith("error:") or lowered.startswith("failed:"):
+                return True
+
+        if role == "user":
+            if hit_count >= 3 and ("\n" in text or "```" in text):
+                return True
+
+        if re.search(r"^\s*```[\s\S]*```$", text):
+            return True
+        if len(text) < 3:
+            return True
+        return False
     
     def create_session(
         self,
@@ -329,7 +369,6 @@ class MessageManager:
 
             user_role = turn.get("user_role", "user")
             user_content = turn.get("user_content", "")
-            assistant_content_safe = assistant_content or ""
             try:
                 loop = asyncio.get_running_loop()
                 loop.run_in_executor(
@@ -338,14 +377,6 @@ class MessageManager:
                     session_id,
                     user_role,
                     user_content,
-                    user_id,
-                )
-                loop.run_in_executor(
-                    None,
-                    self._sync_to_memory,
-                    session_id,
-                    "assistant",
-                    assistant_content_safe,
                     user_id,
                 )
                 logger.debug(f"Triggered memory sync from commit_turn for session {session_id}")
@@ -375,6 +406,8 @@ class MessageManager:
         """Background sync: write to memory system and trigger maintenance tasks."""
         try:
             if not self.memory_adapter or not self.memory_adapter.is_enabled():
+                return
+            if role != "user" or self._is_noisy_memory_content(role, content):
                 return
 
             # 1. Append to hot-layer memory.
@@ -591,4 +624,5 @@ class MessageManager:
 
 # Global singleton instance for convenient imports.
 message_manager = MessageManager()
+
 

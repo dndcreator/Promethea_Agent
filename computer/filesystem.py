@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
+from agentkit.security.sandbox import get_sandbox_policy
 
 logger = logging.getLogger("Computer.FileSystem")
 
@@ -20,6 +21,7 @@ class FileSystemController(ComputerController):
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
         # Backward-compatible default: unrestricted unless workspace_root is explicitly provided
         self.restricted_mode = workspace_root is not None
+        self.sandbox = get_sandbox_policy()
     
     async def initialize(self) -> bool:
         """Initialise file system control."""
@@ -324,3 +326,5 @@ class FileSystemController(ComputerController):
             results.append(self._get_item_info(item))
         
         return results
+
+

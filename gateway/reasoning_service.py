@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import re
@@ -16,6 +16,7 @@ from .events import EventEmitter
 from .protocol import EventType
 from .reasoning_template_memory import ReasoningTemplateMemory
 from .tool_service import ToolInvocationContext
+from .tool_strategy import ToolStrategyEngine
 
 
 @dataclass
@@ -85,6 +86,16 @@ class ReasoningService:
         self._pending_human_reviews: Dict[str, Dict[str, Any]] = {}
         self._completed_runs = 0
         self._failed_runs = 0
+        self.tool_strategy = ToolStrategyEngine()
+        self._tool_selection_stats: Dict[str, Any] = {
+            "total": 0,
+            "llm_selected": 0,
+            "strategy_fallback": 0,
+            "no_tool": 0,
+            "tool_observation_ok": 0,
+            "tool_observation_failed": 0,
+        }
+        self._tool_quality_stats: Dict[str, Dict[str, Any]] = {}
 
     def is_enabled(self, user_id: Optional[str] = None) -> bool:
         policy = self._resolve_policy(user_id=user_id, user_config=None)
@@ -103,6 +114,8 @@ class ReasoningService:
             "pending_human_reviews": len(self._pending_human_reviews),
             "completed_runs": self._completed_runs,
             "failed_runs": self._failed_runs,
+            "tool_selection": dict(self._tool_selection_stats),
+            "tool_quality": self._runtime_tool_quality_hints(limit=8),
         }
 
     def record_outcome(
@@ -267,6 +280,8 @@ class ReasoningService:
             "branch_factor": int(global_reasoning.get("branch_factor", 3)),
             "candidate_votes": int(global_reasoning.get("candidate_votes", 3)),
             "min_branch_score": float(global_reasoning.get("min_branch_score", 0.0)),
+            "moirai_export_plan": bool(global_reasoning.get("moirai_export_plan", False)),
+            "moirai_auto_start": bool(global_reasoning.get("moirai_auto_start", False)),
             "debug_log": bool(
                 global_reasoning.get(
                     "debug_log",
@@ -296,6 +311,8 @@ class ReasoningService:
                 "branch_factor",
                 "candidate_votes",
                 "min_branch_score",
+                "moirai_export_plan",
+                "moirai_auto_start",
                 "debug_log",
             ):
                 if key in reasoning_cfg:
@@ -311,7 +328,15 @@ class ReasoningService:
         policy["branch_factor"] = max(1, int(policy["branch_factor"]))
         policy["candidate_votes"] = max(1, int(policy["candidate_votes"]))
         policy["min_branch_score"] = min(1.0, max(0.0, float(policy["min_branch_score"])))
-        policy["debug_log"] = bool(policy["debug_log"])
+        policy["moirai_export_plan"] = self._to_bool(
+            policy.get("moirai_export_plan"),
+            default=False,
+        )
+        policy["moirai_auto_start"] = self._to_bool(
+            policy.get("moirai_auto_start"),
+            default=False,
+        )
+        policy["debug_log"] = self._to_bool(policy.get("debug_log"), default=False)
         policy["mode"] = str(policy.get("mode", "react_tot")).strip().lower() or "react_tot"
         return policy
 
@@ -468,7 +493,7 @@ class ReasoningService:
                     user_config=user_config,
                     user_id=user_id,
                     policy=policy,
-                    strategy_hints=strategy_hints,
+                    strategy_hints=merged_hints,
                     max_candidates=max(
                         policy["plan_max_steps"],
                         policy["beam_width"] * policy["branch_factor"],
@@ -492,6 +517,15 @@ class ReasoningService:
             if not steps:
                 tree.status = "completed"
                 return {"used_reasoning": False, "gate": gate}
+            moirai_run_id = await self._export_plan_to_moirai(
+                tree=tree,
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                steps=steps,
+                gate=gate,
+                policy=policy,
+            )
 
             initial_nodes: List[str] = []
             for step in steps:
@@ -603,6 +637,7 @@ class ReasoningService:
                 "user_message": user_message,
                 "gate": gate,
                 "policy": policy,
+                "moirai_run_id": moirai_run_id,
                 "template_match": {
                     "matched": bool(template_match.get("matched")),
                     "score": float(template_match.get("score", 0.0) or 0.0),
@@ -638,6 +673,7 @@ class ReasoningService:
                     "matched": bool(template_match.get("matched")),
                     "score": float(template_match.get("score", 0.0) or 0.0),
                 },
+                "moirai_run_id": moirai_run_id,
                 "status": tree.status,
             }
         except Exception:
@@ -920,7 +956,7 @@ class ReasoningService:
                 user_config=user_config,
                 user_id=user_id,
                 policy=policy,
-                strategy_hints=strategy_hints,
+                strategy_hints=merged_hints,
                 max_candidates=policy["branch_factor"],
                 observation_context="\n\n".join(observations),
             )
@@ -1168,6 +1204,7 @@ class ReasoningService:
             source="reasoning",
             metadata={"tree_id": tree.tree_id, "node_id": child.node_id},
         )
+        tool_call_started = time.time()
         try:
             result = await self.tool_service.call_tool(
                 tool_name=tool_name,
@@ -1182,11 +1219,31 @@ class ReasoningService:
             )
         except Exception as e:
             result = f"[tool error] {e}"
+        verify = await self._verify_tool_observation(
+            step=step,
+            observation=self._stringify_observation(result),
+            user_config=user_config,
+            user_id=user_id,
+        )
         child.status = "completed"
         child.observation = self._stringify_observation(result)
         child.summary = child.observation
+        child.metadata["verify_tool"] = verify
         child.updated_at = time.time()
         tree.stats["tool_calls"] += 1
+        tree.stats["tool_failures"] = int(tree.stats.get("tool_failures", 0))
+        verify_ok = bool(verify.get("ok", True))
+        if verify_ok:
+            self._tool_selection_stats["tool_observation_ok"] += 1
+        else:
+            self._tool_selection_stats["tool_observation_failed"] += 1
+            tree.stats["tool_failures"] += 1
+        self._record_tool_quality(
+            service_name=service_name,
+            tool_name=tool_name,
+            ok=verify_ok,
+            latency_ms=(time.time() - tool_call_started) * 1000.0,
+        )
         await self._emit(
             EventType.REASONING_OBSERVATION_RECEIVED,
             {
@@ -1197,7 +1254,10 @@ class ReasoningService:
                 "kind": "tool",
             },
         )
-        return child.observation
+        if verify.get("ok", True):
+            return child.observation
+        reason = str(verify.get("reason", "") or "").strip()
+        return f"[tool verification failed] {reason}\n{child.observation}"
 
     async def _select_tool(
         self,
@@ -1214,6 +1274,24 @@ class ReasoningService:
             if (self.template_memory and user_id)
             else {}
         )
+        merged_hints = dict(strategy_hints or {})
+        runtime_quality = self._runtime_tool_quality_hints(limit=20)
+        if runtime_quality:
+            merged_hints["tool_quality"] = runtime_quality
+        strategy_pick = self.tool_strategy.recommend(
+            step=step,
+            user_message=user_message,
+            observations=observations,
+            catalog=catalog,
+            strategy_hints=merged_hints,
+        )
+        candidates = strategy_pick.get("candidates", []) if isinstance(strategy_pick, dict) else []
+        candidates_text = "\n".join(
+            f"- score={item.get('score', 0):.2f} type={item.get('tool_type', 'unknown')} "
+            f"service={item.get('service_name', '')} tool={item.get('tool_name', '')} "
+            f"reasons={item.get('reasons', [])}"
+            for item in candidates[:8]
+        )
         catalog_text = "\n".join(
             f"- type={item.get('tool_type', 'unknown')} service={item['service_name']} "
             f"tool={item['tool_name']} desc={item.get('description', '')}"
@@ -1222,7 +1300,7 @@ class ReasoningService:
         prompt = (
             "Choose at most one tool for the current reasoning step. Return strict JSON: "
             "{\"use_tool\":bool,\"tool_type\":string,\"service_name\":string,\"tool_name\":string,"
-            "\"args\":object,\"why\":string}."
+            "\"args\":object,\"why\":string}. If uncertain, set use_tool=false."
         )
         result = await self._call_json(
             [
@@ -1234,6 +1312,7 @@ class ReasoningService:
                         f"Current step:\n{json.dumps(step, ensure_ascii=False)}\n\n"
                         f"Historical tool hints:\n{json.dumps(strategy_hints.get('preferred_tools', []), ensure_ascii=False)}\n\n"
                         f"Current observations:\n{self._truncate_text(chr(10).join(observations), 2000)}\n\n"
+                        f"Strategy engine candidates:\n{candidates_text or '(none)'}\n\n"
                         f"Available tools:\n{catalog_text}"
                     ),
                 },
@@ -1242,7 +1321,8 @@ class ReasoningService:
             user_id=user_id,
         )
         if not isinstance(result, dict):
-            return {"use_tool": False}
+            result = {}
+
         result["use_tool"] = self._to_bool(result.get("use_tool"), default=False)
         if result["use_tool"]:
             if not result.get("service_name") or not result.get("tool_name"):
@@ -1250,7 +1330,173 @@ class ReasoningService:
                 if isinstance(preferred, dict):
                     result["service_name"] = result.get("service_name") or preferred.get("service_name")
                     result["tool_name"] = result.get("tool_name") or preferred.get("tool_name")
-        return result
+
+        self._tool_selection_stats["total"] += 1
+        chosen = self._normalize_selected_tool(result, catalog)
+        if chosen.get("use_tool"):
+            self._tool_selection_stats["llm_selected"] += 1
+            return chosen
+
+        # LLM gave invalid/no pick: fallback to deterministic strategy candidate.
+        fallback = self._normalize_selected_tool(strategy_pick if isinstance(strategy_pick, dict) else {}, catalog)
+        if fallback.get("use_tool"):
+            self._tool_selection_stats["strategy_fallback"] += 1
+            return fallback
+
+        self._tool_selection_stats["no_tool"] += 1
+        return {"use_tool": False}
+
+    async def _verify_tool_observation(
+        self,
+        *,
+        step: Dict[str, Any],
+        observation: str,
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """
+        Lightweight post-tool verifier to support auto-replan decisions.
+        """
+        text = (observation or "").strip()
+        lowered = text.lower()
+        if not text:
+            return {"ok": False, "confidence": 0.9, "reason": "empty_observation"}
+        bad_markers = (
+            "[tool error]",
+            "error:",
+            "traceback",
+            "exception",
+            "permission denied",
+            "sandbox blocked",
+            "timed out",
+        )
+        if any(m in lowered for m in bad_markers):
+            return {"ok": False, "confidence": 0.95, "reason": "tool_error_marker"}
+        if lowered.startswith("error") or lowered.startswith("failed"):
+            return {"ok": False, "confidence": 0.8, "reason": "negative_prefix"}
+
+        prompt = (
+            "You verify whether a tool observation indicates successful progress for a reasoning step.\n"
+            "Return strict JSON: {\"ok\":bool,\"confidence\":0..1,\"reason\":string}."
+        )
+        payload = {
+            "step": {
+                "title": str(step.get("title", "") or ""),
+                "goal": str(step.get("goal", "") or ""),
+                "tool_intent": str(step.get("tool_intent", "") or ""),
+            },
+            "observation": self._truncate_text(text, 1600),
+        }
+        result = await self._call_json(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            user_config=user_config,
+            user_id=user_id,
+        )
+        if not isinstance(result, dict):
+            return {"ok": True, "confidence": 0.5, "reason": "verifier_unavailable"}
+        ok = self._to_bool(result.get("ok"), default=True)
+        try:
+            conf = float(result.get("confidence", 0.5))
+        except Exception:
+            conf = 0.5
+        conf = min(1.0, max(0.0, conf))
+        return {
+            "ok": ok,
+            "confidence": conf,
+            "reason": str(result.get("reason", "") or ""),
+        }
+    def _record_tool_quality(
+        self,
+        *,
+        service_name: str,
+        tool_name: str,
+        ok: bool,
+        latency_ms: float,
+    ) -> None:
+        key = f"{service_name}:{tool_name}"
+        row = self._tool_quality_stats.get(key)
+        if not isinstance(row, dict):
+            row = {
+                "service_name": service_name,
+                "tool_name": tool_name,
+                "runs": 0,
+                "ok": 0,
+                "fail": 0,
+                "avg_latency_ms": 0.0,
+            }
+            self._tool_quality_stats[key] = row
+
+        row["runs"] = int(row.get("runs", 0)) + 1
+        if ok:
+            row["ok"] = int(row.get("ok", 0)) + 1
+        else:
+            row["fail"] = int(row.get("fail", 0)) + 1
+
+        prev_avg = float(row.get("avg_latency_ms", 0.0) or 0.0)
+        n = float(row["runs"])
+        row["avg_latency_ms"] = max(0.0, ((prev_avg * (n - 1.0)) + max(0.0, float(latency_ms))) / n)
+
+    def _runtime_tool_quality_hints(self, *, limit: int = 20) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for item in self._tool_quality_stats.values():
+            if not isinstance(item, dict):
+                continue
+            runs = max(1, int(item.get("runs", 0) or 0))
+            ok = int(item.get("ok", 0) or 0)
+            avg_latency = float(item.get("avg_latency_ms", 0.0) or 0.0)
+            rows.append(
+                {
+                    "service_name": str(item.get("service_name", "") or ""),
+                    "tool_name": str(item.get("tool_name", "") or ""),
+                    "runs": runs,
+                    "success_rate": ok / float(runs),
+                    "avg_latency_ms": avg_latency,
+                }
+            )
+        rows.sort(key=lambda x: (int(x.get("runs", 0)), float(x.get("success_rate", 0.0))), reverse=True)
+        return rows[: max(1, int(limit))]
+    def _normalize_selected_tool(
+        self,
+        selected: Dict[str, Any],
+        catalog: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not isinstance(selected, dict):
+            return {"use_tool": False}
+        use_tool = self._to_bool(selected.get("use_tool"), default=False)
+        service_name = str(selected.get("service_name") or "").strip()
+        tool_name = str(selected.get("tool_name") or "").strip()
+        if not use_tool or not service_name or not tool_name:
+            return {"use_tool": False}
+
+        match = self._find_catalog_entry(catalog, service_name, tool_name)
+        if not match:
+            return {"use_tool": False}
+
+        args = selected.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        return {
+            "use_tool": True,
+            "tool_type": match.get("tool_type") or selected.get("tool_type") or "mcp",
+            "service_name": match.get("service_name") or service_name,
+            "tool_name": match.get("tool_name") or tool_name,
+            "args": args,
+            "why": str(selected.get("why") or ""),
+        }
+
+    @staticmethod
+    def _find_catalog_entry(
+        catalog: List[Dict[str, Any]],
+        service_name: str,
+        tool_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        for item in catalog:
+            if str(item.get("service_name", "")) == service_name and str(item.get("tool_name", "")) == tool_name:
+                return item
+        return None
 
     async def _run_think_step(
         self,
@@ -1539,6 +1785,114 @@ class ReasoningService:
                 break
         return merged
 
+    async def _export_plan_to_moirai(
+        self,
+        *,
+        tree: ReasoningTree,
+        session_id: str,
+        user_id: str,
+        user_message: str,
+        steps: List[Dict[str, Any]],
+        gate: Dict[str, Any],
+        policy: Dict[str, Any],
+    ) -> Optional[str]:
+        if not policy.get("moirai_export_plan"):
+            return None
+        if not self.tool_service:
+            return None
+
+        moirai_steps = self._map_plan_steps_to_moirai(steps)
+        if not moirai_steps:
+            return None
+
+        flow_name = f"reasoning-{tree.tree_id[:8]}"
+        ctx = ToolInvocationContext(
+            session_id=session_id,
+            user_id=user_id,
+            source="reasoning",
+            metadata={"tree_id": tree.tree_id, "purpose": "plan_export"},
+        )
+        args = {
+            "agentType": "mcp",
+            "service_name": "moirai",
+            "tool_name": "create_flow",
+            "name": flow_name,
+            "goal": user_message,
+            "steps": moirai_steps,
+            "auto_start": bool(policy.get("moirai_auto_start", False)),
+            "metadata": {
+                "source": "reasoning_service",
+                "tree_id": tree.tree_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "gate": {
+                    "needs_reasoning": bool(gate.get("needs_reasoning", False)),
+                    "needs_memory": bool(gate.get("needs_memory", False)),
+                    "needs_tools": bool(gate.get("needs_tools", False)),
+                    "complexity": str(gate.get("complexity", "")),
+                },
+            },
+        }
+
+        tool_call_started = time.time()
+        try:
+            result = await self.tool_service.call_tool(
+                tool_name="create_flow",
+                params=args,
+                ctx=ctx,
+                request_id=f"reasoning_moirai_{tree.tree_id}",
+            )
+        except Exception as e:
+            logger.debug("ReasoningService: moirai export skipped: {}", e)
+            return None
+
+        if isinstance(result, dict):
+            run_id = result.get("run_id")
+            if isinstance(run_id, str) and run_id.strip():
+                return run_id.strip()
+        return None
+
+    def _map_plan_steps_to_moirai(self, steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        mapped: List[Dict[str, Any]] = []
+        for i, item in enumerate(steps or []):
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or f"Plan Step {i + 1}").strip() or f"Plan Step {i + 1}"
+            goal = str(item.get("goal") or title).strip() or title
+            requires_tools = self._to_bool(item.get("requires_tools"), default=False)
+            tool_intent = str(item.get("tool_intent") or "").strip()
+
+            mapped.append(
+                {
+                    "id": f"plan_{i + 1}",
+                    "name": title,
+                    "kind": "note",
+                    "params": {
+                        "text": goal,
+                        "source_step": item,
+                    },
+                }
+            )
+
+            if requires_tools:
+                mapped.append(
+                    {
+                        "id": f"plan_{i + 1}_tool_probe",
+                        "name": f"Tool probe: {title}",
+                        "kind": "mcp_call",
+                        "require_approval": True,
+                        "continue_on_error": True,
+                        "params": {
+                            "service_name": "computer_control",
+                            "tool_name": "execute_command",
+                            "args": {
+                                "command": "echo [Moirai tool probe] " + (tool_intent or goal),
+                            },
+                        },
+                    }
+                )
+        return mapped
+
     async def _write_debug_snapshot(
         self,
         tree: ReasoningTree,
@@ -1578,3 +1932,12 @@ class ReasoningService:
         uid = str(user_id or "default_user").strip() or "default_user"
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in uid)
         return safe[:128] or "default_user"
+
+
+
+
+
+
+
+
+

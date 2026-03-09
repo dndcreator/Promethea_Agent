@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from datetime import datetime
@@ -43,7 +43,7 @@ class PrometheaConversation:
 
         system_prompt = (
             "You are Promethea, an assistant that can call tools.\n"
-            "When you need tools, output strict JSON objects with keys tool_name and args.\n"
+            "When you need tools, output strict JSON objects.\nUse keys: tool_name, service_name (optional), and args (object).\nIf service_name is omitted, tool_name is used as the service name.\n"
             "Available tools:\n"
             f"{services_desc}"
         )
@@ -93,12 +93,7 @@ class PrometheaConversation:
 
         if user_config and "api" in user_config:
             user_api = user_config["api"]
-            if user_api.get("api_key"):
-                api_key = user_api["api_key"]
-            if user_api.get("base_url"):
-                base_url = user_api["base_url"]
-            if user_api.get("model"):
-                model = user_api["model"]
+            # Sensitive model routing stays env-controlled.
             if user_api.get("temperature") is not None:
                 temperature = user_api["temperature"]
             if user_api.get("max_tokens") is not None:
@@ -106,84 +101,66 @@ class PrometheaConversation:
 
         return api_key, base_url, model, temperature, max_tokens
 
+    def _resolve_model_candidates(self, user_config: Optional[Dict[str, Any]], primary_model: str) -> List[str]:
+        candidates: List[str] = []
+        seen = set()
+
+        def _push(value: Any) -> None:
+            if not isinstance(value, str):
+                return
+            model_name = value.strip()
+            if not model_name or model_name in seen:
+                return
+            seen.add(model_name)
+            candidates.append(model_name)
+
+        _push(primary_model)
+
+        fallback_models = getattr(config.api, "failover_models", []) or []
+
+        if isinstance(fallback_models, list):
+            for model_name in fallback_models:
+                _push(model_name)
+
+        return candidates
+
+    def _resolve_async_client(self, user_config: Optional[Dict[str, Any]], api_key: str, base_url: str) -> AsyncOpenAI:
+        if user_config and "api" in user_config:
+            return AsyncOpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/")
+        return self.async_client
+
     async def call_llm(
         self,
         messages: List[Dict],
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ) -> Dict:
-        try:
-            api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
+        api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
+        model_candidates = self._resolve_model_candidates(user_config, model)
+        errors: List[str] = []
 
-            if user_config and "api" in user_config:
-                client = AsyncOpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/")
-            else:
-                client = self.async_client
-
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=False,
-            )
-
-            content = ""
-            if resp.choices and len(resp.choices) > 0:
-                message = getattr(resp.choices[0], "message", None)
-                if message:
-                    content = getattr(message, "content", "") or ""
-
-            result = {
-                "content": content,
-                "status": "success",
-                "usage": {
-                    "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0)
-                    if hasattr(resp, "usage") and resp.usage
-                    else 0,
-                    "completion_tokens": getattr(resp.usage, "completion_tokens", 0)
-                    if hasattr(resp, "usage") and resp.usage
-                    else 0,
-                },
-            }
-
+        for idx, candidate_model in enumerate(model_candidates):
             try:
-                d = datetime.now().strftime("%Y-%m-%d")
-                t = datetime.now().strftime("%H:%M:%S")
-                user_log_dir = os.path.join(str(config.system.log_dir), self._safe_user_segment(user_id))
-                if not os.path.exists(user_log_dir):
-                    os.makedirs(user_log_dir, exist_ok=True)
-
-                log_file = os.path.join(user_log_dir, f"{d}.log")
-                with open(log_file, "a", encoding="utf-8") as f:
-                    last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
-                    f.write(f"[{t}] USER: {last_user}\n")
-                    f.write(f"[{t}] ASSISTANT ({model}): {content}\n")
-                    f.write("-" * 50 + "\n")
-            except Exception as e:
-                logger.error(f"save conversation log failed: {e}")
-
-            return result
-        except RuntimeError as e:
-            if "handler is closed" in str(e):
-                logger.debug(f"ignore closed-handler and retry once: {e}")
-                api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
-                client = AsyncOpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/")
+                client = self._resolve_async_client(user_config, api_key, base_url)
                 resp = await client.chat.completions.create(
-                    model=model,
+                    model=candidate_model,
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=False,
                 )
+
                 content = ""
                 if resp.choices and len(resp.choices) > 0:
                     message = getattr(resp.choices[0], "message", None)
                     if message:
                         content = getattr(message, "content", "") or ""
-                return {
+
+                result = {
                     "content": content,
                     "status": "success",
+                    "model_used": candidate_model,
+                    "model_attempts": idx + 1,
                     "usage": {
                         "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0)
                         if hasattr(resp, "usage") and resp.usage
@@ -193,14 +170,44 @@ class PrometheaConversation:
                         else 0,
                     },
                 }
-            raise
-        except Exception as e:
-            logger.error(f"LLM API call failed: {e}")
-            return {
-                "content": f"API call failed: {e}",
-                "status": "error",
-                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
-            }
+
+                try:
+                    d = datetime.now().strftime("%Y-%m-%d")
+                    t = datetime.now().strftime("%H:%M:%S")
+                    user_log_dir = os.path.join(str(config.system.log_dir), self._safe_user_segment(user_id))
+                    if not os.path.exists(user_log_dir):
+                        os.makedirs(user_log_dir, exist_ok=True)
+
+                    log_file = os.path.join(user_log_dir, f"{d}.log")
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+                        f.write(f"[{t}] USER: {last_user}\n")
+                        f.write(f"[{t}] ASSISTANT ({candidate_model}): {content}\n")
+                        f.write("-" * 50 + "\n")
+                except Exception as e:
+                    logger.error(f"save conversation log failed: {e}")
+
+                if idx > 0:
+                    logger.warning(
+                        "LLM failover succeeded: fallback model '{}' used after {} failures",
+                        candidate_model,
+                        idx,
+                    )
+                return result
+            except Exception as e:
+                err = str(e)
+                errors.append(f"{candidate_model}: {err}")
+                logger.warning("LLM call failed on model '{}': {}", candidate_model, err)
+
+        error_message = "; ".join(errors) if errors else "unknown error"
+        logger.error("LLM API call failed on all models: {}", error_message)
+        return {
+            "content": f"API call failed: {error_message}",
+            "status": "error",
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            "model_used": None,
+            "model_attempts": len(model_candidates),
+        }
 
     async def call_llm_stream(
         self,
@@ -208,23 +215,39 @@ class PrometheaConversation:
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ):
-        try:
-            api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
-            if user_config and "api" in user_config:
-                client = AsyncOpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/")
-            else:
-                client = self.async_client
+        api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
+        model_candidates = self._resolve_model_candidates(user_config, model)
+        errors: List[str] = []
 
-            stream = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True,
-            )
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        except Exception as e:
-            logger.error(f"LLM streaming call failed: {e}")
-            yield f"[error] {e}"
+        for idx, candidate_model in enumerate(model_candidates):
+            try:
+                client = self._resolve_async_client(user_config, api_key, base_url)
+                stream = await client.chat.completions.create(
+                    model=candidate_model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stream=True,
+                )
+                if idx > 0:
+                    logger.warning(
+                        "LLM stream failover succeeded: fallback model '{}' used after {} failures",
+                        candidate_model,
+                        idx,
+                    )
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                return
+            except Exception as e:
+                err = str(e)
+                errors.append(f"{candidate_model}: {err}")
+                logger.warning("LLM streaming failed on model '{}': {}", candidate_model, err)
+
+        error_message = "; ".join(errors) if errors else "unknown error"
+        logger.error("LLM streaming call failed on all models: {}", error_message)
+        yield f"[error] {error_message}"
+
+
+
+

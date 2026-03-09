@@ -59,7 +59,8 @@ asyncio_mode = "auto"
 addopts = [
     "-v",
     "--strict-markers",
-    "--tb=short"
+    "--tb=short",
+    "--basetemp=.pytest-tmp"
 ]
 markers = [
     "asyncio: async tests",
@@ -71,3 +72,22 @@ markers = [
 where = ["."]
 include = ["*"]
 exclude = ["tests*", "UI*"]
+
+
+
+[tool.coverage.run]
+source = ["agentkit", "gateway", "computer", "memory", "core", "channels"]
+omit = [
+    "tests/*",
+    "start_gateway_service.py",
+]
+
+[tool.coverage.report]
+fail_under = 35
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]
+

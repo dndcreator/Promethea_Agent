@@ -27,6 +27,11 @@ class ReasoningTemplateMemory:
         self.base_dir.mkdir(parents=True, exist_ok=True)
         self.max_templates_per_user = max(20, int(max_templates_per_user))
 
+        # Persist OPRO profile state through Moirai run docs (state machine store).
+        workspace_root = self.base_dir.parent if base_dir is not None else Path.cwd()
+        self.moirai_store_dir = Path(workspace_root) / "memory" / "moirai_runs"
+        self.moirai_store_dir.mkdir(parents=True, exist_ok=True)
+
     def match_template(self, *, user_id: str, task: str) -> Dict[str, Any]:
         templates = self._load_templates(user_id)
         if not templates:
@@ -86,6 +91,8 @@ class ReasoningTemplateMemory:
             self._append_success_path_log(user_id=user_id, payload={"template": template, "tree": tree_payload})
             self._upsert_template(user_id=user_id, template=template)
             self._recompute_profile(user_id=user_id)
+            profile = self._load_profile(user_id)
+            self._append_opro_trial(user_id=user_id, template=template, profile=profile)
         except Exception as e:
             logger.debug("ReasoningTemplateMemory: record_success failed: {}", e)
 
@@ -201,7 +208,7 @@ class ReasoningTemplateMemory:
     def _recompute_profile(self, *, user_id: str) -> None:
         templates = self._load_templates(user_id)
         if not templates:
-            self._save_json(self._profile_path(user_id), {"template_count": 0, "updated_at": time.time()})
+            self._save_profile(user_id=user_id, profile={"template_count": 0, "updated_at": time.time()})
             return
 
         total = len(templates)
@@ -239,7 +246,7 @@ class ReasoningTemplateMemory:
             "beam_width_hint": max(1, min(6, int(round(max(1.0, avg_steps / 3.0))))),
             "preferred_tools": preferred_tools,
         }
-        self._save_json(self._profile_path(user_id), profile)
+        self._save_profile(user_id=user_id, profile=profile)
 
     def _append_success_path_log(self, *, user_id: str, payload: Dict[str, Any]) -> None:
         path = self._paths_log_path(user_id)
@@ -254,8 +261,243 @@ class ReasoningTemplateMemory:
         return templates if isinstance(templates, list) else []
 
     def _load_profile(self, user_id: str) -> Dict[str, Any]:
-        data = self._load_json(self._profile_path(user_id))
-        return data if isinstance(data, dict) else {}
+        data = self._load_profile_from_moirai(user_id)
+        if isinstance(data, dict) and data:
+            return data
+        # Backward-compatible fallback for legacy file-based OPRO state.
+        legacy = self._load_json(self._profile_path(user_id))
+        return legacy if isinstance(legacy, dict) else {}
+
+    def _save_profile(self, *, user_id: str, profile: Dict[str, Any]) -> None:
+        self._save_profile_to_moirai(user_id=user_id, profile=profile)
+
+    def _load_profile_from_moirai(self, user_id: str) -> Dict[str, Any]:
+        run_path = self._moirai_profile_run_path(user_id)
+        run = self._load_json(run_path)
+        if not isinstance(run, dict) or not run:
+            return {}
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        profile = metadata.get("opro_profile") if isinstance(metadata, dict) else None
+        if isinstance(profile, dict):
+            return profile
+        # Fallback: older shape could store profile in first step output.
+        steps = run.get("steps") if isinstance(run.get("steps"), list) else []
+        if steps:
+            step0 = steps[0] if isinstance(steps[0], dict) else {}
+            output = step0.get("output") if isinstance(step0.get("output"), dict) else {}
+            profile = output.get("opro_profile") if isinstance(output, dict) else None
+            if isinstance(profile, dict):
+                return profile
+        return {}
+
+    def _save_profile_to_moirai(self, *, user_id: str, profile: Dict[str, Any]) -> None:
+        run_path = self._moirai_profile_run_path(user_id)
+        now = time.time()
+        existing = self._load_json(run_path)
+        if isinstance(existing, dict) and existing.get("run_id"):
+            run = existing
+            run["status"] = "paused"
+            run["updated_at"] = now
+            md = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+            md["opro_profile"] = profile
+            md["updated_at"] = now
+            run["metadata"] = md
+            events = run.get("events") if isinstance(run.get("events"), list) else []
+            events.append({"ts": now, "event": "opro.profile_updated", "payload": {"user_id": user_id}})
+            run["events"] = events[-max(50, int(run.get("max_events", 500))):]
+            steps = run.get("steps") if isinstance(run.get("steps"), list) else []
+            if not steps:
+                steps = [{
+                    "id": "opro_profile_snapshot",
+                    "name": "OPRO Profile Snapshot",
+                    "kind": "note",
+                    "status": "completed",
+                    "attempts": 1,
+                    "params": {"text": "OPRO profile state"},
+                    "output": {"opro_profile": profile},
+                }]
+            else:
+                if isinstance(steps[0], dict):
+                    steps[0]["status"] = "completed"
+                    steps[0]["output"] = {"opro_profile": profile}
+                    steps[0]["ended_at"] = now
+            run["steps"] = steps
+            self._save_json(run_path, run)
+            return
+
+        run_id = self._moirai_profile_run_id(user_id)
+        run = {
+            "run_id": run_id,
+            "name": f"opro-profile-{self._safe_user_segment(user_id)}",
+            "goal": "persist opro optimization profile",
+            "status": "paused",
+            "cursor": 0,
+            "steps": [
+                {
+                    "id": "opro_profile_snapshot",
+                    "name": "OPRO Profile Snapshot",
+                    "kind": "note",
+                    "require_approval": False,
+                    "continue_on_error": False,
+                    "retries": 0,
+                    "attempts": 1,
+                    "params": {"text": "OPRO profile state"},
+                    "status": "completed",
+                    "output": {"opro_profile": profile},
+                    "error": None,
+                    "started_at": now,
+                    "ended_at": now,
+                }
+            ],
+            "pending_approval": None,
+            "approved_steps": {},
+            "checkpoints": [
+                {
+                    "ts": now,
+                    "cursor": 0,
+                    "step_index": 0,
+                    "step_id": "opro_profile_snapshot",
+                    "status": "completed",
+                }
+            ],
+            "events": [
+                {"ts": now, "event": "flow.created", "payload": {"source": "reasoning_template_memory"}},
+                {"ts": now, "event": "opro.profile_updated", "payload": {"user_id": user_id}},
+            ],
+            "max_events": 500,
+            "metadata": {
+                "state_kind": "opro_profile",
+                "user_id": user_id,
+                "opro_profile": profile,
+                "updated_at": now,
+            },
+            "created_at": now,
+            "updated_at": now,
+            "ended_at": None,
+            "last_error": None,
+            "cancel_reason": None,
+        }
+        self._save_json(run_path, run)
+
+    def _append_opro_trial(self, *, user_id: str, template: Dict[str, Any], profile: Dict[str, Any]) -> None:
+        run_path = self._moirai_episode_run_path(user_id)
+        now = time.time()
+        run = self._load_json(run_path)
+
+        if not isinstance(run, dict) or not run.get("run_id"):
+            run = {
+                "run_id": self._moirai_episode_run_id(user_id),
+                "name": f"opro-episode-{self._safe_user_segment(user_id)}",
+                "goal": "track opro optimization episode trials",
+                "status": "paused",
+                "cursor": 0,
+                "steps": [],
+                "pending_approval": None,
+                "approved_steps": {},
+                "checkpoints": [],
+                "events": [
+                    {
+                        "ts": now,
+                        "event": "flow.created",
+                        "payload": {"source": "reasoning_template_memory", "kind": "opro_episode"},
+                    }
+                ],
+                "max_events": 800,
+                "metadata": {
+                    "state_kind": "opro_episode",
+                    "user_id": user_id,
+                    "trial_count": 0,
+                    "latest_template_id": None,
+                    "updated_at": now,
+                },
+                "created_at": now,
+                "updated_at": now,
+                "ended_at": None,
+                "last_error": None,
+                "cancel_reason": None,
+            }
+
+        trial_no = len(run.get("steps", []) or []) + 1
+        step_id = f"trial_{trial_no}"
+        step = {
+            "id": step_id,
+            "name": f"OPRO Trial {trial_no}",
+            "kind": "note",
+            "require_approval": False,
+            "continue_on_error": False,
+            "retries": 0,
+            "attempts": 1,
+            "params": {
+                "text": "opro trial snapshot",
+                "task": template.get("task"),
+            },
+            "status": "completed",
+            "output": {
+                "template_id": template.get("template_id"),
+                "success_count": template.get("success_count"),
+                "task_tokens": template.get("task_tokens", []),
+                "tools": template.get("tools", []),
+                "stats": template.get("stats", {}),
+                "profile_snapshot": profile,
+            },
+            "error": None,
+            "started_at": now,
+            "ended_at": now,
+        }
+
+        steps = run.get("steps") if isinstance(run.get("steps"), list) else []
+        steps.append(step)
+        run["steps"] = steps
+        run["cursor"] = len(steps)
+        run["status"] = "paused"
+
+        checkpoints = run.get("checkpoints") if isinstance(run.get("checkpoints"), list) else []
+        checkpoints.append(
+            {
+                "ts": now,
+                "cursor": run["cursor"],
+                "step_index": len(steps) - 1,
+                "step_id": step_id,
+                "status": "completed",
+            }
+        )
+        run["checkpoints"] = checkpoints[-200:]
+
+        events = run.get("events") if isinstance(run.get("events"), list) else []
+        events.append(
+            {
+                "ts": now,
+                "event": "opro.trial_recorded",
+                "payload": {
+                    "trial_no": trial_no,
+                    "template_id": template.get("template_id"),
+                },
+            }
+        )
+        max_events = max(50, int(run.get("max_events", 800)))
+        run["events"] = events[-max_events:]
+
+        metadata = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        metadata["trial_count"] = trial_no
+        metadata["latest_template_id"] = template.get("template_id")
+        metadata["latest_task"] = template.get("task")
+        metadata["updated_at"] = now
+        run["metadata"] = metadata
+
+        run["updated_at"] = now
+        self._save_json(run_path, run)
+
+    def _moirai_episode_run_id(self, user_id: str) -> str:
+        return f"opro_episode_{self._safe_user_segment(user_id)}"
+
+    def _moirai_episode_run_path(self, user_id: str) -> Path:
+        return self.moirai_store_dir / f"{self._moirai_episode_run_id(user_id)}.json"
+
+    def _moirai_profile_run_id(self, user_id: str) -> str:
+        return f"opro_profile_{self._safe_user_segment(user_id)}"
+
+    def _moirai_profile_run_path(self, user_id: str) -> Path:
+        return self.moirai_store_dir / f"{self._moirai_profile_run_id(user_id)}.json"
 
     def _load_json(self, path: Path) -> Dict[str, Any]:
         if not path.exists():

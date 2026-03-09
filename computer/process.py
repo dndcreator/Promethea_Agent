@@ -5,6 +5,7 @@ import signal
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
+from agentkit.security.sandbox import get_sandbox_policy
 
 logger = logging.getLogger("Computer.Process")
 
@@ -16,6 +17,7 @@ class ProcessController(ComputerController):
         super().__init__("Process", ComputerCapability.PROCESS)
         self.psutil = None
         self.active_processes: Dict[int, Any] = {}  # pid -> subprocess.Popen
+        self.sandbox = get_sandbox_policy()
     
     async def initialize(self) -> bool:
         try:
@@ -86,6 +88,15 @@ class ProcessController(ComputerController):
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
         return [
+            {'name': 'run', 'description': 'Run command and wait', 'params': ['command', 'cwd?', 'timeout?']},
+            {'name': 'run_async', 'description': 'Run command in background', 'params': ['command', 'cwd?']},
+            {'name': 'list', 'description': 'List processes', 'params': ['filter?']},
+            {'name': 'get', 'description': 'Get process details', 'params': ['pid']},
+            {'name': 'kill', 'description': 'Kill process', 'params': ['pid']},
+            {'name': 'terminate', 'description': 'Terminate process', 'params': ['pid']},
+            {'name': 'wait', 'description': 'Wait process finish', 'params': ['pid', 'timeout?']},
+            {'name': 'get_output', 'description': 'Get async process output', 'params': ['pid']},
+            {'name': 'system_info', 'description': 'Get host process metrics', 'params': []},
         ]
     
     
@@ -138,6 +149,10 @@ class ProcessController(ComputerController):
         if not command:
             raise ValueError("Missing required parameter: command")
         
+        decision = self.sandbox.check_command(str(command), cwd=str(cwd or "."))
+        if not decision.allowed:
+            return {"error": f"sandbox blocked command: {decision.reason}", "success": False}
+
         proc = subprocess.Popen(
             command,
             shell=shell,
@@ -336,3 +351,7 @@ class ProcessController(ComputerController):
             },
             "boot_time": self.psutil.boot_time()
         }
+
+
+
+

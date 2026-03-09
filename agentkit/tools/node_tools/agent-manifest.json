@@ -1,0 +1,60 @@
+{
+  "name": "node_tools",
+  "label": "Node Tools",
+  "version": "1.0.0",
+  "description": "Persistent generic node graph operations for agent workflows.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.node_tools.node_tools",
+    "class": "NodeToolsService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "upsert_node",
+        "description": "Create or update a node.",
+        "example": "upsert_node(node_id='task_1', kind='task', data={'title':'Do X'}, tags=['todo'])"
+      },
+      {
+        "command": "get_node",
+        "description": "Get a node by id.",
+        "example": "get_node(node_id='task_1')"
+      },
+      {
+        "command": "list_nodes",
+        "description": "List nodes with optional filters.",
+        "example": "list_nodes(kind='task', tag='todo', limit=20)"
+      },
+      {
+        "command": "delete_node",
+        "description": "Delete a node and related links.",
+        "example": "delete_node(node_id='task_1')"
+      },
+      {
+        "command": "link_nodes",
+        "description": "Create or update relation between nodes.",
+        "example": "link_nodes(source='task_1', target='task_2', relation='depends_on')"
+      },
+      {
+        "command": "list_links",
+        "description": "List links globally or for one node.",
+        "example": "list_links(node_id='task_1')"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "node_id": { "type": "string" },
+      "kind": { "type": "string" },
+      "data": { "type": "object" },
+      "tags": { "type": "array" },
+      "tag": { "type": "string" },
+      "limit": { "type": "integer" },
+      "source": { "type": "string" },
+      "target": { "type": "string" },
+      "relation": { "type": "string" },
+      "weight": { "type": "number" }
+    }
+  }
+}

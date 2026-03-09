@@ -196,7 +196,8 @@ async def get_memory_graph_global(
         WHERE node IS NOT NULL
         RETURN node.id AS id, labels(node)[0] AS type, node.content AS content,
                node.layer AS layer, node.importance AS importance,
-               node.access_count AS access_count, node.created_at AS created_at
+               node.access_count AS access_count, node.created_at AS created_at,
+               node.role AS role, node.memory_type AS memory_type, node.memory_source AS memory_source
         """
 
         edges_query = """
@@ -227,6 +228,9 @@ async def get_memory_graph_global(
                 "importance": n.get("importance", 0.5),
                 "access_count": n.get("access_count", 0),
                 "created_at": n.get("created_at"),
+                "role": n.get("role", ""),
+                "memory_type": n.get("memory_type", ""),
+                "memory_source": n.get("memory_source", ""),
             }
             for n in nodes_raw
         ]

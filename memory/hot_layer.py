@@ -146,6 +146,10 @@ class HotLayerManager:
                 "memory_type": metadata.get("memory_type"),
                 "memory_source": metadata.get("memory_source"),
                 "semantic_keys": metadata.get("semantic_keys", []),
+                "verify_confidence": metadata.get("verify_confidence"),
+                "verify_reason": metadata.get("verify_reason"),
+                "verify_evidence": metadata.get("verify_evidence"),
+                "verify_attribution": metadata.get("verify_attribution"),
             }
         )
         

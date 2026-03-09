@@ -289,10 +289,12 @@ class MemoryAdapter:
             return {}
 
     def _persist_maintenance_state(self, session_id: str, state: dict):
-        if not self.hot_layer:
+        hot_layer = getattr(self, "hot_layer", None)
+        connector = getattr(hot_layer, "connector", None) if hot_layer else None
+        if not connector:
             return
         try:
-            self.hot_layer.connector.query(
+            connector.query(
                 """
                 MATCH (s:Session {id: $session_id})
                 SET
@@ -495,5 +497,7 @@ def get_memory_adapter() -> MemoryAdapter:
     if _memory_adapter_instance is None:
         _memory_adapter_instance = MemoryAdapter()
     return _memory_adapter_instance
+
+
 
 

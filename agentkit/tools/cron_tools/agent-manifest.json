@@ -1,0 +1,60 @@
+{
+  "name": "cron_tools",
+  "label": "Cron Tools",
+  "version": "1.0.0",
+  "description": "Persistent scheduled jobs with explicit due-run execution via MCP calls.",
+  "serviceType": "mcp",
+  "entryPoint": {
+    "module": "agentkit.tools.cron_tools.cron_tools",
+    "class": "CronToolsService"
+  },
+  "capabilities": {
+    "invocation_commands": [
+      {
+        "command": "create_job",
+        "description": "Create a recurring MCP job.",
+        "example": "create_job(name='sync', interval_seconds=300, service_name='runtime_tools', tool_name='gateway_action', args={'action':'status'})"
+      },
+      {
+        "command": "list_jobs",
+        "description": "List persisted jobs.",
+        "example": "list_jobs(enabled_only=true)"
+      },
+      {
+        "command": "remove_job",
+        "description": "Remove a job by id.",
+        "example": "remove_job(job_id='job_xxx')"
+      },
+      {
+        "command": "pause_job",
+        "description": "Pause a job.",
+        "example": "pause_job(job_id='job_xxx')"
+      },
+      {
+        "command": "resume_job",
+        "description": "Resume a job.",
+        "example": "resume_job(job_id='job_xxx')"
+      },
+      {
+        "command": "run_due_jobs",
+        "description": "Execute due jobs once and update schedule.",
+        "example": "run_due_jobs(max_jobs=5)"
+      }
+    ]
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" },
+      "interval_seconds": { "type": "integer" },
+      "service_name": { "type": "string" },
+      "tool_name": { "type": "string" },
+      "args": { "type": "object" },
+      "enabled": { "type": "boolean" },
+      "enabled_only": { "type": "boolean" },
+      "job_id": { "type": "string" },
+      "now_ts": { "type": "number" },
+      "max_jobs": { "type": "integer" }
+    }
+  }
+}

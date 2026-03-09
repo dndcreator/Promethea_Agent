@@ -1,4 +1,4 @@
-﻿"""HTTP route registry for gateway APIs."""
+"""HTTP route registry for gateway APIs."""
 
 from fastapi import APIRouter
 
@@ -11,6 +11,10 @@ from .routes.memory import router as memory_router
 from .routes.doctor import router as doctor_router
 from .routes.config import router as config_router
 from .routes.batch import router as batch_router
+from .routes.automation import router as automation_router
+from .routes.skills import router as skills_router
+from .routes.voice import router as voice_router
+from .routes.ops import router as ops_router
 
 router = APIRouter()
 
@@ -23,4 +27,7 @@ router.include_router(memory_router)
 router.include_router(doctor_router)
 router.include_router(config_router)
 router.include_router(batch_router)
-
+router.include_router(automation_router)
+router.include_router(skills_router)
+router.include_router(voice_router)
+router.include_router(ops_router)

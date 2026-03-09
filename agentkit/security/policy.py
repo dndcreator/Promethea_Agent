@@ -23,6 +23,7 @@ class ToolPolicy:
             "move_file",
             "replace_in_file",
             "write_file",
+            "process_action",
             "computer_control",
         }
 
@@ -31,6 +32,7 @@ class ToolPolicy:
             "click",
             "type",
             "scroll",
+            "fs_action",
         }
 
         self.auto_approve_tools: Set[str] = {
@@ -42,7 +44,7 @@ class ToolPolicy:
             "date",
         }
 
-        # Backward-compatible map used by existing tests and older callers
+        # Backward-compatible map used by existing tests and older callers.
         self.tool_risk_map: Dict[str, ToolRiskLevel] = {
             tool: ToolRiskLevel.HIGH for tool in self.high_risk_tools
         }
@@ -65,12 +67,30 @@ class ToolPolicy:
             if action in {
                 "screenshot",
                 "get_content",
+                "content",
                 "get_url",
                 "get_title",
                 "get_mouse_position",
                 "get_screen_size",
+                "list_tabs",
             }:
                 return RiskLevel.SAFE
+            return RiskLevel.MODERATE
+
+        if tool_name in {"fs_action"}:
+            action = str(args.get("action", "")).lower() if isinstance(args, dict) else ""
+            if action in {"read", "list", "search", "exists", "stat"}:
+                return RiskLevel.SAFE
+            if action in {"write", "append", "delete", "move", "copy", "mkdir"}:
+                return RiskLevel.HIGH
+            return RiskLevel.MODERATE
+
+        if tool_name in {"process_action"}:
+            action = str(args.get("action", "")).lower() if isinstance(args, dict) else ""
+            if action in {"list", "get", "system_info", "get_output"}:
+                return RiskLevel.SAFE
+            if action in {"run", "run_async", "kill", "terminate", "wait"}:
+                return RiskLevel.HIGH
             return RiskLevel.MODERATE
 
         if tool_name in self.high_risk_tools:
@@ -84,3 +104,4 @@ class ToolPolicy:
 
 
 global_policy = ToolPolicy()
+

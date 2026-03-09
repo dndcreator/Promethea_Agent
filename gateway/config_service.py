@@ -21,6 +21,7 @@ from .events import EventEmitter
 from .protocol import EventType
 from config import PrometheaConfig, load_config
 from gateway.http.user_manager import user_manager
+from agentkit.security.sandbox import reload_sandbox_policy
 
 
 class ConfigService:
@@ -68,6 +69,7 @@ class ConfigService:
         """
         if not self._default_config:
             self._load_default_config()
+            reload_sandbox_policy()
         return self._default_config
     
     def get_user_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
@@ -120,6 +122,7 @@ class ConfigService:
         # 1. Start from the default configuration
         if not self._default_config:
             self._load_default_config()
+            reload_sandbox_policy()
         
         default_dict = self._default_config.model_dump() if self._default_config else {}
         
@@ -149,6 +152,7 @@ class ConfigService:
         """
         if not self._default_config:
             self._load_default_config()
+            reload_sandbox_policy()
         
         default_dict = self._default_config.model_dump() if self._default_config else {}
         return self._deep_merge(default_dict.copy(), user_config)
@@ -232,6 +236,7 @@ class ConfigService:
             # 5. Clear cache
             if user_id in self._user_config_cache:
                 del self._user_config_cache[user_id]
+            reload_sandbox_policy()
             
             # 6. Emit configuration-changed event
             if self.event_emitter:
@@ -303,6 +308,7 @@ class ConfigService:
             # Clear cache
             if user_id in self._user_config_cache:
                 del self._user_config_cache[user_id]
+            reload_sandbox_policy()
             
             # Emit configuration-changed event
             if self.event_emitter:
@@ -340,6 +346,7 @@ class ConfigService:
             
             # Reload default configuration
             self._load_default_config()
+            reload_sandbox_policy()
             
             new_config = self._default_config.model_dump() if self._default_config else {}
             

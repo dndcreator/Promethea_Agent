@@ -22,6 +22,7 @@ from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
 from .connection import ConnectionManager, Connection
 from .events import EventEmitter
 from .tool_service import ToolService, ToolInvocationContext
+from .tool_policy import ToolPolicyEngine
 from .memory_service import MemoryService
 from .conversation_service import ConversationService
 from .reasoning_service import ReasoningService
@@ -75,6 +76,7 @@ class GatewayServer:
         # They communicate over the event bus and are initialized via
         # GatewayIntegration.
         self.tool_service: Optional[ToolService] = None
+        self.tool_policy_engine = ToolPolicyEngine()
         self.memory_service: Optional[MemoryService] = None
         self.reasoning_service: Optional[ReasoningService] = None
         self.conversation_service: Optional[ConversationService] = None
@@ -689,6 +691,42 @@ class GatewayServer:
             return False
         return self.message_manager.get_session(session_id, user_id=user_id) is not None
 
+    def _resolve_tool_identity(self, entry_tool_name: str, params: Dict[str, Any]) -> tuple[str, str]:
+        service_name = str(params.get("service_name") or entry_tool_name)
+        tool_name = str(params.get("tool_name") or params.get("command") or entry_tool_name)
+        return service_name, tool_name
+
+    def _resolve_provider_id(self, user_config: Optional[Dict[str, Any]]) -> str:
+        if not isinstance(user_config, dict):
+            return "default"
+        api_cfg = user_config.get("api")
+        if not isinstance(api_cfg, dict):
+            return "default"
+        model = str(api_cfg.get("model") or "").strip().lower()
+        base_url = str(api_cfg.get("base_url") or "").strip().lower()
+        if model and "/" in model:
+            return model.split("/", 1)[0]
+        if "openrouter" in base_url:
+            return "openrouter"
+        if "openai" in base_url:
+            return "openai"
+        return "default"
+
+    def _enforce_tool_policy(self, *, entry_tool_name: str, params: Dict[str, Any], user_id: Optional[str]) -> None:
+        if not self.tool_policy_engine:
+            return
+        user_cfg = self.config_service.get_merged_config(user_id) if (self.config_service and user_id) else {}
+        provider_id = self._resolve_provider_id(user_cfg)
+        service_name, tool_name = self._resolve_tool_identity(entry_tool_name, params)
+        decision = self.tool_policy_engine.check(
+            service_name=service_name,
+            tool_name=tool_name,
+            user_config=user_cfg,
+            provider_id=provider_id,
+        )
+        if not decision.allowed:
+            raise PermissionError(decision.reason)
+
     async def _execute_tool_for_chat(
         self,
         tool_name: str,
@@ -714,6 +752,7 @@ class GatewayServer:
 
         if not self.tool_service:
             self.tool_service = ToolService(self.event_emitter)
+        self._enforce_tool_policy(entry_tool_name=tool_name, params=args, user_id=user_id)
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
@@ -925,15 +964,18 @@ class GatewayServer:
                     error="Missing 'tool_name' in params",
                 )
 
+            user_id = self._resolve_request_user_id(connection, request)
             ctx = ToolInvocationContext(
                 session_id=tool_params.get("session_id"),
-                user_id=tool_params.get("user_id"),
+                user_id=user_id,
                 source="gateway",
                 metadata={
                     "connection_id": connection.connection_id,
                     "request_method": request.method,
                 },
             )
+
+            self._enforce_tool_policy(entry_tool_name=tool_name, params=tool_params, user_id=user_id)
 
             result = await self.tool_service.call_tool(
                 tool_name=tool_name,
@@ -1071,7 +1113,8 @@ class GatewayServer:
             MATCH (s:Session {id: $session_id})<-[:PART_OF_SESSION]-(n)
             RETURN n.id as id, labels(n)[0] as type, n.content as content,
                    n.layer as layer, n.importance as importance,
-                   n.access_count as access_count, n.created_at as created_at
+                   n.access_count as access_count, n.created_at as created_at,
+                   n.role as role, n.memory_type as memory_type, n.memory_source as memory_source
             """
             
             # Query relations in this session graph.
@@ -1095,6 +1138,9 @@ class GatewayServer:
                     "importance": n.get("importance", 0.5),
                     "access_count": n.get("access_count", 0),
                     "created_at": n.get("created_at"),
+                    "role": n.get("role", ""),
+                    "memory_type": n.get("memory_type", ""),
+                    "memory_source": n.get("memory_source", ""),
                 }
                 for n in nodes_raw
             ]

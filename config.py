@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -38,13 +38,34 @@ class APIConfig(BaseSettings):
     max_history_rounds: int = Field(default=10, ge=1, le=100)
     timeout: Optional[int] = Field(default=None, ge=1, le=300)
     retry_count: Optional[int] = Field(default=None, ge=0, le=10)
-
+    failover_models: list[str] = Field(default_factory=list)
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, v: str) -> str:
         if v and v != "placeholder-key-not-set":
             v.encode("ascii")
         return v
+
+    @field_validator("failover_models", mode="before")
+    @classmethod
+    def normalize_failover_models(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(item).strip() for item in v if str(item).strip()]
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except Exception:
+                    pass
+            return [part.strip() for part in raw.split(",") if part.strip()]
+        return []
 
 
 class Neo4jConfig(BaseSettings):
@@ -144,6 +165,8 @@ class ReasoningConfig(BaseSettings):
     branch_factor: int = Field(default=3, ge=1, le=16)
     candidate_votes: int = Field(default=3, ge=1, le=9)
     min_branch_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    moirai_export_plan: bool = Field(default=False)
+    moirai_auto_start: bool = Field(default=False)
     debug_log: bool = Field(default=False)
 
     @field_validator("mode")
@@ -155,6 +178,68 @@ class ReasoningConfig(BaseSettings):
         return value
 
 
+
+class SandboxConfig(BaseSettings):
+    enabled: bool = Field(default=False)
+    profile: str = Field(default="off")
+    workspace_access: str = Field(default="rw")  # rw|ro|none
+    command_mode: str = Field(default="allowlist")  # allowlist|audit
+    allowed_commands: list[str] = Field(default_factory=lambda: [
+        "python",
+        "pytest",
+        "pip",
+        "uv",
+        "git",
+        "rg",
+        "cmd",
+        "powershell",
+    ])
+    deny_fragments: list[str] = Field(default_factory=lambda: [
+        "rm -rf",
+        "del /f /q",
+        "format ",
+        "shutdown",
+        "reboot",
+        "mkfs",
+        "diskpart",
+        "net user",
+        "reg add",
+    ])
+    network_mode: str = Field(default="restricted")  # restricted|none
+    allowed_domains: list[str] = Field(default_factory=list)
+    block_private_network: bool = Field(default=True)
+
+    @field_validator("profile")
+    @classmethod
+    def validate_profile(cls, v: str) -> str:
+        value = (v or "off").strip().lower()
+        if value not in {"off", "dev", "strict"}:
+            raise ValueError("sandbox.profile must be one of: off, dev, strict")
+        return value
+
+    @field_validator("workspace_access")
+    @classmethod
+    def validate_workspace_access(cls, v: str) -> str:
+        value = (v or "rw").strip().lower()
+        if value not in {"rw", "ro", "none"}:
+            raise ValueError("sandbox.workspace_access must be one of: rw, ro, none")
+        return value
+
+    @field_validator("command_mode")
+    @classmethod
+    def validate_command_mode(cls, v: str) -> str:
+        value = (v or "allowlist").strip().lower()
+        if value not in {"allowlist", "audit"}:
+            raise ValueError("sandbox.command_mode must be one of: allowlist, audit")
+        return value
+
+    @field_validator("network_mode")
+    @classmethod
+    def validate_network_mode(cls, v: str) -> str:
+        value = (v or "restricted").strip().lower()
+        if value not in {"restricted", "none"}:
+            raise ValueError("sandbox.network_mode must be one of: restricted, none")
+        return value
 class SystemPrompts(BaseSettings):
     Promethea_system_prompt: str = Field(
         default=(
@@ -171,6 +256,7 @@ class PrometheaConfig(BaseSettings):
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -203,6 +289,8 @@ def _set_nested_value(target: dict, path: tuple[str, ...], value: Any) -> None:
 def _overlay_explicit_env_values(merged_data: dict, base_from_env: PrometheaConfig) -> None:
     env_map = {
         ("api", "api_key"): "API__API_KEY",
+        ("api", "model"): "API__MODEL",
+        ("api", "failover_models"): "API__FAILOVER_MODELS",
         ("memory", "api", "api_key"): "MEMORY__API__API_KEY",
         ("memory", "neo4j", "password"): "MEMORY__NEO4J__PASSWORD",
     }
@@ -252,3 +340,11 @@ def load_config() -> PrometheaConfig:
 
 config = load_config()
 AI_NAME = "Promethea"
+
+
+
+
+
+
+
+
