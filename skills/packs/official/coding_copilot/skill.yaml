@@ -1,0 +1,13 @@
+﻿{
+  "skill_id": "coding_copilot",
+  "name": "Coding Copilot",
+  "description": "Engineer-focused coding execution with safe tool usage and structured delivery.",
+  "category": "engineering",
+  "prompt_block_policy": {
+    "disable": ["response_format"],
+    "prefer": ["identity", "policy", "workspace", "reasoning"]
+  },
+  "default_mode": "deep",
+  "version": "1.0.0",
+  "enabled": true
+}

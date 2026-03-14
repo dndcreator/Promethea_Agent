@@ -1,0 +1,14 @@
+﻿[
+  {
+    "title": "Fix failing test",
+    "user_input": "Please fix this failing unit test with minimal edits.",
+    "assistant_output": "I localized the regression, applied a one-function patch, and added a focused test assertion.",
+    "notes": "Keep edits scoped and avoid unrelated refactors."
+  },
+  {
+    "title": "Implement backlog item",
+    "user_input": "Implement backlog 014 end-to-end.",
+    "assistant_output": "I added schema, registry, runtime integration, endpoints, tests, and docs for backlog 014.",
+    "notes": "Favor vertical slices that are testable at each layer."
+  }
+]

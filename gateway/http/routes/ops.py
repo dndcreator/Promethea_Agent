@@ -30,6 +30,7 @@ async def ops_capabilities() -> Dict[str, Any]:
         "capabilities": {
             "automation_triggers": ["/api/automation/webhook", "/api/automation/cron/wakeup"],
             "skills_catalog": "/api/skills/catalog",
+            "skills_activate": "/api/skills/activate",
             "voice_turn": "/api/voice/turn",
             "model_failover": True,
             "sandbox_enabled": bool(sandbox_cfg.get("enabled", False)),

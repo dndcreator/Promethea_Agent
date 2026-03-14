@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -12,6 +13,13 @@ from loguru import logger
 from core.services import get_memory_service
 
 from .events import EventEmitter
+from .memory_gate import MemoryWriteGate, MemoryWriteRequest
+from .memory_recall_schema import (
+    DroppedRecallCandidate,
+    MemoryRecallRequest,
+    MemoryRecallResult,
+    RecalledMemoryItem,
+)
 from .protocol import EventType
 from memory.session_scope import scoped_session_id
 from memory.session_scope import user_node_id
@@ -39,7 +47,7 @@ class MemoryService:
         self.memory_adapter = memory_adapter or get_memory_service()
         self.llm_client = llm_client
         self.config_service = config_service
-
+        self._memory_write_gate = MemoryWriteGate()
         self._recent_write_keys: List[str] = []
         self._recent_write_index: set[str] = set()
         self._recent_write_limit = 2000
@@ -59,6 +67,11 @@ class MemoryService:
         self._sync_last_activity_ts = 0.0
         self._sync_current_item: Optional[Dict[str, Any]] = None
         self._sync_shutdown_requested = False
+
+        # Backlog 011: recall inspector in-memory history.
+        self._recall_runs: List[Dict[str, Any]] = []
+        self._recall_by_request: Dict[str, Dict[str, Any]] = {}
+        self._recall_history_limit = 200
 
         if not self.memory_adapter:
             logger.warning(
@@ -524,7 +537,7 @@ class MemoryService:
             "Rules:\n"
             "- If no durable state, return has_long_term_state=false and empty candidates.\n"
             "- Keep each content concise and factual.\n"
-            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
+            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 鑻规灉).\n"
             "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
             "- Do not include temporary tool/output details.\n"
             "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference."
@@ -645,6 +658,84 @@ class MemoryService:
             )
             return True
 
+    def _find_conflict_candidates(
+        self,
+        *,
+        user_id: str,
+        content: str,
+        semantic_keys: Optional[List[str]] = None,
+        limit: int = 3,
+    ) -> List[str]:
+        connector = self._get_connector()
+        if not connector:
+            return []
+        keys = [str(k).strip() for k in (semantic_keys or []) if str(k).strip()]
+        if not keys:
+            return []
+        normalized = self._normalize_content(content)
+        try:
+            rows = connector.query(
+                """
+                MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)<-[:PART_OF_SESSION]-(m:Message {role: 'user'})
+                MATCH (e:Entity)-[:FROM_MESSAGE]->(m)
+                WHERE e.content IN $keys
+                RETURN m.content AS content
+                ORDER BY m.created_at DESC
+                LIMIT 10
+                """,
+                {
+                    "user_node_id": user_node_id(user_id),
+                    "keys": keys,
+                },
+            )
+        except Exception:
+            return []
+        conflicts: List[str] = []
+        for row in rows or []:
+            prev = str((row or {}).get("content", "")).strip()
+            if not prev:
+                continue
+            if self._normalize_content(prev) == normalized:
+                continue
+            conflicts.append(prev)
+        return conflicts[: max(1, int(limit))]
+
+    async def _emit_memory_write_decision(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        channel: Optional[str],
+        memory_type: str,
+        content: str,
+        semantic_keys: List[str],
+        decision: str,
+        target_memory_layer: str,
+        reason: str,
+        requires_user_confirmation: bool = False,
+        conflict_candidates: Optional[List[str]] = None,
+        persisted: bool = False,
+    ) -> None:
+        if not self.event_emitter:
+            return
+        await self.event_emitter.emit(
+            EventType.MEMORY_WRITE_DECIDED,
+            {
+                "session_id": session_id,
+                "user_id": user_id,
+                "channel": channel,
+                "memory_type": memory_type,
+                "target_memory_layer": target_memory_layer,
+                "decision": decision,
+                "reason": reason,
+                "requires_user_confirmation": bool(requires_user_confirmation),
+                "conflict_candidates": list(conflict_candidates or []),
+                "semantic_keys": list(semantic_keys or []),
+                "content_length": len(content or ""),
+                "persisted": bool(persisted),
+                "source": "interaction.completed",
+            },
+        )
     async def _on_interaction_completed(self, event_msg) -> None:
         """Backward-compatible entrypoint for tests and direct callers."""
         payload = dict(getattr(event_msg, "payload", {}) or {})
@@ -757,14 +848,82 @@ class MemoryService:
             content = item["content"]
             semantic_keys = item.get("semantic_keys", [])
             write_key = self._make_write_key(user_id, memory_type, content)
-            if not self._should_write_candidate(user_id, memory_type, content):
+
+            gate_request = MemoryWriteRequest(
+                source_text=user_input,
+                source_turn={
+                    "user_input": user_input,
+                    "assistant_output": assistant_output,
+                },
+                proposed_memory_type=memory_type,
+                extracted_content=content,
+                confidence=float(item.get("verify_confidence") or 0.8),
+                related_entities=list(semantic_keys or []),
+                session_id=session_id,
+                user_id=user_id,
+                metadata={
+                    "verify_reason": item.get("verify_reason", ""),
+                    "verify_attribution": item.get("verify_attribution", ""),
+                },
+                conflict_candidates=self._find_conflict_candidates(
+                    user_id=user_id,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                ),
+            )
+            gate_decision = self._memory_write_gate.evaluate(gate_request)
+            if gate_decision.decision != "allow":
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision=gate_decision.decision,
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason=gate_decision.reason,
+                    requires_user_confirmation=gate_decision.requires_user_confirmation,
+                    conflict_candidates=gate_decision.conflict_candidates,
+                    persisted=False,
+                )
                 continue
+
+            if not self._should_write_candidate(user_id, memory_type, content):
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision="deny",
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason="duplicate_or_too_short",
+                    conflict_candidates=gate_decision.conflict_candidates,
+                    persisted=False,
+                )
+                continue
+
             if not self._graph_memory_state_changed(
                 user_id=user_id,
                 memory_type=memory_type,
                 content=content,
                 semantic_keys=semantic_keys,
             ):
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision="deny",
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason="graph_duplicate",
+                    conflict_candidates=gate_decision.conflict_candidates,
+                    persisted=False,
+                )
                 continue
 
             success = self.memory_adapter.add_message(
@@ -776,6 +935,7 @@ class MemoryService:
                     "memory_type": memory_type,
                     "semantic_keys": semantic_keys,
                     "memory_source": "interaction.completed",
+                    "target_memory_layer": gate_decision.target_memory_layer,
                     "verify_confidence": item.get("verify_confidence"),
                     "verify_reason": item.get("verify_reason", ""),
                     "verify_evidence": item.get("verify_evidence", ""),
@@ -783,11 +943,38 @@ class MemoryService:
                 },
             )
             if not success:
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision="deny",
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason="adapter_write_failed",
+                    conflict_candidates=gate_decision.conflict_candidates,
+                    persisted=False,
+                )
                 continue
 
             self._remember_write_key(write_key)
             self.memory_adapter.on_message_saved(session_id, "user", user_id)
             saved_count += 1
+
+            await self._emit_memory_write_decision(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                memory_type=memory_type,
+                content=content,
+                semantic_keys=semantic_keys,
+                decision="allow",
+                target_memory_layer=gate_decision.target_memory_layer,
+                reason=gate_decision.reason,
+                conflict_candidates=gate_decision.conflict_candidates,
+                persisted=True,
+            )
 
             if self.event_emitter:
                 await self.event_emitter.emit(
@@ -857,32 +1044,426 @@ class MemoryService:
 
     # ===== Memory query API =====
 
+    def _extract_run_context_fields(self, run_context: Optional[Any]) -> Dict[str, Any]:
+        if run_context is None:
+            return {}
+        trace_id = getattr(run_context, "trace_id", None)
+        request_id = getattr(run_context, "request_id", None)
+        session_value = getattr(run_context, "session_id", None)
+        user_value = getattr(run_context, "user_id", None)
+        if session_value is None:
+            session_state = getattr(run_context, "session_state", None)
+            session_value = getattr(session_state, "session_id", None) if session_state is not None else None
+            if user_value is None:
+                user_value = getattr(session_state, "user_id", None) if session_state is not None else None
+            if trace_id is None:
+                trace_id = getattr(session_state, "trace_id", None) if session_state is not None else None
+        data: Dict[str, Any] = {}
+        if trace_id:
+            data["trace_id"] = str(trace_id)
+        if request_id:
+            data["request_id"] = str(request_id)
+        if session_value:
+            data["session_id"] = str(session_value)
+        if user_value:
+            data["user_id"] = str(user_value)
+        return data
+    @staticmethod
+    def _normalize_query_text(text: str) -> str:
+        lowered = (text or "").strip().lower()
+        return re.sub(r"\s+", " ", lowered)
+
+    def _tokenize_text(self, text: str) -> List[str]:
+        chunks = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9_]+", self._normalize_query_text(text))
+        tokens: List[str] = []
+        for chunk in chunks:
+            if re.match(r"^[a-z0-9_]+$", chunk):
+                tokens.extend([x for x in chunk.split("_") if x])
+            else:
+                tokens.append(chunk)
+        return tokens
+
+    def _resolve_recall_policy(
+        self,
+        *,
+        mode: str,
+        user_id: str,
+        request_top_k: int,
+    ) -> Dict[str, Any]:
+        mode_normalized = str(mode or "fast").strip().lower()
+        if mode_normalized not in {"fast", "deep", "workflow"}:
+            mode_normalized = "fast"
+
+        defaults = {
+            "fast": {"top_k": 4, "allowed_layers": ["summary", "direct", "recent"], "max_age_days": 30},
+            "deep": {"top_k": 8, "allowed_layers": ["summary", "concept", "direct", "related", "salient", "recent"], "max_age_days": 90},
+            "workflow": {"top_k": 8, "allowed_layers": ["summary", "concept", "direct", "related"], "max_age_days": 45},
+        }
+        policy = dict(defaults[mode_normalized])
+        cfg = self._get_merged_config(user_id=user_id) or {}
+        recall_cfg = cfg.get("memory", {}).get("recall_policy", {})
+        mode_cfg = recall_cfg.get(mode_normalized, {}) if isinstance(recall_cfg, dict) else {}
+        if isinstance(mode_cfg, dict):
+            if "top_k" in mode_cfg:
+                policy["top_k"] = int(mode_cfg.get("top_k") or policy["top_k"])
+            if "allowed_layers" in mode_cfg and isinstance(mode_cfg.get("allowed_layers"), list):
+                policy["allowed_layers"] = [str(x) for x in mode_cfg.get("allowed_layers") if str(x).strip()]
+            if "max_age_days" in mode_cfg:
+                policy["max_age_days"] = int(mode_cfg.get("max_age_days") or policy["max_age_days"])
+
+        policy["top_k"] = max(1, min(20, int(request_top_k or policy["top_k"] or 5)))
+        policy["max_age_days"] = max(1, min(365, int(policy["max_age_days"])))
+        policy["mode"] = mode_normalized
+        return policy
+
+    @staticmethod
+    def _source_layer_to_memory_type(layer: str) -> str:
+        mapping = {
+            "summary": "semantic",
+            "concept": "semantic",
+            "direct": "episodic",
+            "related": "episodic",
+            "salient": "episodic",
+            "recent": "working",
+        }
+        return mapping.get(str(layer or "").lower(), "episodic")
+
+    def _collect_recall_candidates(self, request: MemoryRecallRequest) -> List[Dict[str, Any]]:
+        if not self.memory_adapter:
+            return []
+        recall_engine = getattr(self.memory_adapter, "recall_engine", None)
+        if recall_engine is None:
+            context = self.memory_adapter.get_context(
+                query=request.query_text,
+                session_id=request.session_id,
+                user_id=request.user_id,
+            )
+            if not context:
+                return []
+            return [{
+                "memory_id": f"ctx_{request.request_id}",
+                "source_layer": "summary",
+                "content": context,
+                "importance": 0.5,
+                "created_at": None,
+                "source_session": None,
+                "owner_user_id": request.user_id,
+            }]
+
+        entities: List[str] = []
+        try:
+            extraction = recall_engine.extractor.extract(role="user", content=request.query_text)
+            entities = extraction.entities if extraction and extraction.entities else []
+        except Exception:
+            entities = []
+
+        recent_days = int(request.filters.get("recent_days") or 7)
+        try:
+            if hasattr(recall_engine, "_calculate_params"):
+                params = recall_engine._calculate_params(request.query_text, entities)
+                recent_days = int(params.get("recent_days", recent_days))
+        except Exception:
+            pass
+
+        try:
+            results = recall_engine._three_layer_query(entities, request.session_id, request.user_id, recent_days)
+        except Exception:
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for layer in ("summary", "concept", "direct", "related", "salient", "recent"):
+            items = results.get(layer, []) if isinstance(results, dict) else []
+            for idx, item in enumerate(items or []):
+                if not isinstance(item, dict):
+                    continue
+                content = str(item.get("content") or "").strip()
+                if not content:
+                    continue
+                source_session = item.get("session_id")
+                rows.append({
+                    "memory_id": f"{layer}_{idx}_{abs(hash(content)) % 10000000}",
+                    "source_layer": layer,
+                    "content": content,
+                    "importance": float(item.get("importance") or 0.0),
+                    "created_at": str(item.get("time") or "") or None,
+                    "source_session": str(source_session) if source_session else None,
+                    "owner_user_id": request.user_id,
+                    "via": item.get("via"),
+                })
+        return rows
+
+    @staticmethod
+    def _parse_candidate_datetime(raw_value: Optional[str]) -> Optional[datetime]:
+        if not raw_value:
+            return None
+        text = str(raw_value).strip()
+        if not text:
+            return None
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return datetime.fromisoformat(text)
+        except Exception:
+            return None
+
+    def _build_recall_reason(self, candidate: Dict[str, Any], request: MemoryRecallRequest) -> str:
+        layer = str(candidate.get("source_layer") or "")
+        if request.mode == "workflow" and candidate.get("source_session") == request.session_id:
+            return "active_workflow_context"
+        if layer == "summary":
+            return "project_memory_match"
+        if layer == "concept":
+            return "reasoning_template_match"
+        if layer == "recent":
+            return "recent_session_context"
+        if layer in {"direct", "related", "salient"}:
+            return "user_profile_match"
+        return "memory_layer_match"
+
+    def _format_recall_context(self, records: List[RecalledMemoryItem]) -> str:
+        if not records:
+            return ""
+        lines: List[str] = []
+        current_layer = ""
+        for item in records:
+            if item.source_layer != current_layer:
+                current_layer = item.source_layer
+                lines.append(f"[{current_layer}]")
+            snippet = (item.content or "").strip().replace("\n", " ")
+            if len(snippet) > 140:
+                snippet = snippet[:137] + "..."
+            lines.append(f"- {snippet}")
+        return "\n".join(lines)
+
+    def _store_recall_run(self, result: MemoryRecallResult) -> None:
+        row = result.model_dump()
+        self._recall_runs.append(row)
+        self._recall_by_request[result.request_id] = row
+        if len(self._recall_runs) > self._recall_history_limit:
+            removed = self._recall_runs.pop(0)
+            rid = str(removed.get("request_id") or "")
+            if rid:
+                self._recall_by_request.pop(rid, None)
+
+    def list_recall_runs(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        rows = list(self._recall_runs)
+        if user_id:
+            rows = [x for x in rows if str(x.get("user_id") or "") == str(user_id)]
+        if session_id:
+            rows = [x for x in rows if str(x.get("session_id") or "") == str(session_id)]
+        if trace_id:
+            rows = [x for x in rows if str(x.get("trace_id") or "") == str(trace_id)]
+        lim = max(1, min(100, int(limit or 20)))
+        return rows[-lim:]
+
+    def get_recall_run(self, request_id: str) -> Optional[Dict[str, Any]]:
+        return self._recall_by_request.get(str(request_id))
+
+    async def recall_memory(
+        self,
+        request: MemoryRecallRequest,
+        run_context: Optional[Any] = None,
+    ) -> MemoryRecallResult:
+        resolved = self._extract_run_context_fields(run_context)
+        request.trace_id = str(resolved.get("trace_id") or request.trace_id)
+        request.request_id = str(resolved.get("request_id") or request.request_id)
+        request.session_id = str(resolved.get("session_id") or request.session_id)
+        request.user_id = str(resolved.get("user_id") or request.user_id)
+        request.normalized_query = request.normalized_query or self._normalize_query_text(request.query_text)
+
+        policy = self._resolve_recall_policy(
+            mode=request.mode,
+            user_id=request.user_id,
+            request_top_k=request.top_k,
+        )
+
+        if self.event_emitter:
+            await self.event_emitter.emit(
+                EventType.MEMORY_RECALL_STARTED,
+                {
+                    "request_id": request.request_id,
+                    "trace_id": request.trace_id,
+                    "session_id": request.session_id,
+                    "user_id": request.user_id,
+                    "query": request.query_text,
+                    "mode": policy.get("mode"),
+                },
+            )
+
+        if not self.enabled or not self.memory_adapter:
+            result = MemoryRecallResult(
+                request_id=request.request_id,
+                trace_id=request.trace_id,
+                session_id=request.session_id,
+                user_id=request.user_id,
+                recall_strategy=policy,
+                applied_filters=["memory_disabled"],
+                metrics={"total_candidates": 0, "selected": 0, "dropped": 0},
+            )
+            self._store_recall_run(result)
+            return result
+
+        candidates = self._collect_recall_candidates(request)
+        q_tokens = set(self._tokenize_text(request.normalized_query))
+        now = datetime.now(timezone.utc)
+        max_age_days = int(policy.get("max_age_days", 30))
+        cutoff = now - timedelta(days=max_age_days)
+        allowed_layers = set(policy.get("allowed_layers", []))
+
+        selected: List[RecalledMemoryItem] = []
+        dropped: List[DroppedRecallCandidate] = []
+        seen_content: set[str] = set()
+
+        for item in candidates:
+            source_layer = str(item.get("source_layer") or "").lower()
+            content = str(item.get("content") or "").strip()
+            memory_id = str(item.get("memory_id") or f"m_{abs(hash(content)) % 100000}")
+            if not content:
+                continue
+
+            if allowed_layers and source_layer not in allowed_layers:
+                dropped.append(DroppedRecallCandidate(memory_id=memory_id, source_layer=source_layer, content=content[:180], reason="layer_filtered"))
+                continue
+
+            owner = str(item.get("owner_user_id") or request.user_id)
+            if owner != request.user_id:
+                dropped.append(DroppedRecallCandidate(memory_id=memory_id, source_layer=source_layer, content=content[:180], reason="namespace_mismatch"))
+                if self.event_emitter:
+                    await self.event_emitter.emit(
+                        EventType.SECURITY_BOUNDARY_VIOLATION,
+                        {
+                            "namespace": "memory",
+                            "request_id": request.request_id,
+                            "trace_id": request.trace_id,
+                            "session_id": request.session_id,
+                            "user_id": request.user_id,
+                            "owner_user_id": owner,
+                            "requester_user_id": request.user_id,
+                            "memory_id": memory_id,
+                            "reason": "cross_user_memory_access",
+                            "outcome": "blocked",
+                        },
+                    )
+                continue
+
+            normalized_content = self._normalize_query_text(content)
+            if normalized_content in seen_content:
+                dropped.append(DroppedRecallCandidate(memory_id=memory_id, source_layer=source_layer, content=content[:180], reason="duplicate_candidate"))
+                continue
+
+            dt = self._parse_candidate_datetime(item.get("created_at"))
+            staleness_flag = False
+            if dt is not None:
+                dt_utc = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                if dt_utc < cutoff:
+                    staleness_flag = True
+                    dropped.append(DroppedRecallCandidate(memory_id=memory_id, source_layer=source_layer, content=content[:180], reason="stale_candidate"))
+                    continue
+
+            c_tokens = set(self._tokenize_text(content))
+            overlap = len(q_tokens.intersection(c_tokens)) / max(1, len(c_tokens))
+            importance = float(item.get("importance") or 0.0)
+            relevance = min(1.0, round((overlap * 0.8) + (importance * 0.2), 4))
+
+            conflict_flag = False
+            if " not " in f" {normalized_content} " and any(x in normalized_content for x in ["always", "must", "prefer"]):
+                conflict_flag = True
+
+            selected.append(
+                RecalledMemoryItem(
+                    memory_id=memory_id,
+                    memory_type=self._source_layer_to_memory_type(source_layer),
+                    source_layer=source_layer,
+                    content=content,
+                    relevance_score=relevance,
+                    confidence=max(0.1, min(1.0, round(0.5 + overlap * 0.5, 3))),
+                    recall_reason=self._build_recall_reason(item, request),
+                    source_session=item.get("source_session"),
+                    created_at=item.get("created_at"),
+                    staleness_flag=staleness_flag,
+                    conflict_flag=conflict_flag,
+                    metadata={"importance": importance, "via": item.get("via")},
+                )
+            )
+            seen_content.add(normalized_content)
+
+        selected.sort(key=lambda x: x.relevance_score, reverse=True)
+        top_k = int(policy.get("top_k", request.top_k or 5))
+        overflow = selected[top_k:]
+        selected = selected[:top_k]
+        for item in overflow:
+            dropped.append(
+                DroppedRecallCandidate(
+                    memory_id=item.memory_id,
+                    source_layer=item.source_layer,
+                    content=item.content[:180],
+                    reason="budget_limit",
+                    relevance_score=item.relevance_score,
+                )
+            )
+
+        result = MemoryRecallResult(
+            request_id=request.request_id,
+            trace_id=request.trace_id,
+            session_id=request.session_id,
+            user_id=request.user_id,
+            memory_records=selected,
+            summary=("; ".join([f"{x.source_layer}:{x.recall_reason}" for x in selected[:3]]) if selected else ""),
+            formatted_context=self._format_recall_context(selected),
+            recall_strategy=policy,
+            applied_filters=["layer_filter", "namespace_filter", "duplicate_filter", "staleness_filter", "top_k_filter"],
+            dropped_candidates=dropped,
+            metrics={
+                "total_candidates": len(candidates),
+                "selected": len(selected),
+                "dropped": len(dropped),
+                "mode": policy.get("mode"),
+                "top_k": top_k,
+            },
+        )
+        self._store_recall_run(result)
+
+        if self.event_emitter:
+            payload = {
+                "request_id": result.request_id,
+                "trace_id": result.trace_id,
+                "session_id": result.session_id,
+                "user_id": result.user_id,
+                "context_length": len(result.formatted_context or ""),
+                "selected": len(result.memory_records),
+                "dropped": len(result.dropped_candidates),
+            }
+            await self.event_emitter.emit(EventType.MEMORY_RECALL_FINISHED, payload)
+            await self.event_emitter.emit(EventType.MEMORY_RECALLED, payload)
+
+        return result
     async def get_context(
         self,
         query: str,
         session_id: str,
         user_id: Optional[str] = None,
+        run_context: Optional[Any] = None,
     ) -> str:
-        if not self.enabled or not self.memory_adapter:
-            return ""
-
         try:
-            context = self.memory_adapter.get_context(
-                query=query,
-                session_id=session_id,
-                user_id=user_id or "default_user",
+            resolved = self._extract_run_context_fields(run_context)
+            request = MemoryRecallRequest(
+                request_id=str(resolved.get("request_id") or f"recall_{int(time.time() * 1000)}"),
+                trace_id=str(resolved.get("trace_id") or f"trace_recall_{int(time.time() * 1000)}"),
+                session_id=str(resolved.get("session_id") or session_id),
+                user_id=str(resolved.get("user_id") or user_id or "default_user"),
+                query_text=str(query or ""),
+                mode=str((resolved.get("mode") or "fast")),
+                top_k=5,
             )
-            if self.event_emitter and context:
-                await self.event_emitter.emit(
-                    EventType.MEMORY_RECALLED,
-                    {
-                        "session_id": session_id,
-                        "user_id": user_id,
-                        "query": query,
-                        "context_length": len(context),
-                    },
-                )
-            return context
+            result = await self.recall_memory(request, run_context=run_context)
+            return result.formatted_context or ""
         except Exception as e:
             logger.error("MemoryService: Error getting context: {}", e)
             return ""
@@ -1056,6 +1637,12 @@ class MemoryService:
 
     def is_enabled(self) -> bool:
         return self.enabled and self.memory_adapter is not None
+
+
+
+
+
+
 
 
 

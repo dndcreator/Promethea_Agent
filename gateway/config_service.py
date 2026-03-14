@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 """
 Configuration system service layer.
@@ -22,6 +22,11 @@ from .protocol import EventType
 from config import PrometheaConfig, load_config
 from gateway.http.user_manager import user_manager
 from agentkit.security.sandbox import reload_sandbox_policy
+from .config_migrations import (
+    CURRENT_CONFIG_VERSION,
+    collect_deprecation_warnings,
+    migrate_config,
+)
 
 
 class ConfigService:
@@ -39,13 +44,13 @@ class ConfigService:
         event_emitter: Optional[EventEmitter] = None,
     ) -> None:
         self.event_emitter = event_emitter
-        
+
         self._default_config: Optional[PrometheaConfig] = None
-        
         self._user_config_cache: Dict[str, Dict[str, Any]] = {}
-        
+        self._deprecation_warnings: Dict[str, list[str]] = {}
+
         self._load_default_config()
-        
+
         logger.info("ConfigService: Initialized")
     
     def _load_default_config(self) -> None:
@@ -58,6 +63,38 @@ class ConfigService:
             # Fallback: use an empty config to keep the service usable
             self._default_config = PrometheaConfig()
     
+    def _migrate_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        warning_key: str,
+    ) -> Dict[str, Any]:
+        migrated, report = migrate_config(payload if isinstance(payload, dict) else {})
+        warnings = list(report.get("warnings") or [])
+        warnings.extend(collect_deprecation_warnings(migrated))
+        if warnings:
+            self._deprecation_warnings[warning_key] = sorted(set(str(w) for w in warnings if str(w).strip()))
+        elif warning_key in self._deprecation_warnings:
+            self._deprecation_warnings.pop(warning_key, None)
+        return migrated
+
+    @staticmethod
+    def _scope_slice(payload: Dict[str, Any], scope: Optional[str]) -> Dict[str, Any]:
+        if not scope:
+            return payload
+        cur: Any = payload
+        for part in [p for p in str(scope).split(".") if p]:
+            if not isinstance(cur, dict):
+                return {}
+            cur = cur.get(part)
+            if cur is None:
+                return {}
+        return cur if isinstance(cur, dict) else {"value": cur}
+
+    def get_deprecation_warnings(self, user_id: Optional[str] = None) -> list[str]:
+        key = user_id if user_id else "default"
+        return list(self._deprecation_warnings.get(key, []))
+
     # ===== Configuration query APIs =====
     
     def get_default_config(self) -> PrometheaConfig:
@@ -77,36 +114,35 @@ class ConfigService:
         Get the user configuration.
 
         If user_id is None, return the default configuration as a plain dict.
-        
+
         Args:
             user_id: Optional user ID.
-            
+
         Returns:
             User configuration as a dictionary.
         """
         if not user_id:
-            # Return the default configuration as a dictionary
             if not self._default_config:
                 self._load_default_config()
-            return self._default_config.model_dump() if self._default_config else {}
-        
-        # Check cache first
+            default_payload = self._default_config.model_dump() if self._default_config else {}
+            return self._migrate_payload(default_payload, warning_key="default")
+
         if user_id in self._user_config_cache:
             return self._user_config_cache[user_id]
-        
-        # Load user config from user_manager
+
         try:
             user_config = user_manager.get_user_config(user_id)
             merged_config = self._merge_configs(user_id, user_config)
+            merged_config = self._migrate_payload(merged_config, warning_key=user_id)
             self._user_config_cache[user_id] = merged_config
             return merged_config
         except Exception as e:
             logger.error(f"ConfigService: Failed to get user config for {user_id}: {e}")
-            # Fallback: return default configuration
             if not self._default_config:
                 self._load_default_config()
-            return self._default_config.model_dump() if self._default_config else {}
-    
+            default_payload = self._default_config.model_dump() if self._default_config else {}
+            return self._migrate_payload(default_payload, warning_key="default")
+
     def get_merged_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Get the merged configuration (default + user + environment).
@@ -137,7 +173,7 @@ class ConfigService:
         # 3. Environment variables have highest priority (handled by load_config)
         # No extra handling here because PrometheaConfig already reads env vars
         
-        return merged
+        return self._migrate_payload(merged, warning_key=(user_id or "default"))
 
     def _merge_configs(self, user_id: str, user_config: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -167,6 +203,57 @@ class ConfigService:
                 target[key] = value
         return target
     
+    def get_runtime_config(self, user_id: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
+        merged = self.get_merged_config(user_id)
+        runtime = {
+            "config_version": merged.get("config_version", CURRENT_CONFIG_VERSION),
+            "api": merged.get("api") or {},
+            "memory": merged.get("memory") or {},
+            "reasoning": merged.get("reasoning") or {},
+            "sandbox": merged.get("sandbox") or {},
+            "system": merged.get("system") or {},
+            "runtime_config": merged.get("runtime_config") or {},
+        }
+        return self._scope_slice(runtime, scope)
+
+    def get_user_preferences(self, user_id: str, scope: Optional[str] = None) -> Dict[str, Any]:
+        merged = self.get_merged_config(user_id)
+        preferences = merged.get("user_preferences") if isinstance(merged.get("user_preferences"), dict) else {}
+        if not preferences:
+            preferences = {
+                "agent_name": merged.get("agent_name"),
+                "system_prompt": merged.get("system_prompt"),
+                "response_style": merged.get("response_style"),
+                "skills": merged.get("skills") if isinstance(merged.get("skills"), dict) else {},
+            }
+        payload = {
+            "config_version": merged.get("config_version", CURRENT_CONFIG_VERSION),
+            "user_preferences": preferences,
+        }
+        return self._scope_slice(payload, scope)
+
+    def get_tool_policy_config(self, user_id: Optional[str] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
+        merged = self.get_merged_config(user_id)
+        tools = merged.get("tools") if isinstance(merged.get("tools"), dict) else {}
+        skills = merged.get("skills") if isinstance(merged.get("skills"), dict) else {}
+        out = {
+            "config_version": merged.get("config_version", CURRENT_CONFIG_VERSION),
+            "agent_id": agent_id,
+            "tools": tools,
+            "skills": {
+                "active": skills.get("active"),
+                "overrides": skills.get("overrides") if isinstance(skills.get("overrides"), dict) else {},
+            },
+        }
+        return out
+
+    def get_channel_config(self, channel_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+        merged = self.get_merged_config(user_id)
+        channels = merged.get("channel_config") if isinstance(merged.get("channel_config"), dict) else {}
+        if not isinstance(channels.get(channel_id), dict):
+            return {}
+        return dict(channels.get(channel_id) or {})
+
     # ===== Configuration update APIs =====
     
     async def update_user_config(
@@ -179,17 +266,11 @@ class ConfigService:
     ) -> Dict[str, Any]:
         """
         Update a user's configuration.
-        
-        Args:
-            user_id: User ID.
-            config_updates: Configuration fields to update (supports nesting, e.g. {"api": {"model": "..."}}).
-            validate: Whether to validate the updated configuration.
-            
+
         Returns:
             Result dict: {"success": bool, "message": str, "config": dict}.
         """
         try:
-            # 1. Get current user configuration
             if hasattr(params_or_user_id, "config_data"):
                 params_obj = params_or_user_id
                 user_id = user_id or kwargs.get("user_id")
@@ -209,59 +290,69 @@ class ConfigService:
                 config_updates = {}
 
             current_config = user_manager.get_user_config(user_id)
-            
-            # 2. Apply a deep-merge of the updates
+            current_config = self._migrate_payload(current_config, warning_key=user_id)
+
             updated_config = self._deep_merge(current_config.copy(), config_updates)
-            
-            # 3. Optionally validate the configuration
+            updated_config, migration_report = migrate_config(updated_config)
+
+            persisted_updates = self._deep_merge(
+                dict(config_updates),
+                {"config_version": updated_config.get("config_version", CURRENT_CONFIG_VERSION)},
+            )
+
             if validate:
                 validation_result = self._validate_config(updated_config)
                 if not validation_result["valid"]:
                     return {
                         "success": False,
                         "message": f"Configuration validation failed: {validation_result['error']}",
-                        "config": current_config
+                        "config": current_config,
+                        "migration": migration_report,
                     }
-            
-            # 4. Persist updates to disk
-            success = user_manager.update_user_config_file(user_id, config_updates)
-            
+
+            success = user_manager.update_user_config_file(user_id, persisted_updates)
             if not success:
                 return {
                     "success": False,
                     "message": "Failed to save user configuration",
-                    "config": current_config
+                    "config": current_config,
+                    "migration": migration_report,
                 }
-            
-            # 5. Clear cache
+
             if user_id in self._user_config_cache:
                 del self._user_config_cache[user_id]
             reload_sandbox_policy()
-            
-            # 6. Emit configuration-changed event
+
             if self.event_emitter:
-                await self.event_emitter.emit(EventType.CONFIG_CHANGED, {
-                    "user_id": user_id,
-                    "changes": config_updates,
-                    "config": updated_config
-                })
-            
+                await self.event_emitter.emit(
+                    EventType.CONFIG_CHANGED,
+                    {
+                        "user_id": user_id,
+                        "changes": config_updates,
+                        "config": updated_config,
+                    },
+                )
+
             logger.info(f"ConfigService: User config updated for {user_id}")
-            
+            dep_warnings = sorted(
+                set(self.get_deprecation_warnings(user_id) + list(migration_report.get("warnings") or []))
+            )
             return {
                 "success": True,
                 "message": "Configuration updated successfully",
-                "config": updated_config
+                "config": updated_config,
+                "migration": migration_report,
+                "warnings": dep_warnings,
             }
-        
+
         except Exception as e:
             logger.error(f"ConfigService: Error updating user config: {e}")
             return {
                 "success": False,
                 "message": f"Failed to update config: {str(e)}",
-                "config": {}
+                "config": {},
             }
-    
+
     async def reset_user_config(
         self,
         user_id: str,
@@ -281,6 +372,7 @@ class ConfigService:
             if reset_to_default:
                 # Reset to default configuration while preserving user-specific fields like agent_name
                 default_config = self.get_default_config().model_dump()
+                default_config["config_version"] = CURRENT_CONFIG_VERSION
                 # Preserve identity-related fields for the user
                 current_config = user_manager.get_user_config(user_id)
                 preserved_fields = {
@@ -293,6 +385,7 @@ class ConfigService:
             else:
                 # Clear configuration and keep only essential fields
                 empty_config = {
+                    "config_version": CURRENT_CONFIG_VERSION,
                     "agent_name": user_manager.get_user_config(user_id).get("agent_name", "Promethea"),
                     "system_prompt": "",
                     "api": {}
@@ -415,6 +508,18 @@ class ConfigService:
             return {"success": False, "message": "model is required", "config": {}}
 
         if api_key:
+            if self.event_emitter:
+                await self.event_emitter.emit(
+                    EventType.SECURITY_SECRET_ACCESS,
+                    {
+                        "user_id": user_id,
+                        "request_id": kwargs.get("request_id"),
+                        "namespace": "config",
+                        "secret_field": "api.api_key",
+                        "reason": "env_only_secret",
+                        "outcome": "blocked",
+                    },
+                )
             return {
                 "success": False,
                 "message": "api_key is env-only; set API__API_KEY in .env",
@@ -479,29 +584,26 @@ class ConfigService:
     def _validate_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Validate a configuration dictionary.
-        
-        Args:
-            config: Configuration dictionary.
-            
+
         Returns:
             {"valid": bool, "error": str or None}
         """
         try:
-            # Try to validate with the Pydantic model.
-            # Only validate the API configuration section.
-            if "api" in config:
-                from config import APIConfig
-                api_config = APIConfig(**config["api"])
-                # Validation succeeded
-                return {"valid": True, "error": None}
-            
+            if not isinstance(config, dict):
+                return {"valid": False, "error": "config must be dict"}
+
+            cfg_ver = str(config.get("config_version") or "").strip()
+            if not cfg_ver:
+                return {"valid": False, "error": "config_version is required"}
+
+            # Validate known strict sections with Pydantic models while allowing
+            # forward-compatible extra keys in other sections.
+            PrometheaConfig(**config)
             return {"valid": True, "error": None}
-        
+
         except Exception as e:
             return {"valid": False, "error": str(e)}
-    
-    # ===== Configuration diagnostics =====
-    
+
     def diagnose_config(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Diagnose configuration issues.
@@ -539,9 +641,23 @@ class ConfigService:
             if not memory_api.get("model"):
                 warnings.append("Memory API is configured as dedicated, but memory.api.model is empty")
         
+        warnings.extend(self.get_deprecation_warnings(user_id))
         return {
             "user_id": user_id,
             "issues": issues,
-            "warnings": warnings,
+            "warnings": sorted(set(warnings)),
             "config": config
         }
+
+
+
+
+
+
+
+
+
+
+
+
+

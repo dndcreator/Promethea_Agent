@@ -1,4 +1,4 @@
-import pytest
+﻿import pytest
 
 from gateway.reasoning_service import ReasoningService
 
@@ -235,7 +235,7 @@ class DummyToolService:
     def __init__(self):
         self.calls = []
 
-    async def call_tool(self, tool_name, params, ctx=None, request_id=None, connection_id=None):
+    async def call_tool(self, tool_name, params, ctx=None, request_id=None, connection_id=None, run_context=None, user_config=None):
         self.calls.append(
             {
                 "tool_name": tool_name,
@@ -345,3 +345,5 @@ async def test_select_tool_falls_back_to_strategy_when_llm_choice_invalid(monkey
     assert selected["use_tool"] is True
     assert selected["service_name"] == "computer_control"
     assert selected["tool_name"] == "browser_action"
+
+

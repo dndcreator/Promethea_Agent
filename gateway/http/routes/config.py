@@ -100,9 +100,10 @@ async def get_config(
     resolved_user_id = _resolve_user_id(user_id, current_user_id)
     config_data = config_service.get_merged_config(resolved_user_id)
     config_data = _sanitize_config_for_client(config_data)
+    warnings = config_service.get_deprecation_warnings(resolved_user_id)
     if raw:
         return config_data
-    return {"status": "success", "user_id": resolved_user_id, "config": config_data}
+    return {"status": "success", "user_id": resolved_user_id, "config": config_data, "warnings": warnings}
 
 
 @router.post("/config")
@@ -196,14 +197,67 @@ async def reload_config(current_user_id: str = Depends(get_current_user_id)) -> 
     return {"status": "success", "user_id": current_user_id, **result}
 
 
+@router.get("/config/runtime/scoped")
+async def get_runtime_config_scoped(
+    scope: Optional[str] = None,
+    user_id: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    runtime = config_service.get_runtime_config(resolved_user_id, scope=scope)
+    runtime = _sanitize_config_for_client(runtime)
+    return {"status": "success", "user_id": resolved_user_id, "runtime": runtime, "scope": scope}
+
+
+@router.get("/config/preferences")
+async def get_user_preferences(
+    scope: Optional[str] = None,
+    user_id: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    prefs = config_service.get_user_preferences(resolved_user_id, scope=scope)
+    prefs = _sanitize_config_for_client(prefs)
+    return {"status": "success", "user_id": resolved_user_id, "preferences": prefs, "scope": scope}
+
+
+@router.get("/config/tool-policy")
+async def get_tool_policy_config(
+    agent_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    payload = config_service.get_tool_policy_config(resolved_user_id, agent_id=agent_id)
+    return {"status": "success", "user_id": resolved_user_id, "tool_policy": payload}
+
+
+@router.get("/config/channel/{channel_id}")
+async def get_channel_config(
+    channel_id: str,
+    user_id: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    payload = config_service.get_channel_config(channel_id, user_id=resolved_user_id)
+    payload = _sanitize_config_for_client(payload)
+    return {"status": "success", "user_id": resolved_user_id, "channel_id": channel_id, "config": payload}
+
+
 @router.get("/config/runtime")
 async def get_runtime_config(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
-    integration = _get_gateway_integration_or_503()
+    config_service = _get_config_service()
+    runtime = config_service.get_runtime_config(current_user_id)
+    runtime = _sanitize_config_for_client(runtime)
     return {
         "status": "success",
         "user_id": current_user_id,
-        "runtime": integration.config,
-        "precedence": "env > gateway_config.json > defaults",
+        "runtime": runtime,
+        "precedence": "env > user > defaults",
     }
 
 
@@ -219,4 +273,7 @@ async def reload_runtime_config(current_user_id: str = Depends(get_current_user_
 @router.post("/config/default")
 async def update_default_config(_: Dict[str, Any], __: str = Depends(get_current_user_id)) -> Dict[str, Any]:
     raise HTTPException(status_code=403, detail="default config mutation is disabled via API")
+
+
+
 

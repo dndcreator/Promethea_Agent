@@ -9,6 +9,9 @@ from .memory_service import MemoryService
 from .reasoning_service import ReasoningService
 from .conversation_service import ConversationService
 from .config_service import ConfigService
+from .workspace_service import WorkspaceService, WorkspaceHandle
+from .workflow_engine import WorkflowEngine, WorkflowError
+from .workflow_models import WorkflowDefinition, WorkflowRun, WorkflowStep, Checkpoint
 
 __all__ = [
     'GatewayProtocol',
@@ -22,7 +25,19 @@ __all__ = [
     'ReasoningService',
     'ConversationService',
     'ConfigService',
+    'WorkspaceService',
+    'WorkspaceHandle',
+    'WorkflowEngine',
+    'WorkflowError',
+    'WorkflowDefinition',
+    'WorkflowRun',
+    'WorkflowStep',
+    'Checkpoint',
     'MessageType',
     'RequestType',
     'EventType',
 ]
+
+
+
+

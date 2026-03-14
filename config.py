@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -251,6 +251,7 @@ class SystemPrompts(BaseSettings):
 
 
 class PrometheaConfig(BaseSettings):
+    config_version: str = Field(default="1")
     system: SystemConfig = Field(default_factory=SystemConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
@@ -340,6 +341,7 @@ def load_config() -> PrometheaConfig:
 
 config = load_config()
 AI_NAME = "Promethea"
+
 
 
 

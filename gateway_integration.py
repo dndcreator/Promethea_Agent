@@ -27,6 +27,8 @@ from gateway.config_service import ConfigService
 from gateway.conversation_service import ConversationService
 from gateway.memory_service import MemoryService
 from gateway.reasoning_service import ReasoningService
+from gateway.workspace_service import WorkspaceService
+from gateway.workflow_engine import WorkflowEngine
 
 
 class GatewayIntegration:
@@ -148,11 +150,12 @@ class GatewayIntegration:
 
         event_emitter = self.gateway_server.event_emitter
         self.gateway_server.config_service = ConfigService(event_emitter=event_emitter)
+        self.gateway_server.workspace_service = WorkspaceService(event_emitter=event_emitter)
 
         if not self.gateway_server.tool_service:
             from gateway.tool_service import ToolService
 
-            self.gateway_server.tool_service = ToolService(event_emitter)
+            self.gateway_server.tool_service = ToolService(event_emitter=event_emitter, mcp_manager=self.gateway_server.mcp_manager)
 
         memory_adapter = memory_system
         self.gateway_server.memory_service = MemoryService(
@@ -168,6 +171,13 @@ class GatewayIntegration:
             memory_service=self.gateway_server.memory_service,
             tool_service=self.gateway_server.tool_service,
             config_service=self.gateway_server.config_service,
+        )
+
+        self.gateway_server.workflow_engine = WorkflowEngine(
+            event_emitter=event_emitter,
+            workspace_service=self.gateway_server.workspace_service,
+            reasoning_service=self.gateway_server.reasoning_service,
+            memory_service=self.gateway_server.memory_service,
         )
 
         self.gateway_server.conversation_service = ConversationService(
@@ -410,4 +420,10 @@ async def initialize_gateway(
 def get_gateway_integration() -> Optional[GatewayIntegration]:
     """Get gateway singleton instance."""
     return _gateway_integration
+
+
+
+
+
+
 

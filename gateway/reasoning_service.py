@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -17,6 +17,17 @@ from .protocol import EventType
 from .reasoning_template_memory import ReasoningTemplateMemory
 from .tool_service import ToolInvocationContext
 from .tool_strategy import ToolStrategyEngine
+from .reasoning_state_machine import (
+    FAILED,
+    PENDING,
+    RUNNING,
+    SKIPPED,
+    SUCCEEDED,
+    WAITING_HUMAN,
+    WAITING_TOOL,
+    TERMINAL_STATES,
+    can_transition,
+)
 
 
 @dataclass
@@ -26,7 +37,13 @@ class ReasoningNode:
     kind: str
     title: str
     prompt: str = ""
-    status: str = "pending"
+    status: str = PENDING
+    evidence: List[str] = field(default_factory=list)
+    result: Dict[str, Any] = field(default_factory=dict)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    human_gate: Dict[str, Any] = field(default_factory=dict)
+    verifier_state: Dict[str, Any] = field(default_factory=dict)
+    checkpoint: Dict[str, Any] = field(default_factory=dict)
     observation: str = ""
     summary: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -376,6 +393,94 @@ class ReasoningService:
             tree.nodes[parent_id].updated_at = time.time()
         return node
 
+    def _transition_node_status(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        target: str,
+        reason: str = "",
+        checkpoint: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        current = str(node.status or "").strip()
+        target_status = str(target or "").strip()
+        if current == target_status:
+            return
+        if not can_transition(current, target_status):
+            raise ValueError(f"invalid node status transition: {current} -> {target_status}")
+        node.status = target_status
+        node.updated_at = time.time()
+        if checkpoint:
+            node.checkpoint = dict(checkpoint)
+        if reason:
+            node.metadata["status_reason"] = reason
+        tree.updated_at = time.time()
+
+    def _mark_node_succeeded(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        observation: str,
+        evidence: Optional[List[str]] = None,
+        result: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._transition_node_status(
+            tree=tree,
+            node=node,
+            target=SUCCEEDED,
+            reason="step_completed",
+        )
+        node.observation = observation
+        node.summary = observation
+        node.evidence = list(evidence or [])
+        node.result = dict(result or {})
+
+    def _resume_node_from_waiting_tool(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        note: str = "tool_observation_ready",
+    ) -> None:
+        self._transition_node_status(
+            tree=tree,
+            node=node,
+            target=RUNNING,
+            reason=note,
+        )
+
+    def _resume_node_from_waiting_human(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        approved: bool,
+    ) -> None:
+        if approved:
+            self._transition_node_status(
+                tree=tree,
+                node=node,
+                target=RUNNING,
+                reason="human_approved",
+            )
+            return
+        self._transition_node_status(
+            tree=tree,
+            node=node,
+            target=SKIPPED,
+            reason="human_rejected",
+        )
+
+    def _snapshot_node(self, node: ReasoningNode) -> Dict[str, Any]:
+        return {
+            "node_id": node.node_id,
+            "status": node.status,
+            "checkpoint": dict(node.checkpoint or {}),
+            "tool_calls": list(node.tool_calls or []),
+            "human_gate": dict(node.human_gate or {}),
+            "verifier_state": dict(node.verifier_state or {}),
+        }
     def _node_depth(self, tree: ReasoningTree, node_id: Optional[str]) -> int:
         depth = 0
         current = tree.nodes.get(node_id) if node_id else None
@@ -392,6 +497,39 @@ class ReasoningService:
         except Exception as e:
             logger.debug("ReasoningService emit failed {}: {}", event, e)
 
+    def _extract_run_context_fields(
+        self,
+        run_context: Optional[Any],
+        *,
+        session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        data: Dict[str, Any] = {}
+        if run_context is not None:
+            trace_id = getattr(run_context, "trace_id", None)
+            request_id = getattr(run_context, "request_id", None)
+            session_value = getattr(run_context, "session_id", None)
+            user_value = getattr(run_context, "user_id", None)
+            session_state = getattr(run_context, "session_state", None)
+            if session_value is None and session_state is not None:
+                session_value = getattr(session_state, "session_id", None)
+            if user_value is None and session_state is not None:
+                user_value = getattr(session_state, "user_id", None)
+            if trace_id is None and session_state is not None:
+                trace_id = getattr(session_state, "trace_id", None)
+            if trace_id:
+                data["trace_id"] = str(trace_id)
+            if request_id:
+                data["request_id"] = str(request_id)
+            if session_value:
+                data["session_id"] = str(session_value)
+            if user_value:
+                data["user_id"] = str(user_value)
+        if session_id and "session_id" not in data:
+            data["session_id"] = str(session_id)
+        if user_id and "user_id" not in data:
+            data["user_id"] = str(user_id)
+        return data
     async def _emit_node(self, tree: ReasoningTree, node: ReasoningNode, event: EventType) -> None:
         await self._emit(
             event,
@@ -416,6 +554,7 @@ class ReasoningService:
         recent_messages: List[Dict[str, Any]],
         base_system_prompt: str,
         user_config: Optional[Dict[str, Any]] = None,
+        run_context: Optional[Any] = None,
     ) -> Dict[str, Any]:
         policy = self._resolve_policy(user_id=user_id, user_config=user_config)
         if (
@@ -442,9 +581,19 @@ class ReasoningService:
                 strategy_hints = self.template_memory.get_strategy_hints(user_id=user_id)
             except Exception as e:
                 logger.debug("ReasoningService: template memory unavailable: {}", e)
+
         is_complex = self._to_bool(gate.get("needs_reasoning", False), default=False)
         needs_memory = self._to_bool(gate.get("needs_memory", False), default=False)
         needs_tools = self._to_bool(gate.get("needs_tools", False), default=False)
+        merged_hints = dict(strategy_hints or {})
+        if template_match.get("matched"):
+            merged_hints["template_matched"] = True
+            merged_hints["template_score"] = float(template_match.get("score", 0.0) or 0.0)
+        run_context_fields = self._extract_run_context_fields(
+            run_context,
+            session_id=session_id,
+            user_id=user_id,
+        )
 
         # Keep the fast path for normal/simple chats. Only enter react-only for
         # simple requests that explicitly need memory/tool interaction.
@@ -453,17 +602,17 @@ class ReasoningService:
 
         tree = self._create_tree(session_id=session_id, user_id=user_id, root_goal=user_message)
         self._active_trees[tree.tree_id] = tree
-        await self._emit(
-            EventType.REASONING_START,
-            {
-                "tree_id": tree.tree_id,
-                "session_id": session_id,
-                "user_id": user_id,
-                "goal": user_message,
-                "gate": gate,
-                "mode": "tot_react" if is_complex else "react_only",
-            },
-        )
+        start_payload = {
+            "tree_id": tree.tree_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "goal": user_message,
+            "gate": gate,
+            "mode": "tot_react" if is_complex else "react_only",
+            **run_context_fields,
+        }
+        await self._emit(EventType.REASONING_START, start_payload)
+        await self._emit(EventType.REASONING_STARTED, start_payload)
         try:
             steps: List[Dict[str, Any]] = []
             template_steps: List[Dict[str, Any]] = []
@@ -515,8 +664,9 @@ class ReasoningService:
                         }
                     ]
             if not steps:
-                tree.status = "completed"
+                tree.status = SKIPPED
                 return {"used_reasoning": False, "gate": gate}
+
             moirai_run_id = await self._export_plan_to_moirai(
                 tree=tree,
                 session_id=session_id,
@@ -525,6 +675,8 @@ class ReasoningService:
                 steps=steps,
                 gate=gate,
                 policy=policy,
+                run_context=run_context,
+                user_config=user_config,
             )
 
             initial_nodes: List[str] = []
@@ -569,6 +721,7 @@ class ReasoningService:
                         recent_messages=recent_messages,
                         user_config=user_config,
                         policy=policy,
+                        run_context=run_context,
                     )
                     for step in extra_steps:
                         if self._node_depth(tree, node_id) >= policy["max_depth"]:
@@ -602,7 +755,8 @@ class ReasoningService:
                 else:
                     frontier = []
 
-            tree.status = "max_iterations" if tree.stats["iterations"] >= iteration_budget else "completed"
+            tree.status = SUCCEEDED
+            tree.stats["termination"] = "max_iterations" if tree.stats["iterations"] >= iteration_budget else "completed"
             reasoning_summary = await self._summarize_tree(
                 tree=tree,
                 user_message=user_message,
@@ -620,16 +774,16 @@ class ReasoningService:
 
             tree.updated_at = time.time()
             self._completed_runs += 1
-            await self._emit(
-                EventType.REASONING_COMPLETE,
-                {
-                    "tree_id": tree.tree_id,
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "status": tree.status,
-                    "stats": tree.stats,
-                },
-            )
+            complete_payload = {
+                "tree_id": tree.tree_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "status": tree.status,
+                "stats": tree.stats,
+                **run_context_fields,
+            }
+            await self._emit(EventType.REASONING_COMPLETE, complete_payload)
+            await self._emit(EventType.REASONING_FINISHED, complete_payload)
             await self._write_debug_snapshot(tree, user_id=user_id, policy=policy)
             self._pending_outcomes[tree.tree_id] = {
                 "user_id": user_id,
@@ -677,7 +831,7 @@ class ReasoningService:
                 "status": tree.status,
             }
         except Exception:
-            tree.status = "failed"
+            tree.status = FAILED
             self._failed_runs += 1
             self._pending_outcomes.pop(tree.tree_id, None)
             await self._emit(
@@ -687,6 +841,7 @@ class ReasoningService:
                     "session_id": session_id,
                     "user_id": user_id,
                     "status": tree.status,
+                    **run_context_fields,
                 },
             )
             await self._write_debug_snapshot(tree, user_id=user_id, policy=policy)
@@ -847,78 +1002,141 @@ class ReasoningService:
         recent_messages: List[Dict[str, Any]],
         user_config: Optional[Dict[str, Any]],
         policy: Dict[str, Any],
+        run_context: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         node = tree.nodes[node_id]
-        node.status = "running"
-        node.updated_at = time.time()
+        if node.status in TERMINAL_STATES:
+            return []
+
+        if node.status == PENDING:
+            self._transition_node_status(
+                tree=tree,
+                node=node,
+                target=RUNNING,
+                reason="execute_step_start",
+                checkpoint={"phase": "start"},
+            )
+        elif node.status == WAITING_TOOL:
+            self._resume_node_from_waiting_tool(tree=tree, node=node)
+        elif node.status == WAITING_HUMAN:
+            # Current runtime path has no persisted human-review queue for nodes yet,
+            # so resume defaults to approved. Future workflow can override.
+            self._resume_node_from_waiting_human(tree=tree, node=node, approved=True)
+            if node.status == SKIPPED:
+                return []
+        elif node.status != RUNNING:
+            self._transition_node_status(
+                tree=tree,
+                node=node,
+                target=RUNNING,
+                reason="recover_to_running",
+            )
+
         await self._emit_node(tree, node, EventType.REASONING_NODE_CREATED)
         observations: List[str] = []
         step = dict(node.metadata)
+        strategy_hints = (
+            self.template_memory.get_strategy_hints(user_id=user_id)
+            if self.template_memory
+            else {}
+        )
+        merged_hints = dict(strategy_hints or {})
         extra_steps: List[Dict[str, Any]] = []
 
-        # ReAct loop: Thought(node) -> Action(decision) -> Observation -> repeat.
-        if step.get("requires_memory") and tree.stats["memory_calls"] < policy["max_memory_calls"]:
-            memory_query = step.get("memory_query") or step.get("goal") or node.title
-            memory_observation = await self._run_memory_lookup(
-                tree=tree,
-                node=node,
-                session_id=session_id,
-                user_id=user_id,
-                query=memory_query,
-            )
-            if memory_observation:
-                observations.append(f"Memory:\n{memory_observation}")
-
-        react_rounds = max(1, int(policy["max_replan_rounds"]) + 1)
-        for _ in range(react_rounds):
-            decision = await self._replan_step(
-                tree=tree,
-                node=node,
-                user_message=user_message,
-                observations=observations,
-                user_config=user_config,
-                user_id=user_id,
-            )
-            next_action = (decision.get("next_action") or "done").lower()
-            extra_steps.extend(
-                step for step in decision.get("additional_steps", []) if isinstance(step, dict)
-            )
-            if next_action == "memory" and tree.stats["memory_calls"] < policy["max_memory_calls"]:
-                query = decision.get("memory_query") or node.title
+        try:
+            if step.get("requires_memory") and tree.stats["memory_calls"] < policy["max_memory_calls"]:
+                memory_query = step.get("memory_query") or step.get("goal") or node.title
                 memory_observation = await self._run_memory_lookup(
                     tree=tree,
                     node=node,
                     session_id=session_id,
                     user_id=user_id,
-                    query=query,
+                    query=memory_query,
+                    run_context=run_context,
+                    user_config=user_config,
                 )
                 if memory_observation:
                     observations.append(f"Memory:\n{memory_observation}")
-                continue
 
-            if next_action == "tool" and tree.stats["tool_calls"] < policy["max_tool_calls"]:
-                tool_step = {
-                    "goal": node.title,
-                    "tool_intent": decision.get("tool_intent")
-                    or step.get("tool_intent")
-                    or node.title,
-                    "requires_tools": True,
-                }
-                tool_observation = await self._run_tool_step(
+            react_rounds = max(1, int(policy["max_replan_rounds"]) + 1)
+            for _ in range(react_rounds):
+                decision = await self._replan_step(
                     tree=tree,
                     node=node,
-                    session_id=session_id,
-                    user_id=user_id,
-                    step=tool_step,
                     user_message=user_message,
                     observations=observations,
                     user_config=user_config,
+                    user_id=user_id,
                 )
-                if tool_observation:
-                    observations.append(f"Tool:\n{tool_observation}")
-                continue
+                next_action = (decision.get("next_action") or "done").lower()
+                extra_steps.extend(
+                    item for item in decision.get("additional_steps", []) if isinstance(item, dict)
+                )
 
-            if next_action == "think":
+                if next_action == "memory" and tree.stats["memory_calls"] < policy["max_memory_calls"]:
+                    query = decision.get("memory_query") or node.title
+                    memory_observation = await self._run_memory_lookup(
+                        tree=tree,
+                        node=node,
+                        session_id=session_id,
+                        user_id=user_id,
+                        query=query,
+                        run_context=run_context,
+                        user_config=user_config,
+                    )
+                    if memory_observation:
+                        observations.append(f"Memory:\n{memory_observation}")
+                    continue
+
+                if next_action == "tool" and tree.stats["tool_calls"] < policy["max_tool_calls"]:
+                    self._transition_node_status(
+                        tree=tree,
+                        node=node,
+                        target=WAITING_TOOL,
+                        reason="awaiting_tool",
+                        checkpoint={
+                            "phase": "tool",
+                            "tool_intent": decision.get("tool_intent") or step.get("tool_intent") or node.title,
+                        },
+                    )
+                    tool_step = {
+                        "goal": node.title,
+                        "tool_intent": decision.get("tool_intent") or step.get("tool_intent") or node.title,
+                        "requires_tools": True,
+                    }
+                    tool_observation = await self._run_tool_step(
+                        tree=tree,
+                        node=node,
+                        session_id=session_id,
+                        user_id=user_id,
+                        step=tool_step,
+                        user_message=user_message,
+                        observations=observations,
+                        user_config=user_config,
+                        run_context=run_context,
+                    )
+                    self._resume_node_from_waiting_tool(tree=tree, node=node)
+                    if tool_observation:
+                        observations.append(f"Tool:\n{tool_observation}")
+                    continue
+
+                if next_action == "think":
+                    think_observation = await self._run_think_step(
+                        tree=tree,
+                        node=node,
+                        user_message=user_message,
+                        recent_messages=recent_messages,
+                        observations=observations,
+                        user_config=user_config,
+                        user_id=user_id,
+                    )
+                    if think_observation:
+                        observations.append(f"Think:\n{think_observation}")
+                    continue
+
+                break
+
+            if not observations:
                 think_observation = await self._run_think_step(
                     tree=tree,
                     node=node,
@@ -930,44 +1148,47 @@ class ReasoningService:
                 )
                 if think_observation:
                     observations.append(f"Think:\n{think_observation}")
-                continue
 
-            break
+            if not extra_steps and observations and self._node_depth(tree, node_id) < policy["max_depth"]:
+                expanded = await self._plan_steps(
+                    tree=tree,
+                    user_message=user_message,
+                    recent_messages=recent_messages,
+                    user_config=user_config,
+                    user_id=user_id,
+                    policy=policy,
+                    strategy_hints=merged_hints,
+                    max_candidates=policy["branch_factor"],
+                    observation_context="\n\n".join(observations),
+                )
+                extra_steps.extend(expanded)
 
-        if not observations:
-            # Fallback to a single thought note, so simple tasks still produce traceable reasoning.
-            think_observation = await self._run_think_step(
+            final_observation = "\n\n".join(observations).strip()
+            self._mark_node_succeeded(
                 tree=tree,
                 node=node,
-                user_message=user_message,
-                recent_messages=recent_messages,
-                observations=observations,
-                user_config=user_config,
-                user_id=user_id,
+                observation=final_observation,
+                evidence=observations,
+                result={
+                    "generated_steps": len(extra_steps),
+                    "snapshot": self._snapshot_node(node),
+                },
             )
-            if think_observation:
-                observations.append(f"Think:\n{think_observation}")
-
-        if not extra_steps and observations and self._node_depth(tree, node_id) < policy["max_depth"]:
-            expanded = await self._plan_steps(
-                tree=tree,
-                user_message=user_message,
-                recent_messages=recent_messages,
-                user_config=user_config,
-                user_id=user_id,
-                policy=policy,
-                strategy_hints=merged_hints,
-                max_candidates=policy["branch_factor"],
-                observation_context="\n\n".join(observations),
-            )
-            extra_steps.extend(expanded)
-
-        node.status = "completed"
-        node.summary = "\n\n".join(observations).strip()
-        node.observation = node.summary
-        node.updated_at = time.time()
-        await self._emit_node(tree, node, EventType.REASONING_NODE_COMPLETED)
-        return extra_steps[: policy["branch_factor"]]
+            await self._emit_node(tree, node, EventType.REASONING_NODE_COMPLETED)
+            return extra_steps[: policy["branch_factor"]]
+        except Exception as e:
+            if node.status not in TERMINAL_STATES:
+                try:
+                    self._transition_node_status(
+                        tree=tree,
+                        node=node,
+                        target=FAILED,
+                        reason=f"execute_step_error:{e}",
+                    )
+                except Exception:
+                    node.status = FAILED
+                    node.updated_at = time.time()
+            raise
 
     async def _select_beam_nodes(
         self,
@@ -1097,15 +1318,28 @@ class ReasoningService:
         session_id: str,
         user_id: str,
         query: str,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
     ) -> str:
         if not self.memory_service or not self.memory_service.is_enabled():
             return ""
+        context_fields = self._extract_run_context_fields(
+            run_context,
+            session_id=session_id,
+            user_id=user_id,
+        )
         child = self._add_node(
             tree,
             parent_id=node.node_id,
             kind="memory",
             title=f"memory: {query}",
             metadata={"query": query},
+        )
+        self._transition_node_status(
+            tree=tree,
+            node=child,
+            target=RUNNING,
+            reason="memory_lookup_started",
         )
         await self._emit(
             EventType.REASONING_MEMORY_REQUESTED,
@@ -1115,6 +1349,7 @@ class ReasoningService:
                 "user_id": user_id,
                 "node_id": child.node_id,
                 "query": query,
+                **context_fields,
             },
         )
         try:
@@ -1122,13 +1357,17 @@ class ReasoningService:
                 query=query,
                 session_id=session_id,
                 user_id=user_id,
+                run_context=run_context,
             )
         except Exception as e:
             result = f"[memory error] {e}"
-        child.status = "completed"
-        child.observation = result or ""
-        child.summary = child.observation
-        child.updated_at = time.time()
+        self._mark_node_succeeded(
+            tree=tree,
+            node=child,
+            observation=result or "",
+            evidence=[result or ""],
+            result={"query": query},
+        )
         tree.stats["memory_calls"] += 1
         await self._emit(
             EventType.REASONING_OBSERVATION_RECEIVED,
@@ -1138,6 +1377,7 @@ class ReasoningService:
                 "user_id": user_id,
                 "node_id": child.node_id,
                 "kind": "memory",
+                **context_fields,
             },
         )
         return child.observation
@@ -1153,9 +1393,15 @@ class ReasoningService:
         user_message: str,
         observations: List[str],
         user_config: Optional[Dict[str, Any]],
+        run_context: Optional[Any] = None,
     ) -> str:
         if not self.tool_service:
             return ""
+        context_fields = self._extract_run_context_fields(
+            run_context,
+            session_id=session_id,
+            user_id=user_id,
+        )
         catalog = await self.tool_service.get_tool_catalog()
         if not catalog:
             return ""
@@ -1186,6 +1432,17 @@ class ReasoningService:
                 "args": args,
             },
         )
+        self._transition_node_status(
+            tree=tree,
+            node=child,
+            target=RUNNING,
+            reason="tool_execution_started",
+            checkpoint={
+                "phase": "tool_call",
+                "service_name": service_name,
+                "tool_name": tool_name,
+            },
+        )
         await self._emit(
             EventType.REASONING_TOOL_REQUESTED,
             {
@@ -1196,14 +1453,20 @@ class ReasoningService:
                 "tool_type": tool_type,
                 "service_name": service_name,
                 "tool_name": tool_name,
+                **context_fields,
             },
         )
+        ctx_metadata = {"tree_id": tree.tree_id, "node_id": child.node_id}
+        trace_id = context_fields.get("trace_id")
+        if trace_id:
+            ctx_metadata["trace_id"] = trace_id
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
             source="reasoning",
-            metadata={"tree_id": tree.tree_id, "node_id": child.node_id},
+            metadata=ctx_metadata,
         )
+
         tool_call_started = time.time()
         try:
             result = await self.tool_service.call_tool(
@@ -1216,20 +1479,30 @@ class ReasoningService:
                 },
                 ctx=ctx,
                 request_id=f"reasoning_{tree.tree_id}",
+                run_context=run_context,
+                user_config=user_config,
             )
         except Exception as e:
             result = f"[tool error] {e}"
+
+        result_text = self._stringify_observation(result)
         verify = await self._verify_tool_observation(
             step=step,
-            observation=self._stringify_observation(result),
+            observation=result_text,
             user_config=user_config,
             user_id=user_id,
         )
-        child.status = "completed"
-        child.observation = self._stringify_observation(result)
-        child.summary = child.observation
-        child.metadata["verify_tool"] = verify
-        child.updated_at = time.time()
+        child.verifier_state = dict(verify or {})
+        child.tool_calls.append(
+            {
+                "tool_type": tool_type,
+                "service_name": service_name,
+                "tool_name": tool_name,
+                "args": args,
+                "at": time.time(),
+            }
+        )
+
         tree.stats["tool_calls"] += 1
         tree.stats["tool_failures"] = int(tree.stats.get("tool_failures", 0))
         verify_ok = bool(verify.get("ok", True))
@@ -1238,12 +1511,47 @@ class ReasoningService:
         else:
             self._tool_selection_stats["tool_observation_failed"] += 1
             tree.stats["tool_failures"] += 1
+
         self._record_tool_quality(
             service_name=service_name,
             tool_name=tool_name,
             ok=verify_ok,
             latency_ms=(time.time() - tool_call_started) * 1000.0,
         )
+
+        if verify_ok:
+            self._mark_node_succeeded(
+                tree=tree,
+                node=child,
+                observation=result_text,
+                evidence=[result_text],
+                result={"verification": verify},
+            )
+        else:
+            conf = float(verify.get("confidence", 0.0) or 0.0)
+            if conf < 0.9:
+                self._transition_node_status(
+                    tree=tree,
+                    node=child,
+                    target=WAITING_HUMAN,
+                    reason="tool_verification_uncertain",
+                    checkpoint={"phase": "human_review", "verification": verify},
+                )
+                child.human_gate = {
+                    "question": "Should this tool observation still be accepted?",
+                    "verification": verify,
+                }
+                self._resume_node_from_waiting_human(tree=tree, node=child, approved=False)
+            else:
+                self._transition_node_status(
+                    tree=tree,
+                    node=child,
+                    target=FAILED,
+                    reason="tool_verification_failed",
+                )
+            child.observation = result_text
+            child.summary = result_text
+
         await self._emit(
             EventType.REASONING_OBSERVATION_RECEIVED,
             {
@@ -1252,9 +1560,11 @@ class ReasoningService:
                 "user_id": user_id,
                 "node_id": child.node_id,
                 "kind": "tool",
+                **context_fields,
             },
         )
-        if verify.get("ok", True):
+
+        if verify_ok:
             return child.observation
         reason = str(verify.get("reason", "") or "").strip()
         return f"[tool verification failed] {reason}\n{child.observation}"
@@ -1535,10 +1845,19 @@ class ReasoningService:
             user_config=user_config,
             user_id=user_id,
         )
-        child.status = "completed"
-        child.observation = response
-        child.summary = response
-        child.updated_at = time.time()
+        self._transition_node_status(
+            tree=tree,
+            node=child,
+            target=RUNNING,
+            reason="think_step_started",
+        )
+        self._mark_node_succeeded(
+            tree=tree,
+            node=child,
+            observation=response,
+            evidence=[response],
+            result={"kind": "think"},
+        )
         tree.stats["think_calls"] += 1
         await self._emit(
             EventType.REASONING_OBSERVATION_RECEIVED,
@@ -1795,6 +2114,8 @@ class ReasoningService:
         steps: List[Dict[str, Any]],
         gate: Dict[str, Any],
         policy: Dict[str, Any],
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         if not policy.get("moirai_export_plan"):
             return None
@@ -1806,11 +2127,20 @@ class ReasoningService:
             return None
 
         flow_name = f"reasoning-{tree.tree_id[:8]}"
+        context_fields = self._extract_run_context_fields(
+            run_context,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        ctx_metadata = {"tree_id": tree.tree_id, "purpose": "plan_export"}
+        trace_id = context_fields.get("trace_id")
+        if trace_id:
+            ctx_metadata["trace_id"] = trace_id
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
             source="reasoning",
-            metadata={"tree_id": tree.tree_id, "purpose": "plan_export"},
+            metadata=ctx_metadata,
         )
         args = {
             "agentType": "mcp",
@@ -1834,13 +2164,14 @@ class ReasoningService:
             },
         }
 
-        tool_call_started = time.time()
         try:
             result = await self.tool_service.call_tool(
                 tool_name="create_flow",
                 params=args,
                 ctx=ctx,
                 request_id=f"reasoning_moirai_{tree.tree_id}",
+                run_context=run_context,
+                user_config=user_config,
             )
         except Exception as e:
             logger.debug("ReasoningService: moirai export skipped: {}", e)
@@ -1932,6 +2263,33 @@ class ReasoningService:
         uid = str(user_id or "default_user").strip() or "default_user"
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in uid)
         return safe[:128] or "default_user"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

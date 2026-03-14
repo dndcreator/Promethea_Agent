@@ -1,0 +1,18 @@
+﻿[
+  {
+    "case_id": "code-001",
+    "title": "Scoped bug fix",
+    "input": "A feature broke after refactor. Diagnose and patch with minimal risk.",
+    "expected_behavior": "Identify root cause, implement narrow fix, and explain impact.",
+    "required_tools": ["filesystem.*"],
+    "tags": ["bugfix", "stability"]
+  },
+  {
+    "case_id": "code-002",
+    "title": "Backlog implementation",
+    "input": "Implement a backlog item with tests and docs.",
+    "expected_behavior": "Deliver working code, add tests, and update architecture docs.",
+    "required_tools": ["filesystem.*", "workspace.*"],
+    "tags": ["feature", "delivery"]
+  }
+]

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Gateway protocol definition - WebSocket communication protocol.
 
 Loosely inspired by the Clawdbot Gateway Protocol design.
@@ -34,6 +34,8 @@ class RequestType(str, Enum):
     MEMORY_GRAPH = "memory.graph"    # Retrieve memory graph
     MEMORY_DECAY = "memory.decay"    # Apply forgetting
     MEMORY_CLEANUP = "memory.cleanup"  # Cleanup forgotten nodes
+    MEMORY_RECALL_RUNS = "memory.recall.runs"  # Recall inspector run list
+    MEMORY_RECALL_INSPECT = "memory.recall.inspect"  # Recall inspector detail
     
     # Session management
     SESSIONS_LIST = "sessions.list"  # List sessions
@@ -49,7 +51,10 @@ class RequestType(str, Enum):
     # Tool system
     TOOLS_LIST = "tools.list"        # Tool list
     TOOL_CALL = "tool.call"          # Tool invocation
-    
+    MCP_SERVICES_LIST = "mcp.services.list"     # MCP services
+    MCP_SERVICE_HEALTH = "mcp.service.health"   # MCP service health
+    MCP_SERVICE_TOOLS = "mcp.service.tools"     # MCP tools by service
+    MCP_VISIBLE_TOOLS = "mcp.tools.visible"     # MCP visible tools for user
     # Configuration management
     CONFIG_GET = "config.get"              # Get configuration
     CONFIG_RELOAD = "config.reload"        # Reload configuration
@@ -57,7 +62,24 @@ class RequestType(str, Enum):
     CONFIG_RESET = "config.reset"          # Reset user configuration
     CONFIG_SWITCH_MODEL = "config.switch_model"  # Switch model
     CONFIG_DIAGNOSE = "config.diagnose"    # Diagnose configuration
+
+    # Workspace sandbox
+    WORKSPACE_CREATE_DOCUMENT = "workspace.create_document"
+    WORKSPACE_UPDATE_DOCUMENT = "workspace.update_document"
+    WORKSPACE_LIST_ARTIFACTS = "workspace.list_artifacts"
+    WORKSPACE_SNAPSHOT_ARTIFACT = "workspace.snapshot_artifact"
     
+    # Workflow engine
+    WORKFLOW_DEFINE = "workflow.define"
+    WORKFLOW_LIST = "workflow.list"
+    WORKFLOW_START = "workflow.start"
+    WORKFLOW_STATUS = "workflow.status"
+    WORKFLOW_PAUSE = "workflow.pause"
+    WORKFLOW_RESUME = "workflow.resume"
+    WORKFLOW_RETRY_STEP = "workflow.retry_step"
+    WORKFLOW_APPROVE_STEP = "workflow.approve_step"
+    WORKFLOW_CHECKPOINTS = "workflow.checkpoints"
+
     # Computer control
     COMPUTER_BROWSER = "computer.browser"      # Browser control
     COMPUTER_SCREEN = "computer.screen"        # Screen capture/control
@@ -109,6 +131,32 @@ class EventType(str, Enum):
     REQUEST_RECEIVED = "request.received"
     REQUEST_COMPLETED = "request.completed"
     REQUEST_FAILED = "request.failed"
+    # Canonical gateway protocol lifecycle events (Backlog 002)
+    GATEWAY_REQUEST_RECEIVED = "gateway.request.received"
+    GATEWAY_RUN_STARTED = "gateway.run.started"
+    CONVERSATION_RUN_STARTED = "conversation.run.started"
+    MEMORY_RECALL_STARTED = "memory.recall.started"
+    MEMORY_RECALL_FINISHED = "memory.recall.finished"
+    REASONING_STARTED = "reasoning.started"
+    REASONING_FINISHED = "reasoning.finished"
+    TOOL_EXECUTION_STARTED = "tool.execution.started"
+    TOOL_EXECUTION_FINISHED = "tool.execution.finished"
+    TOOL_EXECUTION_FAILED = "tool.execution.failed"
+    RESPONSE_SYNTHESIZED = "response.synthesized"
+    MEMORY_WRITE_DECIDED = "memory.write.decided"
+    GATEWAY_RUN_FINISHED = "gateway.run.finished"
+    WORKSPACE_ARTIFACT_WRITTEN = "workspace.artifact.written"
+    WORKSPACE_WRITE_BLOCKED = "workspace.write.blocked"
+    SECURITY_BOUNDARY_VIOLATION = "security.boundary.violation"
+    SECURITY_SECRET_ACCESS = "security.secret.access"
+    CONVERSATION_STAGE_STARTED = "conversation.stage.started"
+    CONVERSATION_STAGE_FINISHED = "conversation.stage.finished"
+    CONVERSATION_STAGE_FAILED = "conversation.stage.failed"
+    WORKFLOW_RUN_STARTED = "workflow.run.started"
+    WORKFLOW_RUN_PAUSED = "workflow.run.paused"
+    WORKFLOW_RUN_RESUMED = "workflow.run.resumed"
+    WORKFLOW_RUN_COMPLETED = "workflow.run.completed"
+    WORKFLOW_STEP_WAITING_HUMAN = "workflow.step.waiting_human"
     
 
 class DeviceRole(str, Enum):
@@ -314,6 +362,193 @@ class ChannelMessagePayload(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+
+class GatewayRequest(BaseModel):
+    """Unified gateway boundary request object."""
+
+    request_id: str
+    trace_id: str
+    session_id: Optional[str] = None
+    user_id: str
+    agent_id: Optional[str] = None
+    channel_id: Optional[str] = None
+    input_text: str = ""
+    input_payload: Dict[str, Any] = Field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    requested_mode: Optional[str] = None
+    requested_skill: Optional[str] = None
+    requested_workflow: Optional[str] = None
+    debug_flags: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.now)
+
+    @classmethod
+    def from_request(
+        cls,
+        *,
+        request: "RequestMessage",
+        user_id: str,
+        session_id: Optional[str] = None,
+        channel_id: Optional[str] = None,
+    ) -> "GatewayRequest":
+        params = dict(request.params or {})
+        resolved_session = session_id or params.get("session_id")
+        trace_id = str(params.get("trace_id") or f"trace_{request.id}")
+        input_text = str(
+            params.get("message")
+            or params.get("query")
+            or params.get("text")
+            or ""
+        )
+        return cls(
+            request_id=request.id,
+            trace_id=trace_id,
+            session_id=resolved_session,
+            user_id=str(user_id),
+            agent_id=params.get("agent_id"),
+            channel_id=channel_id,
+            input_text=input_text,
+            input_payload=params,
+            attachments=params.get("attachments") or [],
+            metadata=params.get("metadata") or {},
+            requested_mode=params.get("requested_mode"),
+            requested_skill=params.get("requested_skill"),
+            requested_workflow=params.get("requested_workflow"),
+            debug_flags=params.get("debug_flags") or {},
+        )
+
+
+class GatewayResponse(BaseModel):
+    """Unified gateway boundary response object."""
+
+    request_id: str
+    trace_id: str
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_message: Optional[str] = None
+    channel: str = "web"
+    include_recent: bool = True
+    response_text: str = ""
+    response_blocks: List[Dict[str, Any]] = Field(default_factory=list)
+    artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    tool_summary: Dict[str, Any] = Field(default_factory=dict)
+    reasoning_summary: Dict[str, Any] = Field(default_factory=dict)
+    memory_write_summary: Dict[str, Any] = Field(default_factory=dict)
+    status: str = "success"
+    error: Optional[str] = None
+    metrics: Dict[str, Any] = Field(default_factory=dict)
+
+    def to_payload(self) -> Dict[str, Any]:
+        payload = {
+            "request_id": self.request_id,
+            "trace_id": self.trace_id,
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "response_text": self.response_text,
+            "response_blocks": self.response_blocks,
+            "artifacts": self.artifacts,
+            "tool_summary": self.tool_summary,
+            "reasoning_summary": self.reasoning_summary,
+            "memory_write_summary": self.memory_write_summary,
+            "status": self.status,
+            "error": self.error,
+            "metrics": self.metrics,
+            # Backward-compatible fields used by existing callers.
+            "response": self.response_text,
+        }
+        return payload
+
+
+class GatewayEvent(BaseModel):
+    """Unified structured gateway event object."""
+
+    event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    event_type: str
+    trace_id: Optional[str] = None
+    request_id: Optional[str] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_message: Optional[str] = None
+    channel: str = "web"
+    include_recent: bool = True
+    timestamp: datetime = Field(default_factory=datetime.now)
+    source_module: str = "gateway"
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    severity: str = "info"
+    tags: List[str] = Field(default_factory=list)
+
+
+class ConversationRunInput(BaseModel):
+    """Structured conversation-service input contract."""
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    user_config: Optional[Dict[str, Any]] = None
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    user_message: Optional[str] = None
+    channel: str = "web"
+    include_recent: bool = True
+    run_context: Optional[Any] = None
+    tool_executor: Optional[Any] = None
+
+
+class ConversationRunOutput(BaseModel):
+    """Structured conversation-service output contract."""
+
+    status: str = "success"
+    content: str = ""
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    args: Optional[Dict[str, Any]] = None
+    raw: Dict[str, Any] = Field(default_factory=dict)
+
+class NormalizedInput(BaseModel):
+    user_message: str
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    channel: str = "web"
+    input_payload: Dict[str, Any] = Field(default_factory=dict)
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    recent_messages: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class ModeDecision(BaseModel):
+    mode: str = "fast"
+    reason: str = "default"
+    confidence: float = 0.5
+
+
+class MemoryRecallBundle(BaseModel):
+    recalled: bool = False
+    context: str = ""
+    reason: str = "not_needed"
+    source: str = "memory_service"
+    confidence: float = 0.0
+
+
+class PlanResult(BaseModel):
+    used_reasoning: bool = False
+    system_prompt: str = ""
+    base_system_prompt: str = ""
+    reasoning: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ToolExecutionBundle(BaseModel):
+    enabled: bool = False
+    strategy: str = "llm_native"
+    tool_executor: Optional[Any] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ResponseDraft(BaseModel):
+    status: str = "success"
+    content: str = ""
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    response_data: Dict[str, Any] = Field(default_factory=dict)
+
 class GatewayProtocol:
     """Helper utilities for building/parsing gateway protocol messages."""
     
@@ -373,3 +608,16 @@ class GatewayProtocol:
             return EventMessage(**raw)
         else:
             raise ValueError(f"Unknown message type: {msg_type}")
+
+
+
+
+
+
+
+
+
+
+
+
+

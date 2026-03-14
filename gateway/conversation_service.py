@@ -9,7 +9,8 @@ from loguru import logger
 from conversation_core import PrometheaConversation
 
 from .events import EventEmitter
-from .protocol import EventType
+from .protocol import EventType, ConversationRunInput, ConversationRunOutput
+from .conversation_pipeline import run_staged_pipeline
 
 
 class ConversationService:
@@ -472,6 +473,7 @@ class ConversationService:
         user_message: str,
         channel: str,
         include_recent: bool = True,
+        run_context: Optional[Any] = None,
     ) -> Dict[str, Any]:
         user_config: Optional[Dict[str, Any]] = None
         messages: List[Dict[str, Any]] = []
@@ -491,6 +493,25 @@ class ConversationService:
                     )
                 )
 
+        if run_context is not None:
+            active_skill = getattr(run_context, "active_skill", None)
+            if isinstance(active_skill, dict) and active_skill:
+                skill_instruction = str(active_skill.get("system_instruction") or "").strip()
+                if skill_instruction:
+                    base_system_prompt = (
+                        f"{base_system_prompt}\n\n{skill_instruction}".strip()
+                        if base_system_prompt
+                        else skill_instruction
+                    )
+                if not getattr(run_context, "requested_mode", None):
+                    requested_mode = str(active_skill.get("default_mode") or "").strip()
+                    if requested_mode:
+                        run_context.requested_mode = requested_mode
+                if not getattr(run_context, "prompt_block_policy", None):
+                    policy = active_skill.get("prompt_block_policy")
+                    if isinstance(policy, dict):
+                        run_context.prompt_block_policy = dict(policy)
+
         recent_messages: List[Dict[str, Any]] = []
         if include_recent and self.message_manager:
             recent_messages = self.message_manager.get_recent_messages(
@@ -507,6 +528,7 @@ class ConversationService:
                 recent_messages=recent_messages,
                 base_system_prompt=base_system_prompt,
                 user_config=user_config,
+                run_context=run_context,
             )
             if reasoning_result.get("used_reasoning"):
                 system_prompt = reasoning_result.get("system_prompt", "")
@@ -518,6 +540,7 @@ class ConversationService:
                 user_id=user_id,
                 user_config=user_config,
                 base_system_prompt=base_system_prompt,
+                run_context=run_context,
             )
 
         if system_prompt:
@@ -527,6 +550,7 @@ class ConversationService:
 
         return {
             "messages": messages,
+            "run_context": run_context,
             "user_config": user_config,
             "system_prompt": system_prompt,
             "base_system_prompt": base_system_prompt,
@@ -791,6 +815,7 @@ class ConversationService:
         user_id: Optional[str],
         user_config: Optional[Dict[str, Any]] = None,
         base_system_prompt: str = "",
+        run_context: Optional[Any] = None,
     ) -> str:
         """
         Build final system prompt with optional memory recall context.
@@ -813,6 +838,7 @@ class ConversationService:
                 query=query,
                 session_id=session_id,
                 user_id=user_id,
+                run_context=run_context,
             )
         if memory_context:
             return (
@@ -822,12 +848,19 @@ class ConversationService:
             )
         return base_system_prompt
 
+    async def run_conversation(
+        self,
+        run_input: ConversationRunInput,
+    ) -> ConversationRunOutput:
+        return await run_staged_pipeline(self, run_input)
+
     async def run_chat_loop(
         self,
         messages: List[Dict],
         user_config: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        run_context: Optional[Any] = None,
         tool_executor=None,
     ) -> Dict:
         try:
@@ -890,4 +923,14 @@ class ConversationService:
             "queue_dropped": self._queue_dropped,
             "queue_coalesced": self._queue_coalesced,
         }
+
+
+
+
+
+
+
+
+
+
 

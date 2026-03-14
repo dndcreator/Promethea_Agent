@@ -105,7 +105,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                             user_config=user_config,
                             session_id=session_id,
                             user_id=user_id,
-                            tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(  # noqa: SLF001
+                            tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
                                 name,
                                 payload,
                                 session_id=session_id,
@@ -189,29 +189,61 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
 
-        payload = await dispatch_gateway_method(
-            RequestType.CHAT,
-            {
-                "message": request.message,
-                "session_id": request.session_id,
-                "stream": False,
-            },
-            user_id=user_id,
-        )
+        gateway_server = get_gateway_server()
+        adapter_registry = getattr(gateway_server, "channel_adapter_registry", None)
+        adapter = adapter_registry.get("http_api") if adapter_registry else None
+        if adapter is None:
+            payload = await dispatch_gateway_method(
+                RequestType.CHAT,
+                {
+                    "message": request.message,
+                    "session_id": request.session_id,
+                    "stream": False,
+                    "requested_mode": request.requested_mode,
+                    "requested_skill": request.requested_skill,
+                },
+                user_id=user_id,
+            )
+            mapped = payload
+        else:
+            gateway_request = adapter.ingest_message(
+                {
+                    "request_id": f"http_{uuid.uuid4().hex}",
+                    "session_id": request.session_id,
+                    "message": request.message,
+                    "user_id": user_id,
+                }
+            )
+            perm = adapter.permission_check(adapter.normalize_identity({"user_id": user_id}))
+            if not perm.allowed:
+                raise HTTPException(status_code=403, detail=f"permission denied: {perm.reason}")
+            payload = await dispatch_gateway_method(
+                RequestType.CHAT,
+                {
+                    "message": gateway_request.input_text,
+                    "session_id": gateway_request.session_id,
+                    "stream": False,
+                    "channel": gateway_request.channel_id,
+                    "requested_mode": request.requested_mode,
+                    "requested_skill": request.requested_skill,
+                },
+                user_id=gateway_request.user_id,
+            )
+            mapped = adapter.emit_response(payload)
+
         return ChatResponse(
-            response=payload.get("response", ""),
-            session_id=payload.get("session_id"),
-            status=payload.get("status", "success"),
-            tool_call_id=payload.get("tool_call_id"),
-            tool_name=payload.get("tool_name"),
-            args=payload.get("args"),
+            response=mapped.get("response", ""),
+            session_id=mapped.get("session_id"),
+            status=mapped.get("status", "success"),
+            tool_call_id=mapped.get("tool_call_id"),
+            tool_name=mapped.get("tool_name"),
+            args=mapped.get("args"),
         )
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"chat failed: {e}")
         raise HTTPException(status_code=500, detail=f"chat failed: {e}")
-
 
 @router.post("/chat/confirm", response_model=ChatResponse)
 async def confirm_tool(request: ConfirmToolRequest, user_id: str = Depends(get_current_user_id)):
@@ -238,3 +270,10 @@ async def confirm_tool(request: ConfirmToolRequest, user_id: str = Depends(get_c
     except Exception as e:
         logger.error(f"chat confirm failed: {e}")
         raise HTTPException(status_code=500, detail=f"chat confirm failed: {e}")
+
+
+
+
+
+
+

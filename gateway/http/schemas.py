@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
@@ -8,6 +8,8 @@ class ChatRequest(BaseModel):
     message: str
     stream: bool = False
     session_id: Optional[str] = None
+    requested_mode: Optional[str] = None
+    requested_skill: Optional[str] = None
 
 
 class ChatResponse(BaseModel):

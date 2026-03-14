@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -351,3 +351,30 @@ async def get_forgetting_stats(
         raise HTTPException(status_code=500, detail=f"Get forgetting stats failed: {e}")
 
 
+
+@router.get("/memory/recall/runs")
+async def get_memory_recall_runs(
+    session_id: str | None = None,
+    trace_id: str | None = None,
+    limit: int = 20,
+    user_id: str = Depends(get_current_user_id),
+):
+    payload = await dispatch_gateway_method(
+        RequestType.MEMORY_RECALL_RUNS,
+        {"session_id": session_id, "trace_id": trace_id, "limit": limit},
+        user_id=user_id,
+    )
+    return {"status": "success", **payload}
+
+
+@router.get("/memory/recall/{target_request_id}")
+async def inspect_memory_recall_run(
+    target_request_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    payload = await dispatch_gateway_method(
+        RequestType.MEMORY_RECALL_INSPECT,
+        {"target_request_id": target_request_id},
+        user_id=user_id,
+    )
+    return {"status": "success", **payload}

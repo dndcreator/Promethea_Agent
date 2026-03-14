@@ -1,4 +1,4 @@
-﻿"""
+"""
 Gateway server - WebSocket-based multiplexing server.
 """
 import asyncio
@@ -15,7 +15,8 @@ from .protocol import (
     RequestType, EventType, ConnectParams,
     GatewayProtocol, MessageType,
     SendMessageParams, AgentCallParams, MemoryQueryParams,
-    HealthPayload, StatusPayload, AgentResponsePayload
+    HealthPayload, StatusPayload, AgentResponsePayload,
+    GatewayRequest, GatewayResponse, GatewayEvent, ConversationRunInput
 )
 from channels.base import MessageType as ChannelMessageType
 from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
@@ -27,7 +28,12 @@ from .memory_service import MemoryService
 from .conversation_service import ConversationService
 from .reasoning_service import ReasoningService
 from .config_service import ConfigService
+from .workspace_service import WorkspaceService, WorkspaceSandboxError
+from .workflow_engine import WorkflowError
+from channels.adapter_registry import build_default_adapter_registry
 from memory.session_scope import ensure_session_owned
+from .models import RunContext, SessionState
+from skills import build_default_skill_registry
 
 
 class GatewayServer:
@@ -62,6 +68,8 @@ class GatewayServer:
         
         # Channel registry (registered via GatewayIntegration).
         self.channels: Dict[str, Any] = {}
+        self.channel_adapter_registry = build_default_adapter_registry()
+        self.skill_registry = build_default_skill_registry()
         
         # Runtime dependencies, wired up by higher-level integration code.
         self.agent_manager = None
@@ -81,6 +89,8 @@ class GatewayServer:
         self.reasoning_service: Optional[ReasoningService] = None
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
+        self.workspace_service: Optional[WorkspaceService] = None
+        self.workflow_engine: Optional[Any] = None
         
         # Backward-compat compatibility: keep legacy attributes pointing to
         # new services.
@@ -104,6 +114,8 @@ class GatewayServer:
         self._handlers[RequestType.MEMORY_GRAPH] = self._handle_memory_graph
         self._handlers[RequestType.MEMORY_DECAY] = self._handle_memory_decay
         self._handlers[RequestType.MEMORY_CLEANUP] = self._handle_memory_cleanup
+        self._handlers[RequestType.MEMORY_RECALL_RUNS] = self._handle_memory_recall_runs
+        self._handlers[RequestType.MEMORY_RECALL_INSPECT] = self._handle_memory_recall_inspect
         
         # Session handlers
         self._handlers[RequestType.SESSIONS_LIST] = self._handle_sessions_list
@@ -119,6 +131,10 @@ class GatewayServer:
         # Tool handlers
         self._handlers[RequestType.TOOLS_LIST] = self._handle_tools_list
         self._handlers[RequestType.TOOL_CALL] = self._handle_tool_call
+        self._handlers[RequestType.MCP_SERVICES_LIST] = self._handle_mcp_services_list
+        self._handlers[RequestType.MCP_SERVICE_HEALTH] = self._handle_mcp_service_health
+        self._handlers[RequestType.MCP_SERVICE_TOOLS] = self._handle_mcp_service_tools
+        self._handlers[RequestType.MCP_VISIBLE_TOOLS] = self._handle_mcp_visible_tools
         
         # Config handlers
         self._handlers[RequestType.CONFIG_GET] = self._handle_config_get
@@ -127,6 +143,23 @@ class GatewayServer:
         self._handlers[RequestType.CONFIG_RESET] = self._handle_config_reset
         self._handlers[RequestType.CONFIG_SWITCH_MODEL] = self._handle_config_switch_model
         self._handlers[RequestType.CONFIG_DIAGNOSE] = self._handle_config_diagnose
+
+        # Workspace sandbox handlers
+        self._handlers[RequestType.WORKSPACE_CREATE_DOCUMENT] = self._handle_workspace_create_document
+        self._handlers[RequestType.WORKSPACE_UPDATE_DOCUMENT] = self._handle_workspace_update_document
+        self._handlers[RequestType.WORKSPACE_LIST_ARTIFACTS] = self._handle_workspace_list_artifacts
+        self._handlers[RequestType.WORKSPACE_SNAPSHOT_ARTIFACT] = self._handle_workspace_snapshot_artifact
+
+        # Workflow engine handlers
+        self._handlers[RequestType.WORKFLOW_DEFINE] = self._handle_workflow_define
+        self._handlers[RequestType.WORKFLOW_LIST] = self._handle_workflow_list
+        self._handlers[RequestType.WORKFLOW_START] = self._handle_workflow_start
+        self._handlers[RequestType.WORKFLOW_STATUS] = self._handle_workflow_status
+        self._handlers[RequestType.WORKFLOW_PAUSE] = self._handle_workflow_pause
+        self._handlers[RequestType.WORKFLOW_RESUME] = self._handle_workflow_resume
+        self._handlers[RequestType.WORKFLOW_RETRY_STEP] = self._handle_workflow_retry_step
+        self._handlers[RequestType.WORKFLOW_APPROVE_STEP] = self._handle_workflow_approve_step
+        self._handlers[RequestType.WORKFLOW_CHECKPOINTS] = self._handle_workflow_checkpoints
         
         # Computer-control handlers
         self._handlers[RequestType.COMPUTER_BROWSER] = self._handle_computer_control
@@ -208,10 +241,14 @@ class GatewayServer:
         request_id = str(uuid.uuid4())
         req_params = dict(params or {})
         req_params.setdefault("user_id", user_id)
+        trace_id = str(req_params.get("trace_id") or f"trace_{request_id}")
+        req_params.setdefault("trace_id", trace_id)
         await self.event_emitter.emit(
             EventType.REQUEST_RECEIVED,
             {
                 "request_id": request_id,
+                "trace_id": trace_id,
+                "session_id": req_params.get("session_id"),
                 "transport": "http",
                 "method": method.value,
                 "user_id": user_id,
@@ -239,8 +276,11 @@ class GatewayServer:
                 EventType.REQUEST_FAILED,
                 {
                     "request_id": request_id,
+                    "trace_id": trace_id,
+                    "session_id": req_params.get("session_id"),
                     "transport": "http",
                     "method": method.value,
+                    "user_id": user_id,
                     "error": response.error,
                 },
             )
@@ -257,8 +297,11 @@ class GatewayServer:
                 EventType.REQUEST_FAILED,
                 {
                     "request_id": request_id,
+                    "trace_id": trace_id,
+                    "session_id": req_params.get("session_id"),
                     "transport": "http",
                     "method": method.value,
+                    "user_id": user_id,
                     "error": response.error,
                 },
             )
@@ -279,8 +322,11 @@ class GatewayServer:
                     EventType.REQUEST_COMPLETED,
                     {
                         "request_id": request_id,
+                    "trace_id": trace_id,
+                    "session_id": req_params.get("session_id"),
                         "transport": "http",
                         "method": method.value,
+                    "user_id": user_id,
                         "ok": response.ok,
                     },
                 )
@@ -299,8 +345,11 @@ class GatewayServer:
             EventType.REQUEST_FAILED,
             {
                 "request_id": request_id,
+                    "trace_id": trace_id,
+                    "session_id": req_params.get("session_id"),
                 "transport": "http",
                 "method": method.value,
+                    "user_id": user_id,
                 "error": response.error,
             },
         )
@@ -314,6 +363,8 @@ class GatewayServer:
             "reasoning_service": bool(self.reasoning_service and self.reasoning_service.is_enabled()),
             "conversation_service": bool(self.conversation_service),
             "config_service": bool(self.config_service),
+            "workspace_service": bool(self.workspace_service),
+            "workflow_engine": bool(self.workflow_engine),
             "message_manager": bool(self.message_manager),
             "agent_manager": bool(self.agent_manager),
             "mcp_manager": bool(self.mcp_manager),
@@ -328,6 +379,8 @@ class GatewayServer:
             RequestType.MEMORY_GRAPH,
             RequestType.MEMORY_DECAY,
             RequestType.MEMORY_CLEANUP,
+            RequestType.MEMORY_RECALL_RUNS,
+            RequestType.MEMORY_RECALL_INSPECT,
         }
         config_methods = {
             RequestType.CONFIG_GET,
@@ -336,6 +389,29 @@ class GatewayServer:
             RequestType.CONFIG_RESET,
             RequestType.CONFIG_SWITCH_MODEL,
             RequestType.CONFIG_DIAGNOSE,
+        }
+        workspace_methods = {
+            RequestType.WORKSPACE_CREATE_DOCUMENT,
+            RequestType.WORKSPACE_UPDATE_DOCUMENT,
+            RequestType.WORKSPACE_LIST_ARTIFACTS,
+            RequestType.WORKSPACE_SNAPSHOT_ARTIFACT,
+        }
+        workflow_methods = {
+            RequestType.WORKFLOW_DEFINE,
+            RequestType.WORKFLOW_LIST,
+            RequestType.WORKFLOW_START,
+            RequestType.WORKFLOW_STATUS,
+            RequestType.WORKFLOW_PAUSE,
+            RequestType.WORKFLOW_RESUME,
+            RequestType.WORKFLOW_RETRY_STEP,
+            RequestType.WORKFLOW_APPROVE_STEP,
+            RequestType.WORKFLOW_CHECKPOINTS,
+        }
+        mcp_methods = {
+            RequestType.MCP_SERVICES_LIST,
+            RequestType.MCP_SERVICE_HEALTH,
+            RequestType.MCP_SERVICE_TOOLS,
+            RequestType.MCP_VISIBLE_TOOLS,
         }
         convo_methods = {
             RequestType.CHAT,
@@ -354,6 +430,12 @@ class GatewayServer:
             return "config service unavailable (degraded)"
         if method in convo_methods and not self.conversation_service:
             return "conversation service unavailable (degraded)"
+        if method in workspace_methods and not self.workspace_service:
+            return "workspace service unavailable (degraded)"
+        if method in workflow_methods and not self.workflow_engine:
+            return "workflow engine unavailable (degraded)"
+        if method in mcp_methods and not self.mcp_manager:
+            return "mcp manager unavailable (degraded)"
         return None
     
     async def start(self):
@@ -686,6 +768,102 @@ class GatewayServer:
             return str(user_id)
         return "default_user"
 
+    def _build_run_context(
+        self,
+        *,
+        request: RequestMessage,
+        session_id: str,
+        user_id: str,
+        channel_id: str,
+        input_payload: Optional[Dict[str, Any]] = None,
+    ) -> RunContext:
+        params = dict(input_payload or request.params or {})
+        trace_id = str(params.get("trace_id") or f"trace_{request.id}")
+        requested_mode = params.get("requested_mode")
+        requested_skill = params.get("requested_skill")
+
+        session_state = SessionState(
+            session_id=str(session_id),
+            user_id=str(user_id),
+            channel_id=str(channel_id),
+            reasoning_mode=str(requested_mode) if requested_mode else None,
+            active_skill_id=str(requested_skill) if requested_skill else None,
+            trace_id=trace_id,
+            session_metadata={
+                "request_id": request.id,
+                "channel_id": channel_id,
+            },
+        )
+
+        return RunContext(
+            request_id=request.id,
+            trace_id=trace_id,
+            session_state=session_state,
+            input_payload=params,
+            normalized_input={
+                "text": str(params.get("message") or params.get("query") or ""),
+                "attachments": params.get("attachments") or [],
+                "metadata": params.get("metadata") or {},
+            },
+            requested_mode=str(requested_mode) if requested_mode else None,
+            requested_skill=str(requested_skill) if requested_skill else None,
+            debug_flags=params.get("debug_flags") or {},
+        )
+
+    def _apply_skill_runtime_context(
+        self,
+        *,
+        run_context: RunContext,
+        requested_skill: Optional[str],
+        user_config: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not self.skill_registry:
+            return None
+
+        spec = self.skill_registry.resolve_skill_for_user(
+            requested_skill=requested_skill,
+            user_config=user_config,
+        )
+        if spec is None:
+            return None
+
+        skill_payload = {
+            "skill_id": spec.skill_id,
+            "name": spec.name,
+            "category": spec.category,
+            "system_instruction": spec.system_instruction,
+            "tool_allowlist": list(spec.tool_allowlist),
+            "prompt_block_policy": dict(spec.prompt_block_policy or {}),
+            "default_mode": spec.default_mode,
+            "version": spec.version,
+        }
+
+        run_context.requested_skill = spec.skill_id
+        run_context.active_skill = skill_payload
+        run_context.session_state.active_skill_id = spec.skill_id
+        if not run_context.requested_mode and spec.default_mode:
+            run_context.requested_mode = str(spec.default_mode)
+            run_context.session_state.reasoning_mode = str(spec.default_mode)
+
+        existing_policy = dict(run_context.tool_policy or {})
+        existing_allowlist = existing_policy.get("skill_allowlist") or []
+        merged_allowlist = []
+        seen = set()
+        for item in list(existing_allowlist) + list(spec.tool_allowlist):
+            name = str(item).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged_allowlist.append(name)
+        existing_policy["skill_allowlist"] = merged_allowlist
+        run_context.tool_policy = existing_policy
+
+        if isinstance(spec.prompt_block_policy, dict) and spec.prompt_block_policy:
+            run_context.prompt_block_policy = dict(spec.prompt_block_policy)
+
+        return skill_payload
+
+
     def _ensure_session_access(self, session_id: str, user_id: str) -> bool:
         if not self.message_manager:
             return False
@@ -736,6 +914,8 @@ class GatewayServer:
         user_id: Optional[str],
         request_id: Optional[str] = None,
         connection_id: Optional[str] = None,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
     ) -> Any:
         agent_type = str(args.get("agentType", "mcp")).lower()
         if agent_type == "agent":
@@ -765,6 +945,8 @@ class GatewayServer:
             ctx=ctx,
             request_id=request_id,
             connection_id=connection_id,
+            run_context=run_context,
+            user_config=user_config,
         )
     
     async def _handle_send(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
@@ -1245,6 +1427,50 @@ class GatewayServer:
     
     # ============ Conversation-management handlers ============
     
+    async def _handle_memory_recall_runs(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.memory_service or not self.memory_service.is_enabled():
+                return GatewayProtocol.create_response(
+                    request.id,
+                    False,
+                    error="Memory service not initialized"
+                )
+            user_id = self._resolve_request_user_id(connection, request)
+            session_id = request.params.get("session_id")
+            trace_id = request.params.get("trace_id")
+            limit = int(request.params.get("limit", 20))
+            runs = self.memory_service.list_recall_runs(
+                user_id=user_id,
+                session_id=session_id,
+                trace_id=trace_id,
+                limit=limit,
+            )
+            return GatewayProtocol.create_response(request.id, True, {"runs": runs})
+        except Exception as e:
+            logger.error(f"Error listing memory recall runs: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_memory_recall_inspect(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.memory_service or not self.memory_service.is_enabled():
+                return GatewayProtocol.create_response(
+                    request.id,
+                    False,
+                    error="Memory service not initialized"
+                )
+            user_id = self._resolve_request_user_id(connection, request)
+            target_request_id = str(request.params.get("target_request_id") or "")
+            if not target_request_id:
+                return GatewayProtocol.create_response(request.id, False, error="target_request_id is required")
+            row = self.memory_service.get_recall_run(target_request_id)
+            if not row:
+                return GatewayProtocol.create_response(request.id, False, error="recall run not found")
+            if str(row.get("user_id") or "") != str(user_id):
+                return GatewayProtocol.create_response(request.id, False, error="forbidden recall run access")
+            return GatewayProtocol.create_response(request.id, True, {"run": row})
+        except Exception as e:
+            logger.error(f"Error inspecting memory recall run: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
     async def _handle_sessions_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
         """Handle query for list of sessions."""
         try:
@@ -1346,19 +1572,88 @@ class GatewayServer:
                     request.id, False, error="Conversation service not initialized"
                 )
 
+            requested_channel = str(request.params.get("channel") or "web").strip() or "web"
+            adapter = self.channel_adapter_registry.get(requested_channel) or self.channel_adapter_registry.get("web")
+            if adapter is None:
+                return GatewayProtocol.create_response(
+                    request.id, False, error=f"channel adapter not found: {requested_channel}"
+                )
+
             user_id = self._resolve_request_user_id(connection, request)
-            user_text = (request.params.get("message") or "").strip()
+            raw_input = {
+                "request_id": request.id,
+                "trace_id": request.params.get("trace_id"),
+                "session_id": request.params.get("session_id"),
+                "message": request.params.get("message"),
+                "requested_mode": request.params.get("requested_mode"),
+                "requested_skill": request.params.get("requested_skill"),
+                "metadata": request.params.get("metadata") or {},
+                "user_id": request.params.get("user_id") or user_id,
+                "sender_id": getattr(getattr(connection, "identity", None), "device_id", None),
+            }
+            identity = adapter.normalize_identity(raw_input)
+            decision = adapter.permission_check(identity)
+            if not decision.allowed:
+                return GatewayProtocol.create_response(
+                    request.id, False, error=f"permission denied: {decision.reason}"
+                )
+
+            gateway_request = adapter.ingest_message(raw_input)
+            user_id = gateway_request.user_id
+            channel_id = str(gateway_request.channel_id or requested_channel)
+            user_text = (gateway_request.input_text or "").strip()
             if not user_text:
                 return GatewayProtocol.create_response(
                     request.id, False, error="message is required"
                 )
 
-            session_id = request.params.get("session_id")
+            session_id = gateway_request.session_id
             if session_id:
                 if not self.message_manager.get_session(session_id, user_id=user_id):
                     self.message_manager.create_session(session_id=session_id, user_id=user_id)
             else:
                 session_id = self.message_manager.create_session(user_id=user_id)
+                gateway_request.session_id = session_id
+
+            run_context_payload = dict(request.params or {})
+            run_context_payload["session_id"] = session_id
+            run_context_payload["requested_mode"] = gateway_request.requested_mode
+            run_context_payload["requested_skill"] = gateway_request.requested_skill
+            run_context = self._build_run_context(
+                request=request,
+                session_id=session_id,
+                user_id=user_id,
+                channel_id=channel_id,
+                input_payload=run_context_payload,
+            )
+            merged_for_skill = self.config_service.get_merged_config(user_id) if self.config_service else {}
+            active_skill = self._apply_skill_runtime_context(
+                run_context=run_context,
+                requested_skill=gateway_request.requested_skill,
+                user_config=merged_for_skill if isinstance(merged_for_skill, dict) else {},
+            )
+            if active_skill and active_skill.get("skill_id"):
+                gateway_request.requested_skill = str(active_skill.get("skill_id"))
+
+            if self.event_emitter:
+                await self.event_emitter.emit(
+                    EventType.GATEWAY_RUN_STARTED,
+                    {
+                        "request_id": request.id,
+                        "trace_id": gateway_request.trace_id,
+                        "session_id": session_id,
+                        "user_id": user_id,
+                    },
+                )
+                await self.event_emitter.emit(
+                    EventType.CONVERSATION_RUN_STARTED,
+                    {
+                        "request_id": request.id,
+                        "trace_id": gateway_request.trace_id,
+                        "session_id": session_id,
+                        "user_id": user_id,
+                    },
+                )
 
             turn_id = str(uuid.uuid4())
             began = self.message_manager.begin_turn(
@@ -1377,8 +1672,9 @@ class GatewayServer:
                 session_id=session_id,
                 user_id=user_id,
                 user_message=user_text,
-                channel="web",
+                channel=channel_id,
                 include_recent=True,
+                run_context=run_context,
             )
             messages = prepared["messages"]
             user_config = prepared["user_config"]
@@ -1395,6 +1691,8 @@ class GatewayServer:
                     user_id=user_id,
                     request_id=request.id,
                     connection_id=connection.connection_id,
+                    run_context=run_context,
+                    user_config=user_config,
                 ),
             )
 
@@ -1405,9 +1703,7 @@ class GatewayServer:
                 self.message_manager.set_pending_confirmation(
                     session_id, pending, user_id=user_id
                 )
-                return GatewayProtocol.create_response(
-                    request.id,
-                    True,
+                payload = adapter.emit_response(
                     {
                         "status": "needs_confirmation",
                         "session_id": session_id,
@@ -1415,8 +1711,30 @@ class GatewayServer:
                         "tool_name": tool_call_outcome.get("tool_name"),
                         "args": tool_call_outcome.get("args"),
                         "response": f"Tool `{tool_call_outcome.get('tool_name')}` requires confirmation.",
-                    },
+                    }
                 )
+                if self.event_emitter:
+                    await self.event_emitter.emit(
+                        EventType.RESPONSE_SYNTHESIZED,
+                        {
+                            "request_id": request.id,
+                            "trace_id": gateway_request.trace_id,
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "status": "needs_confirmation",
+                        },
+                    )
+                    await self.event_emitter.emit(
+                        EventType.GATEWAY_RUN_FINISHED,
+                        {
+                            "request_id": request.id,
+                            "trace_id": gateway_request.trace_id,
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "status": "needs_confirmation",
+                        },
+                    )
+                return GatewayProtocol.create_response(request.id, True, payload)
 
             final_content = tool_call_outcome.get("content", "")
             committed = self.message_manager.commit_turn(
@@ -1458,9 +1776,7 @@ class GatewayServer:
                     self.message_manager.set_pending_confirmation(
                         session_id, pending, user_id=user_id
                     )
-                    return GatewayProtocol.create_response(
-                        request.id,
-                        True,
+                    payload = adapter.emit_response(
                         {
                             "status": "needs_confirmation",
                             "session_id": session_id,
@@ -1468,22 +1784,76 @@ class GatewayServer:
                             "tool_name": "reasoning.success_label",
                             "args": pending["args"],
                             "response": final_content,
-                        },
+                        }
                     )
+                    if self.event_emitter:
+                        await self.event_emitter.emit(
+                            EventType.RESPONSE_SYNTHESIZED,
+                            {
+                                "request_id": request.id,
+                                "trace_id": gateway_request.trace_id,
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "status": "needs_confirmation",
+                            },
+                        )
+                        await self.event_emitter.emit(
+                            EventType.GATEWAY_RUN_FINISHED,
+                            {
+                                "request_id": request.id,
+                                "trace_id": gateway_request.trace_id,
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "status": "needs_confirmation",
+                            },
+                        )
+                    return GatewayProtocol.create_response(request.id, True, payload)
 
-            return GatewayProtocol.create_response(
-                request.id,
-                True,
-                {
-                    "status": "success",
-                    "session_id": session_id,
-                    "response": final_content,
-                },
+            gateway_response = GatewayResponse(
+                request_id=gateway_request.request_id,
+                trace_id=gateway_request.trace_id,
+                session_id=session_id,
+                user_id=user_id,
+                response_text=final_content,
+                status="success",
             )
+            payload = adapter.emit_response(gateway_response)
+            if self.event_emitter:
+                await self.event_emitter.emit(
+                    EventType.RESPONSE_SYNTHESIZED,
+                    {
+                        "request_id": request.id,
+                        "trace_id": gateway_request.trace_id,
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "status": "success",
+                    },
+                )
+                await self.event_emitter.emit(
+                    EventType.GATEWAY_RUN_FINISHED,
+                    {
+                        "request_id": request.id,
+                        "trace_id": gateway_request.trace_id,
+                        "session_id": session_id,
+                        "user_id": user_id,
+                        "status": "success",
+                    },
+                )
+            return GatewayProtocol.create_response(request.id, True, payload)
         except Exception as e:
             logger.error(f"Error handling chat: {e}")
+            if self.event_emitter:
+                await self.event_emitter.emit(
+                    EventType.GATEWAY_RUN_FINISHED,
+                    {
+                        "request_id": request.id,
+                        "session_id": request.params.get("session_id"),
+                        "user_id": self._resolve_request_user_id(connection, request),
+                        "status": "failed",
+                        "error": str(e),
+                    },
+                )
             return GatewayProtocol.create_response(request.id, False, error=str(e))
-
     async def _handle_chat_confirm(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
         """Handle tool-confirmation continuation for chat turn."""
         try:
@@ -1504,6 +1874,14 @@ class GatewayServer:
                 return GatewayProtocol.create_response(
                     request.id, False, error="session_id and tool_call_id are required"
                 )
+
+            run_context = self._build_run_context(
+                request=request,
+                session_id=session_id,
+                user_id=user_id,
+                channel_id=str(request.params.get("channel") or "web"),
+                input_payload=request.params,
+            )
 
             pending = self.message_manager.get_pending_confirmation(session_id, user_id=user_id)
             if not pending:
@@ -1540,13 +1918,14 @@ class GatewayServer:
                     return GatewayProtocol.create_response(
                         request.id,
                         True,
-                        {"status": "success", "session_id": session_id, "response": note},
+                        {"status": "success", "trace_id": run_context.trace_id, "session_id": session_id, "response": note},
                     )
                 return GatewayProtocol.create_response(
                     request.id,
                     True,
                     {
                         "status": "rejected",
+                        "trace_id": run_context.trace_id,
                         "session_id": session_id,
                         "response": "Marked as not successful. Reasoning template was not saved.",
                     },
@@ -1560,7 +1939,7 @@ class GatewayServer:
                 return GatewayProtocol.create_response(
                     request.id,
                     True,
-                    {"status": "rejected", "session_id": session_id, "response": "Tool execution rejected."},
+                    {"status": "rejected", "trace_id": run_context.trace_id, "session_id": session_id, "response": "Tool execution rejected."},
                 )
             if action != "approve":
                 return GatewayProtocol.create_response(
@@ -1595,6 +1974,7 @@ class GatewayServer:
                         user_id=user_id,
                         request_id=request.id,
                         connection_id=connection.connection_id,
+                        run_context=run_context,
                     ),
                 )
             except Exception as e:
@@ -1617,6 +1997,7 @@ class GatewayServer:
                         True,
                         {
                             "status": "needs_confirmation",
+                            "trace_id": run_context.trace_id,
                             "session_id": session_id,
                             "tool_call_id": e.tool_call_id,
                             "tool_name": e.tool_name,
@@ -1641,12 +2022,34 @@ class GatewayServer:
                 user_config = self.config_service.get_merged_config(user_id)
             self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
 
-            tool_call_outcome = await self.conversation_service.run_chat_loop(
-                messages,
-                user_config,
+            conversation_input = ConversationRunInput(
+                messages=messages,
+                user_config=user_config,
                 session_id=session_id,
                 user_id=user_id,
+                run_context=run_context,
+                tool_executor=lambda name, payload: self._execute_tool_for_chat(
+                    name,
+                    payload,
+                    session_id=session_id,
+                    user_id=user_id,
+                    request_id=request.id,
+                    connection_id=connection.connection_id,
+                    run_context=run_context,
+                    user_config=user_config,
+                ),
             )
+            await self._emit_gateway_event(
+                event_type=EventType.CONVERSATION_RUN_STARTED,
+                trace_id=run_context.trace_id,
+                request_id=request.id,
+                session_id=session_id,
+                user_id=user_id,
+                payload={"service": "conversation_service"},
+                tags=["conversation"],
+            )
+            conversation_output = await self.conversation_service.run_conversation(conversation_input)
+            tool_call_outcome = conversation_output.raw
 
             if tool_call_outcome.get("status") == "needs_confirmation":
                 next_pending = dict(tool_call_outcome)
@@ -1660,6 +2063,7 @@ class GatewayServer:
                     True,
                     {
                         "status": "needs_confirmation",
+                        "trace_id": run_context.trace_id,
                         "session_id": session_id,
                         "tool_call_id": tool_call_outcome.get("tool_call_id"),
                         "tool_name": tool_call_outcome.get("tool_name"),
@@ -1686,7 +2090,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(
                 request.id,
                 True,
-                {"status": "success", "session_id": session_id, "response": final_content},
+                {"status": "success", "trace_id": run_context.trace_id, "session_id": session_id, "response": final_content},
             )
         except Exception as e:
             logger.error(f"Error handling chat confirm: {e}")
@@ -1804,6 +2208,318 @@ class GatewayServer:
             logger.error(f"Error handling batch: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     
+    # ============ Workspace handlers ============
+
+    def _get_workspace_handle(
+        self,
+        *,
+        user_id: str,
+        params: Dict[str, Any],
+        request_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Optional[Any]:
+        if not self.workspace_service:
+            return None
+        requested_user_id = params.get("user_id")
+        if requested_user_id and str(requested_user_id) != str(user_id):
+            payload = {
+                "namespace": "workspace",
+                "owner_user_id": str(requested_user_id),
+                "requester_user_id": str(user_id),
+                "operation": "resolve_handle",
+                "reason": "cross_user_workspace_access",
+                "outcome": "blocked",
+                "request_id": request_id,
+                "trace_id": trace_id,
+                "user_id": str(user_id),
+            }
+            if self.event_emitter:
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.event_emitter.emit(EventType.SECURITY_BOUNDARY_VIOLATION, payload))
+                except Exception:
+                    pass
+            raise WorkspaceSandboxError("forbidden workspace access")
+
+        wid = params.get("workspace_id") or params.get("session_id") or "default"
+        metadata = params.get("metadata") if isinstance(params.get("metadata"), dict) else {}
+        return self.workspace_service.resolve_workspace_handle(
+            user_id=user_id,
+            workspace_id=str(wid),
+            metadata=metadata,
+        )
+
+    async def _handle_workspace_create_document(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workspace_service:
+                return GatewayProtocol.create_response(request.id, False, error="Workspace service not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            handle = self._get_workspace_handle(user_id=user_id, params=request.params, request_id=request.id, trace_id=self._resolve_request_trace_id(request))
+            rel = str(request.params.get("path") or "")
+            content = str(request.params.get("content") or "")
+            if not rel:
+                return GatewayProtocol.create_response(request.id, False, error="path is required")
+            trace_id = self._resolve_request_trace_id(request)
+            row = self.workspace_service.create_document(
+                handle=handle,
+                relative_path=rel,
+                content=content,
+                trace_id=trace_id,
+                request_id=request.id,
+                session_id=request.params.get("session_id"),
+                requester_user_id=user_id,
+            )
+            return GatewayProtocol.create_response(request.id, True, payload=row)
+        except WorkspaceSandboxError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error creating workspace document: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workspace_update_document(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workspace_service:
+                return GatewayProtocol.create_response(request.id, False, error="Workspace service not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            handle = self._get_workspace_handle(user_id=user_id, params=request.params, request_id=request.id, trace_id=self._resolve_request_trace_id(request))
+            rel = str(request.params.get("path") or "")
+            content = str(request.params.get("content") or "")
+            if not rel:
+                return GatewayProtocol.create_response(request.id, False, error="path is required")
+            trace_id = self._resolve_request_trace_id(request)
+            row = self.workspace_service.update_document(
+                handle=handle,
+                relative_path=rel,
+                content=content,
+                trace_id=trace_id,
+                request_id=request.id,
+                session_id=request.params.get("session_id"),
+                requester_user_id=user_id,
+            )
+            return GatewayProtocol.create_response(request.id, True, payload=row)
+        except WorkspaceSandboxError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error updating workspace document: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workspace_list_artifacts(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workspace_service:
+                return GatewayProtocol.create_response(request.id, False, error="Workspace service not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            handle = self._get_workspace_handle(user_id=user_id, params=request.params, request_id=request.id, trace_id=self._resolve_request_trace_id(request))
+            subdir = str(request.params.get("subdir") or "")
+            rows = self.workspace_service.list_artifacts(handle=handle, subdir=subdir, requester_user_id=user_id, trace_id=self._resolve_request_trace_id(request), request_id=request.id, session_id=request.params.get("session_id"))
+            return GatewayProtocol.create_response(request.id, True, payload={"artifacts": rows})
+        except WorkspaceSandboxError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error listing workspace artifacts: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workspace_snapshot_artifact(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workspace_service:
+                return GatewayProtocol.create_response(request.id, False, error="Workspace service not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            handle = self._get_workspace_handle(user_id=user_id, params=request.params, request_id=request.id, trace_id=self._resolve_request_trace_id(request))
+            rel = str(request.params.get("path") or "")
+            if not rel:
+                return GatewayProtocol.create_response(request.id, False, error="path is required")
+            trace_id = self._resolve_request_trace_id(request)
+            row = self.workspace_service.snapshot_artifact(
+                handle=handle,
+                relative_path=rel,
+                trace_id=trace_id,
+                request_id=request.id,
+                session_id=request.params.get("session_id"),
+                requester_user_id=user_id,
+            )
+            return GatewayProtocol.create_response(request.id, True, payload=row)
+        except WorkspaceSandboxError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error snapshot workspace artifact: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+    # ============ Workflow handlers ============
+
+    def _get_owned_workflow_run(self, connection: Connection, request: RequestMessage, run_id: str):
+        if not self.workflow_engine:
+            raise WorkflowError("Workflow engine not initialized")
+        run = self.workflow_engine.get_run(run_id)
+        if not run:
+            raise WorkflowError("workflow run not found")
+        requester = self._resolve_request_user_id(connection, request)
+        if str(run.user_id) != str(requester):
+            raise WorkflowError("forbidden workflow access")
+        return run
+
+    async def _handle_workflow_define(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            from .workflow_models import WorkflowDefinition
+
+            params = dict(request.params or {})
+            workflow_id = str(params.get("workflow_id") or "").strip()
+            name = str(params.get("name") or "").strip()
+            steps_raw = params.get("steps") or []
+            if not workflow_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_id is required")
+            if not name:
+                return GatewayProtocol.create_response(request.id, False, error="name is required")
+            definition = WorkflowDefinition(
+                workflow_id=workflow_id,
+                workflow_type=str(params.get("workflow_type") or "linear"),
+                name=name,
+                description=str(params.get("description") or ""),
+                owner_user_id=str(params.get("owner_user_id") or self._resolve_request_user_id(connection, request)),
+                agent_id=params.get("agent_id"),
+                skill_id=params.get("skill_id"),
+                steps=steps_raw,
+                policy=params.get("policy") or {},
+                status=str(params.get("status") or "active"),
+            )
+            saved = self.workflow_engine.define_workflow(definition)
+            return GatewayProtocol.create_response(request.id, True, payload={"workflow": saved.model_dump()})
+        except Exception as e:
+            logger.error(f"Error define workflow: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            params = dict(request.params or {})
+            user_id = str(params.get("owner_user_id") or self._resolve_request_user_id(connection, request))
+            limit = int(params.get("limit") or 50)
+            rows = self.workflow_engine.list_workflows(owner_user_id=user_id)
+            return GatewayProtocol.create_response(request.id, True, payload={"workflows": rows[: max(1, limit)]})
+        except Exception as e:
+            logger.error(f"Error list workflow: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_start(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            params = dict(request.params or {})
+            workflow_id = str(params.get("workflow_id") or "").strip()
+            if not workflow_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_id is required")
+            user_id = self._resolve_request_user_id(connection, request)
+            session_id = str(params.get("session_id") or "default_session")
+            workspace_id = str(params.get("workspace_id") or session_id)
+            run = self.workflow_engine.start_workflow(
+                workflow_id=workflow_id,
+                session_id=session_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                run_context=request.params,
+                run_metadata=params.get("run_metadata") or {},
+            )
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except Exception as e:
+            logger.error(f"Error start workflow: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_status(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            params = dict(request.params or {})
+            run_id = str(params.get("workflow_run_id") or "")
+            if not run_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id is required")
+            run = self._get_owned_workflow_run(connection, request, run_id)
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except Exception as e:
+            logger.error(f"Error workflow status: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_pause(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            run_id = str((request.params or {}).get("workflow_run_id") or "")
+            if not run_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id is required")
+            self._get_owned_workflow_run(connection, request, run_id)
+            run = self.workflow_engine.pause_workflow(run_id)
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except WorkflowError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error pause workflow: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_resume(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            run_id = str((request.params or {}).get("workflow_run_id") or "")
+            if not run_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id is required")
+            self._get_owned_workflow_run(connection, request, run_id)
+            run = self.workflow_engine.resume_workflow(run_id, run_context=request.params)
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except WorkflowError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error resume workflow: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_retry_step(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            params = dict(request.params or {})
+            run_id = str(params.get("workflow_run_id") or "")
+            step_id = str(params.get("step_id") or "")
+            if not run_id or not step_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id and step_id are required")
+            self._get_owned_workflow_run(connection, request, run_id)
+            run = self.workflow_engine.retry_step(run_id, step_id, run_context=request.params)
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except WorkflowError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error retry workflow step: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_approve_step(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            params = dict(request.params or {})
+            run_id = str(params.get("workflow_run_id") or "")
+            step_id = str(params.get("step_id") or "")
+            if not run_id or not step_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id and step_id are required")
+            approver = str(params.get("approved_by") or self._resolve_request_user_id(connection, request))
+            self._get_owned_workflow_run(connection, request, run_id)
+            run = self.workflow_engine.approve_step(run_id, step_id, approver, run_context=request.params)
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+        except WorkflowError as e:
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+        except Exception as e:
+            logger.error(f"Error approve workflow step: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_workflow_checkpoints(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.workflow_engine:
+                return GatewayProtocol.create_response(request.id, False, error="Workflow engine not initialized")
+            run_id = str((request.params or {}).get("workflow_run_id") or "")
+            if not run_id:
+                return GatewayProtocol.create_response(request.id, False, error="workflow_run_id is required")
+            self._get_owned_workflow_run(connection, request, run_id)
+            checkpoints = [ckpt.model_dump() for ckpt in self.workflow_engine.list_checkpoints(run_id)]
+            return GatewayProtocol.create_response(request.id, True, payload={"workflow_run_id": run_id, "checkpoints": checkpoints})
+        except Exception as e:
+            logger.error(f"Error workflow checkpoints: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
     # ============ Config-management handlers ============
     
     async def _handle_config_get(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
@@ -2106,4 +2822,80 @@ class GatewayServer:
             
             # Cleanup stale websocket connections.
             await self.connection_manager.cleanup_stale_connections()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

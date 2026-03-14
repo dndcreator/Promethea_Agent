@@ -1,0 +1,6 @@
+﻿[
+  "filesystem.*",
+  "workspace.*",
+  "websearch.*",
+  "mcp.*"
+]
