@@ -44,11 +44,8 @@ def detect_config_version(config: Dict[str, Any]) -> str:
     direct = config.get("config_version")
     if direct is not None:
         return _normalize_version(direct)
-
-    # Legacy fallback.
-    legacy = _deep_get(config, ["system", "version"])
-    if legacy is not None:
-        return _normalize_version(legacy)
+    # Treat missing config_version as v0. system.version is legacy metadata
+    # and should not short-circuit schema migration.
     return "0"
 
 

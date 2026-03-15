@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from gateway.events import EventEmitter
@@ -50,7 +50,7 @@ class SecurityAuditService:
         )
 
         return {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "user_id": user_id,
             "limit": bounded_limit,
             "summary": {

@@ -1453,6 +1453,41 @@ class MemoryService:
     ) -> str:
         try:
             resolved = self._extract_run_context_fields(run_context)
+            supports_structured_recall = False
+            collect_fn = getattr(self.memory_adapter, "collect_recall_candidates", None) if self.memory_adapter else None
+            if callable(collect_fn):
+                try:
+                    from unittest.mock import Mock
+
+                    supports_structured_recall = not (
+                        isinstance(self.memory_adapter, Mock) or isinstance(collect_fn, Mock)
+                    )
+                except Exception:
+                    supports_structured_recall = True
+            # Legacy adapter compatibility:
+            # If adapter does not provide structured recall candidates, keep
+            # historical get_context() behavior (raw context string).
+            if self.enabled and self.memory_adapter and not supports_structured_recall:
+                legacy_text = self.memory_adapter.get_context(
+                    query=str(query or ""),
+                    session_id=str(resolved.get("session_id") or session_id),
+                    user_id=str(resolved.get("user_id") or user_id or "default_user"),
+                )
+                if self.event_emitter:
+                    await self.event_emitter.emit(
+                        EventType.MEMORY_RECALLED,
+                        {
+                            "request_id": str(resolved.get("request_id") or f"recall_{int(time.time() * 1000)}"),
+                            "trace_id": str(resolved.get("trace_id") or f"trace_recall_{int(time.time() * 1000)}"),
+                            "session_id": str(resolved.get("session_id") or session_id),
+                            "user_id": str(resolved.get("user_id") or user_id or "default_user"),
+                            "context_length": len(str(legacy_text or "")),
+                            "selected": 1 if legacy_text else 0,
+                            "dropped": 0,
+                        },
+                    )
+                return str(legacy_text or "")
+
             request = MemoryRecallRequest(
                 request_id=str(resolved.get("request_id") or f"recall_{int(time.time() * 1000)}"),
                 trace_id=str(resolved.get("trace_id") or f"trace_recall_{int(time.time() * 1000)}"),

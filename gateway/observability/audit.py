@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from .trace import TraceEvent
 
 
 class AuditEvent(BaseModel):
-    audit_id: str = Field(default_factory=lambda: f"audit_{datetime.utcnow().timestamp()}")
+    audit_id: str = Field(default_factory=lambda: f"audit_{datetime.now(timezone.utc).timestamp()}")
     trace_id: Optional[str] = None
     request_id: Optional[str] = None
     session_id: Optional[str] = None
@@ -17,7 +17,7 @@ class AuditEvent(BaseModel):
     event_type: str
     action: str
     outcome: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source_module: str = "gateway"
     severity: str = "info"
     details: Dict[str, Any] = Field(default_factory=dict)
@@ -32,7 +32,11 @@ def infer_audit_event(trace_event: TraceEvent) -> Optional[AuditEvent]:
 
     if et in {"tool.call.start", "tool.execution.started", "tool.call.error", "tool.execution.failed"}:
         spec = payload.get("tool_spec") if isinstance(payload.get("tool_spec"), dict) else {}
-        side_effect = str(spec.get("side_effect_level") or "")
+        raw_side_effect = spec.get("side_effect_level")
+        side_effect = getattr(raw_side_effect, "value", raw_side_effect)
+        side_effect = str(side_effect or "").lower()
+        if "." in side_effect:
+            side_effect = side_effect.split(".")[-1]
         if side_effect in _SIDE_EFFECT_LEVELS:
             if et in {"tool.call.error", "tool.execution.failed"}:
                 outcome = "failed"

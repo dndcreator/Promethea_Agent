@@ -303,13 +303,15 @@ class MCPManager:
 
                 tools = get_available_tools(service_name)
                 self.tools_cache[service_name] = tools
+                current_health = self._ensure_health(service_name)
+                fallback_error = current_health.last_error or "service has no discoverable tools"
                 self._mark_health(
                     service_name,
                     status="online" if tools else "degraded",
                     tool_count=len(tools),
                     touch_seen=True,
                     touch_sync=True,
-                    last_error=None if tools else "service has no discoverable tools",
+                    last_error=None if tools else fallback_error,
                 )
                 return tools
             except Exception:

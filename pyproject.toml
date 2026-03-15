@@ -60,8 +60,11 @@ addopts = [
     "-v",
     "--strict-markers",
     "--tb=short",
-    "--basetemp=.pytest-tmp"
+    "-p",
+    "no:cacheprovider"
 ]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
 markers = [
     "asyncio: async tests",
     "live: integration tests requiring running services",

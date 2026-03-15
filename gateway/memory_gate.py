@@ -1,4 +1,4 @@
-from __future__ import annotations
+锘縡rom __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Literal, Optional
@@ -43,11 +43,11 @@ class MemoryWriteDecision(BaseModel):
 
 class MemoryWriteGate:
     _SPECULATIVE_RE = re.compile(
-        r"\b(maybe|might|perhaps|guess|probably|assume|uncertain|rumor|估计|可能|也许|大概|猜测)\b",
+        r"\b(maybe|might|perhaps|guess|probably|assume|uncertain|rumor)\b",
         re.IGNORECASE,
     )
     _SHORT_LIVED_RE = re.compile(
-        r"\b(today|tonight|tomorrow|this week|for now|temporary|temp|临时|暂时|今天|明天|本周)\b",
+        r"\b(today|tonight|tomorrow|this week|for now|temporary|temp)\b",
         re.IGNORECASE,
     )
 

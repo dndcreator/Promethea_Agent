@@ -141,14 +141,41 @@ class MemoryAPIConfig(BaseSettings):
     model: str = Field(default="")
 
 
+class MemoryMigrationConfig(BaseSettings):
+    mode: str = Field(default="off")
+    source_backend: str = Field(default="")
+    target_backend: str = Field(default="")
+    checkpoint: str = Field(default="")
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        value = (v or "off").strip().lower()
+        if value not in {"off", "dual_write", "cutover"}:
+            raise ValueError("memory.migration.mode must be one of: off, dual_write, cutover")
+        return value
+
+
 class MemoryConfig(BaseSettings):
     enabled: bool = Field(default=False)
+    store_backend: str = Field(default="neo4j")
+    sqlite_graph_path: str = Field(default="memory/sqlite_graph.db")
+    flat_memory_path: str = Field(default="memory/flat_memory.jsonl")
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
     api: MemoryAPIConfig = Field(default_factory=MemoryAPIConfig)
     hot_layer: HotLayerConfig = Field(default_factory=HotLayerConfig)
     warm_layer: WarmLayerConfig = Field(default_factory=WarmLayerConfig)
     cold_layer: ColdLayerConfig = Field(default_factory=ColdLayerConfig)
     gating: MemoryGatingConfig = Field(default_factory=MemoryGatingConfig)
+    migration: MemoryMigrationConfig = Field(default_factory=MemoryMigrationConfig)
+
+    @field_validator("store_backend")
+    @classmethod
+    def validate_store_backend(cls, v: str) -> str:
+        value = (v or "neo4j").strip().lower()
+        if value not in {"neo4j", "sqlite_graph", "flat_memory"}:
+            raise ValueError("memory.store_backend must be one of: neo4j, sqlite_graph, flat_memory")
+        return value
 
 
 class ReasoningConfig(BaseSettings):
@@ -321,7 +348,8 @@ def load_config() -> PrometheaConfig:
 
     if config_path and config_path.exists():
         try:
-            with config_path.open("r", encoding="utf-8") as f:
+            # Accept UTF-8 BOM files produced by some editors/exporters.
+            with config_path.open("r", encoding="utf-8-sig") as f:
                 file_data = json.load(f)
             _deep_merge(merged_data, file_data)
         except Exception as e:

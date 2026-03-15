@@ -2,6 +2,7 @@
 Gateway server - WebSocket-based multiplexing server.
 """
 import asyncio
+import inspect
 import os
 import time
 import uuid
@@ -1178,6 +1179,72 @@ class GatewayServer:
         except Exception as e:
             logger.error(f"Error calling tool: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_mcp_services_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.mcp_manager:
+                return GatewayProtocol.create_response(request.id, False, error="MCP manager not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            rows = self.mcp_manager.list_service_health(user_id=user_id)
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {
+                    "services": rows,
+                    "total": len(rows),
+                    "user_id": user_id,
+                },
+            )
+        except Exception as e:
+            logger.error(f"Error listing MCP services: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_mcp_service_health(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.mcp_manager:
+                return GatewayProtocol.create_response(request.id, False, error="MCP manager not initialized")
+            service_name = str(request.params.get("service_name") or "").strip()
+            if not service_name:
+                return GatewayProtocol.create_response(request.id, False, error="service_name is required")
+            user_id = self._resolve_request_user_id(connection, request)
+            row = self.mcp_manager.get_service_health(service_name, user_id=user_id)
+            return GatewayProtocol.create_response(request.id, True, row)
+        except Exception as e:
+            logger.error(f"Error reading MCP service health: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_mcp_service_tools(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.mcp_manager:
+                return GatewayProtocol.create_response(request.id, False, error="MCP manager not initialized")
+            service_name = str(request.params.get("service_name") or "").strip()
+            if not service_name:
+                return GatewayProtocol.create_response(request.id, False, error="service_name is required")
+            user_id = self._resolve_request_user_id(connection, request)
+            rows = await self.mcp_manager.list_tool_descriptors(service_name=service_name, user_id=user_id)
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {"service_name": service_name, "tools": rows, "total": len(rows), "user_id": user_id},
+            )
+        except Exception as e:
+            logger.error(f"Error reading MCP service tools: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
+
+    async def _handle_mcp_visible_tools(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
+        try:
+            if not self.mcp_manager:
+                return GatewayProtocol.create_response(request.id, False, error="MCP manager not initialized")
+            user_id = self._resolve_request_user_id(connection, request)
+            rows = await self.mcp_manager.list_visible_tools_for_user(user_id)
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {"tools": rows, "total": len(rows), "user_id": user_id},
+            )
+        except Exception as e:
+            logger.error(f"Error reading MCP visible tools: {e}")
+            return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     # ============ Memory-system handlers ============
     
@@ -1445,7 +1512,12 @@ class GatewayServer:
                 trace_id=trace_id,
                 limit=limit,
             )
-            return GatewayProtocol.create_response(request.id, True, {"runs": runs})
+            runs = runs or []
+            return GatewayProtocol.create_response(
+                request.id,
+                True,
+                {"runs": runs, "total": len(runs)},
+            )
         except Exception as e:
             logger.error(f"Error listing memory recall runs: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
@@ -1679,22 +1751,54 @@ class GatewayServer:
             messages = prepared["messages"]
             user_config = prepared["user_config"]
 
-            tool_call_outcome = await self.conversation_service.run_chat_loop(
-                messages,
-                user_config,
+            tool_executor = lambda name, payload: self._execute_tool_for_chat(
+                name,
+                payload,
                 session_id=session_id,
                 user_id=user_id,
-                tool_executor=lambda name, payload: self._execute_tool_for_chat(
-                    name,
-                    payload,
+                request_id=request.id,
+                connection_id=connection.connection_id,
+                run_context=run_context,
+                user_config=user_config,
+            )
+            tool_call_outcome: Dict[str, Any]
+            run_conversation = getattr(self.conversation_service, "run_conversation", None)
+            if callable(run_conversation):
+                run_result = run_conversation(
+                    ConversationRunInput(
+                        messages=messages,
+                        user_config=user_config,
+                        session_id=session_id,
+                        user_id=user_id,
+                        tool_executor=tool_executor,
+                        run_context=run_context,
+                    )
+                )
+                run_result = await run_result if inspect.isawaitable(run_result) else run_result
+                if isinstance(run_result, dict):
+                    tool_call_outcome = run_result
+                else:
+                    raw_payload = getattr(run_result, "raw", None)
+                    if isinstance(raw_payload, dict):
+                        tool_call_outcome = raw_payload
+                    else:
+                        tool_call_outcome = {
+                            "status": str(getattr(run_result, "status", "success") or "success"),
+                            "content": str(getattr(run_result, "content", "") or ""),
+                        }
+            else:
+                run_chat_loop = getattr(self.conversation_service, "run_chat_loop", None)
+                if not callable(run_chat_loop):
+                    raise RuntimeError("conversation service missing run entrypoint")
+                run_result = run_chat_loop(
+                    messages,
+                    user_config,
                     session_id=session_id,
                     user_id=user_id,
-                    request_id=request.id,
-                    connection_id=connection.connection_id,
-                    run_context=run_context,
-                    user_config=user_config,
-                ),
-            )
+                    tool_executor=tool_executor,
+                )
+                run_result = await run_result if inspect.isawaitable(run_result) else run_result
+                tool_call_outcome = run_result if isinstance(run_result, dict) else {"status": "success", "content": ""}
 
             if tool_call_outcome.get("status") == "needs_confirmation":
                 pending = dict(tool_call_outcome)

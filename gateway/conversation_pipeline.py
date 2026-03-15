@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, List, Optional
 
 from .protocol import (
@@ -19,6 +20,15 @@ from .memory_recall_schema import MemoryRecallRequest
 from .prompt_assembler import PromptAssembler
 
 PROMPT_ASSEMBLER = PromptAssembler()
+
+
+def _normalize_recall_context(value: Any) -> str:
+    """Accept only real text context; reject mock/object stringifications."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return ""
 
 def _extract_context_fields(
     run_context: Optional[Any],
@@ -172,11 +182,51 @@ async def stage_memory_recall(
         top_k=8 if mode.mode in {"deep", "workflow"} else 4,
         filters={"channel": normalized.channel},
     )
-    result = await service.memory_service.recall_memory(
-        recall_request,
-        run_context=run_context,
-    )
-    context = result.formatted_context or ""
+    context = ""
+    recall_memory = getattr(service.memory_service, "recall_memory", None)
+    if callable(recall_memory):
+        recall_out = recall_memory(
+            recall_request,
+            run_context=run_context,
+        )
+        result = await recall_out if inspect.isawaitable(recall_out) else recall_out
+        context = _normalize_recall_context(
+            getattr(result, "formatted_context", None)
+            or (result.get("formatted_context") if isinstance(result, dict) else None)
+            or (result if isinstance(result, str) else "")
+        )
+        if not context:
+            get_context = getattr(service.memory_service, "get_context", None)
+            if callable(get_context):
+                try:
+                    fallback_out = get_context(
+                        normalized.user_message,
+                        normalized.session_id,
+                        normalized.user_id,
+                    )
+                except TypeError:
+                    fallback_out = get_context(
+                        normalized.user_message,
+                        normalized.session_id,
+                    )
+                raw_fallback = await fallback_out if inspect.isawaitable(fallback_out) else fallback_out
+                context = _normalize_recall_context(raw_fallback)
+    else:
+        get_context = getattr(service.memory_service, "get_context", None)
+        if callable(get_context):
+            try:
+                recall_out = get_context(
+                    normalized.user_message,
+                    normalized.session_id,
+                    normalized.user_id,
+                )
+            except TypeError:
+                recall_out = get_context(
+                    normalized.user_message,
+                    normalized.session_id,
+                )
+            raw_context = await recall_out if inspect.isawaitable(recall_out) else recall_out
+            context = _normalize_recall_context(raw_context)
     if not context:
         return MemoryRecallBundle(recalled=False, reason="empty_context")
     return MemoryRecallBundle(

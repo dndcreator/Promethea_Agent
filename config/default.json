@@ -18,6 +18,9 @@
             },
     "memory":  {
                    "enabled":  true,
+                   "store_backend": "neo4j",
+                   "sqlite_graph_path": "memory/sqlite_graph.db",
+                   "flat_memory_path": "memory/flat_memory.jsonl",
                    "api":  {
                                "use_main_api":  true,
                                "api_key":  "",
@@ -76,7 +79,13 @@
                                                  "recent_write_cache_size":  2000,
                                                  "min_candidate_chars":  8
                                              }
-                              }
+                              },
+                   "migration": {
+                       "mode": "off",
+                       "source_backend": "",
+                       "target_backend": "",
+                       "checkpoint": ""
+                   }
                },
     "reasoning":  {
                       "enabled":  false,

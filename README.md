@@ -1,366 +1,309 @@
-﻿# Promethea Agent
+# Promethea
 
-Promethea Agent is a local-first, multi-user agent runtime built around one rule: keep boundaries clear.
+**A memory-native, reasoning-aware, multi-user-safe Agent Runtime.**
 
-It provides a web UI, HTTP API, session management, user-scoped memory, and plugin-based extensions in one repository.
+> Not a chatbot wrapper. Not a prompt chain.  
+> A complete runtime for long-lived, multi-turn, multi-task AI agents —  
+> that can remember you, plan actions, execute tools safely, and deliver artifacts you can actually trust.
 
-## Contents
+---
 
-- [Why This Exists](#why-this-exists)
-- [Differentiation](#differentiation)
-- [Who This Is For](#who-this-is-for)
-- [Quick Start](#quick-start)
-- [How The System Is Organized](#how-the-system-is-organized)
-- [Design Rules (Project-Wide)](#design-rules-project-wide)
-- [Request Lifecycle](#request-lifecycle)
-- [Configuration Model](#configuration-model)
-- [Module Map](#module-map)
-- [Development Workflow](#development-workflow)
-- [Testing](#testing)
-- [Open Source Baseline](#open-source-baseline)
-- [Troubleshooting](#troubleshooting)
-- [Documentation](#documentation)
+## Why Promethea?
 
-## Why This Exists
+Most agent frameworks solve the "make an LLM call a tool" problem.  
+Promethea solves what comes after:
 
-Most agent projects are easy to demo and hard to maintain.
+| Problem | What Promethea does |
+|---|---|
+| Agent forgets who you are after 10 messages | Layered long-term memory: hot / warm / cold, graph-backed, per-user owned |
+| Tool calls are fire-and-forget black boxes | ToolSpec + ToolPolicy + full audit trace on every invocation |
+| Multi-user = data leaks between users | Four namespace layers, enforced at runtime, auditable |
+| Long tasks die mid-way | Resumable workflow engine with checkpoints and human-approval gates |
+| "What did the agent do?" is unanswerable | Structured trace + audit events on every memory write, tool call, and workspace write |
+| Config drifts, prod breaks silently | Versioned config schema with migration path and deprecation warnings |
 
-This project is designed for long-lived operation:
+---
 
-- local-first deployment for fast iteration
-- strict user isolation for multi-user safety
-- explicit module boundaries for low-risk maintenance
-- extension model that does not require rewriting core runtime
+## Feature Highlights
 
-## Differentiation
+### 🧠 Multi-Layer Memory System
+Three pluggable backends — no database required for basic use:
 
-This section describes what is intentionally different about this project.
+- **`flat_memory`** — JSONL file, zero dependencies, works out of the box
+- **`sqlite_graph`** — SQLite with graph recall via recursive CTE; semantic + structural search
+- **`neo4j`** — Full hot/warm/cold/forgetting stack; production-grade multi-session memory
 
-### 1) Multi-user is a first-class runtime constraint
+Memory is **governed, not just stored**:
+- `MemoryWriteGate` decides allow / deny / defer before any long-term write
+- `MemoryRecallPolicy` controls fast / deep / workflow recall modes
+- MEF (Memory Exchange Format) enables lossless migration between backends
 
-Many agent repos are single-user at heart and add accounts later.
+### ⚙️ Workflow Engine
+Linear, resumable, human-in-the-loop workflows:
 
-Promethea starts from user scoping:
+- Step types: `reasoning_step`, `tool_step`, `artifact_step`, `approval_step`, `memory_step`, `summary_step`
+- Checkpoint capture at every step boundary
+- Pause / resume / retry / human approval gate
+- Artifacts written directly into workspace sandbox
 
-- API auth resolves a concrete `user_id`
-- session operations are user-scoped
-- config is persisted under `config/users/<user_id>/config.json`
-- memory ownership is enforced in session scope helpers (`memory/session_scope.py`)
+### 🔒 Security-First Runtime
+Four enforced namespace layers:
 
-Design impact:
+- **Config namespace** — user-scoped policies, no cross-user bleed
+- **Session namespace** — session ownership bound to user identity
+- **Memory namespace** — recall and write scoped to owning user
+- **Workspace namespace** — sandboxed file access, path-escape protection
 
-- fewer cross-user leakage risks
-- easier productionization for teams/internal tools
-- some extra code in route/service layers, by design
+Security audit is queryable in real time: `GET /api/security/audit/report`
 
-### 2) Memory is layered and operational, not a demo vector store
+### 🛠️ Tool & Skill System
+- Unified `ToolRegistry` covers local tools, MCP services, and agent tools
+- `ToolSpec` carries capability type, side-effect level, permission scope, timeout hints
+- `ToolPolicy` enforces allow/deny at runtime, not just at prompt time
+- `Skills` bundle tool allowlists + system instructions + evaluation cases into deployable capability packs
 
-Memory is built as a lifecycle:
+### 📡 Multi-Channel, One Runtime
+Channel adapters normalize every input source to the same gateway contract:
+- Web UI (built-in)
+- HTTP API
+- Telegram
+- Tauri desktop shell (Windows / macOS / Linux)
+- Extensible to any channel without touching the core pipeline
 
-- hot layer: immediate writes from current turns
-- warm layer: clustering/concept stabilization
-- cold layer: long-term summaries
-- forgetting pass: decay + cleanup
+### 🔍 Observability Built In
+- Structured `TraceEvent` + `AuditEvent` on every significant operation
+- `SecurityAuditService` generates per-user audit reports
+- MCP service health snapshots (`online / offline / degraded`)
+- `MemoryRecallInspector` — see exactly what was recalled, dropped, and why
 
-This design targets long-horizon chats where context windows are not enough.
+---
 
-Tradeoff:
+## Quickstart
 
-- more moving parts than a simple embedding cache
-- better control over retention and recall quality over time
+### Requirements
 
-### 3) Gateway-first orchestration, not route-first sprawl
+- Python ≥ 3.10
+- pip / venv
 
-`gateway` is the orchestrator. `gateway/http` is only the boundary.
+### 1. Install
 
-Why this matters:
+```bash
+git clone https://github.com/<your-org>/Promethea_Agent.git
+cd Promethea_Agent
 
-- business behavior stays in service modules
-- HTTP payload changes do not force deep rewrites
-- adding channels does not duplicate core logic
+python -m venv .venv
 
-### 4) Tool use is policy-driven, not binary on/off
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
 
-Tool access is controlled by policy profiles (`minimal`, `coding`, `full`) and allow/deny sets.
+# macOS / Linux
+source .venv/bin/activate
 
-This is practical for real deployment:
-
-- safer defaults for general users
-- broader permissions for coding/ops users
-- per-provider overrides when needed
-
-### 5) Reasoning outcomes are gated before persistence
-
-Reasoning output is not blindly recorded.
-
-The runtime supports outcome assessment and optional human confirmation before storing successful patterns.
-
-Goal:
-
-- reduce accumulation of low-quality reasoning artifacts
-- keep long-term memory cleaner in real usage
-
-## Who This Is For
-
-### Good fit
-
-- teams building an internal assistant with multiple user accounts
-- projects that need both UI and API from one runtime
-- developers who care about maintainability more than quick hacks
-- systems that need memory behavior beyond context-window stuffing
-
-### Not a good fit
-
-- single-file prototype needs
-- "just one script" automation tasks
-- use cases where no user isolation is required
-
-## Quick Start
-
-### 1. Requirements
-
-- Python 3.10+
-- Neo4j (optional, only needed for memory features)
-
-### 2. Install
-
-```powershell
+pip install -U pip
 pip install -r requirements.txt
 ```
 
-Optional editable install:
+### 2. Configure
 
-```powershell
-pip install -e .
+```bash
+# Windows
+copy example.env .env
+
+# macOS / Linux
+cp example.env .env
 ```
 
-### 3. Configure
+Open `.env` and set **at minimum these three fields** (they are coupled — all three must match your provider):
 
-Create `.env` in repo root (or copy from `env.example`):
+```bash
+# Option A: OpenRouter (recommended for first-time users)
+API__API_KEY=sk-or-your-key-here
+API__BASE_URL=https://openrouter.ai/api/v1
+API__MODEL=openai/gpt-4.1-mini
 
-```env
-API__API_KEY=your_api_key_here
-AUTH__SECRET_KEY=replace_with_a_long_random_value
+# Option B: OpenAI directly
+API__API_KEY=sk-your-openai-key
+API__BASE_URL=https://api.openai.com/v1
+API__MODEL=gpt-4.1-mini
+
+# Option C: Local model (any OpenAI-compatible server)
+API__API_KEY=dummy-local-key
+API__BASE_URL=http://127.0.0.1:8001/v1
+API__MODEL=your-local-model-id
 ```
 
-Enable memory only if needed:
+> ⚠️ `API__BASE_URL` and `API__MODEL` must match. Changing only the key will not work.
 
-```env
+Choose a memory backend (start here if you want zero external dependencies):
+
+```bash
 MEMORY__ENABLED=true
-MEMORY__NEO4J__ENABLED=true
-MEMORY__NEO4J__URI=bolt://127.0.0.1:7687
-MEMORY__NEO4J__USERNAME=neo4j
-MEMORY__NEO4J__PASSWORD=your_password
-MEMORY__NEO4J__DATABASE=neo4j
+MEMORY__STORE_BACKEND=sqlite_graph   # or flat_memory
 ```
 
-Enable voice with compact settings (optional):
+### 3. Run
 
-```env
-# reuse API__API_KEY by default
-VOICE__PROVIDER=openai
-VOICE__MODEL=gpt-4o-mini-tts
-VOICE__VOICE=alloy
-```
-
-### 4. Run
-
-```powershell
+```bash
 python start_gateway_service.py
 ```
 
-Open:
+Visit `http://127.0.0.1:8000/UI/index.html` — it opens automatically.
 
-- API: `http://127.0.0.1:8000`
-- UI: `http://127.0.0.1:8000/UI/index.html`
+---
 
-## How The System Is Organized
+## Architecture in 90 Seconds
 
-```text
-client (UI/channels)
-  -> gateway/http (routing, auth, middleware)
-  -> gateway services (conversation, config, memory, tools)
-  -> memory/core/agentkit/extensions
-  -> response/logs/metrics
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Interface Layer                         │
+│          Web UI  │  HTTP API  │  Telegram  │  Tauri         │
+└────────────────────────┬────────────────────────────────────┘
+                         │ GatewayRequest
+┌────────────────────────▼────────────────────────────────────┐
+│                  Gateway Control Plane                      │
+│   Session ▸ RunContext ▸ Pipeline ▸ Audit ▸ EventBus        │
+└──┬──────────┬──────────┬──────────┬───────────┬────────────┘
+   │          │          │          │           │
+Memory    Tools/MCP   Skills    Workspace   Workflow
+Layer     Layer       Layer     Sandbox     Engine
+   │          │          │          │           │
+   └──────────┴──────────┴──────────┴───────────┘
+                         │
+         ┌───────────────▼──────────────┐
+         │   Security / Observability   │
+         │  Namespace  Trace  Audit     │
+         └──────────────────────────────┘
 ```
 
-The gateway is orchestration. Business logic should live in services. Persistence details should stay in storage modules.
+Six-stage pipeline per request:
 
-## Design Rules (Project-Wide)
+1. **Input Normalization** — user identity, trace_id, channel normalization
+2. **Mode Detection** — fast / deep / workflow
+3. **Memory Recall** — layered, policy-controlled, reason-tagged
+4. **Planning / Reasoning** — ReAct-Tree-of-Thought, resumable nodes
+5. **Tool Execution** — policy-checked, fully traced
+6. **Response Synthesis** — artifact write, memory write gate, audit flush
 
-These rules apply to every module in this repository.
+Full design: [`docs/architecture/runtime-overview.md`](docs/architecture/runtime-overview.md)
 
-### 1) Respect the boundary chain
+---
 
-`Route -> Service -> Storage`
+## Configuration Reference
 
-- Routes parse input, run auth checks, and shape output.
-- Services implement business behavior.
-- Storage layers persist and retrieve data.
+See [`docs/configuration.md`](docs/configuration.md) for the complete reference.
 
-Do not skip layers unless there is a proven performance reason.
+Key sections:
 
-### 2) User isolation is non-negotiable
+| Section | Key fields | Notes |
+|---|---|---|
+| `api` | `api_key`, `base_url`, `model` | All three must match your provider |
+| `memory` | `enabled`, `store_backend` | Start with `sqlite_graph` |
+| `memory.neo4j` | `uri`, `username`, `password` | Only needed for Neo4j backend |
+| `sandbox` | `enabled`, `profile` | Set `profile=strict` in production |
+| `reasoning` | `enabled`, `mode` | `react_tot` is the only supported mode |
 
-Any session/config/memory operation must be scoped by `user_id`.
+---
 
-If a shortcut bypasses `user_id`, it is a bug.
+## Docs
 
-### 3) Prefer one write path per domain action
+| Document | What it covers |
+|---|---|
+| [`docs/architecture/runtime-overview.md`](docs/architecture/runtime-overview.md) | Full runtime design, pipeline stages, core objects |
+| [`docs/architecture/memory-model.md`](docs/architecture/memory-model.md) | Memory layers, write gate, recall policy |
+| [`docs/architecture/security-model.md`](docs/architecture/security-model.md) | Namespace layers, enforcement points, audit |
+| [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |
+| [`docs/architecture/tool-runtime.md`](docs/architecture/tool-runtime.md) | ToolSpec, ToolRegistry, ToolPolicy |
+| [`docs/configuration.md`](docs/configuration.md) | Full configuration reference |
+| [`docs/quickstart-local-model.md`](docs/quickstart-local-model.md) | Using local models (vLLM, Ollama, etc.) |
+| [`docs/scenario-workflow-audit.md`](docs/scenario-workflow-audit.md) | End-to-end demo: workflow + workspace + audit |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
 
-For config updates, prefer `POST /api/config/update`.
+---
 
-Parallel write paths are a common source of silent data drift.
+## Scenarios
 
-### 4) Add features in service layer first
+### Run a workflow that saves an artifact
 
-Expose new routes only after the service behavior is stable and testable.
-
-### 5) Fail loudly for operators, clearly for users
-
-- user-facing messages should be readable
-- logs should include enough context to debug quickly
-
-### 6) Compatibility beats cleanup in active systems
-
-When API shapes change, keep compatibility where practical and remove old paths in a controlled follow-up.
-
-## Request Lifecycle
-
-Typical chat request flow:
-
-1. UI calls `POST /api/chat`
-2. middleware resolves user context
-3. conversation service builds prompt + calls model
-4. message manager commits turn data
-5. memory pipeline updates graph data asynchronously
-6. future turns can recall user-scoped memory
-
-## Configuration Model
-
-Precedence (low to high):
-
-1. `config/default.json`
-2. `config/users/<user_id>/config.json`
-3. environment variables (`.env`)
-
-Notes:
-
-- keep secrets in environment variables
-- keep user overrides minimal and explicit
-- keep defaults stable for first-run experience
-
-## Module Map
-
-```text
-gateway/         runtime orchestration and core services
-gateway/http/    API boundary (auth, routes, middleware)
-memory/          layered memory + recall/forgetting
-core/            plugin framework (discovery/registry/runtime)
-channels/        inbound/outbound channel adapters
-computer/        host-side control primitives
-agentkit/        MCP + tool-call orchestration + policy
-extensions/      concrete plugin implementations
-config/          default and per-user config data
-UI/              browser client
-tests/           regression and integration coverage
+```bash
+curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_message": "Design a memory system architecture",
+    "session_id": "s1",
+    "workspace_id": "myproject",
+    "user_id": "u1"
+  }'
 ```
 
-## Development Workflow
+The agent will:
+1. Run a `reasoning_step` to generate the plan
+2. Write the artifact via `artifact_step` to `workspace/u1/myproject/outputs/plan.md`
+3. Emit a `workspace.artifact.written` audit event
 
-### Install dev dependencies
+### Inspect the security audit log
 
-```powershell
-pip install -e .[dev]
+```bash
+curl "http://127.0.0.1:8000/api/security/audit/report?user_id=u1"
 ```
 
-### Before opening a PR
+Returns a structured report with: namespace violations, workspace blocked events, side-effect tool calls, secret access attempts.
 
-1. confirm boundary placement (route/service/storage)
-2. confirm `user_id` scoping on touched paths
-3. confirm no duplicate write paths were introduced
-4. run relevant tests
+### Switch memory backend without data loss
 
-### If you touched memory logic
+```python
+from memory.adapter import MemoryAdapter
 
-Always run memory regression tests before merge.
-
-### If you touched streaming UI
-
-Validate SSE path and JSON fallback path.
-
-## Testing
-
-Run all tests:
-
-```powershell
-pytest -q tests/
+adapter = MemoryAdapter()
+result = adapter.migrate_backend("flat_memory", mode="cutover")
+# {"ok": True, "mode": "cutover", "active_backend": "flat_memory", ...}
 ```
 
-Or use the unified runner:
+---
 
-```powershell
-python tests/run_all_tests.py
-python tests/run_all_tests.py --coverage
+## Comparison
+
+| | Promethea | OpenClaw |
+|---|---|---|
+| Multi-layer memory (hot/warm/cold) | ✅ | ⚠️ varies |
+| Memory write governance (allow/deny/defer) | ✅ | ❌ |
+| Memory backend migration (MEF) | ✅ | ❌ |
+| Namespace isolation (4 layers) | ✅ | ⚠️ partial |
+| Resumable workflow + human approval | ✅ | ⚠️ varies |
+| Workspace sandbox + path escape protection | ✅ | ⚠️ varies |
+| Real-time security audit report | ✅ | ❌ |
+| ToolSpec + ToolPolicy at runtime | ✅ | ⚠️ varies |
+| MCP health panel | ✅ | ⚠️ varies |
+| Local model support (OpenAI-compatible) | ✅ | ✅ |
+| Channel adapter framework | ✅ | ✅ |
+| Tauri desktop shell | ✅ | ❌ |
+
+---
+
+## Contributing
+
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Quick start for contributors:
+
+```bash
+pip install -r requirements.txt
+pytest tests/test_reasoning_service.py tests/test_memory_regressions.py \
+       tests/test_tool_service.py tests/test_workspace_sandbox.py
 ```
 
-Recommended fast regression set:
+---
 
-```powershell
-pytest -q tests/test_message_manager_turns.py tests/test_memory_regressions.py tests/test_conversation_queue.py
-```
+## License
 
-## Open Source Baseline
+MIT — see [`LICENSE`](LICENSE).
 
-This repository includes standard open-source collaboration files:
+---
 
-- `CONTRIBUTING.md`
-- `CODE_OF_CONDUCT.md`
-- `SECURITY.md`
-- `SUPPORT.md`
-- `CHANGELOG.md`
-- `.github/workflows/ci.yml`
-- `.github/ISSUE_TEMPLATE/*`
-- `.github/pull_request_template.md`
+## Share
 
-## Troubleshooting
+If Promethea helps you build something real, tell someone.
 
-### `API key is not configured`
+> A memory-native agent runtime for long-lived tasks — with governance, workspace, workflow, and multi-user safety built in.  
+> Zero cloud lock-in. Runs on your machine. Open source.
 
-Set `API__API_KEY` in `.env` and restart service.
-
-### `Memory system not enabled`
-
-Set both:
-
-- `MEMORY__ENABLED=true`
-- `MEMORY__NEO4J__ENABLED=true`
-
-### Neo4j connection issues
-
-Check in order:
-
-1. Neo4j is running
-2. URI is correct (`bolt://127.0.0.1:7687` by default)
-3. username/password/database are correct
-
-### UI opens but chat fails
-
-Check gateway logs first, then verify `/api/config` returns expected model settings for the current user.
-
-## Documentation
-
-- `QUICK_START.md`
-- `gateway/README.md`
-- `gateway/http/README.md`
-- `memory/README.md`
-- `core/README.md`
-- `channels/README.md`
-- `computer/README.md`
-- `agentkit/README.md`
-- `extensions/README.md`
-- `config/README.md`
-- `UI/README.md`
-- `tests/README.md`
-
-
+[![GitHub Stars](https://img.shields.io/github/stars/your-org/Promethea_Agent?style=social)](https://github.com/your-org/Promethea_Agent)

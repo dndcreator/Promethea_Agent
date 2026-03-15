@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
@@ -31,7 +31,7 @@ class RunContext(BaseModel):
     workspace_handle: Dict[str, Any] = Field(default_factory=dict)
     event_buffer: list[Dict[str, Any]] = Field(default_factory=list)
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def session_id(self) -> str:

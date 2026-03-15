@@ -100,6 +100,27 @@ Recall path:
 3. Aggregate multi-layer results (summary/concept/direct/related/recent)
 4. Inject into model context
 
+### 3.1 Store Backends
+
+The memory adapter now supports backend switching through config:
+
+- `memory.store_backend = neo4j`
+- `memory.store_backend = sqlite_graph`
+- `memory.store_backend = flat_memory`
+
+`sqlite_graph` keeps graph capability with `nodes / edges / memory_links` and
+recursive CTE traversal for related recall candidates.
+
+Migration controls:
+
+- `memory.migration.mode = off | dual_write | cutover`
+- `memory.migration.source_backend`
+- `memory.migration.target_backend`
+- `memory.migration.checkpoint`
+
+All backends expose `export_mef()` / `import_mef()` using a common Memory
+Exchange Format (MEF) envelope.
+
 ### 4. Example
 
 Session A: user says “My name is Wang Er, I am 26.”  

@@ -190,9 +190,9 @@ class ToolService:
     ) -> Dict[str, Any]:
         fields = self._extract_run_context_fields(run_context)
         if ctx:
-            if ctx.session_id and "session_id" not in fields:
+            if ctx.session_id:
                 fields["session_id"] = str(ctx.session_id)
-            if ctx.user_id and "user_id" not in fields:
+            if ctx.user_id:
                 fields["user_id"] = str(ctx.user_id)
             if ctx.source:
                 fields["source"] = ctx.source
@@ -308,7 +308,7 @@ class ToolService:
                     "tool_type": "local",
                     "tool_id": tool_name,
                     "args": params,
-                    "tool_spec": spec.model_dump(),
+                    "tool_spec": spec.model_dump(mode="json"),
                     "policy": (decision.effective if decision else {}),
                 },
             )
@@ -355,7 +355,7 @@ class ToolService:
                     **context_fields,
                     "tool_type": "agent",
                     "agent_name": agent_name,
-                    "tool_spec": spec.model_dump(),
+                    "tool_spec": spec.model_dump(mode="json"),
                     "policy": (decision.effective if decision else {}),
                 },
             )
@@ -412,7 +412,7 @@ class ToolService:
                 "service_name": service_name,
                 "tool_name": actual_tool_name,
                 "args": args,
-                "tool_spec": spec.model_dump(),
+                "tool_spec": spec.model_dump(mode="json"),
                 "policy": (decision.effective if decision else {}),
             },
         )

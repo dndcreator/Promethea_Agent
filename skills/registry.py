@@ -29,6 +29,7 @@ class SkillRegistry:
             return default
         if not raw:
             return default
+        raw = raw.lstrip("\ufeff")
 
         # We intentionally accept JSON syntax in .yaml files so we do not add
         # a hard dependency on external YAML libraries.

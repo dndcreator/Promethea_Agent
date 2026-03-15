@@ -3,9 +3,10 @@ conversation system to the richer multi-layer memory system (hot / warm / cold).
 """
 import logging
 import time
-from typing import Optional
+from typing import Any, Dict, List, Optional
 import threading
 from .session_scope import scoped_session_id
+from .backends import FlatMemoryStore, Neo4jMemoryStore, SqliteGraphMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,16 @@ class MemoryAdapter:
         """Initialise the adapter and (best-effort) memory stack."""
         self.enabled = False
         self._config = None
+        self.store_backend = "neo4j"
+        self.store = None
+        self._dual_write_store = None
+        self._migration_state = {
+            "mode": "off",
+            "source_backend": None,
+            "target_backend": None,
+            "checkpoint": None,
+            "updated_at": None,
+        }
         self.hot_layer = None
         self.recall_engine = None
         self._warm_layer = None
@@ -62,28 +73,48 @@ class MemoryAdapter:
             config = load_config()
             self._config = config
             self._load_maintenance_defaults_from_config(config)
+            mem_cfg = getattr(config, "memory", None)
+            self.store_backend = str(getattr(mem_cfg, "store_backend", "neo4j") or "neo4j").strip().lower()
             
             # Check if memory is enabled in config
             if not config.memory.enabled:
                 logger.info("Memory system disabled (config.memory.enabled = false)")
                 return
-            
-            # Use factory helpers to create hot-layer manager
+
+            if self.store_backend == "sqlite_graph":
+                sqlite_path = str(getattr(mem_cfg, "sqlite_graph_path", "memory/sqlite_graph.db") or "memory/sqlite_graph.db")
+                self.store = SqliteGraphMemoryStore(sqlite_path)
+                self.enabled = self.store.is_ready()
+                logger.info(f"Memory adapter initialised with backend=sqlite_graph path={sqlite_path}")
+                return
+
+            if self.store_backend == "flat_memory":
+                flat_path = str(getattr(mem_cfg, "flat_memory_path", "memory/flat_memory.jsonl") or "memory/flat_memory.jsonl")
+                self.store = FlatMemoryStore(flat_path)
+                self.enabled = self.store.is_ready()
+                logger.info(f"Memory adapter initialised with backend=flat_memory path={flat_path}")
+                return
+
+            # Default/explicit neo4j path: preserve existing behavior.
             from memory import create_hot_layer_manager
-            # During init we give a dummy session_id; it will be updated per call.
             self.hot_layer = create_hot_layer_manager("_adapter_init", "default_user")
-            
-            if self.hot_layer:
-                # Initialise auto-recall engine
-                from .auto_recall import AutoRecallEngine
-                self.recall_engine = AutoRecallEngine(
-                    connector=self.hot_layer.connector,
-                    extractor=self.hot_layer.extractor
-                )
-                self.enabled = True
-                logger.info("Memory adapter initialised successfully (with auto-recall)")
-            else:
-                logger.info("Memory system not available (Neo4j not connected or misconfigured)")
+
+            if not self.hot_layer:
+                logger.info("Neo4j memory backend unavailable")
+                return
+
+            from .auto_recall import AutoRecallEngine
+            self.recall_engine = AutoRecallEngine(
+                connector=self.hot_layer.connector,
+                extractor=self.hot_layer.extractor
+            )
+            self.store = Neo4jMemoryStore(
+                adapter=self,
+                connector=self.hot_layer.connector,
+                recall_engine=self.recall_engine,
+            )
+            self.enabled = True
+            logger.info("Memory adapter initialised with backend=neo4j")
                 
         except Exception as e:
             logger.warning(f"Memory system initialisation failed: {e}")
@@ -129,36 +160,49 @@ class MemoryAdapter:
         Returns:
             bool: whether the message was successfully processed.
         """
-        if not self.enabled or not self.hot_layer:
+        if not self.enabled:
             return False
-        
+
+        primary_ok = False
         try:
-            scoped_sid = scoped_session_id(session_id, user_id)
-            with self._hot_layer_lock:
-                # Update stateful hot-layer with current session/user
-                self.hot_layer.session_id = scoped_sid
-                self.hot_layer.user_id = user_id
-                
-                # Build lightweight context from cache
-                context = self._get_context(scoped_sid)
-                
-                # Call into memory system
-                stats = self.hot_layer.process_message(
-                    role,
-                    content,
-                    context,
+            if self.store is not None:
+                primary_ok = bool(
+                    self.store.add_message(
+                        session_id=session_id,
+                        role=role,
+                        content=content,
+                        user_id=user_id,
+                        metadata=metadata,
+                    )
+                )
+            elif self.hot_layer:
+                # Defensive fallback for legacy path.
+                scoped_sid = scoped_session_id(session_id, user_id)
+                with self._hot_layer_lock:
+                    self.hot_layer.session_id = scoped_sid
+                    self.hot_layer.user_id = user_id
+                    context = self._get_context(scoped_sid)
+                    self.hot_layer.process_message(role, content, context, metadata=metadata)
+                    self._update_cache(scoped_sid, role, content)
+                primary_ok = True
+        except Exception as e:
+            logger.error(f"Primary memory write failed: {e}")
+            primary_ok = False
+
+        dual = self._dual_write_store
+        if dual is not None:
+            try:
+                dual.add_message(
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    user_id=user_id,
                     metadata=metadata,
                 )
-                
-                # Update cache
-                self._update_cache(scoped_sid, role, content)
-                
-                logger.debug(f"Memory stored with stats: {stats}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Memory system processing failed: {e}")
-            return False
+            except Exception as e:
+                logger.debug(f"Dual-write memory store failed: {e}")
+
+        return primary_ok
     
     def _get_context(self, session_id: str) -> list:
         """Get recent context messages (up to last 5) for a session."""
@@ -192,10 +236,14 @@ class MemoryAdapter:
         Returns:
             Formatted context string (may be empty).
         """
-        if not self.enabled or not self.recall_engine:
+        if not self.enabled:
             return ""
         
         try:
+            if self.store is not None:
+                return self.store.get_context(query=query, session_id=session_id, user_id=user_id)
+            if self.recall_engine is None:
+                return ""
             scoped_sid = scoped_session_id(session_id, user_id)
             return self.recall_engine.recall(query, scoped_sid, user_id)
         except Exception as e:
@@ -482,10 +530,104 @@ class MemoryAdapter:
         finally:
             with self._maintenance_lock:
                 state['decay_running'] = False
+
+    def collect_recall_candidates(self, request) -> List[Dict[str, Any]]:
+        if not self.enabled or self.store is None:
+            return []
+        try:
+            return self.store.collect_recall_candidates(
+                query=str(getattr(request, "query_text", "") or ""),
+                session_id=str(getattr(request, "session_id", "") or ""),
+                user_id=str(getattr(request, "user_id", "default_user") or "default_user"),
+                top_k=int(getattr(request, "top_k", 8) or 8),
+                mode=str(getattr(request, "mode", "fast") or "fast"),
+            )
+        except Exception as e:
+            logger.debug(f"collect_recall_candidates failed: {e}")
+            return []
+
+    def export_mef(self, user_id: Optional[str] = None) -> Dict[str, Any]:
+        if self.store is None:
+            return {
+                "version": "1.0",
+                "source_backend": self.store_backend,
+                "memory_items": [],
+                "nodes": [],
+                "edges": [],
+                "metadata": {"reason": "store_unavailable"},
+            }
+        return self.store.export_mef(user_id=user_id)
+
+    def import_mef(self, payload: Dict[str, Any], merge: bool = True) -> Dict[str, Any]:
+        if self.store is None:
+            return {"ok": False, "reason": "store_unavailable", "imported": {"memory_items": 0, "nodes": 0, "edges": 0}}
+        return self.store.import_mef(payload, merge=merge)
+
+    def _build_store(self, backend: str):
+        backend_name = str(backend or "neo4j").strip().lower()
+        mem_cfg = getattr(self._config, "memory", None)
+        if backend_name == "sqlite_graph":
+            sqlite_path = str(getattr(mem_cfg, "sqlite_graph_path", "memory/sqlite_graph.db") or "memory/sqlite_graph.db")
+            return SqliteGraphMemoryStore(sqlite_path)
+        if backend_name == "flat_memory":
+            flat_path = str(getattr(mem_cfg, "flat_memory_path", "memory/flat_memory.jsonl") or "memory/flat_memory.jsonl")
+            return FlatMemoryStore(flat_path)
+        if backend_name == "neo4j" and self.hot_layer is not None:
+            return Neo4jMemoryStore(adapter=self, connector=self.hot_layer.connector, recall_engine=self.recall_engine)
+        return None
+
+    def configure_migration(
+        self,
+        *,
+        mode: str,
+        source_backend: Optional[str] = None,
+        target_backend: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        mode_norm = str(mode or "off").strip().lower()
+        if mode_norm not in {"off", "dual_write", "cutover"}:
+            mode_norm = "off"
+        self._migration_state = {
+            "mode": mode_norm,
+            "source_backend": source_backend or self.store_backend,
+            "target_backend": target_backend,
+            "checkpoint": checkpoint,
+            "updated_at": time.time(),
+        }
+        if mode_norm == "off":
+            self._dual_write_store = None
+        if mode_norm == "dual_write" and target_backend:
+            self._dual_write_store = self._build_store(target_backend)
+        return dict(self._migration_state)
+
+    def migrate_backend(self, target_backend: str, *, mode: str = "cutover", merge: bool = True) -> Dict[str, Any]:
+        target = self._build_store(target_backend)
+        if target is None:
+            return {"ok": False, "reason": f"target backend not available: {target_backend}"}
+        snapshot = self.export_mef()
+        imported = target.import_mef(snapshot, merge=merge)
+        mode_norm = str(mode or "cutover").strip().lower()
+        if mode_norm == "dual_write":
+            self._dual_write_store = target
+            self.configure_migration(mode="dual_write", source_backend=self.store_backend, target_backend=target_backend)
+            return {"ok": True, "mode": "dual_write", "imported": imported}
+
+        self.store = target
+        self.store_backend = str(target_backend or self.store_backend).strip().lower()
+        self._dual_write_store = None
+        self.configure_migration(mode="cutover", source_backend=snapshot.get("source_backend"), target_backend=self.store_backend)
+        return {"ok": True, "mode": "cutover", "imported": imported, "active_backend": self.store_backend}
     
     def is_enabled(self) -> bool:
         """Return True if the memory system is initialised and usable."""
-        return self.enabled and self.hot_layer is not None
+        if not self.enabled:
+            return False
+        if self.store is not None:
+            try:
+                return bool(self.store.is_ready())
+            except Exception:
+                return False
+        return self.hot_layer is not None
 
 
 _memory_adapter_instance: Optional[MemoryAdapter] = None
