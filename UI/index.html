@@ -302,8 +302,52 @@
             <div class="modal-body settings-modal-body">
                 <div class="settings-loading">Loading configuration...</div>
                 <form id="settingsForm" style="display: none;">
+                    <div class="settings-section settings-basic">
+                        <h3 id="settingsSectionBasicTitle">Quick Setup</h3>
+                        <p class="settings-hint" id="settingsBasicHint">Only the most important fields are shown here. Open advanced settings for full control.</p>
+                        <div class="form-group">
+                            <label for="apiKey" id="labelApiKey">API Key</label>
+                            <input type="password" id="apiKey" name="api.api_key" placeholder="Global default API key">
+                        </div>
+                        <div class="form-group">
+                            <label for="baseUrl" id="labelBaseUrl">Base URL</label>
+                            <input type="text" id="baseUrl" name="api.base_url" placeholder="https://api.openai.com/v1">
+                        </div>
+                        <div class="form-group">
+                            <label for="model" id="labelModelPrimary">Model</label>
+                            <input type="text" id="model" name="api.model" placeholder="gpt-4">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="memoryEnabled" name="memory.enabled">
+                                <span id="labelMemoryEnabledQuick">Enable Memory</span>
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="memoryStoreBackend" id="labelMemoryStoreBackend">Memory Backend</label>
+                            <select id="memoryStoreBackend" name="memory.store_backend">
+                                <option value="neo4j">Neo4j (Graph)</option>
+                                <option value="sqlite_graph">SQLite Graph (Lightweight)</option>
+                                <option value="flat_memory">Flat Memory (Fallback)</option>
+                            </select>
+                        </div>
+                        <div class="form-group" id="basicNeo4jUriRow">
+                            <label for="neo4jUri" id="labelNeo4jUriPrimary">Neo4j URI</label>
+                            <input type="text" id="neo4jUri" name="memory.neo4j.uri" placeholder="bolt://localhost:7687">
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="settingsHotApply">
+                                <span id="labelHotApply">Apply immediately (hot reload)</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <details class="settings-advanced" id="advancedSettingsDetails">
+                        <summary id="settingsAdvancedSummary">Advanced Settings</summary>
+
                     <div class="settings-section">
-                        <h3>Personalization</h3>
+                        <h3 id="settingsSectionPersonalTitle">Personalization</h3>
                         <div class="form-group">
                             <label for="userAgentName">Agent Name</label>
                             <input type="text" id="userAgentName" name="user.agent_name" placeholder="Promethea">
@@ -315,8 +359,8 @@
                     </div>
 
                     <div class="settings-section">
-                        <h3>Personal API Override (optional)</h3>
-                        <p class="settings-hint">If set, these values override system defaults for your account.</p>
+                        <h3 id="settingsSectionPersonalApiTitle">Personal API Override (optional)</h3>
+                        <p class="settings-hint" id="settingsPersonalApiHint">If set, these values override system defaults for your account.</p>
                         <div class="form-group">
                             <label for="userApiKey">API Key</label>
                             <input type="password" id="userApiKey" name="user.api.api_key" placeholder="sk-...">
@@ -342,7 +386,7 @@
                     </div>
 
                     <div class="settings-section">
-                        <h3>Social Account Binding</h3>
+                        <h3 id="settingsSectionBindTitle">Social Account Binding</h3>
                         <div class="channel-bind-container">
                             <div class="bind-row">
                                 <select id="bindChannelType">
@@ -359,19 +403,7 @@
                     </div>
 
                     <div class="settings-section">
-                        <h3>System Default API</h3>
-                        <div class="form-group">
-                            <label for="apiKey">API Key</label>
-                            <input type="password" id="apiKey" name="api.api_key" placeholder="Global default API key">
-                        </div>
-                        <div class="form-group">
-                            <label for="baseUrl">Base URL</label>
-                            <input type="text" id="baseUrl" name="api.base_url" placeholder="https://api.openai.com/v1">
-                        </div>
-                        <div class="form-group">
-                            <label for="model">Model</label>
-                            <input type="text" id="model" name="api.model" placeholder="gpt-4">
-                        </div>
+                        <h3 id="settingsSectionSysApiTitle">System Default API</h3>
                         <div class="form-row">
                             <div class="form-group">
                                 <label for="temperature">Temperature</label>
@@ -389,7 +421,7 @@
                     </div>
 
                     <div class="settings-section">
-                        <h3>System</h3>
+                        <h3 id="settingsSectionSystemTitle">System</h3>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="streamMode" name="system.stream_mode">
@@ -414,22 +446,12 @@
                     </div>
 
                     <div class="settings-section">
-                        <h3>Memory</h3>
-                        <div class="form-group checkbox-group">
-                            <label>
-                                <input type="checkbox" id="memoryEnabled" name="memory.enabled">
-                                <span>Enable Memory</span>
-                            </label>
-                        </div>
+                        <h3 id="settingsSectionMemoryTitle">Memory</h3>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="neo4jEnabled" name="memory.neo4j.enabled">
                                 <span>Enable Neo4j</span>
                             </label>
-                        </div>
-                        <div class="form-group">
-                            <label for="neo4jUri">Neo4j URI</label>
-                            <input type="text" id="neo4jUri" name="memory.neo4j.uri" placeholder="bolt://localhost:7687">
                         </div>
                         <div class="form-row">
                             <div class="form-group">
@@ -459,6 +481,48 @@
                             <label for="memoryModel">Memory API Model</label>
                             <input type="text" id="memoryModel" name="memory.api.model" placeholder="Optional dedicated model">
                         </div>
+                        <div class="form-group">
+                            <label for="sqliteGraphPath">SQLite Graph Path</label>
+                            <input type="text" id="sqliteGraphPath" name="memory.sqlite_graph_path" placeholder="memory/sqlite_graph.db">
+                        </div>
+                        <div class="form-group">
+                            <label for="flatMemoryPath">Flat Memory Path</label>
+                            <input type="text" id="flatMemoryPath" name="memory.flat_memory_path" placeholder="memory/flat_memory.jsonl">
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="migrationMode">Migration Mode</label>
+                                <select id="migrationMode" name="memory.migration.mode">
+                                    <option value="off">off</option>
+                                    <option value="dual_write">dual_write</option>
+                                    <option value="cutover">cutover</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="migrationCheckpoint">Migration Checkpoint</label>
+                                <input type="text" id="migrationCheckpoint" name="memory.migration.checkpoint" placeholder="Optional checkpoint token">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="migrationSourceBackend">Migration Source Backend</label>
+                                <select id="migrationSourceBackend" name="memory.migration.source_backend">
+                                    <option value="">(none)</option>
+                                    <option value="neo4j">neo4j</option>
+                                    <option value="sqlite_graph">sqlite_graph</option>
+                                    <option value="flat_memory">flat_memory</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="migrationTargetBackend">Migration Target Backend</label>
+                                <select id="migrationTargetBackend" name="memory.migration.target_backend">
+                                    <option value="">(none)</option>
+                                    <option value="neo4j">neo4j</option>
+                                    <option value="sqlite_graph">sqlite_graph</option>
+                                    <option value="flat_memory">flat_memory</option>
+                                </select>
+                            </div>
+                        </div>
                         <div class="form-group checkbox-group">
                             <label>
                                 <input type="checkbox" id="warmLayerEnabled" name="memory.warm_layer.enabled">
@@ -486,6 +550,7 @@
                             </div>
                         </div>
                     </div>
+                    </details>
 
                     <div class="settings-actions">
                         <button type="button" class="btn-secondary" id="resetBtn">Reset</button>

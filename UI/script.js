@@ -470,6 +470,16 @@ Object.assign(I18N.zh, {
     ui_tools_empty: "暂无可用工具",
     ui_tools_error: "工具列表加载失败",
     ui_tools_more: "还有 {count} 个工具",
+    ui_settings_basic: "快速设置",
+    ui_settings_basic_hint: "这里只显示最关键配置；展开高级设置可查看全部选项。",
+    ui_settings_advanced: "高级设置",
+    ui_settings_hot_apply: "立即生效（热重载）",
+    ui_label_api_key: "API 密钥",
+    ui_label_base_url: "Base URL",
+    ui_label_memory_backend: "记忆后端",
+    ui_memory_backend_neo4j: "Neo4j（图数据库）",
+    ui_memory_backend_sqlite_graph: "SQLite Graph（轻量）",
+    ui_memory_backend_flat: "Flat Memory（兜底）",
 });
 
 Object.assign(I18N.en, {
@@ -478,6 +488,16 @@ Object.assign(I18N.en, {
     ui_tools_empty: "No tools available",
     ui_tools_error: "Failed to load tools",
     ui_tools_more: "{count} more tools",
+    ui_settings_basic: "Quick Setup",
+    ui_settings_basic_hint: "Only the most important fields are shown here. Open advanced settings for full control.",
+    ui_settings_advanced: "Advanced Settings",
+    ui_settings_hot_apply: "Apply immediately (hot reload)",
+    ui_label_api_key: "API Key",
+    ui_label_base_url: "Base URL",
+    ui_label_memory_backend: "Memory Backend",
+    ui_memory_backend_neo4j: "Neo4j (Graph)",
+    ui_memory_backend_sqlite_graph: "SQLite Graph (Lightweight)",
+    ui_memory_backend_flat: "Flat Memory (Fallback)",
 });
 
 function getCurrentLang() {
@@ -671,15 +691,24 @@ class LanguageManager {
         const saveBtn = document.querySelector("#settingsForm .settings-actions .btn-primary");
         if (saveBtn) saveBtn.textContent = t("ui_save_btn");
 
-        const sec = document.querySelectorAll("#settingsForm .settings-section h3");
-        if (sec[0]) sec[0].textContent = t("ui_settings_personal");
-        if (sec[1]) sec[1].textContent = t("ui_settings_personal_api");
-        if (sec[2]) sec[2].textContent = t("ui_settings_bind");
-        if (sec[3]) sec[3].textContent = t("ui_settings_sys_api");
-        if (sec[4]) sec[4].textContent = t("ui_settings_sys");
-        if (sec[5]) sec[5].textContent = t("ui_settings_memory");
-        const personalHint = document.querySelector("#settingsForm .settings-section:nth-of-type(2) .settings-hint");
-        if (personalHint) personalHint.textContent = t("ui_settings_personal_api_hint");
+        const setTextById = (id, key) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = t(key);
+        };
+        setTextById("settingsSectionBasicTitle", "ui_settings_basic");
+        setTextById("settingsBasicHint", "ui_settings_basic_hint");
+        setTextById("settingsAdvancedSummary", "ui_settings_advanced");
+        setTextById("settingsSectionPersonalTitle", "ui_settings_personal");
+        setTextById("settingsSectionPersonalApiTitle", "ui_settings_personal_api");
+        setTextById("settingsSectionBindTitle", "ui_settings_bind");
+        setTextById("settingsSectionSysApiTitle", "ui_settings_sys_api");
+        setTextById("settingsSectionSystemTitle", "ui_settings_sys");
+        setTextById("settingsSectionMemoryTitle", "ui_settings_memory");
+        setTextById("settingsPersonalApiHint", "ui_settings_personal_api_hint");
+        setTextById("labelHotApply", "ui_settings_hot_apply");
+        setTextById("labelApiKey", "ui_label_api_key");
+        setTextById("labelBaseUrl", "ui_label_base_url");
+        setTextById("labelMemoryStoreBackend", "ui_label_memory_backend");
 
         const setLabel = (selector, key) => {
             const el = document.querySelector(selector);
@@ -714,6 +743,12 @@ class LanguageManager {
         if (bindInput) bindInput.placeholder = t("ui_label_bind_account");
         const userPrompt = document.getElementById('userSystemPrompt');
         if (userPrompt) userPrompt.placeholder = t("ui_placeholder_user_prompt");
+        const memoryBackend = document.getElementById("memoryStoreBackend");
+        if (memoryBackend?.options?.length >= 3) {
+            memoryBackend.options[0].text = t("ui_memory_backend_neo4j");
+            memoryBackend.options[1].text = t("ui_memory_backend_sqlite_graph");
+            memoryBackend.options[2].text = t("ui_memory_backend_flat");
+        }
 
         window.dispatchEvent(new CustomEvent("ui-language-changed", { detail: { lang: getCurrentLang() } }));
     }
@@ -2374,6 +2409,8 @@ class SettingsManager {
         
         this.form.addEventListener('submit', (e) => this.handleSubmit(e));
         this.resetBtn.addEventListener('click', () => this.loadConfig());
+        this.memoryStoreBackend = document.getElementById('memoryStoreBackend');
+        this.memoryStoreBackend?.addEventListener('change', () => this.updateMemoryBackendFields());
         
         // 缁戝畾鎸夐挳浜嬩欢
         document.getElementById('bindBtn').addEventListener('click', () => this.handleBindChannel());
@@ -2488,6 +2525,15 @@ class SettingsManager {
     }
     
     populateForm(config) {
+        const apiConfig = (config && config.api) || {};
+        const systemConfig = (config && config.system) || {};
+        const memoryConfig = (config && config.memory) || {};
+        const neo4jConfig = (memoryConfig && memoryConfig.neo4j) || {};
+        const memoryApiConfig = (memoryConfig && memoryConfig.api) || {};
+        const warmLayerConfig = (memoryConfig && memoryConfig.warm_layer) || {};
+        const coldLayerConfig = (memoryConfig && memoryConfig.cold_layer) || {};
+        const migrationConfig = (memoryConfig && memoryConfig.migration) || {};
+
         // personal settings
         this.setFieldValue('userAgentName', config.agent_name || '');
         this.setFieldValue('userSystemPrompt', config.system_prompt || '');
@@ -2500,29 +2546,41 @@ class SettingsManager {
         this.setFieldValue('userMaxTokens', userApi.max_tokens || '');
 
         // API閰嶇疆
-        this.setFieldValue('apiKey', config.api.api_key);
-        this.setFieldValue('baseUrl', config.api.base_url);
-        this.setFieldValue('model', config.api.model);
-        this.setFieldValue('temperature', config.api.temperature);
-        this.setFieldValue('maxTokens', config.api.max_tokens);
-        this.setFieldValue('maxHistoryRounds', config.api.max_history_rounds);
+        this.setFieldValue('apiKey', apiConfig.api_key || '');
+        this.setFieldValue('baseUrl', apiConfig.base_url || '');
+        this.setFieldValue('model', apiConfig.model || '');
+        this.setFieldValue('temperature', apiConfig.temperature ?? '');
+        this.setFieldValue('maxTokens', apiConfig.max_tokens ?? '');
+        this.setFieldValue('maxHistoryRounds', apiConfig.max_history_rounds ?? '');
         
         // 绯荤粺閰嶇疆
-        this.setFieldValue('streamMode', config.system.stream_mode, 'checkbox');
-        this.setFieldValue('debugMode', config.system.debug, 'checkbox');
-        this.setFieldValue('logLevel', config.system.log_level);
+        this.setFieldValue('streamMode', !!systemConfig.stream_mode, 'checkbox');
+        this.setFieldValue('debugMode', !!systemConfig.debug, 'checkbox');
+        this.setFieldValue('logLevel', systemConfig.log_level || 'INFO');
         
         // 璁板繂绯荤粺閰嶇疆
-        this.setFieldValue('memoryEnabled', config.memory.enabled, 'checkbox');
-        this.setFieldValue('neo4jEnabled', config.memory.neo4j.enabled, 'checkbox');
-        this.setFieldValue('neo4jUri', config.memory.neo4j.uri);
-        this.setFieldValue('neo4jUsername', config.memory.neo4j.username);
-        this.setFieldValue('neo4jDatabase', config.memory.neo4j.database);
-        this.setFieldValue('warmLayerEnabled', config.memory.warm_layer.enabled, 'checkbox');
-        this.setFieldValue('clusteringThreshold', config.memory.warm_layer.clustering_threshold);
-        this.setFieldValue('minClusterSize', config.memory.warm_layer.min_cluster_size);
-        this.setFieldValue('maxSummaryLength', config.memory.cold_layer.max_summary_length);
-        this.setFieldValue('compressionThreshold', config.memory.cold_layer.compression_threshold);
+        this.setFieldValue('memoryEnabled', !!memoryConfig.enabled, 'checkbox');
+        this.setFieldValue('memoryStoreBackend', memoryConfig.store_backend || 'neo4j');
+        this.setFieldValue('neo4jEnabled', !!neo4jConfig.enabled, 'checkbox');
+        this.setFieldValue('neo4jUri', neo4jConfig.uri || '');
+        this.setFieldValue('neo4jUsername', neo4jConfig.username || '');
+        this.setFieldValue('neo4jDatabase', neo4jConfig.database || '');
+        this.setFieldValue('memoryUseMainApi', memoryApiConfig.use_main_api !== false, 'checkbox');
+        this.setFieldValue('memoryApiKey', memoryApiConfig.api_key || '');
+        this.setFieldValue('memoryBaseUrl', memoryApiConfig.base_url || '');
+        this.setFieldValue('memoryModel', memoryApiConfig.model || '');
+        this.setFieldValue('sqliteGraphPath', memoryConfig.sqlite_graph_path || '');
+        this.setFieldValue('flatMemoryPath', memoryConfig.flat_memory_path || '');
+        this.setFieldValue('migrationMode', migrationConfig.mode || 'off');
+        this.setFieldValue('migrationSourceBackend', migrationConfig.source_backend || '');
+        this.setFieldValue('migrationTargetBackend', migrationConfig.target_backend || '');
+        this.setFieldValue('migrationCheckpoint', migrationConfig.checkpoint || '');
+        this.setFieldValue('warmLayerEnabled', !!warmLayerConfig.enabled, 'checkbox');
+        this.setFieldValue('clusteringThreshold', warmLayerConfig.clustering_threshold ?? '');
+        this.setFieldValue('minClusterSize', warmLayerConfig.min_cluster_size ?? '');
+        this.setFieldValue('maxSummaryLength', coldLayerConfig.max_summary_length ?? '');
+        this.setFieldValue('compressionThreshold', coldLayerConfig.compression_threshold ?? '');
+        this.updateMemoryBackendFields();
     }
     
     setFieldValue(fieldId, value, type = 'input') {
@@ -2539,8 +2597,8 @@ class SettingsManager {
     async handleSubmit(event) {
         event.preventDefault();
         
-        const formData = new FormData(this.form);
-        const config = this.normalizeConfigForGateway(this.buildConfigObject(formData));
+        const config = this.normalizeConfigForGateway(this.buildConfigObject());
+        const hotApply = !!document.getElementById('settingsHotApply')?.checked;
         const token = localStorage.getItem('auth_token');
         const headers = {
             'Content-Type': 'application/json',
@@ -2555,7 +2613,7 @@ class SettingsManager {
             const response = await fetch(`${this.apiBaseUrl}/api/config/update`, {
                 method: 'POST',
                 headers: headers,
-                body: JSON.stringify({ config })
+                body: JSON.stringify({ config, options: { hot_apply: hotApply } })
             });
 
             const data = await response.json();
@@ -2578,40 +2636,42 @@ class SettingsManager {
         }
     }
     
-    buildConfigObject(formData) {
-        const config = {
-            api: {},
-            system: {},
-            memory: {
-                neo4j: {},
-                warm_layer: {},
-                cold_layer: {}
-            }
-        };
-        
-        for (let [name, value] of formData.entries()) {
-            const parts = name.split('.');
-            let current = config;
-            
+    buildConfigObject() {
+        const config = {};
+        const setNestedValue = (target, path, value) => {
+            const parts = path.split('.');
+            let current = target;
             for (let i = 0; i < parts.length - 1; i++) {
-                if (!current[parts[i]]) {
+                if (!current[parts[i]] || typeof current[parts[i]] !== 'object') {
                     current[parts[i]] = {};
                 }
                 current = current[parts[i]];
             }
-            
-            const lastPart = parts[parts.length - 1];
-            const field = this.form.querySelector(`[name="${name}"]`);
-            
+            current[parts[parts.length - 1]] = value;
+        };
+
+        const fields = this.form.querySelectorAll('[name]');
+        fields.forEach((field) => {
+            const name = field.name;
+            if (!name) return;
+
             if (field.type === 'checkbox') {
-                current[lastPart] = field.checked;
-            } else if (field.type === 'number') {
-                current[lastPart] = parseFloat(value);
-            } else {
-                current[lastPart] = value;
+                setNestedValue(config, name, field.checked);
+                return;
             }
-        }
-        
+
+            if (field.type === 'number') {
+                if (field.value === '') return;
+                const parsed = Number(field.value);
+                if (!Number.isNaN(parsed)) {
+                    setNestedValue(config, name, parsed);
+                }
+                return;
+            }
+
+            setNestedValue(config, name, field.value);
+        });
+
         return config;
     }
 
@@ -2633,6 +2693,14 @@ class SettingsManager {
         }
 
         return normalized;
+    }
+
+    updateMemoryBackendFields() {
+        const backend = document.getElementById('memoryStoreBackend')?.value || 'neo4j';
+        const neo4jUriRow = document.getElementById('basicNeo4jUriRow');
+        if (neo4jUriRow) {
+            neo4jUriRow.style.display = backend === 'neo4j' ? 'block' : 'none';
+        }
     }
 }
 

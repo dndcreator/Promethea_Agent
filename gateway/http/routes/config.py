@@ -19,6 +19,7 @@ router = APIRouter()
 class ConfigUpdateRequest(BaseModel):
     user_id: Optional[str] = None
     config: Dict[str, Any]
+    options: Optional[Dict[str, Any]] = None
 
 
 class ConfigResetRequest(BaseModel):
@@ -139,7 +140,28 @@ async def update_config(
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Update failed"))
-    return {**result, "user_id": resolved_user_id, "config": _sanitize_config_for_client(result.get("config", {}))}
+
+    hot_apply_requested = bool((request.options or {}).get("hot_apply"))
+    hot_apply_payload: Dict[str, Any] = {"requested": hot_apply_requested, "success": False}
+    if hot_apply_requested:
+        try:
+            integration = _get_gateway_integration_or_503()
+            reload_result = await integration.reload_config()
+            hot_apply_payload["success"] = bool(reload_result.get("success"))
+            hot_apply_payload["message"] = reload_result.get("message")
+            if hot_apply_payload["success"]:
+                hot_apply_payload["reloaded_at"] = reload_result.get("reloaded_at")
+        except HTTPException as exc:
+            hot_apply_payload["message"] = str(exc.detail)
+        except Exception as exc:  # pragma: no cover - defensive path
+            hot_apply_payload["message"] = str(exc)
+
+    return {
+        **result,
+        "user_id": resolved_user_id,
+        "config": _sanitize_config_for_client(result.get("config", {})),
+        "hot_apply": hot_apply_payload,
+    }
 
 
 @router.post("/config/reset")
