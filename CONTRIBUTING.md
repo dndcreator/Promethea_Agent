@@ -21,7 +21,7 @@ Thank you for your interest. This document explains how to set up a development 
 ## Development environment
 
 ```bash
-git clone https://github.com/<your-org>/Promethea_Agent.git
+git clone https://github.com/dndcreator/Promethea_Agent.git
 cd Promethea_Agent
 
 python -m venv .venv
@@ -134,7 +134,7 @@ Every PR must answer these questions in the description:
 
 6. **Does this require a new ADR or doc update?**
 
-Template is in `.github/PULL_REQUEST_TEMPLATE.md`.
+Template is in `.github/pull_request_template.md`.
 
 ---
 

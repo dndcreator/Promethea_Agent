@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -12,7 +13,12 @@ if str(ROOT) not in sys.path:
 
 from agentkit.security.sandbox import SandboxPolicy
 from agentkit.tools.moirai.moirai import MoiraiService
+from gateway.events import EventEmitter
+from gateway.security.audit import SecurityAuditService
 from gateway.tool_strategy import ToolStrategyEngine
+from gateway.workflow_engine import WorkflowEngine
+from gateway.workflow_models import WorkflowDefinition, WorkflowStep
+from gateway.workspace_service import WorkspaceSandboxError, WorkspaceService
 
 
 def _default_catalog() -> List[Dict[str, Any]]:
@@ -83,10 +89,67 @@ async def run_capability_smoke(workspace_root: Path) -> Dict[str, Any]:
     )
     sandbox_ok = sandbox.check_command("python -V").allowed and not sandbox.check_command("rm -rf /").allowed
 
+    emitter = EventEmitter()
+    bench_workspace_root = workspace_root / ".benchmark-workspace"
+    ws = WorkspaceService(event_emitter=emitter, base_dir=str(bench_workspace_root))
+    engine = WorkflowEngine(event_emitter=emitter, workspace_service=ws)
+    workflow = WorkflowDefinition(
+        workflow_id="wf.benchmark.audit",
+        name="Benchmark Workflow Audit",
+        owner_user_id="bench_user",
+        steps=[
+            WorkflowStep(step_id="s1", step_type="reasoning_step", name="Plan"),
+            WorkflowStep(
+                step_id="s2",
+                step_type="artifact_step",
+                name="Write",
+                inputs={"path": "outputs/plan.md", "content": "# benchmark artifact\n"},
+            ),
+        ],
+    )
+    engine.define_workflow(workflow)
+    run_context = SimpleNamespace(trace_id="bench-trace", request_id="bench-request")
+    wf_run = engine.start_workflow(
+        workflow_id="wf.benchmark.audit",
+        session_id="bench-session",
+        user_id="bench_user",
+        workspace_id="bench_workspace",
+        run_context=run_context,
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    artifact_path = bench_workspace_root / "bench_user" / "bench_workspace" / "outputs" / "plan.md"
+    workspace_audits = emitter.get_audit_history(action="workspace_artifact_write")
+    workflow_artifact_audit_ok = bool(
+        wf_run.status == "completed"
+        and artifact_path.exists()
+        and any(a.user_id == "bench_user" for a in workspace_audits)
+    )
+
+    handle = ws.resolve_workspace_handle(user_id="owner_user", workspace_id="secure_workspace")
+    security_violation_logged = False
+    try:
+        ws.create_document(
+            handle=handle,
+            relative_path="blocked.txt",
+            content="x",
+            requester_user_id="attacker_user",
+            trace_id="bench-security-trace",
+            request_id="bench-security-request",
+            session_id="bench-security-session",
+        )
+    except WorkspaceSandboxError:
+        await asyncio.sleep(0)
+        report = SecurityAuditService(emitter).build_report(user_id="attacker_user", limit=20)
+        security_violation_logged = report["summary"]["namespace_violations"] >= 1
+
     return {
         "moirai_template_gate": has_manual_gate,
         "sandbox_guard": sandbox_ok,
-        "ok": bool(has_manual_gate and sandbox_ok),
+        "workflow_artifact_audit": workflow_artifact_audit_ok,
+        "security_violation_audit": security_violation_logged,
+        "ok": bool(has_manual_gate and sandbox_ok and workflow_artifact_audit_ok and security_violation_logged),
     }
 
 

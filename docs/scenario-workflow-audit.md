@@ -36,23 +36,25 @@ python start_gateway_service.py
 ## Step 2 — Trigger the workflow
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
+curl -X POST http://127.0.0.1:8000/api/workflow/start \
   -H "Content-Type: application/json" \
   -d '{
-    "user_message": "Design a memory system architecture for a personal AI assistant",
+    "workflow_id": "wf.api",
     "session_id": "demo_session",
     "workspace_id": "demo_project",
     "user_id": "demo_user"
   }'
 ```
 
+> Note: `workflow_id` must reference an existing workflow definition (for example, one created via `POST /api/workflow/define`).
+
 ### What happens internally
 
-1. `WorkflowEngine.define_workflow` creates a two-step workflow:
-   - `s1`: `reasoning_step` — generates the plan from `user_message`
-   - `s2`: `artifact_step` — writes the plan to workspace
+1. `WorkflowEngine.start_workflow` resolves the workflow definition:
+   - The workflow is looked up by `workflow_id`
+   - Steps come from the existing workflow definition
 
-2. `WorkflowEngine.start_workflow` begins execution.
+2. `WorkflowEngine.start_workflow` begins execution for that definition.
 
 3. After `s1` completes, `advance_to_next_step` runs `s2`.
 
@@ -80,7 +82,7 @@ curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
 
 ```json
 {
-  "ok": true,
+  "status": "success",
   "run": {
     "workflow_run_id": "wf_run_...",
     "status": "completed",
@@ -88,10 +90,7 @@ curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
       {"step_id": "s1", "status": "succeeded"},
       {"step_id": "s2", "status": "succeeded"}
     ]
-  },
-  "artifact_path": "outputs/plan.md",
-  "workspace_id": "demo_project",
-  "user_id": "demo_user"
+  }
 }
 ```
 
@@ -139,49 +138,22 @@ curl "http://127.0.0.1:8000/api/security/audit/report?user_id=demo_user&limit=20
 
 ---
 
-## Step 5 — Trigger a cross-user access attempt (optional)
+## Step 5 — Trigger a cross-user audit access attempt (optional)
 
 This shows the security enforcement in action.
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_message": "Steal the demo_user workspace",
-    "session_id": "s_attacker",
-    "workspace_id": "demo_project",
-    "user_id": "demo_user",
-    "requester_user_id": "attacker"
-  }'
+curl "http://127.0.0.1:8000/api/security/audit/report?user_id=demo_user&limit=20"
 ```
 
-If `requester_user_id` does not match `handle.user_id`, `WorkspaceService._assert_owner` fires:
-- Emits `EventType.SECURITY_BOUNDARY_VIOLATION`
-- Raises `WorkspaceSandboxError("forbidden workspace access")`
-- The violation is captured as an `AuditEvent(action="namespace_violation_attempt")`
+When the authenticated caller is not `demo_user`, the HTTP layer rejects this with:
+- HTTP 403
+- `cross-user security audit access is forbidden`
 
-Re-run the audit query — you will now see:
+This behavior is enforced by:
 
-```json
-{
-  "summary": {
-    "namespace_violations": 1,
-    ...
-  },
-  "violations": [
-    {
-      "action": "namespace_violation_attempt",
-      "outcome": "blocked",
-      "details": {
-        "namespace": "workspace",
-        "owner_user_id": "demo_user",
-        "requester_user_id": "attacker",
-        "reason": "cross_user_workspace_access",
-        ...
-      }
-    }
-  ]
-}
+```text
+_resolve_user_id(requested, current_user_id)
 ```
 
 ---

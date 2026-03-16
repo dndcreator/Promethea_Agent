@@ -88,7 +88,7 @@ Channel adapters normalize every input source to the same gateway contract:
 ### 1. Install
 
 ```bash
-git clone https://github.com/<your-org>/Promethea_Agent.git
+git clone https://github.com/dndcreator/Promethea_Agent.git
 cd Promethea_Agent
 
 python -m venv .venv
@@ -184,7 +184,7 @@ Six-stage pipeline per request:
 5. **Tool Execution** — policy-checked, fully traced
 6. **Response Synthesis** — artifact write, memory write gate, audit flush
 
-Full design: [`docs/architecture/runtime-overview.md`](docs/architecture/runtime-overview.md)
+Full design: [`docs/runtime-overview.md`](docs/runtime-overview.md)
 
 ---
 
@@ -208,7 +208,7 @@ Key sections:
 
 | Document | What it covers |
 |---|---|
-| [`docs/architecture/runtime-overview.md`](docs/architecture/runtime-overview.md) | Full runtime design, pipeline stages, core objects |
+| [`docs/runtime-overview.md`](docs/runtime-overview.md) | Full runtime design, pipeline stages, core objects |
 | [`docs/architecture/memory-model.md`](docs/architecture/memory-model.md) | Memory layers, write gate, recall policy |
 | [`docs/architecture/security-model.md`](docs/architecture/security-model.md) | Namespace layers, enforcement points, audit |
 | [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |
@@ -225,17 +225,17 @@ Key sections:
 ### Run a workflow that saves an artifact
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/workflows/plan_and_save \
+curl -X POST http://127.0.0.1:8000/api/workflow/start \
   -H "Content-Type: application/json" \
   -d '{
-    "user_message": "Design a memory system architecture",
+    "workflow_id": "wf.api",
     "session_id": "s1",
     "workspace_id": "myproject",
     "user_id": "u1"
   }'
 ```
 
-The agent will:
+If the selected workflow includes these steps, the agent will:
 1. Run a `reasoning_step` to generate the plan
 2. Write the artifact via `artifact_step` to `workspace/u1/myproject/outputs/plan.md`
 3. Emit a `workspace.artifact.written` audit event
@@ -306,4 +306,4 @@ If Promethea helps you build something real, tell someone.
 > A memory-native agent runtime for long-lived tasks — with governance, workspace, workflow, and multi-user safety built in.  
 > Zero cloud lock-in. Runs on your machine. Open source.
 
-[![GitHub Stars](https://img.shields.io/github/stars/your-org/Promethea_Agent?style=social)](https://github.com/your-org/Promethea_Agent)
+[![GitHub Stars](https://img.shields.io/github/stars/dndcreator/Promethea_Agent?style=social)](https://github.com/dndcreator/Promethea_Agent)

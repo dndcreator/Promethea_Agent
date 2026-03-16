@@ -89,3 +89,6 @@ yarn.lock
 .DS_Store
 Thumbs.db
 
+# Runtime workflow artifacts
+memory/moirai_runs/wf_*.json
+

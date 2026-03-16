@@ -19,4 +19,6 @@ async def test_capability_smoke_checks():
     out = await run_capability_smoke(root)
     assert out["moirai_template_gate"] is True
     assert out["sandbox_guard"] is True
+    assert out["workflow_artifact_audit"] is True
+    assert out["security_violation_audit"] is True
     assert out["ok"] is True
