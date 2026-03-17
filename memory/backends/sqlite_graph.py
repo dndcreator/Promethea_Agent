@@ -526,3 +526,158 @@ class SqliteGraphMemoryStore(MemoryStore):
                 )
                 imported["memory_items"] += 1
         return {"ok": True, "imported": imported, "merge": bool(merge)}
+
+    def list_memory_entries(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        memory_types: Optional[List[str]] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        scoped_sid = scoped_session_id(session_id, user_id) if session_id else None
+        clauses = ["user_id = ?"]
+        params: List[Any] = [user_id]
+        if scoped_sid:
+            clauses.append("session_id = ?")
+            params.append(scoped_sid)
+        wanted_types = [str(x).strip().lower() for x in (memory_types or []) if str(x).strip()]
+        if wanted_types:
+            clauses.append("lower(memory_type) IN ({})".format(",".join(["?"] * len(wanted_types))))
+            params.extend(wanted_types)
+        q = str(query or "").strip().lower()
+        if q:
+            clauses.append("lower(content) LIKE ?")
+            params.append(f"%{q}%")
+        where_sql = " AND ".join(clauses)
+        lim = max(1, min(500, int(limit)))
+        off = max(0, int(offset))
+        sql = f"""
+            SELECT id, user_id, session_id, role, memory_type, source_layer, content,
+                   importance, created_at, last_used_at, metadata_json
+            FROM memory_items
+            WHERE {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+        """
+        params.extend([lim, off])
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            md: Dict[str, Any] = {}
+            try:
+                md = json.loads(row["metadata_json"] or "{}")
+                if not isinstance(md, dict):
+                    md = {}
+            except Exception:
+                md = {}
+            out.append(
+                {
+                    "memory_id": str(row["id"]),
+                    "user_id": str(row["user_id"]),
+                    "session_id": str(row["session_id"]),
+                    "role": str(row["role"] or "user"),
+                    "memory_type": str(row["memory_type"] or ""),
+                    "source_layer": str(row["source_layer"] or ""),
+                    "content": str(row["content"] or ""),
+                    "importance": float(row["importance"] or 0.5),
+                    "created_at": row["created_at"],
+                    "updated_at": md.get("updated_at") or row["created_at"],
+                    "status": str(md.get("status") or "active"),
+                    "metadata": md,
+                }
+            )
+        return out
+
+    def update_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+        content: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            return {"ok": False, "reason": "memory_id_required"}
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                """
+                SELECT metadata_json FROM memory_items
+                WHERE id = ? AND user_id = ?
+                LIMIT 1
+                """,
+                (target_id, user_id),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "reason": "not_found"}
+            md: Dict[str, Any] = {}
+            try:
+                md = json.loads(row["metadata_json"] or "{}")
+                if not isinstance(md, dict):
+                    md = {}
+            except Exception:
+                md = {}
+            if metadata:
+                md.update(metadata)
+            md["updated_at"] = _utc_now_iso()
+            parts: List[str] = ["metadata_json = ?"]
+            args: List[Any] = [json.dumps(md, ensure_ascii=False)]
+            if content is not None:
+                parts.append("content = ?")
+                args.append(str(content))
+            if memory_type is not None:
+                parts.append("memory_type = ?")
+                args.append(str(memory_type).strip().lower())
+            if len(parts) == 1 and metadata is None:
+                return {"ok": False, "reason": "no_change"}
+            args.extend([target_id, user_id])
+            self._conn.execute(
+                f"UPDATE memory_items SET {', '.join(parts)} WHERE id = ? AND user_id = ?",
+                args,
+            )
+        return {"ok": True}
+
+    def delete_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+    ) -> Dict[str, Any]:
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            return {"ok": False, "reason": "memory_id_required"}
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT metadata_json FROM memory_items WHERE id = ? AND user_id = ? LIMIT 1",
+                (target_id, user_id),
+            ).fetchone()
+            if not row:
+                return {"ok": False, "reason": "not_found"}
+            md: Dict[str, Any] = {}
+            try:
+                md = json.loads(row["metadata_json"] or "{}")
+                if not isinstance(md, dict):
+                    md = {}
+            except Exception:
+                md = {}
+            md["status"] = "archived"
+            md["updated_at"] = _utc_now_iso()
+            self._conn.execute(
+                "UPDATE memory_items SET metadata_json = ? WHERE id = ? AND user_id = ?",
+                (json.dumps(md, ensure_ascii=False), target_id, user_id),
+            )
+        return {"ok": True}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            "backend": "sqlite_graph",
+            "supports_graph": True,
+            "supports_crud": True,
+            "supports_recall_runs": True,
+            "supports_write_inspector": True,
+        }

@@ -47,3 +47,40 @@ class MemoryStore(ABC):
     def import_mef(self, payload: Dict[str, Any], *, merge: bool = True) -> Dict[str, Any]:
         raise NotImplementedError
 
+    @abstractmethod
+    def list_memory_entries(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        memory_types: Optional[List[str]] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+        content: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def delete_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+    ) -> Dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_capabilities(self) -> Dict[str, Any]:
+        raise NotImplementedError

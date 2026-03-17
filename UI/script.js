@@ -2391,6 +2391,343 @@ class MemoryGraphVisualization {
     }
 }
 
+class MemoryConsoleManager {
+    constructor(apiBaseUrl, graphViz) {
+        this.apiBaseUrl = apiBaseUrl;
+        this.graphViz = graphViz;
+        this.modal = document.getElementById('memoryGraphModal');
+        this.closeBtn = this.modal.querySelector('.close-modal');
+        this.tabButtons = [...this.modal.querySelectorAll('.memory-tab-btn')];
+        this.panels = [...this.modal.querySelectorAll('.memory-panel')];
+        this.entrySearchInput = document.getElementById('memoryEntrySearchInput');
+        this.scopeFilter = document.getElementById('memoryScopeFilter');
+        this.entryTypeFilter = document.getElementById('memoryEntryTypeFilter');
+        this.entryRefreshBtn = document.getElementById('memoryEntryRefreshBtn');
+        this.entryListEl = document.getElementById('memoryEntryList');
+        this.entryDetailEl = document.getElementById('memoryEntryDetail');
+        this.entryEditBtn = document.getElementById('memoryEntryEditBtn');
+        this.entryDeleteBtn = document.getElementById('memoryEntryDeleteBtn');
+        this.profileSelect = document.getElementById('memoryProfileSelect');
+        this.decisionFilter = document.getElementById('memoryDecisionFilter');
+        this.decisionRefreshBtn = document.getElementById('memoryDecisionRefreshBtn');
+        this.decisionTimelineEl = document.getElementById('memoryDecisionTimeline');
+        this.recallSearchInput = document.getElementById('memoryRecallSearchInput');
+        this.recallRefreshBtn = document.getElementById('memoryRecallRefreshBtn');
+        this.recallRunListEl = document.getElementById('memoryRecallRunList');
+        this.recallDetailEl = document.getElementById('memoryRecallDetail');
+        this.proposalModal = document.getElementById('memoryProposalModal');
+        this.proposalContentEl = document.getElementById('memoryProposalContent');
+        this.proposalConflictEl = document.getElementById('memoryProposalConflict');
+        this.proposalConfirmBtn = document.getElementById('memoryProposalConfirmBtn');
+        this.proposalIgnoreBtn = document.getElementById('memoryProposalIgnoreBtn');
+        this.proposalReduceBtn = document.getElementById('memoryProposalReduceBtn');
+        this.selectedEntry = null;
+        this.selectedRecallRequestId = null;
+        this.activeProposal = null;
+        this.pollTimer = null;
+        this.bindEvents();
+    }
+
+    async apiFetch(path, options = {}) {
+        const token = localStorage.getItem('auth_token');
+        const headers = { ...(options.headers || {}) };
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+        const response = await fetch(`${this.apiBaseUrl}${path}`, { ...options, headers });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data?.detail || data?.message || `HTTP ${response.status}`);
+        return data;
+    }
+
+    bindEvents() {
+        this.tabButtons.forEach((btn) => btn.addEventListener('click', () => this.switchTab(btn.dataset.tab || 'console')));
+        this.entrySearchInput?.addEventListener('input', () => this.refreshEntries());
+        this.scopeFilter?.addEventListener('change', () => this.refreshEntries());
+        this.entryTypeFilter?.addEventListener('change', () => this.refreshEntries());
+        this.entryRefreshBtn?.addEventListener('click', () => this.refreshEntries());
+        this.entryEditBtn?.addEventListener('click', () => this.editSelectedEntry());
+        this.entryDeleteBtn?.addEventListener('click', () => this.deleteSelectedEntry());
+        this.profileSelect?.addEventListener('change', () => this.updateMemoryProfile());
+        this.decisionFilter?.addEventListener('change', () => this.refreshWriteDecisions());
+        this.decisionRefreshBtn?.addEventListener('click', () => this.refreshWriteDecisions());
+        this.recallSearchInput?.addEventListener('input', () => this.refreshRecallRuns());
+        this.recallRefreshBtn?.addEventListener('click', () => this.refreshRecallRuns());
+        this.proposalConfirmBtn?.addEventListener('click', () => this.resolveProposal('confirm_write'));
+        this.proposalIgnoreBtn?.addEventListener('click', () => this.resolveProposal('ignore_once'));
+        this.proposalReduceBtn?.addEventListener('click', () => this.resolveProposal('reduce_similar'));
+        this.closeBtn?.addEventListener('click', () => {
+            if (this.pollTimer) {
+                clearInterval(this.pollTimer);
+                this.pollTimer = null;
+            }
+            this.hideProposalModal();
+        });
+        this.modal?.addEventListener('click', (event) => {
+            if (event.target === this.modal && this.pollTimer) {
+                clearInterval(this.pollTimer);
+                this.pollTimer = null;
+            }
+        });
+    }
+
+    switchTab(tabName) {
+        const next = String(tabName || 'console');
+        this.tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === next));
+        this.panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === next));
+    }
+
+    async show(sessionId = null) {
+        await this.graphViz.show(sessionId || null);
+        await this.loadProfile();
+        await this.loadCapabilities();
+        await this.loadDiagnostics();
+        await this.refreshEntries();
+        await this.refreshWriteDecisions();
+        await this.refreshRecallRuns();
+        await this.pollWriteProposals();
+        if (this.pollTimer) clearInterval(this.pollTimer);
+        this.pollTimer = setInterval(() => this.pollWriteProposals(), 15000);
+    }
+
+    async loadCapabilities() {
+        try {
+            const data = await this.apiFetch('/api/memory/capabilities');
+            const supportsGraph = Boolean(data?.capabilities?.supports_graph);
+            const graphBtn = this.tabButtons.find((x) => x.dataset.tab === 'graph');
+            if (graphBtn) graphBtn.style.display = supportsGraph ? '' : 'none';
+            if (!supportsGraph) this.switchTab('console');
+        } catch (error) {
+            this.switchTab('console');
+        }
+    }
+
+    async loadProfile() {
+        try {
+            const data = await this.apiFetch('/api/config');
+            const profile = String(data?.config?.memory?.profile || 'balanced');
+            if (this.profileSelect) this.profileSelect.value = profile;
+        } catch (error) {
+            if (this.profileSelect) this.profileSelect.value = 'balanced';
+        }
+    }
+
+    async loadDiagnostics() {
+        try {
+            const data = await this.apiFetch('/api/config/diagnose');
+            const issues = data?.issues || [];
+            const warnings = data?.warnings || [];
+            if (!issues.length && !warnings.length) return;
+            const lines = [];
+            if (issues.length) lines.push(`Issues:\n- ${issues.join('\n- ')}`);
+            if (warnings.length) lines.push(`Warnings:\n- ${warnings.join('\n- ')}`);
+            if (this.entryDetailEl && !this.selectedEntry) {
+                this.entryDetailEl.textContent = `Memory diagnostics:\n${lines.join('\n\n')}`;
+            }
+        } catch (error) {
+            // silent
+        }
+    }
+
+    async updateMemoryProfile() {
+        const profile = String(this.profileSelect?.value || 'balanced');
+        try {
+            await this.apiFetch('/api/config/update', {
+                method: 'POST',
+                body: JSON.stringify({
+                    config_data: { memory: { profile } },
+                    validate_config: false,
+                    hot_reload: true,
+                }),
+            });
+        } catch (error) {
+            alert(error.message || 'Update profile failed');
+        }
+    }
+
+    async refreshEntries() {
+        if (!this.entryListEl) return;
+        this.entryListEl.innerHTML = `<div class="memory-node-item empty">${t("memory_loading")}</div>`;
+        try {
+            const scope = this.scopeFilter?.value || 'all';
+            const type = this.entryTypeFilter?.value || 'all';
+            const q = encodeURIComponent((this.entrySearchInput?.value || '').trim());
+            const typeQuery = type === 'all' ? '' : `&memory_types=${encodeURIComponent(type)}`;
+            const data = await this.apiFetch(`/api/memory/entries?scope=${encodeURIComponent(scope)}${typeQuery}&q=${q}&limit=200`);
+            const rows = data?.entries || [];
+            if (!rows.length) {
+                this.entryListEl.innerHTML = `<div class="memory-node-item empty">${t("memory_no_data")}</div>`;
+                return;
+            }
+            this.entryListEl.innerHTML = '';
+            rows.forEach((entry) => {
+                const item = document.createElement('div');
+                item.className = 'memory-entry-item';
+                item.innerHTML = `
+                    <div class="title">[${this.escapeHtml(entry.memory_type || 'memory')}] ${this.escapeHtml((entry.content || '').slice(0, 120))}</div>
+                    <div class="meta">${this.escapeHtml(String(entry.created_at || '').replace('T', ' ').slice(0, 19))} | ${this.escapeHtml(entry.source_layer || '')}</div>
+                `;
+                item.addEventListener('click', () => this.selectEntry(entry));
+                this.entryListEl.appendChild(item);
+            });
+        } catch (error) {
+            this.entryListEl.innerHTML = `<div class="memory-node-item empty">${this.escapeHtml(error.message || 'load failed')}</div>`;
+        }
+    }
+
+    selectEntry(entry) {
+        this.selectedEntry = entry;
+        this.entryDetailEl.innerHTML = `
+            <div class="memory-detail-row"><span>ID</span><code>${this.escapeHtml(entry.memory_id || '')}</code></div>
+            <div class="memory-detail-row"><span>Type</span><code>${this.escapeHtml(entry.memory_type || '')}</code></div>
+            <div class="memory-detail-row"><span>Layer</span><code>${this.escapeHtml(entry.source_layer || '')}</code></div>
+            <div class="memory-detail-content">${this.escapeHtml(entry.content || '')}</div>
+        `;
+    }
+
+    async editSelectedEntry() {
+        if (!this.selectedEntry) return;
+        const next = window.prompt('Edit memory content', String(this.selectedEntry.content || ''));
+        if (next === null) return;
+        try {
+            await this.apiFetch(`/api/memory/entries/${encodeURIComponent(this.selectedEntry.memory_id)}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ content: next }),
+            });
+            await this.refreshEntries();
+        } catch (error) {
+            alert(error.message || 'Update failed');
+        }
+    }
+
+    async deleteSelectedEntry() {
+        if (!this.selectedEntry) return;
+        if (!window.confirm('Delete this memory entry?')) return;
+        try {
+            await this.apiFetch(`/api/memory/entries/${encodeURIComponent(this.selectedEntry.memory_id)}`, { method: 'DELETE' });
+            this.selectedEntry = null;
+            await this.refreshEntries();
+        } catch (error) {
+            alert(error.message || 'Delete failed');
+        }
+    }
+
+    async refreshWriteDecisions() {
+        if (!this.decisionTimelineEl) return;
+        this.decisionTimelineEl.innerHTML = `<div class="memory-node-item empty">${t("memory_loading")}</div>`;
+        try {
+            const decision = this.decisionFilter?.value || '';
+            const q = decision ? `?decision=${encodeURIComponent(decision)}&limit=200` : '?limit=200';
+            const data = await this.apiFetch(`/api/memory/write-decisions${q}`);
+            const rows = (data?.events || []).slice().reverse();
+            if (!rows.length) {
+                this.decisionTimelineEl.innerHTML = `<div class="memory-node-item empty">${t("memory_no_data")}</div>`;
+                return;
+            }
+            this.decisionTimelineEl.innerHTML = '';
+            rows.forEach((item) => {
+                const node = document.createElement('div');
+                const decisionClass = String(item.decision || '').toLowerCase();
+                node.className = `memory-timeline-item ${decisionClass}`;
+                node.innerHTML = `
+                    <div><strong>${this.escapeHtml(String(item.timestamp || '').replace('T', ' ').slice(0, 19))}</strong> | <code>${this.escapeHtml(item.decision || '')}</code></div>
+                    <div>reason: <code>${this.escapeHtml(item.reason || '')}</code> | target: <code>${this.escapeHtml(item.target_memory_layer || '')}</code></div>
+                    <div>${this.escapeHtml(item.content_preview || '')}</div>
+                `;
+                this.decisionTimelineEl.appendChild(node);
+            });
+        } catch (error) {
+            this.decisionTimelineEl.innerHTML = `<div class="memory-node-item empty">${this.escapeHtml(error.message || 'load failed')}</div>`;
+        }
+    }
+
+    async refreshRecallRuns() {
+        if (!this.recallRunListEl) return;
+        this.recallRunListEl.innerHTML = `<div class="memory-node-item empty">${t("memory_loading")}</div>`;
+        try {
+            const data = await this.apiFetch('/api/memory/recall/runs?limit=120');
+            let rows = data?.runs || [];
+            const q = String(this.recallSearchInput?.value || '').trim().toLowerCase();
+            if (q) rows = rows.filter((x) => `${x.request_id || ''} ${x.query_text || ''}`.toLowerCase().includes(q));
+            if (!rows.length) {
+                this.recallRunListEl.innerHTML = `<div class="memory-node-item empty">${t("memory_no_data")}</div>`;
+                return;
+            }
+            this.recallRunListEl.innerHTML = '';
+            rows.slice().reverse().forEach((run) => {
+                const item = document.createElement('div');
+                item.className = 'memory-entry-item';
+                item.innerHTML = `<div class="title">${this.escapeHtml((run.query_text || '').slice(0, 120) || '(empty query)')}</div><div class="meta">${this.escapeHtml(run.request_id || '')}</div>`;
+                item.addEventListener('click', () => this.selectRecallRun(run.request_id));
+                this.recallRunListEl.appendChild(item);
+            });
+        } catch (error) {
+            this.recallRunListEl.innerHTML = `<div class="memory-node-item empty">${this.escapeHtml(error.message || 'load failed')}</div>`;
+        }
+    }
+
+    async selectRecallRun(requestId) {
+        try {
+            const data = await this.apiFetch(`/api/memory/recall/${encodeURIComponent(requestId)}`);
+            const run = data?.run || {};
+            const selected = run?.memory_records || [];
+            const dropped = run?.dropped_candidates || [];
+            this.recallDetailEl.innerHTML = `
+                <div class="memory-detail-row"><span>Request</span><code>${this.escapeHtml(run.request_id || '')}</code></div>
+                <div class="memory-detail-row"><span>Query</span><code>${this.escapeHtml(run.query_text || '')}</code></div>
+                <div class="memory-detail-content"><strong>Formatted Context</strong>\n${this.escapeHtml(run.formatted_context || '')}</div>
+                <div class="memory-detail-content"><strong>Selected</strong>\n${this.escapeHtml(selected.map((x) => `- [${x.source_layer}] ${x.content}`).join('\n'))}</div>
+                <div class="memory-detail-content"><strong>Dropped</strong>\n${this.escapeHtml(dropped.map((x) => `- [${x.reason}] ${x.content}`).join('\n'))}</div>
+            `;
+        } catch (error) {
+            this.recallDetailEl.textContent = error.message || 'load failed';
+        }
+    }
+
+    async pollWriteProposals() {
+        try {
+            const data = await this.apiFetch('/api/memory/write-proposals?status=pending&limit=5');
+            const rows = data?.proposals || [];
+            if (!rows.length) {
+                this.hideProposalModal();
+                return;
+            }
+            const top = rows[rows.length - 1];
+            if (this.activeProposal?.proposal_id === top.proposal_id) return;
+            this.activeProposal = top;
+            this.proposalContentEl.textContent = String(top.content || '');
+            const conflicts = top.conflict_candidates || [];
+            this.proposalConflictEl.textContent = conflicts.length ? `Conflicts:\n${conflicts.map((x) => `- ${x}`).join('\n')}` : 'No conflicts';
+            this.proposalModal.style.display = 'flex';
+        } catch (error) {
+            this.hideProposalModal();
+        }
+    }
+
+    hideProposalModal() {
+        this.activeProposal = null;
+        if (this.proposalModal) this.proposalModal.style.display = 'none';
+    }
+
+    async resolveProposal(action) {
+        if (!this.activeProposal) return;
+        try {
+            await this.apiFetch(`/api/memory/write-proposals/${encodeURIComponent(this.activeProposal.proposal_id)}/decision`, {
+                method: 'POST',
+                body: JSON.stringify({ action }),
+            });
+            this.hideProposalModal();
+            await this.refreshEntries();
+            await this.refreshWriteDecisions();
+        } catch (error) {
+            alert(error.message || 'Decision failed');
+        }
+    }
+
+    escapeHtml(value) {
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+}
+
 // 璁剧疆绠＄悊
 class SettingsManager {
     constructor(apiBaseUrl) {
@@ -3037,6 +3374,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const app = new TerminalChatApp();
     const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
+    const memoryConsole = new MemoryConsoleManager(app.apiBaseUrl, memoryViz);
     const settingsManager = new SettingsManager(app.apiBaseUrl);
     const metricsManager = new MetricsManager(app.apiBaseUrl);
     const doctorManager = new DoctorManager(app.apiBaseUrl);
@@ -3045,10 +3383,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('memoryGraphBtn').addEventListener('click', (event) => {
         // Default: global user memory. Hold Alt to inspect current session scope.
         if (event.altKey && app.currentSessionId) {
-            memoryViz.show(app.currentSessionId);
+            memoryConsole.show(app.currentSessionId);
             return;
         }
-        memoryViz.show();
+        memoryConsole.show();
     });
     
     document.getElementById('settingsBtn').addEventListener('click', () => {

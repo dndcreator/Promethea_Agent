@@ -181,3 +181,129 @@ class FlatMemoryStore(MemoryStore):
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return {"ok": True, "imported": {"memory_items": imported, "nodes": 0, "edges": 0}, "merge": bool(merge)}
 
+    def list_memory_entries(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        memory_types: Optional[List[str]] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        scoped_sid = scoped_session_id(session_id, user_id) if session_id else None
+        wanted_types = {str(x).strip().lower() for x in (memory_types or []) if str(x).strip()}
+        q = _normalize(query)
+        with self._lock:
+            rows = self._load_rows()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            if str(row.get("user_id") or "") != str(user_id):
+                continue
+            if scoped_sid and str(row.get("session_id") or "") != scoped_sid:
+                continue
+            mt = str(row.get("memory_type") or "").strip().lower()
+            if wanted_types and mt not in wanted_types:
+                continue
+            content = str(row.get("content") or "")
+            if q and q not in _normalize(content):
+                continue
+            out.append(
+                {
+                    "memory_id": str(row.get("id") or ""),
+                    "user_id": str(row.get("user_id") or ""),
+                    "session_id": str(row.get("session_id") or ""),
+                    "role": str(row.get("role") or "user"),
+                    "memory_type": mt,
+                    "source_layer": str(row.get("source_layer") or "direct"),
+                    "content": content,
+                    "importance": float(row.get("importance") or 0.5),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at") or row.get("created_at"),
+                    "status": str(row.get("status") or "active"),
+                    "metadata": row.get("metadata") or {},
+                }
+            )
+        out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        start = max(0, int(offset))
+        end = start + max(1, min(500, int(limit)))
+        return out[start:end]
+
+    def update_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+        content: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            return {"ok": False, "reason": "memory_id_required"}
+        changed = False
+        updated_row: Dict[str, Any] = {}
+        with self._lock:
+            rows = self._load_rows()
+            for row in rows:
+                if str(row.get("id") or "") != target_id:
+                    continue
+                if str(row.get("user_id") or "") != str(user_id):
+                    continue
+                if content is not None:
+                    row["content"] = str(content)
+                    row["semantic_keys"] = _tokenize(str(content))[:10]
+                    changed = True
+                if memory_type is not None:
+                    row["memory_type"] = str(memory_type).strip().lower()
+                    changed = True
+                if metadata is not None:
+                    md = dict(row.get("metadata") or {})
+                    md.update(metadata)
+                    row["metadata"] = md
+                    changed = True
+                if changed:
+                    row["updated_at"] = _utc_now_iso()
+                    updated_row = dict(row)
+                break
+            if changed:
+                with open(self.file_path, "w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return {"ok": changed, "entry": updated_row if changed else None, "reason": None if changed else "not_found_or_no_change"}
+
+    def delete_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+    ) -> Dict[str, Any]:
+        target_id = str(memory_id or "").strip()
+        if not target_id:
+            return {"ok": False, "reason": "memory_id_required"}
+        changed = False
+        with self._lock:
+            rows = self._load_rows()
+            for row in rows:
+                if str(row.get("id") or "") != target_id:
+                    continue
+                if str(row.get("user_id") or "") != str(user_id):
+                    continue
+                row["status"] = "archived"
+                row["updated_at"] = _utc_now_iso()
+                changed = True
+                break
+            if changed:
+                with open(self.file_path, "w", encoding="utf-8") as f:
+                    for row in rows:
+                        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return {"ok": changed, "reason": None if changed else "not_found"}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        return {
+            "backend": "flat_memory",
+            "supports_graph": False,
+            "supports_crud": True,
+            "supports_recall_runs": True,
+            "supports_write_inspector": True,
+        }

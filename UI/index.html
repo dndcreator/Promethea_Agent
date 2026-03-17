@@ -248,46 +248,157 @@
                 <span class="close-modal">&times;</span>
             </div>
             <div class="modal-body memory-workbench-body">
-                <div class="memory-toolbar">
-                    <div class="memory-toolbar-left">
-                        <input type="search" id="memorySearchInput" class="memory-search" placeholder="Search content / node id / type...">
-                        <select id="memoryLayerFilter" class="memory-filter">
-                            <option value="all">All Layers</option>
-                            <option value="0">Hot</option>
-                            <option value="1">Warm</option>
-                            <option value="2">Cold</option>
-                        </select>
-                        <select id="memoryTypeFilter" class="memory-filter">
-                            <option value="all">All Types</option>
-                        </select>
+                <div class="memory-tabs" id="memoryTabs">
+                    <button class="memory-tab-btn active" data-tab="console">Console</button>
+                    <button class="memory-tab-btn" data-tab="inspector">Write Inspector</button>
+                    <button class="memory-tab-btn" data-tab="recall">Recall Viewer</button>
+                    <button class="memory-tab-btn" data-tab="graph">Graph</button>
+                </div>
+
+                <div class="memory-panel active" data-panel="console">
+                    <div class="memory-toolbar">
+                        <div class="memory-toolbar-left">
+                            <input type="search" id="memoryEntrySearchInput" class="memory-search" placeholder="Search memory content...">
+                            <select id="memoryScopeFilter" class="memory-filter">
+                                <option value="all">All Scope</option>
+                                <option value="user">User Memory</option>
+                                <option value="project">Project Memory</option>
+                            </select>
+                            <select id="memoryEntryTypeFilter" class="memory-filter">
+                                <option value="all">All Types</option>
+                                <option value="goal">goal</option>
+                                <option value="preference">preference</option>
+                                <option value="constraint">constraint</option>
+                                <option value="identity">identity</option>
+                                <option value="project_state">project_state</option>
+                            </select>
+                        </div>
+                        <div class="memory-toolbar-right">
+                            <label class="memory-profile-switch">
+                                <span>Sensitivity</span>
+                                <select id="memoryProfileSelect">
+                                    <option value="conservative">Less</option>
+                                    <option value="balanced">Standard</option>
+                                    <option value="aggressive">More</option>
+                                </select>
+                            </label>
+                            <button id="memoryEntryRefreshBtn" class="btn-primary">Refresh</button>
+                        </div>
                     </div>
-                    <div class="memory-toolbar-right">
-                        <button id="memoryOpenNeo4jBtn" class="btn-secondary">Neo4j</button>
-                        <button id="memoryClusterBtn" class="btn-secondary">Cluster</button>
-                        <button id="memorySummarizeBtn" class="btn-secondary">Summarize</button>
-                        <button id="memoryDecayBtn" class="btn-secondary">Decay</button>
-                        <button id="memoryCleanupBtn" class="btn-secondary">Cleanup</button>
-                        <button id="memoryRefreshBtn" class="btn-primary">Refresh</button>
+                    <div class="memory-entry-layout">
+                        <div class="memory-entry-list-wrap">
+                            <div id="memoryEntryList" class="memory-entry-list"></div>
+                        </div>
+                        <aside class="memory-side-panel">
+                            <div class="memory-side-header">
+                                <h3>Entry Detail</h3>
+                            </div>
+                            <div id="memoryEntryDetail" class="memory-node-detail">This system remembers durable preferences, goals, constraints, identity, and project state. You can review, edit, or delete any memory here.</div>
+                            <div class="memory-entry-actions">
+                                <button id="memoryEntryEditBtn" class="btn-secondary">Edit</button>
+                                <button id="memoryEntryDeleteBtn" class="btn-danger">Delete</button>
+                            </div>
+                        </aside>
                     </div>
                 </div>
 
-                <div id="graphStats" class="graph-stats"></div>
-
-                <div class="memory-workbench-grid">
-                    <div class="memory-graph-panel">
-                        <div id="graphCanvas"></div>
+                <div class="memory-panel" data-panel="inspector">
+                    <div class="memory-toolbar">
+                        <div class="memory-toolbar-left">
+                            <select id="memoryDecisionFilter" class="memory-filter">
+                                <option value="">All Decisions</option>
+                                <option value="allow">allow</option>
+                                <option value="deny">deny</option>
+                                <option value="defer">defer</option>
+                            </select>
+                        </div>
+                        <div class="memory-toolbar-right">
+                            <button id="memoryDecisionRefreshBtn" class="btn-primary">Refresh</button>
+                        </div>
                     </div>
-                    <aside class="memory-side-panel">
-                        <div class="memory-side-header">
-                            <h3 id="memoryNodeListTitle">Node List</h3>
-                            <span id="memoryNodeCount" class="memory-node-count">0</span>
+                    <div id="memoryDecisionTimeline" class="memory-timeline"></div>
+                </div>
+
+                <div class="memory-panel" data-panel="recall">
+                    <div class="memory-toolbar">
+                        <div class="memory-toolbar-left">
+                            <input type="search" id="memoryRecallSearchInput" class="memory-search" placeholder="Filter by query/request id...">
                         </div>
-                        <div id="memoryNodeList" class="memory-node-list"></div>
-                        <div class="memory-side-header">
-                            <h3 id="memoryNodeDetailTitle">Node Details</h3>
+                        <div class="memory-toolbar-right">
+                            <button id="memoryRecallRefreshBtn" class="btn-primary">Refresh</button>
                         </div>
-                        <div id="memoryNodeDetail" class="memory-node-detail">Select a node to view details.</div>
-                    </aside>
+                    </div>
+                    <div class="memory-entry-layout">
+                        <div class="memory-entry-list-wrap">
+                            <div id="memoryRecallRunList" class="memory-entry-list"></div>
+                        </div>
+                        <aside class="memory-side-panel">
+                            <div class="memory-side-header">
+                                <h3>Recall Detail</h3>
+                            </div>
+                            <div id="memoryRecallDetail" class="memory-node-detail">Select a recall run.</div>
+                        </aside>
+                    </div>
+                </div>
+
+                <div class="memory-panel" data-panel="graph">
+                    <div class="memory-toolbar">
+                        <div class="memory-toolbar-left">
+                            <input type="search" id="memorySearchInput" class="memory-search" placeholder="Search content / node id / type...">
+                            <select id="memoryLayerFilter" class="memory-filter">
+                                <option value="all">All Layers</option>
+                                <option value="0">Hot</option>
+                                <option value="1">Warm</option>
+                                <option value="2">Cold</option>
+                            </select>
+                            <select id="memoryTypeFilter" class="memory-filter">
+                                <option value="all">All Types</option>
+                            </select>
+                        </div>
+                        <div class="memory-toolbar-right">
+                            <button id="memoryOpenNeo4jBtn" class="btn-secondary">Neo4j</button>
+                            <button id="memoryClusterBtn" class="btn-secondary">Cluster</button>
+                            <button id="memorySummarizeBtn" class="btn-secondary">Summarize</button>
+                            <button id="memoryDecayBtn" class="btn-secondary">Decay</button>
+                            <button id="memoryCleanupBtn" class="btn-secondary">Cleanup</button>
+                            <button id="memoryRefreshBtn" class="btn-primary">Refresh</button>
+                        </div>
+                    </div>
+                    <div id="graphStats" class="graph-stats"></div>
+                    <div class="memory-workbench-grid">
+                        <div class="memory-graph-panel">
+                            <div id="graphCanvas"></div>
+                        </div>
+                        <aside class="memory-side-panel">
+                            <div class="memory-side-header">
+                                <h3 id="memoryNodeListTitle">Node List</h3>
+                                <span id="memoryNodeCount" class="memory-node-count">0</span>
+                            </div>
+                            <div id="memoryNodeList" class="memory-node-list"></div>
+                            <div class="memory-side-header">
+                                <h3 id="memoryNodeDetailTitle">Node Details</h3>
+                            </div>
+                            <div id="memoryNodeDetail" class="memory-node-detail">Select a node to view details.</div>
+                        </aside>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="memoryProposalModal" class="modal">
+        <div class="modal-content confirm-modal-content">
+            <div class="modal-header">
+                <h2>Memory Confirmation</h2>
+            </div>
+            <div class="modal-body">
+                <p id="memoryProposalTitle">Detected a possible long-term memory. Keep it?</p>
+                <div id="memoryProposalContent" class="memory-proposal-content"></div>
+                <div id="memoryProposalConflict" class="memory-proposal-conflict"></div>
+                <div class="form-actions">
+                    <button type="button" class="btn-primary" id="memoryProposalConfirmBtn">Confirm</button>
+                    <button type="button" class="btn-secondary" id="memoryProposalIgnoreBtn">Ignore Once</button>
+                    <button type="button" class="btn-danger" id="memoryProposalReduceBtn">Remember Less Like This</button>
                 </div>
             </div>
         </div>

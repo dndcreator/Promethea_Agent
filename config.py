@@ -158,6 +158,7 @@ class MemoryMigrationConfig(BaseSettings):
 
 class MemoryConfig(BaseSettings):
     enabled: bool = Field(default=False)
+    profile: str = Field(default="balanced")
     store_backend: str = Field(default="neo4j")
     sqlite_graph_path: str = Field(default="memory/sqlite_graph.db")
     flat_memory_path: str = Field(default="memory/flat_memory.jsonl")
@@ -175,6 +176,14 @@ class MemoryConfig(BaseSettings):
         value = (v or "neo4j").strip().lower()
         if value not in {"neo4j", "sqlite_graph", "flat_memory"}:
             raise ValueError("memory.store_backend must be one of: neo4j, sqlite_graph, flat_memory")
+        return value
+
+    @field_validator("profile")
+    @classmethod
+    def validate_profile(cls, v: str) -> str:
+        value = (v or "balanced").strip().lower()
+        if value not in {"conservative", "balanced", "aggressive"}:
+            raise ValueError("memory.profile must be one of: conservative, balanced, aggressive")
         return value
 
 

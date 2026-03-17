@@ -72,6 +72,11 @@ class MemoryService:
         self._recall_runs: List[Dict[str, Any]] = []
         self._recall_by_request: Dict[str, Dict[str, Any]] = {}
         self._recall_history_limit = 200
+        self._write_decisions: List[Dict[str, Any]] = []
+        self._write_decision_limit = 500
+        self._write_proposals: List[Dict[str, Any]] = []
+        self._write_proposal_by_id: Dict[str, Dict[str, Any]] = {}
+        self._write_proposal_limit = 300
 
         if not self.memory_adapter:
             logger.warning(
@@ -132,6 +137,7 @@ class MemoryService:
         self._write_min_user_chars = 4
         self._write_min_assistant_chars_for_short_user = 20
         self._write_max_combined_chars = 8000
+        profile = "balanced"
         try:
             if self.config_service:
                 if user_id:
@@ -142,6 +148,7 @@ class MemoryService:
                 from config import config as global_config
                 cfg = global_config.model_dump()
             gating = cfg.get("memory", {}).get("gating", {})
+            profile = str(cfg.get("memory", {}).get("profile", "balanced") or "balanced").strip().lower()
             write_filter = gating.get("write_filter", {})
             dedupe = gating.get("dedupe", {})
             self._write_min_user_chars = int(
@@ -164,6 +171,14 @@ class MemoryService:
             )
         except Exception:
             pass
+        if profile == "conservative":
+            self._write_min_user_chars = max(self._write_min_user_chars, 10)
+            self._dedupe_min_candidate_chars = max(self._dedupe_min_candidate_chars, 12)
+            self._write_max_combined_chars = min(self._write_max_combined_chars, 6000)
+        elif profile == "aggressive":
+            self._write_min_user_chars = max(1, self._write_min_user_chars - 2)
+            self._dedupe_min_candidate_chars = max(4, self._dedupe_min_candidate_chars - 2)
+            self._write_max_combined_chars = min(12000, self._write_max_combined_chars + 2000)
 
     def _resolve_sync_policy(self, user_id: Optional[str] = None) -> Dict[str, float]:
         policy = dict(self._sync_defaults)
@@ -732,27 +747,72 @@ class MemoryService:
         requires_user_confirmation: bool = False,
         conflict_candidates: Optional[List[str]] = None,
         persisted: bool = False,
+        proposal_id: Optional[str] = None,
     ) -> None:
+        row = {
+            "decision_id": f"mwd_{int(time.time() * 1000)}_{abs(hash((session_id, user_id, memory_type, decision))) % 100000}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "user_id": user_id,
+            "channel": channel,
+            "memory_type": memory_type,
+            "target_memory_layer": target_memory_layer,
+            "decision": decision,
+            "reason": reason,
+            "requires_user_confirmation": bool(requires_user_confirmation),
+            "conflict_candidates": list(conflict_candidates or []),
+            "semantic_keys": list(semantic_keys or []),
+            "content_length": len(content or ""),
+            "content_preview": (content or "")[:200],
+            "persisted": bool(persisted),
+            "source": "interaction.completed",
+            "proposal_id": proposal_id,
+        }
+        self._write_decisions.append(row)
+        if len(self._write_decisions) > self._write_decision_limit:
+            self._write_decisions = self._write_decisions[-self._write_decision_limit :]
         if not self.event_emitter:
             return
         await self.event_emitter.emit(
             EventType.MEMORY_WRITE_DECIDED,
-            {
-                "session_id": session_id,
-                "user_id": user_id,
-                "channel": channel,
-                "memory_type": memory_type,
-                "target_memory_layer": target_memory_layer,
-                "decision": decision,
-                "reason": reason,
-                "requires_user_confirmation": bool(requires_user_confirmation),
-                "conflict_candidates": list(conflict_candidates or []),
-                "semantic_keys": list(semantic_keys or []),
-                "content_length": len(content or ""),
-                "persisted": bool(persisted),
-                "source": "interaction.completed",
-            },
+            row,
         )
+
+    def _create_write_proposal(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        memory_type: str,
+        target_memory_layer: str,
+        content: str,
+        semantic_keys: List[str],
+        conflict_candidates: Optional[List[str]] = None,
+        reason: str = "conflict_detected",
+    ) -> str:
+        proposal_id = f"mwp_{int(time.time() * 1000)}_{abs(hash((session_id, user_id, memory_type, content))) % 100000}"
+        row = {
+            "proposal_id": proposal_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+            "session_id": session_id,
+            "user_id": user_id,
+            "memory_type": memory_type,
+            "target_memory_layer": target_memory_layer,
+            "content": content,
+            "semantic_keys": list(semantic_keys or []),
+            "conflict_candidates": list(conflict_candidates or []),
+            "reason": reason,
+        }
+        self._write_proposals.append(row)
+        self._write_proposal_by_id[proposal_id] = row
+        if len(self._write_proposals) > self._write_proposal_limit:
+            removed = self._write_proposals.pop(0)
+            rid = str(removed.get("proposal_id") or "")
+            if rid:
+                self._write_proposal_by_id.pop(rid, None)
+        return proposal_id
     async def _on_interaction_completed(self, event_msg) -> None:
         """Backward-compatible entrypoint for tests and direct callers."""
         payload = dict(getattr(event_msg, "payload", {}) or {})
@@ -889,7 +949,38 @@ class MemoryService:
                 ),
             )
             gate_decision = self._memory_write_gate.evaluate(gate_request)
+            if self._is_suppressed_by_feedback(
+                user_id=user_id,
+                memory_type=memory_type,
+                semantic_keys=semantic_keys,
+            ):
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision="deny",
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason="suppressed_by_user_feedback",
+                    conflict_candidates=gate_decision.conflict_candidates,
+                    persisted=False,
+                )
+                continue
             if gate_decision.decision != "allow":
+                proposal_id = None
+                if gate_decision.requires_user_confirmation:
+                    proposal_id = self._create_write_proposal(
+                        session_id=session_id,
+                        user_id=user_id,
+                        memory_type=memory_type,
+                        target_memory_layer=gate_decision.target_memory_layer,
+                        content=content,
+                        semantic_keys=semantic_keys,
+                        conflict_candidates=gate_decision.conflict_candidates,
+                        reason=gate_decision.reason,
+                    )
                 await self._emit_memory_write_decision(
                     session_id=session_id,
                     user_id=user_id,
@@ -903,6 +994,7 @@ class MemoryService:
                     requires_user_confirmation=gate_decision.requires_user_confirmation,
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
+                    proposal_id=proposal_id,
                 )
                 continue
 
@@ -1127,6 +1219,13 @@ class MemoryService:
                 policy["allowed_layers"] = [str(x) for x in mode_cfg.get("allowed_layers") if str(x).strip()]
             if "max_age_days" in mode_cfg:
                 policy["max_age_days"] = int(mode_cfg.get("max_age_days") or policy["max_age_days"])
+        profile = str(cfg.get("memory", {}).get("profile", "balanced") or "balanced").strip().lower()
+        if profile == "conservative":
+            policy["top_k"] = max(2, int(policy["top_k"]) - 2)
+            policy["max_age_days"] = max(7, int(policy["max_age_days"]) // 2)
+        elif profile == "aggressive":
+            policy["top_k"] = min(20, int(policy["top_k"]) + 2)
+            policy["max_age_days"] = min(365, int(policy["max_age_days"]) + 30)
 
         policy["top_k"] = max(1, min(20, int(request_top_k or policy["top_k"] or 5)))
         policy["max_age_days"] = max(1, min(365, int(policy["max_age_days"])))
@@ -1252,8 +1351,9 @@ class MemoryService:
             lines.append(f"- {snippet}")
         return "\n".join(lines)
 
-    def _store_recall_run(self, result: MemoryRecallResult) -> None:
+    def _store_recall_run(self, result: MemoryRecallResult, *, query_text: str = "") -> None:
         row = result.model_dump()
+        row["query_text"] = str(query_text or "")
         self._recall_runs.append(row)
         self._recall_by_request[result.request_id] = row
         if len(self._recall_runs) > self._recall_history_limit:
@@ -1282,6 +1382,193 @@ class MemoryService:
 
     def get_recall_run(self, request_id: str) -> Optional[Dict[str, Any]]:
         return self._recall_by_request.get(str(request_id))
+
+    def list_write_decisions(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        decision: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        rows = [x for x in self._write_decisions if str(x.get("user_id") or "") == str(user_id)]
+        if session_id:
+            rows = [x for x in rows if str(x.get("session_id") or "") == str(session_id)]
+        if trace_id:
+            rows = [x for x in rows if str(x.get("trace_id") or "") == str(trace_id)]
+        if decision:
+            rows = [x for x in rows if str(x.get("decision") or "").lower() == str(decision).lower()]
+        lim = max(1, min(500, int(limit or 100)))
+        return rows[-lim:]
+
+    def list_write_proposals(
+        self,
+        *,
+        user_id: str,
+        status: str = "pending",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        rows = [x for x in self._write_proposals if str(x.get("user_id") or "") == str(user_id)]
+        if status:
+            rows = [x for x in rows if str(x.get("status") or "").lower() == str(status).lower()]
+        lim = max(1, min(300, int(limit or 100)))
+        return rows[-lim:]
+
+    async def _save_reduce_memory_feedback(
+        self,
+        *,
+        user_id: str,
+        semantic_keys: List[str],
+        memory_type: str,
+    ) -> None:
+        if not self.config_service:
+            return
+        merged = self._get_merged_config(user_id=user_id) or {}
+        gating = ((merged.get("memory") or {}).get("gating") or {}) if isinstance(merged, dict) else {}
+        feedback = (gating.get("user_feedback") or {}) if isinstance(gating, dict) else {}
+        existed_keys = [str(x).strip().lower() for x in (feedback.get("suppress_semantic_keys") or []) if str(x).strip()]
+        existed_types = [str(x).strip().lower() for x in (feedback.get("suppress_memory_types") or []) if str(x).strip()]
+        next_keys = sorted(set(existed_keys + [str(x).strip().lower() for x in (semantic_keys or []) if str(x).strip()]))
+        next_types = sorted(set(existed_types + ([str(memory_type).strip().lower()] if str(memory_type).strip() else [])))
+        await self.config_service.update_user_config(
+            user_id,
+            {
+                "memory": {
+                    "gating": {
+                        "user_feedback": {
+                            "suppress_semantic_keys": next_keys,
+                            "suppress_memory_types": next_types,
+                        }
+                    }
+                }
+            },
+            validate=False,
+        )
+
+    def _is_suppressed_by_feedback(
+        self,
+        *,
+        user_id: str,
+        memory_type: str,
+        semantic_keys: List[str],
+    ) -> bool:
+        merged = self._get_merged_config(user_id=user_id) or {}
+        gating = ((merged.get("memory") or {}).get("gating") or {}) if isinstance(merged, dict) else {}
+        feedback = (gating.get("user_feedback") or {}) if isinstance(gating, dict) else {}
+        suppressed_types = {str(x).strip().lower() for x in (feedback.get("suppress_memory_types") or []) if str(x).strip()}
+        suppressed_keys = {str(x).strip().lower() for x in (feedback.get("suppress_semantic_keys") or []) if str(x).strip()}
+        if str(memory_type).strip().lower() in suppressed_types:
+            return True
+        for key in semantic_keys or []:
+            if str(key).strip().lower() in suppressed_keys:
+                return True
+        return False
+
+    async def resolve_write_proposal(
+        self,
+        *,
+        proposal_id: str,
+        user_id: str,
+        action: str,
+    ) -> Dict[str, Any]:
+        row = self._write_proposal_by_id.get(str(proposal_id))
+        if not row:
+            return {"ok": False, "reason": "proposal_not_found"}
+        if str(row.get("user_id") or "") != str(user_id):
+            return {"ok": False, "reason": "forbidden"}
+        if str(row.get("status") or "") != "pending":
+            return {"ok": False, "reason": "proposal_not_pending"}
+        action_norm = str(action or "").strip().lower()
+        if action_norm not in {"confirm_write", "ignore_once", "reduce_similar"}:
+            return {"ok": False, "reason": "invalid_action"}
+
+        row["updated_at"] = datetime.now(timezone.utc).isoformat()
+        row["resolved_action"] = action_norm
+        if action_norm == "confirm_write":
+            if not self.memory_adapter:
+                return {"ok": False, "reason": "memory_adapter_unavailable"}
+            ok = self.memory_adapter.add_message(
+                session_id=str(row.get("session_id") or ""),
+                role="user",
+                content=str(row.get("content") or ""),
+                user_id=user_id,
+                metadata={
+                    "memory_type": str(row.get("memory_type") or ""),
+                    "semantic_keys": list(row.get("semantic_keys") or []),
+                    "memory_source": "user.confirmed",
+                    "target_memory_layer": str(row.get("target_memory_layer") or ""),
+                    "user_confirmed": True,
+                },
+            )
+            if not ok:
+                return {"ok": False, "reason": "adapter_write_failed"}
+            for prev in row.get("conflict_candidates") or []:
+                prev_text = str(prev or "").strip()
+                if not prev_text:
+                    continue
+                try:
+                    found = self.memory_adapter.list_memory_entries(
+                        user_id=user_id,
+                        session_id=None,
+                        memory_types=[str(row.get("memory_type") or "")],
+                        query=prev_text,
+                        limit=20,
+                        offset=0,
+                    )
+                    for item in found or []:
+                        if self._normalize_content(str(item.get("content") or "")) != self._normalize_content(prev_text):
+                            continue
+                        mid = str(item.get("memory_id") or "")
+                        if not mid:
+                            continue
+                        self.memory_adapter.update_memory_entry(
+                            user_id=user_id,
+                            memory_id=mid,
+                            metadata={
+                                "status": "superseded",
+                                "superseded_by_proposal": str(proposal_id),
+                            },
+                        )
+                except Exception:
+                    continue
+            row["status"] = "confirmed"
+            await self._emit_memory_write_decision(
+                session_id=str(row.get("session_id") or ""),
+                user_id=user_id,
+                channel=None,
+                memory_type=str(row.get("memory_type") or ""),
+                content=str(row.get("content") or ""),
+                semantic_keys=list(row.get("semantic_keys") or []),
+                decision="allow",
+                target_memory_layer=str(row.get("target_memory_layer") or ""),
+                reason="user_confirmed_conflict_write",
+                persisted=True,
+                proposal_id=str(proposal_id),
+            )
+            return {"ok": True, "proposal": row}
+
+        if action_norm == "reduce_similar":
+            await self._save_reduce_memory_feedback(
+                user_id=user_id,
+                semantic_keys=list(row.get("semantic_keys") or []),
+                memory_type=str(row.get("memory_type") or ""),
+            )
+        row["status"] = "dismissed"
+        await self._emit_memory_write_decision(
+            session_id=str(row.get("session_id") or ""),
+            user_id=user_id,
+            channel=None,
+            memory_type=str(row.get("memory_type") or ""),
+            content=str(row.get("content") or ""),
+            semantic_keys=list(row.get("semantic_keys") or []),
+            decision="deny",
+            target_memory_layer=str(row.get("target_memory_layer") or ""),
+            reason="user_declined_conflict_write" if action_norm == "ignore_once" else "user_reduce_similar_writes",
+            persisted=False,
+            proposal_id=str(proposal_id),
+        )
+        return {"ok": True, "proposal": row}
 
     async def recall_memory(
         self,
@@ -1324,7 +1611,7 @@ class MemoryService:
                 applied_filters=["memory_disabled"],
                 metrics={"total_candidates": 0, "selected": 0, "dropped": 0},
             )
-            self._store_recall_run(result)
+            self._store_recall_run(result, query_text=request.query_text)
             return result
 
         candidates = self._collect_recall_candidates(request)
@@ -1445,7 +1732,7 @@ class MemoryService:
                 "top_k": top_k,
             },
         )
-        self._store_recall_run(result)
+        self._store_recall_run(result, query_text=request.query_text)
 
         if self.event_emitter:
             payload = {

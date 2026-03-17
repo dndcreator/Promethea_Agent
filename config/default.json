@@ -18,6 +18,7 @@
             },
     "memory":  {
                    "enabled":  true,
+                   "profile": "balanced",
                    "store_backend": "neo4j",
                    "sqlite_graph_path": "memory/sqlite_graph.db",
                    "flat_memory_path": "memory/flat_memory.jsonl",

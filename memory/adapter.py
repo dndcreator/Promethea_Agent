@@ -563,6 +563,89 @@ class MemoryAdapter:
             return {"ok": False, "reason": "store_unavailable", "imported": {"memory_items": 0, "nodes": 0, "edges": 0}}
         return self.store.import_mef(payload, merge=merge)
 
+    def list_memory_entries(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        memory_types: Optional[List[str]] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        if self.store is None:
+            return []
+        try:
+            return self.store.list_memory_entries(
+                user_id=user_id,
+                session_id=session_id,
+                memory_types=memory_types,
+                query=query,
+                limit=limit,
+                offset=offset,
+            )
+        except Exception as e:
+            logger.debug(f"list_memory_entries failed: {e}")
+            return []
+
+    def update_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+        content: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if self.store is None:
+            return {"ok": False, "reason": "store_unavailable"}
+        try:
+            return self.store.update_memory_entry(
+                user_id=user_id,
+                memory_id=memory_id,
+                content=content,
+                memory_type=memory_type,
+                metadata=metadata,
+            )
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    def delete_memory_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+    ) -> Dict[str, Any]:
+        if self.store is None:
+            return {"ok": False, "reason": "store_unavailable"}
+        try:
+            return self.store.delete_memory_entry(user_id=user_id, memory_id=memory_id)
+        except Exception as e:
+            return {"ok": False, "reason": str(e)}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        if self.store is None:
+            return {
+                "backend": self.store_backend,
+                "supports_graph": False,
+                "supports_crud": False,
+                "supports_recall_runs": False,
+                "supports_write_inspector": False,
+            }
+        try:
+            caps = self.store.get_capabilities()
+            if isinstance(caps, dict):
+                return caps
+        except Exception:
+            pass
+        return {
+            "backend": self.store_backend,
+            "supports_graph": False,
+            "supports_crud": False,
+            "supports_recall_runs": False,
+            "supports_write_inspector": False,
+        }
+
     def _build_store(self, backend: str):
         backend_name = str(backend or "neo4j").strip().lower()
         mem_cfg = getattr(self._config, "memory", None)
