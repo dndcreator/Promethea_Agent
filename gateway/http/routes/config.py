@@ -3,7 +3,7 @@
 import json
 import copy
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -16,10 +16,14 @@ from .auth import get_current_user_id
 router = APIRouter()
 
 
+class ConfigUpdateOptions(BaseModel):
+    hot_apply: bool = False
+
+
 class ConfigUpdateRequest(BaseModel):
     user_id: Optional[str] = None
     config: Dict[str, Any]
-    options: Optional[Dict[str, Any]] = None
+    options: Optional[ConfigUpdateOptions] = None
 
 
 class ConfigResetRequest(BaseModel):
@@ -73,6 +77,59 @@ def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
     return sanitized
 
 
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+        return default
+    return bool(value)
+
+
+def _build_basic_config_view(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = config_data or {}
+    api = cfg.get("api") if isinstance(cfg.get("api"), dict) else {}
+    memory = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
+    reasoning = cfg.get("reasoning") if isinstance(cfg.get("reasoning"), dict) else {}
+    sandbox = cfg.get("sandbox") if isinstance(cfg.get("sandbox"), dict) else {}
+    system = cfg.get("system") if isinstance(cfg.get("system"), dict) else {}
+    return {
+        "config_version": cfg.get("config_version"),
+        "agent_name": cfg.get("agent_name"),
+        "system_prompt": cfg.get("system_prompt"),
+        "api": {
+            "api_key": api.get("api_key", ""),
+            "base_url": api.get("base_url", ""),
+            "model": api.get("model", ""),
+        },
+        "memory": {
+            "enabled": _to_bool(memory.get("enabled"), default=False),
+            "store_backend": memory.get("store_backend", "neo4j"),
+        },
+        "reasoning": {
+            "enabled": _to_bool(reasoning.get("enabled"), default=False),
+            "mode": reasoning.get("mode", "react_tot"),
+        },
+        "sandbox": {
+            "enabled": _to_bool(sandbox.get("enabled"), default=False),
+            "profile": sandbox.get("profile", "off"),
+        },
+        "system": {
+            "stream_mode": _to_bool(system.get("stream_mode"), default=True),
+            "debug": _to_bool(system.get("debug"), default=False),
+            "log_level": system.get("log_level", "INFO"),
+        },
+    }
+
+
 def _load_default_config_dict() -> tuple[Path, Dict[str, Any]]:
     config_path = Path("config/default.json")
     if not config_path.exists():
@@ -95,16 +152,23 @@ def _resolve_user_id(requested: Optional[str], current_user_id: str) -> str:
 async def get_config(
     user_id: Optional[str] = None,
     raw: bool = False,
+    view: Literal["basic", "full"] = "full",
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     config_service = _get_config_service()
     resolved_user_id = _resolve_user_id(user_id, current_user_id)
-    config_data = config_service.get_merged_config(resolved_user_id)
-    config_data = _sanitize_config_for_client(config_data)
+    full_config = _sanitize_config_for_client(config_service.get_merged_config(resolved_user_id))
+    config_data = _build_basic_config_view(full_config) if view == "basic" else full_config
     warnings = config_service.get_deprecation_warnings(resolved_user_id)
     if raw:
         return config_data
-    return {"status": "success", "user_id": resolved_user_id, "config": config_data, "warnings": warnings}
+    return {
+        "status": "success",
+        "user_id": resolved_user_id,
+        "config": config_data,
+        "view": view,
+        "warnings": warnings,
+    }
 
 
 @router.post("/config")
@@ -141,13 +205,13 @@ async def update_config(
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Update failed"))
 
-    hot_apply_requested = bool((request.options or {}).get("hot_apply"))
+    hot_apply_requested = bool(request.options.hot_apply) if request.options else False
     hot_apply_payload: Dict[str, Any] = {"requested": hot_apply_requested, "success": False}
     if hot_apply_requested:
         try:
             integration = _get_gateway_integration_or_503()
             reload_result = await integration.reload_config()
-            hot_apply_payload["success"] = bool(reload_result.get("success"))
+            hot_apply_payload["success"] = _to_bool(reload_result.get("success"), default=False)
             hot_apply_payload["message"] = reload_result.get("message")
             if hot_apply_payload["success"]:
                 hot_apply_payload["reloaded_at"] = reload_result.get("reloaded_at")

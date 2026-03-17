@@ -49,6 +49,58 @@ async def get_services_status():
     return {"status": overall, "services": health}
 
 
+@router.get("/health/memory")
+async def get_memory_health():
+    gateway_server = get_gateway_server()
+    memory_service = getattr(gateway_server, "memory_service", None)
+    if memory_service is None:
+        return {
+            "status": "unavailable",
+            "enabled": False,
+            "configured_backend": None,
+            "active_backend": None,
+            "ready": False,
+            "reason": "memory_service_not_initialized",
+        }
+
+    adapter = getattr(memory_service, "memory_adapter", None)
+    configured_backend = (
+        str(getattr(adapter, "store_backend", "") or "").strip().lower() if adapter else None
+    )
+    active_backend = None
+    if adapter is not None:
+        store = getattr(adapter, "store", None)
+        if store is not None:
+            active_backend = str(
+                getattr(store, "backend_name", configured_backend) or configured_backend
+            )
+        elif getattr(adapter, "hot_layer", None) is not None:
+            active_backend = "neo4j"
+
+    enabled = bool(getattr(memory_service, "enabled", False))
+    ready = bool(memory_service.is_enabled())
+    sync = memory_service.get_sync_stats()
+    status = "healthy" if ready else ("disabled" if not enabled else "degraded")
+    reason = ""
+    if not ready:
+        if not enabled:
+            reason = "memory_disabled_or_unavailable"
+        elif configured_backend == "neo4j":
+            reason = "neo4j_not_ready"
+        else:
+            reason = "backend_not_ready"
+
+    return {
+        "status": status,
+        "enabled": enabled,
+        "configured_backend": configured_backend,
+        "active_backend": active_backend,
+        "ready": ready,
+        "sync": sync,
+        "reason": reason,
+    }
+
+
 @router.get("/status/routes")
 async def get_gateway_routes():
     gateway_server = get_gateway_server()

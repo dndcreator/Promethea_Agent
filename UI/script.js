@@ -2554,18 +2554,18 @@ class SettingsManager {
         this.setFieldValue('maxHistoryRounds', apiConfig.max_history_rounds ?? '');
         
         // 绯荤粺閰嶇疆
-        this.setFieldValue('streamMode', !!systemConfig.stream_mode, 'checkbox');
-        this.setFieldValue('debugMode', !!systemConfig.debug, 'checkbox');
+        this.setFieldValue('streamMode', this.toBoolean(systemConfig.stream_mode), 'checkbox');
+        this.setFieldValue('debugMode', this.toBoolean(systemConfig.debug), 'checkbox');
         this.setFieldValue('logLevel', systemConfig.log_level || 'INFO');
         
         // 璁板繂绯荤粺閰嶇疆
-        this.setFieldValue('memoryEnabled', !!memoryConfig.enabled, 'checkbox');
+        this.setFieldValue('memoryEnabled', this.toBoolean(memoryConfig.enabled), 'checkbox');
         this.setFieldValue('memoryStoreBackend', memoryConfig.store_backend || 'neo4j');
-        this.setFieldValue('neo4jEnabled', !!neo4jConfig.enabled, 'checkbox');
+        this.setFieldValue('neo4jEnabled', this.toBoolean(neo4jConfig.enabled), 'checkbox');
         this.setFieldValue('neo4jUri', neo4jConfig.uri || '');
         this.setFieldValue('neo4jUsername', neo4jConfig.username || '');
         this.setFieldValue('neo4jDatabase', neo4jConfig.database || '');
-        this.setFieldValue('memoryUseMainApi', memoryApiConfig.use_main_api !== false, 'checkbox');
+        this.setFieldValue('memoryUseMainApi', this.toBoolean(memoryApiConfig.use_main_api, true), 'checkbox');
         this.setFieldValue('memoryApiKey', memoryApiConfig.api_key || '');
         this.setFieldValue('memoryBaseUrl', memoryApiConfig.base_url || '');
         this.setFieldValue('memoryModel', memoryApiConfig.model || '');
@@ -2575,12 +2575,24 @@ class SettingsManager {
         this.setFieldValue('migrationSourceBackend', migrationConfig.source_backend || '');
         this.setFieldValue('migrationTargetBackend', migrationConfig.target_backend || '');
         this.setFieldValue('migrationCheckpoint', migrationConfig.checkpoint || '');
-        this.setFieldValue('warmLayerEnabled', !!warmLayerConfig.enabled, 'checkbox');
+        this.setFieldValue('warmLayerEnabled', this.toBoolean(warmLayerConfig.enabled), 'checkbox');
         this.setFieldValue('clusteringThreshold', warmLayerConfig.clustering_threshold ?? '');
         this.setFieldValue('minClusterSize', warmLayerConfig.min_cluster_size ?? '');
         this.setFieldValue('maxSummaryLength', coldLayerConfig.max_summary_length ?? '');
         this.setFieldValue('compressionThreshold', coldLayerConfig.compression_threshold ?? '');
         this.updateMemoryBackendFields();
+    }
+
+    toBoolean(value, defaultValue = false) {
+        if (typeof value === 'boolean') return value;
+        if (value == null) return defaultValue;
+        if (typeof value === 'number') return value !== 0;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+            if (['0', 'false', 'no', 'off', ''].includes(normalized)) return false;
+        }
+        return Boolean(value);
     }
     
     setFieldValue(fieldId, value, type = 'input') {

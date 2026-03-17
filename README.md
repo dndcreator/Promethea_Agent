@@ -148,6 +148,7 @@ python start_gateway_service.py
 ```
 
 Visit `http://127.0.0.1:8000/UI/index.html` — it opens automatically.
+UI feature scope: [`docs/ui-overview.md`](docs/ui-overview.md)
 
 ---
 
@@ -214,6 +215,8 @@ Key sections:
 | [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |
 | [`docs/architecture/tool-runtime.md`](docs/architecture/tool-runtime.md) | ToolSpec, ToolRegistry, ToolPolicy |
 | [`docs/configuration.md`](docs/configuration.md) | Full configuration reference |
+| [`docs/ui-overview.md`](docs/ui-overview.md) | Current Web UI capabilities and limits |
+| [`docs/channels/telegram.md`](docs/channels/telegram.md) | Telegram adapter status and integration notes |
 | [`docs/quickstart-local-model.md`](docs/quickstart-local-model.md) | Using local models (vLLM, Ollama, etc.) |
 | [`docs/scenario-workflow-audit.md`](docs/scenario-workflow-audit.md) | End-to-end demo: workflow + workspace + audit |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |

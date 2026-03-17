@@ -37,7 +37,7 @@ Controls every LLM call made by the runtime.
 | `API__MAX_HISTORY_ROUNDS` | int 1–100 | `10` | Conversation turns kept in context. |
 | `API__TIMEOUT` | int 1–300 | `null` | Request timeout in seconds. |
 | `API__RETRY_COUNT` | int 0–10 | `null` | Retry attempts on failure. |
-| `API__FAILOVER_MODELS` | comma-separated string | `[]` | Models tried in order if primary fails. |
+| `API__FAILOVER_MODELS` | comma-separated string | `[]` | Advanced/reserved. Listed in config schema, but runtime model failover is not wired by default yet. |
 
 ### Provider examples
 
@@ -89,6 +89,26 @@ API__MODEL=gpt-4o
 | `flat_memory` | No | No | No | First-time users, minimal setup |
 | `sqlite_graph` | No | Yes (recursive CTE) | No | Personal use, development |
 | `neo4j` | Yes (Neo4j ≥ 5) | Yes (Cypher) | Yes (full stack) | Production, multi-session |
+
+### Cold-start behavior and health
+
+Memory startup is fail-soft:
+
+- If `MEMORY__ENABLED=false`, memory features stay disabled and the service still starts.
+- If `MEMORY__STORE_BACKEND=neo4j` but Neo4j is unreachable, the service still starts, but memory is not ready.
+- There is no automatic backend fallback from `neo4j` to `sqlite_graph` or `flat_memory`.
+
+You can check effective runtime state via:
+
+```bash
+curl "http://127.0.0.1:8000/api/health/memory"
+```
+
+Key fields:
+- `configured_backend`: backend from config
+- `active_backend`: backend currently attached in memory adapter
+- `ready`: whether memory is currently usable
+- `reason`: why it is unavailable/degraded
 
 ### Neo4j connection
 
@@ -154,6 +174,10 @@ result = adapter.migrate_backend("flat_memory", mode="cutover")
 | `SANDBOX__NETWORK_MODE` | `restricted` | `restricted` \| `none` |
 | `SANDBOX__BLOCK_PRIVATE_NETWORK` | `true` | Block access to `192.168.x`, `10.x`, `172.16–31.x`. |
 
+`SANDBOX__PROFILE` currently acts as an operator label (`off`/`dev`/`strict`) and validation field.
+It does not automatically override `workspace_access`, `command_mode`, or `network_mode`.
+Set those fields explicitly for deterministic behavior.
+
 **Recommended settings per environment:**
 
 | Environment | Profile | Notes |
@@ -194,6 +218,19 @@ Disabled by default. Enabling this increases token usage significantly.
 | `SYSTEM__DEBUG` | `false` | Enable extra debug output. |
 | `SYSTEM__STREAM_MODE` | `true` | Stream responses when possible. |
 | `SYSTEM__SESSION_TTL_HOURS` | `0` | Session expiry in hours. `0` = no expiry. |
+
+---
+
+## Channels (current state)
+
+Channel runtime support is not symmetric.
+
+- Telegram adapter exists, but full first-party bot runtime wiring is not yet a config-only turnkey flow.
+- Do not assume `TELEGRAM__...` variables are active unless you implement corresponding runtime handlers.
+
+See:
+
+- `docs/channels/telegram.md`
 
 ---
 

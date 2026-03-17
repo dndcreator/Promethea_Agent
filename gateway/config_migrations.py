@@ -38,6 +38,23 @@ def _normalize_version(value: Any) -> str:
     return text
 
 
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off", ""}:
+            return False
+        return default
+    return bool(value)
+
+
 def detect_config_version(config: Dict[str, Any]) -> str:
     if not isinstance(config, dict):
         return "0"
@@ -61,7 +78,7 @@ def _migrate_v0_to_v1(config: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]
     # Initialize boundary sections without breaking legacy keys.
     runtime_defaults = {
         "default_mode": str(_deep_get(out, ["reasoning", "mode"]) or "fast"),
-        "stream_mode": bool(_deep_get(out, ["system", "stream_mode"]) if _deep_get(out, ["system", "stream_mode"]) is not None else True),
+        "stream_mode": _to_bool(_deep_get(out, ["system", "stream_mode"]), default=True),
     }
     user_preferences = out.get("user_preferences") if isinstance(out.get("user_preferences"), dict) else {}
     user_preferences.setdefault("default_mode", runtime_defaults["default_mode"])

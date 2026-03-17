@@ -28,6 +28,12 @@ from .config_migrations import (
     migrate_config,
 )
 
+ENV_ONLY_SECRET_PATHS = (
+    ("api", "api_key"),
+    ("memory", "api", "api_key"),
+    ("memory", "neo4j", "password"),
+)
+
 
 class ConfigService:
     """
@@ -77,6 +83,28 @@ class ConfigService:
         elif warning_key in self._deprecation_warnings:
             self._deprecation_warnings.pop(warning_key, None)
         return migrated
+
+    @staticmethod
+    def _pop_nested_path(payload: Dict[str, Any], path: tuple[str, ...]) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        cur: Any = payload
+        for key in path[:-1]:
+            if not isinstance(cur, dict) or key not in cur:
+                return False
+            cur = cur[key]
+        if isinstance(cur, dict) and path[-1] in cur:
+            cur.pop(path[-1], None)
+            return True
+        return False
+
+    def _strip_env_only_secret_updates(self, updates: Dict[str, Any]) -> tuple[Dict[str, Any], list[str]]:
+        clean = json.loads(json.dumps(updates or {})) if isinstance(updates, dict) else {}
+        blocked: list[str] = []
+        for path in ENV_ONLY_SECRET_PATHS:
+            if self._pop_nested_path(clean, path):
+                blocked.append(".".join(path))
+        return clean, blocked
 
     @staticmethod
     def _scope_slice(payload: Dict[str, Any], scope: Optional[str]) -> Dict[str, Any]:
@@ -288,6 +316,7 @@ class ConfigService:
 
             if config_updates is None:
                 config_updates = {}
+            config_updates, blocked_secret_fields = self._strip_env_only_secret_updates(config_updates)
 
             current_config = user_manager.get_user_config(user_id)
             current_config = self._migrate_payload(current_config, warning_key=user_id)
@@ -332,14 +361,30 @@ class ConfigService:
                         "config": updated_config,
                     },
                 )
+                for field in blocked_secret_fields:
+                    await self.event_emitter.emit(
+                        EventType.SECURITY_SECRET_ACCESS,
+                        {
+                            "user_id": user_id,
+                            "namespace": "config",
+                            "secret_field": field,
+                            "reason": "env_only_secret",
+                            "outcome": "blocked",
+                        },
+                    )
 
             logger.info(f"ConfigService: User config updated for {user_id}")
             dep_warnings = sorted(
                 set(self.get_deprecation_warnings(user_id) + list(migration_report.get("warnings") or []))
             )
+            dep_warnings.extend([f"env-only secret ignored: {field}" for field in blocked_secret_fields])
+            dep_warnings = sorted(set(dep_warnings))
+            message = "Configuration updated successfully"
+            if blocked_secret_fields:
+                message = "Configuration updated; env-only secret fields were ignored"
             return {
                 "success": True,
-                "message": "Configuration updated successfully",
+                "message": message,
                 "config": updated_config,
                 "migration": migration_report,
                 "warnings": dep_warnings,

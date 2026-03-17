@@ -75,3 +75,33 @@ class TestConfigService:
             result = await service.switch_model(params, user_id="test_user")
             assert result['success'] is True
 
+    @pytest.mark.asyncio
+    async def test_update_user_config_ignores_env_only_secret_fields(self):
+        service = ConfigService(event_emitter=EventEmitter())
+
+        with patch('gateway.config_service.user_manager') as mock_user_manager:
+            mock_user_manager.get_user_config.return_value = {"agent_name": "Promethea"}
+            mock_user_manager.update_user_config_file.return_value = True
+
+            result = await service.update_user_config(
+                "test_user",
+                {
+                    "api": {"api_key": "sk-xxx", "model": "gpt-4.1-mini"},
+                    "memory": {
+                        "neo4j": {"password": "secret"},
+                        "api": {"api_key": "mem-secret"},
+                    },
+                },
+                validate=False,
+            )
+
+            assert result["success"] is True
+            called_args = mock_user_manager.update_user_config_file.call_args[0]
+            persisted = called_args[1]
+            assert persisted.get("config_version")
+            assert persisted.get("api", {}).get("api_key") is None
+            assert persisted.get("memory", {}).get("neo4j", {}).get("password") is None
+            assert persisted.get("memory", {}).get("api", {}).get("api_key") is None
+            assert persisted.get("api", {}).get("model") == "gpt-4.1-mini"
+            assert any("env-only secret ignored" in w for w in result.get("warnings", []))
+

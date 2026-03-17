@@ -69,3 +69,13 @@ def test_update_user_config_persists_config_version():
         assert called_args[0] == "u1"
         persisted = called_args[1]
         assert persisted.get("config_version") == CURRENT_CONFIG_VERSION
+
+
+def test_migrate_stream_mode_string_false_normalizes_to_boolean_false():
+    legacy = {
+        "system": {"stream_mode": "false"},
+        "api": {"model": "gpt-4"},
+    }
+    migrated, _ = migrate_config(legacy)
+    defaults = migrated.get("runtime_config", {}).get("defaults", {})
+    assert defaults.get("stream_mode") is False

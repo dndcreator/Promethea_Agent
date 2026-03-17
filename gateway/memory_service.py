@@ -440,11 +440,28 @@ class MemoryService:
         except Exception:
             return None
 
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off", ""}:
+                return False
+            return default
+        return bool(value)
+
     def _resolve_memory_api_for_user(self, user_id: str) -> Dict[str, str]:
         cfg = self._get_merged_config(user_id=user_id) or {}
         api_cfg = cfg.get("api", {})
         memory_api = cfg.get("memory", {}).get("api", {})
-        use_main = bool(memory_api.get("use_main_api", True))
+        use_main = self._to_bool(memory_api.get("use_main_api", True), default=True)
 
         if use_main:
             return {

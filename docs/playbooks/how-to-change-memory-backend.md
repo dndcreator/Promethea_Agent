@@ -126,5 +126,5 @@ MEMORY__NEO4J__PASSWORD=your-password
 Test connectivity:
 ```bash
 curl "http://127.0.0.1:8000/api/health/memory"
-# {"backend": "neo4j", "status": "ready"}
+# {"status":"healthy","configured_backend":"neo4j","active_backend":"neo4j","ready":true,...}
 ```

@@ -52,6 +52,7 @@ python start_gateway_service.py
 
 启动后访问：
 - `http://127.0.0.1:8000/UI/index.html`
+- UI 功能说明：`docs/ui-overview.md`
 
 ## 第 4 步：注册并登录
 
