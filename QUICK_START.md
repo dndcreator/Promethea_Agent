@@ -54,6 +54,44 @@ python start_gateway_service.py
 - `http://127.0.0.1:8000/UI/index.html`
 - UI 功能说明：`docs/ui-overview.md`
 
+## 协议优先 CLI（推荐）
+
+CLI 是 runtime 的 reference client，不复制业务逻辑，全部能力都透传 `/api/*`。
+
+安装（开发模式）：
+
+```powershell
+pip install -e .
+promethea --help
+```
+
+常用示例：
+
+```powershell
+# 认证
+promethea auth register <username> <password>
+promethea auth login <username> <password>
+promethea auth whoami
+
+# 状态与对话
+promethea status base
+promethea chat chat "hello"
+promethea chat chat "hello stream" --stream
+
+# 工作流/记忆
+promethea workflow list
+promethea memory graph
+```
+
+旧别名兼容：
+
+```powershell
+promethea register <username> <password>
+promethea login <username> <password>
+promethea logout
+promethea whoami
+```
+
 ## 第 4 步：注册并登录
 
 1. 在 UI 注册账号

@@ -40,6 +40,9 @@ dependencies = [
     "mcp>=1.0.0",
 ]
 
+[project.scripts]
+promethea = "promethea_cli.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0.0",
