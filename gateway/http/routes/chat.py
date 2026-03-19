@@ -4,7 +4,7 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
@@ -39,7 +39,11 @@ def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)):
+async def chat(
+    request: ChatRequest,
+    raw_request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
     try:
         if request.stream:
             gateway_server = get_gateway_server()
@@ -203,6 +207,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                     "requested_skill": request.requested_skill,
                 },
                 user_id=user_id,
+                request=raw_request,
             )
             mapped = payload
         else:
@@ -228,6 +233,7 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
                     "requested_skill": request.requested_skill,
                 },
                 user_id=gateway_request.user_id,
+                request=raw_request,
             )
             mapped = adapter.emit_response(payload)
 
@@ -246,7 +252,11 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
         raise HTTPException(status_code=500, detail=f"chat failed: {e}")
 
 @router.post("/chat/confirm", response_model=ChatResponse)
-async def confirm_tool(request: ConfirmToolRequest, user_id: str = Depends(get_current_user_id)):
+async def confirm_tool(
+    request: ConfirmToolRequest,
+    raw_request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
     try:
         payload = await dispatch_gateway_method(
             RequestType.CHAT_CONFIRM,
@@ -256,6 +266,7 @@ async def confirm_tool(request: ConfirmToolRequest, user_id: str = Depends(get_c
                 "action": request.action,
             },
             user_id=user_id,
+            request=raw_request,
         )
         return ChatResponse(
             response=payload.get("response", ""),

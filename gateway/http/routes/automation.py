@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
 from gateway.protocol import RequestType
@@ -32,6 +32,7 @@ def _enforce_automation_token(token: Optional[str]) -> None:
 @router.post("/automation/webhook")
 async def trigger_webhook(
     request: AutomationTriggerRequest,
+    raw_request: Request,
     x_automation_token: Optional[str] = Header(default=None),
 ):
     _enforce_automation_token(x_automation_token)
@@ -43,6 +44,7 @@ async def trigger_webhook(
             "stream": False,
         },
         user_id=request.user_id,
+        request=raw_request,
     )
     return {
         "status": "success",
@@ -56,6 +58,7 @@ async def trigger_webhook(
 @router.post("/automation/cron/wakeup")
 async def trigger_cron_wakeup(
     request: AutomationTriggerRequest,
+    raw_request: Request,
     x_automation_token: Optional[str] = Header(default=None),
 ):
     _enforce_automation_token(x_automation_token)
@@ -68,6 +71,7 @@ async def trigger_cron_wakeup(
             "stream": False,
         },
         user_id=request.user_id,
+        request=raw_request,
     )
     return {
         "status": "success",

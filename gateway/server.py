@@ -217,6 +217,7 @@ class GatewayServer:
         user_id: str,
         timeout_ms: Optional[int] = None,
         retries: int = 0,
+        idempotency_key: Optional[str] = None,
     ) -> ResponseMessage:
         """
         HTTP -> gateway protocol bridge.
@@ -265,7 +266,20 @@ class GatewayServer:
                 error=f"invalid request params: {e}",
             )
 
-        request = RequestMessage(id=request_id, method=method, params=validated)
+        if idempotency_key:
+            cached = self._idempotency_cache.get(idempotency_key)
+            if cached:
+                logger.debug(
+                    f"Returning cached HTTP response for idempotency_key: {idempotency_key}"
+                )
+                return cached
+
+        request = RequestMessage(
+            id=request_id,
+            method=method,
+            params=validated,
+            idempotency_key=idempotency_key,
+        )
         handler = self._handlers.get(method)
         if not handler:
             response = GatewayProtocol.create_response(
@@ -331,6 +345,8 @@ class GatewayServer:
                         "ok": response.ok,
                     },
                 )
+                if idempotency_key and response.ok:
+                    self._idempotency_cache[idempotency_key] = response
                 return response
             except asyncio.TimeoutError:
                 last_error = "request timeout"

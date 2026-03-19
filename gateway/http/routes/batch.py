@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 
 from gateway.protocol import RequestType
@@ -16,6 +16,7 @@ router = APIRouter()
 @router.post("/batch")
 async def batch_dispatch(
     request: BatchRequest,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     if not request.requests:
@@ -48,6 +49,7 @@ async def batch_dispatch(
                 user_id=user_id,
                 timeout_ms=item.timeout_ms,
                 retries=item.retries,
+                request=raw_request,
             )
             results.append({"method": item.method, "ok": True, "payload": payload})
         except HTTPException as e:

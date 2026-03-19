@@ -21,7 +21,7 @@ from .memory_recall_schema import (
     RecalledMemoryItem,
 )
 from .protocol import EventType
-from memory.session_scope import scoped_session_id
+from memory.session_scope import ensure_session_owned, scoped_session_id
 from memory.session_scope import user_node_id
 
 
@@ -42,11 +42,13 @@ class MemoryService:
         memory_adapter: Optional[Any] = None,
         llm_client: Optional[Any] = None,
         config_service: Optional[Any] = None,
+        message_manager: Optional[Any] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.memory_adapter = memory_adapter or get_memory_service()
         self.llm_client = llm_client
         self.config_service = config_service
+        self.message_manager = message_manager
         self._memory_write_gate = MemoryWriteGate()
         self._recent_write_keys: List[str] = []
         self._recent_write_index: set[str] = set()
@@ -1414,6 +1416,478 @@ class MemoryService:
             rows = [x for x in rows if str(x.get("status") or "").lower() == str(status).lower()]
         lim = max(1, min(300, int(limit or 100)))
         return rows[-lim:]
+
+    def get_capabilities_snapshot(self) -> Dict[str, Any]:
+        adapter = self.memory_adapter
+        if not adapter:
+            return {"ok": False, "reason": "adapter_unavailable"}
+        caps = adapter.get_capabilities() if hasattr(adapter, "get_capabilities") else {}
+        if not isinstance(caps, dict):
+            caps = {}
+        return {
+            "ok": True,
+            "enabled": bool(self.is_enabled()),
+            "capabilities": {
+                "backend": str(caps.get("backend") or getattr(adapter, "store_backend", "unknown")),
+                "supports_graph": bool(caps.get("supports_graph", False)),
+                "supports_crud": bool(caps.get("supports_crud", False)),
+                "supports_recall_runs": bool(caps.get("supports_recall_runs", True)),
+                "supports_write_inspector": bool(caps.get("supports_write_inspector", True)),
+            },
+        }
+
+    def list_entries(
+        self,
+        *,
+        user_id: str,
+        scope: str = "all",
+        session_id: Optional[str] = None,
+        memory_types: Optional[str] = None,
+        query: str = "",
+        limit: int = 100,
+        offset: int = 0,
+        include_archived: bool = False,
+    ) -> Dict[str, Any]:
+        adapter = self.memory_adapter
+        if not adapter or not getattr(adapter, "is_enabled", lambda: False)():
+            return {"ok": False, "reason": "memory_not_enabled"}
+
+        type_list = [x.strip().lower() for x in str(memory_types or "").split(",") if x.strip()]
+        scope_norm = str(scope or "all").strip().lower()
+        if scope_norm == "user" and not type_list:
+            type_list = ["goal", "preference", "constraint", "identity"]
+        elif scope_norm == "project" and not type_list:
+            type_list = ["project_state"]
+
+        rows = adapter.list_memory_entries(
+            user_id=user_id,
+            session_id=session_id,
+            memory_types=type_list or None,
+            query=query,
+            limit=limit,
+            offset=offset,
+        )
+        if not include_archived:
+            rows = [x for x in rows if str(x.get("status") or "active") != "archived"]
+        return {"ok": True, "entries": rows, "total": len(rows)}
+
+    def create_entry(
+        self,
+        *,
+        user_id: str,
+        content: str,
+        memory_type: str = "preference",
+        session_id: Optional[str] = None,
+        source_layer: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        adapter = self.memory_adapter
+        if not adapter or not getattr(adapter, "is_enabled", lambda: False)():
+            return {"ok": False, "reason": "memory_not_enabled"}
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            return {"ok": False, "reason": "content_required"}
+
+        sid = str(session_id or "manual").strip()
+        ok = adapter.add_message(
+            session_id=sid,
+            role="user",
+            content=normalized_content,
+            user_id=user_id,
+            metadata={
+                "memory_type": str(memory_type or "preference").strip().lower(),
+                "source_layer": str(source_layer or "direct").strip().lower(),
+                "memory_source": "user.manual_entry",
+            },
+        )
+        return {"ok": bool(ok)}
+
+    def update_entry(
+        self,
+        *,
+        user_id: str,
+        memory_id: str,
+        content: Optional[str] = None,
+        memory_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        adapter = self.memory_adapter
+        if not adapter:
+            return {"ok": False, "reason": "adapter_unavailable"}
+        return adapter.update_memory_entry(
+            user_id=user_id,
+            memory_id=memory_id,
+            content=content,
+            memory_type=memory_type,
+            metadata=metadata,
+        )
+
+    def delete_entry(self, *, user_id: str, memory_id: str) -> Dict[str, Any]:
+        adapter = self.memory_adapter
+        if not adapter:
+            return {"ok": False, "reason": "adapter_unavailable"}
+        return adapter.delete_memory_entry(user_id=user_id, memory_id=memory_id)
+
+    def build_dev_dashboard(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        decisions = self.list_write_decisions(user_id=user_id, session_id=session_id, limit=limit)
+        recalls = self.list_recall_runs(user_id=user_id, session_id=session_id, limit=limit)
+        write_total = len(decisions)
+        write_allow = len([x for x in decisions if str(x.get("decision") or "") == "allow"])
+        reason_dist: Dict[str, int] = {}
+        for row in decisions:
+            reason = str(row.get("reason") or "unknown")
+            reason_dist[reason] = reason_dist.get(reason, 0) + 1
+        recall_total = len(recalls)
+        recall_candidates = sum(int((x.get("metrics") or {}).get("total_candidates", 0) or 0) for x in recalls)
+        recall_selected = sum(int((x.get("metrics") or {}).get("selected", 0) or 0) for x in recalls)
+        layer_dist: Dict[str, int] = {}
+        for run in recalls:
+            for rec in run.get("memory_records") or []:
+                layer = str((rec or {}).get("source_layer") or "unknown")
+                layer_dist[layer] = layer_dist.get(layer, 0) + 1
+        return {
+            "write": {
+                "candidates": write_total,
+                "allow_rate": (write_allow / write_total) if write_total else 0.0,
+                "reasons": reason_dist,
+            },
+            "recall": {
+                "runs": recall_total,
+                "candidates": recall_candidates,
+                "selected": recall_selected,
+                "top_k_hit_rate": (recall_selected / recall_candidates) if recall_candidates else 0.0,
+                "layer_contribution": layer_dist,
+            },
+        }
+
+    def get_session_concepts(self, *, memory_session_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        if not self.memory_adapter.hot_layer:
+            return {"ok": False, "reason": "hot_layer_unavailable"}
+        try:
+            from memory import create_warm_layer_manager
+
+            warm_layer = create_warm_layer_manager(self.memory_adapter.hot_layer.connector)
+            if not warm_layer:
+                return {"ok": False, "reason": "warm_layer_unavailable"}
+            return {"ok": True, "concepts": warm_layer.get_concepts(memory_session_id)}
+        except Exception as e:
+            return {"ok": False, "reason": f"get_concepts_failed:{e}"}
+
+    def get_session_summaries(self, *, memory_session_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        if not self.memory_adapter.hot_layer:
+            return {"ok": False, "reason": "hot_layer_unavailable"}
+        try:
+            from memory import create_cold_layer_manager
+
+            cold_layer = create_cold_layer_manager(self.memory_adapter.hot_layer.connector)
+            if not cold_layer:
+                return {"ok": False, "reason": "cold_layer_unavailable"}
+            summaries = cold_layer.get_summaries(memory_session_id)
+            return {"ok": True, "summaries": summaries, "total_summaries": len(summaries)}
+        except Exception as e:
+            return {"ok": False, "reason": f"get_summaries_failed:{e}"}
+
+    def get_summary_for_user(self, *, summary_id: str, user_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        if not self.memory_adapter.hot_layer:
+            return {"ok": False, "reason": "hot_layer_unavailable"}
+        try:
+            from memory import create_cold_layer_manager
+
+            connector = self.memory_adapter.hot_layer.connector
+            cold_layer = create_cold_layer_manager(connector)
+            if not cold_layer:
+                return {"ok": False, "reason": "cold_layer_unavailable"}
+            summary = cold_layer.get_summary_by_id(summary_id)
+            if not summary:
+                return {"ok": False, "reason": "summary_not_found"}
+            raw_session_id = str(summary.get("session_id") or "")
+            owned, _ = ensure_session_owned(connector, raw_session_id, user_id)
+            if not owned:
+                return {"ok": False, "reason": "summary_not_found"}
+            return {"ok": True, "summary": summary}
+        except Exception as e:
+            return {"ok": False, "reason": f"get_summary_failed:{e}"}
+
+    def get_forgetting_stats(self, *, memory_session_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        if not self.memory_adapter.hot_layer:
+            return {"ok": False, "reason": "hot_layer_unavailable"}
+        try:
+            from memory import create_forgetting_manager
+
+            forgetting_manager = create_forgetting_manager(self.memory_adapter.hot_layer.connector)
+            return {"ok": True, "stats": forgetting_manager.get_forgetting_stats(memory_session_id)}
+        except Exception as e:
+            return {"ok": False, "reason": f"get_forgetting_stats_failed:{e}"}
+
+    def ensure_session_access(self, *, session_id: str, user_id: str) -> Dict[str, Any]:
+        manager = self.message_manager
+        if not manager:
+            return {"ok": False, "reason": "message_manager_unavailable"}
+        try:
+            exists = bool(manager.get_session(session_id, user_id=user_id))
+        except Exception:
+            exists = False
+        if not exists:
+            return {"ok": False, "reason": "session_not_found"}
+        return {"ok": True}
+
+    def resolve_owned_memory_session(self, *, session_id: str, user_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        if not getattr(self.memory_adapter, "hot_layer", None):
+            return {"ok": False, "reason": "hot_layer_unavailable"}
+        try:
+            connector = self.memory_adapter.hot_layer.connector
+            owned, resolved = ensure_session_owned(connector, session_id, user_id)
+            if not owned:
+                return {"ok": False, "reason": "session_memory_not_found"}
+            return {"ok": True, "memory_session_id": resolved}
+        except Exception as e:
+            return {"ok": False, "reason": f"resolve_session_failed:{e}"}
+
+    def get_graph_global_for_user(self, *, user_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled"}
+        adapter = self.memory_adapter
+        backend = str(getattr(adapter, "store_backend", "")).strip().lower()
+        try:
+            if backend == "sqlite_graph":
+                snapshot = adapter.export_mef(user_id=user_id)
+                nodes_raw = snapshot.get("nodes") or []
+                edges_raw = snapshot.get("edges") or []
+                nodes = []
+                for n in nodes_raw:
+                    nodes.append(
+                        {
+                            "id": n.get("id"),
+                            "type": str(n.get("node_type") or n.get("type") or "").lower(),
+                            "content": n.get("content", ""),
+                            "layer": 1 if str(n.get("node_type") or "") == "token" else 0,
+                            "importance": n.get("importance", 0.5),
+                            "access_count": 0,
+                            "created_at": n.get("created_at"),
+                            "role": "",
+                            "memory_type": "",
+                            "memory_source": "sqlite_graph",
+                        }
+                    )
+                edges = [
+                    {
+                        "source": e.get("src_node_id") or e.get("source"),
+                        "target": e.get("dst_node_id") or e.get("target"),
+                        "type": e.get("edge_type") or e.get("type") or "",
+                        "weight": e.get("weight", 1.0),
+                    }
+                    for e in edges_raw
+                ]
+                return {
+                    "ok": True,
+                    "status": "success",
+                    "user_id": user_id,
+                    "graph_available": True,
+                    "graph_mode": "sqlite_graph",
+                    "nodes": nodes,
+                    "edges": edges,
+                    "stats": {
+                        "total_nodes": len(nodes),
+                        "total_edges": len(edges),
+                        "layers": {
+                            "hot": len([x for x in nodes if x.get("layer") == 0]),
+                            "warm": len([x for x in nodes if x.get("layer") == 1]),
+                            "cold": len([x for x in nodes if x.get("layer") == 2]),
+                        },
+                    },
+                }
+            if backend == "flat_memory":
+                return {
+                    "ok": True,
+                    "status": "success",
+                    "user_id": user_id,
+                    "graph_available": False,
+                    "graph_mode": "none",
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
+                }
+
+            if not getattr(adapter, "hot_layer", None):
+                return {"ok": False, "reason": "hot_layer_unavailable"}
+            connector = adapter.hot_layer.connector
+            uid = user_node_id(user_id)
+            nodes_query = """
+            MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
+            OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
+            OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
+            OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
+            OPTIONAL MATCH (sum:Summary)
+            WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
+            WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
+            UNWIND all_nodes AS node
+            WITH DISTINCT node
+            WHERE node IS NOT NULL
+            RETURN node.id AS id, labels(node)[0] AS type, node.content AS content,
+                   node.layer AS layer, node.importance AS importance,
+                   node.access_count AS access_count, node.created_at AS created_at,
+                   node.role AS role, node.memory_type AS memory_type, node.memory_source AS memory_source
+            """
+            edges_query = """
+            MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
+            OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
+            OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
+            OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
+            OPTIONAL MATCH (sum:Summary)
+            WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
+            WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
+            UNWIND all_nodes AS node
+            WITH collect(DISTINCT node.id) AS node_ids
+            MATCH (a)-[r]->(b)
+            WHERE a.id IN node_ids AND b.id IN node_ids
+            RETURN a.id AS source, b.id AS target, type(r) AS type, r.weight AS weight
+            """
+            params = {"user_node_id": uid}
+            nodes_raw = connector.query(nodes_query, params)
+            edges_raw = connector.query(edges_query, params)
+            nodes = [
+                {
+                    "id": n.get("id"),
+                    "type": (n.get("type", "") or "").lower(),
+                    "content": n.get("content", ""),
+                    "layer": n.get("layer", 0),
+                    "importance": n.get("importance", 0.5),
+                    "access_count": n.get("access_count", 0),
+                    "created_at": n.get("created_at"),
+                    "role": n.get("role", ""),
+                    "memory_type": n.get("memory_type", ""),
+                    "memory_source": n.get("memory_source", ""),
+                }
+                for n in nodes_raw
+            ]
+            edges = [
+                {
+                    "source": e.get("source"),
+                    "target": e.get("target"),
+                    "type": e.get("type", ""),
+                    "weight": e.get("weight", 1.0),
+                }
+                for e in edges_raw
+            ]
+            layer_counts = {"hot": 0, "warm": 0, "cold": 0}
+            for node in nodes:
+                layer = node.get("layer", 0)
+                if layer == 0:
+                    layer_counts["hot"] += 1
+                elif layer == 1:
+                    layer_counts["warm"] += 1
+                elif layer == 2:
+                    layer_counts["cold"] += 1
+            return {
+                "ok": True,
+                "status": "success",
+                "user_id": user_id,
+                "graph_available": True,
+                "graph_mode": "neo4j",
+                "nodes": nodes,
+                "edges": edges,
+                "stats": {
+                    "total_nodes": len(nodes),
+                    "total_edges": len(edges),
+                    "layers": layer_counts,
+                },
+            }
+        except Exception as e:
+            return {"ok": False, "reason": f"graph_global_failed:{e}"}
+
+    def get_graph_for_session(self, *, session_id: str, user_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled", "handled": False}
+        adapter = self.memory_adapter
+        backend = str(getattr(adapter, "store_backend", "")).strip().lower()
+        try:
+            if backend == "sqlite_graph":
+                scoped_sid = scoped_session_id(session_id, user_id)
+                snapshot = adapter.export_mef(user_id=user_id)
+                nodes_raw = [
+                    x
+                    for x in (snapshot.get("nodes") or [])
+                    if str(x.get("session_id") or "") in {"", scoped_sid}
+                ]
+                edges_raw = snapshot.get("edges") or []
+                allowed_node_ids = {str(x.get("id") or "") for x in nodes_raw}
+                edges = []
+                for e in edges_raw:
+                    src = e.get("src_node_id") or e.get("source")
+                    dst = e.get("dst_node_id") or e.get("target")
+                    if src in allowed_node_ids and dst in allowed_node_ids:
+                        edges.append(
+                            {
+                                "source": src,
+                                "target": dst,
+                                "type": e.get("edge_type") or e.get("type") or "",
+                                "weight": e.get("weight", 1.0),
+                            }
+                        )
+                nodes = [
+                    {
+                        "id": n.get("id"),
+                        "type": str(n.get("node_type") or n.get("type") or "").lower(),
+                        "content": n.get("content", ""),
+                        "layer": 1 if str(n.get("node_type") or "") == "token" else 0,
+                        "importance": n.get("importance", 0.5),
+                        "access_count": 0,
+                        "created_at": n.get("created_at"),
+                        "role": "",
+                        "memory_type": "",
+                        "memory_source": "sqlite_graph",
+                    }
+                    for n in nodes_raw
+                ]
+                return {
+                    "ok": True,
+                    "handled": True,
+                    "status": "success",
+                    "session_id": session_id,
+                    "graph_available": True,
+                    "graph_mode": "sqlite_graph",
+                    "nodes": nodes,
+                    "edges": edges,
+                    "stats": {
+                        "total_nodes": len(nodes),
+                        "total_edges": len(edges),
+                        "layers": {
+                            "hot": len([x for x in nodes if x.get("layer") == 0]),
+                            "warm": len([x for x in nodes if x.get("layer") == 1]),
+                            "cold": len([x for x in nodes if x.get("layer") == 2]),
+                        },
+                    },
+                }
+            if backend == "flat_memory":
+                return {
+                    "ok": True,
+                    "handled": True,
+                    "status": "success",
+                    "session_id": session_id,
+                    "graph_available": False,
+                    "graph_mode": "none",
+                    "nodes": [],
+                    "edges": [],
+                    "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
+                }
+            return {"ok": True, "handled": False}
+        except Exception as e:
+            return {"ok": False, "reason": f"graph_session_failed:{e}", "handled": False}
 
     async def _save_reduce_memory_feedback(
         self,

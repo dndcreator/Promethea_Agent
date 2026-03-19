@@ -417,10 +417,6 @@
                         <h3 id="settingsSectionBasicTitle">Quick Setup</h3>
                         <p class="settings-hint" id="settingsBasicHint">Only the most important fields are shown here. Open advanced settings for full control.</p>
                         <div class="form-group">
-                            <label for="apiKey" id="labelApiKey">API Key</label>
-                            <input type="password" id="apiKey" name="api.api_key" placeholder="Global default API key">
-                        </div>
-                        <div class="form-group">
                             <label for="baseUrl" id="labelBaseUrl">Base URL</label>
                             <input type="text" id="baseUrl" name="api.base_url" placeholder="https://api.openai.com/v1">
                         </div>
@@ -472,10 +468,6 @@
                     <div class="settings-section">
                         <h3 id="settingsSectionPersonalApiTitle">Personal API Override (optional)</h3>
                         <p class="settings-hint" id="settingsPersonalApiHint">If set, these values override system defaults for your account.</p>
-                        <div class="form-group">
-                            <label for="userApiKey">API Key</label>
-                            <input type="password" id="userApiKey" name="user.api.api_key" placeholder="sk-...">
-                        </div>
                         <div class="form-group">
                             <label for="userBaseUrl">Base URL</label>
                             <input type="text" id="userBaseUrl" name="user.api.base_url" placeholder="https://openrouter.ai/api/v1">
@@ -579,10 +571,6 @@
                                 <input type="checkbox" id="memoryUseMainApi" name="memory.api.use_main_api">
                                 <span>Memory uses main chat API</span>
                             </label>
-                        </div>
-                        <div class="form-group">
-                            <label for="memoryApiKey">Memory API Key (optional)</label>
-                            <input type="password" id="memoryApiKey" name="memory.api.api_key" placeholder="Leave empty to use defaults">
                         </div>
                         <div class="form-group">
                             <label for="memoryBaseUrl">Memory API Base URL</label>

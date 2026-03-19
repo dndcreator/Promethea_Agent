@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, Optional
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from gateway.protocol import RequestType
 from gateway_integration import get_gateway_integration
@@ -31,26 +31,59 @@ def _http_status_from_error(error: str | None) -> int:
     return 400
 
 
+def _error_code_from_error(error: str | None) -> str:
+    msg = (error or "").lower()
+    if "not found" in msg:
+        return "not_found"
+    if "forbidden" in msg:
+        return "forbidden"
+    if "unauthorized" in msg:
+        return "unauthorized"
+    if "not initialized" in msg:
+        return "service_unavailable"
+    if "not enabled" in msg:
+        return "feature_disabled"
+    if "timeout" in msg:
+        return "timeout"
+    if "invalid" in msg:
+        return "invalid_request"
+    return "gateway_error"
+
+
 async def dispatch_gateway_method(
     method: RequestType,
     params: Dict[str, Any],
     user_id: str,
     timeout_ms: Optional[int] = None,
     retries: int = 0,
+    request: Optional[Request] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
+    merged_params = dict(params or {})
+    key = idempotency_key or merged_params.pop("idempotency_key", None)
+    if not key and request is not None:
+        key = (
+            request.headers.get("X-Idempotency-Key")
+            or request.headers.get("Idempotency-Key")
+        )
     gateway_server = get_gateway_server()
     response = await gateway_server.handle_http_request(
         method=method,
-        params=params or {},
+        params=merged_params,
         user_id=user_id,
         timeout_ms=timeout_ms,
         retries=retries,
+        idempotency_key=key,
     )
 
     if not response.ok:
+        message = response.error or "Gateway request failed"
         raise HTTPException(
-            status_code=_http_status_from_error(response.error),
-            detail=response.error or "Gateway request failed",
+            status_code=_http_status_from_error(message),
+            detail={
+                "code": _error_code_from_error(message),
+                "message": message,
+            },
         )
     return response.payload or {}
 

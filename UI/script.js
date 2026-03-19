@@ -706,7 +706,6 @@ class LanguageManager {
         setTextById("settingsSectionMemoryTitle", "ui_settings_memory");
         setTextById("settingsPersonalApiHint", "ui_settings_personal_api_hint");
         setTextById("labelHotApply", "ui_settings_hot_apply");
-        setTextById("labelApiKey", "ui_label_api_key");
         setTextById("labelBaseUrl", "ui_label_base_url");
         setTextById("labelMemoryStoreBackend", "ui_label_memory_backend");
 
@@ -2876,14 +2875,12 @@ class SettingsManager {
         this.setFieldValue('userSystemPrompt', config.system_prompt || '');
 
         const userApi = (config.user && config.user.api) || {};
-        this.setFieldValue('userApiKey', userApi.api_key || '');
         this.setFieldValue('userBaseUrl', userApi.base_url || '');
         this.setFieldValue('userModel', userApi.model || '');
         this.setFieldValue('userTemperature', userApi.temperature || '');
         this.setFieldValue('userMaxTokens', userApi.max_tokens || '');
 
         // API閰嶇疆
-        this.setFieldValue('apiKey', apiConfig.api_key || '');
         this.setFieldValue('baseUrl', apiConfig.base_url || '');
         this.setFieldValue('model', apiConfig.model || '');
         this.setFieldValue('temperature', apiConfig.temperature ?? '');
@@ -2903,7 +2900,6 @@ class SettingsManager {
         this.setFieldValue('neo4jUsername', neo4jConfig.username || '');
         this.setFieldValue('neo4jDatabase', neo4jConfig.database || '');
         this.setFieldValue('memoryUseMainApi', this.toBoolean(memoryApiConfig.use_main_api, true), 'checkbox');
-        this.setFieldValue('memoryApiKey', memoryApiConfig.api_key || '');
         this.setFieldValue('memoryBaseUrl', memoryApiConfig.base_url || '');
         this.setFieldValue('memoryModel', memoryApiConfig.model || '');
         this.setFieldValue('sqliteGraphPath', memoryConfig.sqlite_graph_path || '');

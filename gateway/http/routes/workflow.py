@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from gateway.protocol import RequestType
 
@@ -14,16 +14,23 @@ router = APIRouter()
 @router.post("/workflow/define")
 async def define_workflow(
     payload: dict,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     body = dict(payload or {})
     body.setdefault("owner_user_id", user_id)
-    data = await dispatch_gateway_method(RequestType.WORKFLOW_DEFINE, body, user_id=user_id)
+    data = await dispatch_gateway_method(
+        RequestType.WORKFLOW_DEFINE,
+        body,
+        user_id=user_id,
+        request=raw_request,
+    )
     return {"status": "success", **data}
 
 
 @router.get("/workflow/list")
 async def list_workflows(
+    raw_request: Request,
     limit: int = 50,
     user_id: str = Depends(get_current_user_id),
 ):
@@ -31,6 +38,7 @@ async def list_workflows(
         RequestType.WORKFLOW_LIST,
         {"owner_user_id": user_id, "limit": limit},
         user_id=user_id,
+        request=raw_request,
     )
     return {"status": "success", **data}
 
@@ -38,21 +46,29 @@ async def list_workflows(
 @router.post("/workflow/start")
 async def start_workflow(
     payload: dict,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
-    data = await dispatch_gateway_method(RequestType.WORKFLOW_START, payload or {}, user_id=user_id)
+    data = await dispatch_gateway_method(
+        RequestType.WORKFLOW_START,
+        payload or {},
+        user_id=user_id,
+        request=raw_request,
+    )
     return {"status": "success", **data}
 
 
 @router.get("/workflow/run/{workflow_run_id}")
 async def workflow_status(
     workflow_run_id: str,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     data = await dispatch_gateway_method(
         RequestType.WORKFLOW_STATUS,
         {"workflow_run_id": workflow_run_id},
         user_id=user_id,
+        request=raw_request,
     )
     return {"status": "success", **data}
 
@@ -60,12 +76,14 @@ async def workflow_status(
 @router.post("/workflow/pause/{workflow_run_id}")
 async def pause_workflow(
     workflow_run_id: str,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     data = await dispatch_gateway_method(
         RequestType.WORKFLOW_PAUSE,
         {"workflow_run_id": workflow_run_id},
         user_id=user_id,
+        request=raw_request,
     )
     return {"status": "success", **data}
 
@@ -73,12 +91,14 @@ async def pause_workflow(
 @router.post("/workflow/resume/{workflow_run_id}")
 async def resume_workflow(
     workflow_run_id: str,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     data = await dispatch_gateway_method(
         RequestType.WORKFLOW_RESUME,
         {"workflow_run_id": workflow_run_id},
         user_id=user_id,
+        request=raw_request,
     )
     return {"status": "success", **data}
 
@@ -86,31 +106,45 @@ async def resume_workflow(
 @router.post("/workflow/retry")
 async def retry_workflow_step(
     payload: dict,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
-    data = await dispatch_gateway_method(RequestType.WORKFLOW_RETRY_STEP, payload or {}, user_id=user_id)
+    data = await dispatch_gateway_method(
+        RequestType.WORKFLOW_RETRY_STEP,
+        payload or {},
+        user_id=user_id,
+        request=raw_request,
+    )
     return {"status": "success", **data}
 
 
 @router.post("/workflow/approve")
 async def approve_workflow_step(
     payload: dict,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     body = dict(payload or {})
     body.setdefault("approved_by", user_id)
-    data = await dispatch_gateway_method(RequestType.WORKFLOW_APPROVE_STEP, body, user_id=user_id)
+    data = await dispatch_gateway_method(
+        RequestType.WORKFLOW_APPROVE_STEP,
+        body,
+        user_id=user_id,
+        request=raw_request,
+    )
     return {"status": "success", **data}
 
 
 @router.get("/workflow/checkpoints/{workflow_run_id}")
 async def workflow_checkpoints(
     workflow_run_id: str,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     data = await dispatch_gateway_method(
         RequestType.WORKFLOW_CHECKPOINTS,
         {"workflow_run_id": workflow_run_id},
         user_id=user_id,
+        request=raw_request,
     )
     return {"status": "success", **data}

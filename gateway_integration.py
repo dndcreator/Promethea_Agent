@@ -163,6 +163,7 @@ class GatewayIntegration:
             memory_adapter=memory_adapter,
             llm_client=conversation_core,
             config_service=self.gateway_server.config_service,
+            message_manager=message_manager,
         )
         self.gateway_server.memory_system = memory_adapter
         self.gateway_server.reasoning_service = ReasoningService(

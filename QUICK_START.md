@@ -1,4 +1,4 @@
-﻿# Quick Start（手把手）
+# Quick Start（手把手）
 
 本文面向第一次使用 Promethea Agent 的用户，按步骤执行即可跑通。
 
@@ -75,12 +75,14 @@ promethea auth whoami
 
 # 状态与对话
 promethea status base
-promethea chat chat "hello"
-promethea chat chat "hello stream" --stream
+promethea chat send "hello"
+promethea ask "hello (shortcut)"
+promethea chat send "hello stream" --stream
 
 # 工作流/记忆
 promethea workflow list
 promethea memory graph
+promethea ops capabilities
 ```
 
 旧别名兼容：

@@ -105,3 +105,21 @@ class TestConfigService:
             assert persisted.get("api", {}).get("model") == "gpt-4.1-mini"
             assert any("env-only secret ignored" in w for w in result.get("warnings", []))
 
+    def test_get_merged_config_pins_env_only_secrets(self):
+        service = ConfigService()
+        default_payload = service.get_default_config().model_dump()
+
+        with patch("gateway.config_service.user_manager") as mock_user_manager:
+            mock_user_manager.get_user_config.return_value = {
+                "api": {"api_key": "user-should-not-win"},
+                "memory": {
+                    "api": {"api_key": "mem-user-should-not-win"},
+                    "neo4j": {"password": "neo-user-should-not-win"},
+                },
+            }
+            merged = service.get_merged_config("test_user")
+
+        assert merged["api"]["api_key"] == default_payload["api"]["api_key"]
+        assert merged["memory"]["api"]["api_key"] == default_payload["memory"]["api"]["api_key"]
+        assert merged["memory"]["neo4j"]["password"] == default_payload["memory"]["neo4j"]["password"]
+

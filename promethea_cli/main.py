@@ -67,17 +67,27 @@ class AuthStore:
 
 
 class Client:
-    def __init__(self, base_url: str, token: Optional[str], pretty: bool, store: AuthStore) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: Optional[str],
+        pretty: bool,
+        store: AuthStore,
+        idempotency_key: Optional[str] = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.pretty = pretty
         self.store = store
+        self.idempotency_key = idempotency_key
 
     def _headers(self, auth: bool, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers = dict(extra or {})
         token = self.token or self.store.token()
         if auth and token:
             headers["Authorization"] = f"Bearer {token}"
+        if self.idempotency_key:
+            headers["X-Idempotency-Key"] = self.idempotency_key
         return headers
 
     def req(
@@ -157,7 +167,7 @@ def cmd_auth(args: argparse.Namespace, c: Client) -> None:
 
 
 def cmd_chat(args: argparse.Namespace, c: Client) -> None:
-    if args.chat_cmd == "chat":
+    if args.chat_cmd in {"send", "chat"}:
         body = {
             "message": args.message,
             "stream": bool(args.stream),
@@ -189,6 +199,18 @@ def cmd_chat(args: argparse.Namespace, c: Client) -> None:
         return
     raise CliError(f"unknown chat command: {args.chat_cmd}")
 
+def cmd_ask(args: argparse.Namespace, c: Client) -> None:
+    shim = argparse.Namespace(
+        chat_cmd="send",
+        message=args.message,
+        stream=bool(args.stream),
+        session_id=args.session_id,
+        mode=args.mode,
+        skill=args.skill,
+    )
+    cmd_chat(shim, c)
+
+
 
 def cmd_simple(args: argparse.Namespace, c: Client) -> None:
     mapping = {
@@ -211,6 +233,8 @@ def cmd_simple(args: argparse.Namespace, c: Client) -> None:
         # ops
         ("ops", "capabilities"): ("GET", "/api/ops/capabilities", None),
         ("ops", "runbook"): ("GET", "/api/ops/runbook", None),
+        ("ops", "abstractions"): ("GET", "/api/ops/abstractions", None),
+        ("ops", "protocol"): ("GET", "/api/ops/protocol", None),
         # skills
         ("skills", "catalog"): ("GET", "/api/skills/catalog", None),
         ("skills", "show"): ("GET", None, None),
@@ -270,6 +294,9 @@ def cmd_config(args: argparse.Namespace, c: Client) -> None:
 
 def cmd_memory(args: argparse.Namespace, c: Client) -> None:
     sub = args.memory_cmd
+    if sub == "capabilities":
+        c.emit(c.req_json("GET", "/api/memory/capabilities"))
+        return
     if sub == "graph":
         path = f"/api/memory/graph/{args.session_id}" if args.session_id else "/api/memory/graph"
         c.emit(c.req_json("GET", path))
@@ -303,8 +330,74 @@ def cmd_memory(args: argparse.Namespace, c: Client) -> None:
     if sub == "recall-inspect":
         c.emit(c.req_json("GET", f"/api/memory/recall/{args.request_id}"))
         return
+    if sub == "entries-list":
+        params: Dict[str, Any] = {
+            "scope": args.scope,
+            "q": args.query,
+            "limit": args.limit,
+            "offset": args.offset,
+            "include_archived": str(bool(args.include_archived)).lower(),
+        }
+        if args.session_id:
+            params["session_id"] = args.session_id
+        if args.memory_types:
+            params["memory_types"] = args.memory_types
+        c.emit(c.req_json("GET", "/api/memory/entries", params=params))
+        return
+    if sub == "entries-create":
+        payload: Dict[str, Any] = {
+            "content": args.content,
+            "memory_type": args.memory_type,
+        }
+        if args.session_id:
+            payload["session_id"] = args.session_id
+        if args.source_layer:
+            payload["source_layer"] = args.source_layer
+        c.emit(c.req_json("POST", "/api/memory/entries", payload=payload))
+        return
+    if sub == "entries-update":
+        payload: Dict[str, Any] = {}
+        if args.content is not None:
+            payload["content"] = args.content
+        if args.memory_type is not None:
+            payload["memory_type"] = args.memory_type
+        if args.metadata_json or args.metadata_file:
+            payload["metadata"] = _load_json(args.metadata_json, args.metadata_file)
+        c.emit(c.req_json("PATCH", f"/api/memory/entries/{args.memory_id}", payload=payload))
+        return
+    if sub == "entries-delete":
+        c.emit(c.req_json("DELETE", f"/api/memory/entries/{args.memory_id}"))
+        return
+    if sub == "write-decisions":
+        params: Dict[str, Any] = {"limit": args.limit}
+        if args.session_id:
+            params["session_id"] = args.session_id
+        if args.trace_id:
+            params["trace_id"] = args.trace_id
+        if args.decision:
+            params["decision"] = args.decision
+        c.emit(c.req_json("GET", "/api/memory/write-decisions", params=params))
+        return
+    if sub == "write-proposals":
+        params: Dict[str, Any] = {"status": args.status, "limit": args.limit}
+        c.emit(c.req_json("GET", "/api/memory/write-proposals", params=params))
+        return
+    if sub == "proposal-decide":
+        c.emit(
+            c.req_json(
+                "POST",
+                f"/api/memory/write-proposals/{args.proposal_id}/decision",
+                payload={"action": args.action},
+            )
+        )
+        return
+    if sub == "dev-dashboard":
+        params: Dict[str, Any] = {"limit": args.limit}
+        if args.session_id:
+            params["session_id"] = args.session_id
+        c.emit(c.req_json("GET", "/api/memory/dev/dashboard", params=params))
+        return
     raise CliError(f"unknown memory command: {sub}")
-
 
 def cmd_workflow(args: argparse.Namespace, c: Client) -> None:
     sub = args.workflow_cmd
@@ -424,6 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-url", default=os.getenv("PROMETHEA_BASE_URL", DEFAULT_BASE_URL))
     p.add_argument("--token", default=None)
     p.add_argument("--pretty", action="store_true")
+    p.add_argument("--idempotency-key", default=None)
     sp = p.add_subparsers(dest="command", required=True)
 
     auth = sp.add_parser("auth")
@@ -441,8 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
             a.add_argument("--agent-name", default=None)
 
     chat = sp.add_parser("chat"); csp = chat.add_subparsers(dest="chat_cmd", required=True)
-    ch = csp.add_parser("chat"); ch.add_argument("message"); ch.add_argument("--session-id", default=None); ch.add_argument("--mode", default=None); ch.add_argument("--skill", default=None); ch.add_argument("--stream", action="store_true")
+    ch = csp.add_parser("send"); ch.add_argument("message"); ch.add_argument("--session-id", default=None); ch.add_argument("--mode", default=None); ch.add_argument("--skill", default=None); ch.add_argument("--stream", action="store_true")
+    ch_legacy = csp.add_parser("chat", help=argparse.SUPPRESS); ch_legacy.add_argument("message"); ch_legacy.add_argument("--session-id", default=None); ch_legacy.add_argument("--mode", default=None); ch_legacy.add_argument("--skill", default=None); ch_legacy.add_argument("--stream", action="store_true")
     cc = csp.add_parser("chat-confirm"); cc.add_argument("session_id"); cc.add_argument("tool_call_id"); cc.add_argument("action", choices=["approve", "reject"])
+
+    ask = sp.add_parser("ask"); ask.add_argument("message"); ask.add_argument("--session-id", default=None); ask.add_argument("--mode", default=None); ask.add_argument("--skill", default=None); ask.add_argument("--stream", action="store_true")
 
     f = sp.add_parser("followup"); f.add_argument("selected_text"); f.add_argument("query_type"); f.add_argument("session_id"); f.add_argument("--custom-query", default=None)
     ses = sp.add_parser("sessions"); ssp = ses.add_subparsers(dest="sessions_cmd", required=True); ssp.add_parser("list"); ss = ssp.add_parser("show"); ss.add_argument("session_id")
@@ -459,6 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     chn = cgp.add_parser("channel"); chn.add_argument("channel_id")
 
     mem = sp.add_parser("memory"); msp = mem.add_subparsers(dest="memory_cmd", required=True)
+    msp.add_parser("capabilities")
     mg = msp.add_parser("graph"); mg.add_argument("--session-id", default=None)
     for x in ("cluster", "summarize", "decay", "cleanup", "concepts", "summaries", "forgetting-stats"):
         cmd = msp.add_parser(x); cmd.add_argument("session_id")
@@ -467,7 +565,14 @@ def build_parser() -> argparse.ArgumentParser:
     sget = msp.add_parser("summary-get"); sget.add_argument("summary_id")
     rr = msp.add_parser("recall-runs"); rr.add_argument("--session-id", default=None); rr.add_argument("--trace-id", default=None); rr.add_argument("--limit", type=int, default=20)
     ri = msp.add_parser("recall-inspect"); ri.add_argument("request_id")
-
+    mel = msp.add_parser("entries-list"); mel.add_argument("--scope", default="all", choices=["all", "session", "project", "identity", "constraints", "preferences"]); mel.add_argument("--session-id", default=None); mel.add_argument("--memory-types", default=None); mel.add_argument("--query", default=""); mel.add_argument("--limit", type=int, default=100); mel.add_argument("--offset", type=int, default=0); mel.add_argument("--include-archived", action="store_true")
+    mec = msp.add_parser("entries-create"); mec.add_argument("content"); mec.add_argument("--memory-type", default="preference"); mec.add_argument("--session-id", default=None); mec.add_argument("--source-layer", default=None)
+    meu = msp.add_parser("entries-update"); meu.add_argument("memory_id"); meu.add_argument("--content", default=None); meu.add_argument("--memory-type", default=None); meu.add_argument("--metadata-json", default=None); meu.add_argument("--metadata-file", default=None)
+    med = msp.add_parser("entries-delete"); med.add_argument("memory_id")
+    mwd = msp.add_parser("write-decisions"); mwd.add_argument("--session-id", default=None); mwd.add_argument("--trace-id", default=None); mwd.add_argument("--decision", default=None); mwd.add_argument("--limit", type=int, default=100)
+    mwp = msp.add_parser("write-proposals"); mwp.add_argument("--status", default="pending", choices=["pending", "confirmed", "dismissed", "all"]); mwp.add_argument("--limit", type=int, default=100)
+    mpd = msp.add_parser("proposal-decide"); mpd.add_argument("proposal_id"); mpd.add_argument("action", choices=["confirm_write", "ignore_once", "reduce_similar"])
+    mdd = msp.add_parser("dev-dashboard"); mdd.add_argument("--session-id", default=None); mdd.add_argument("--limit", type=int, default=200)
     wf = sp.add_parser("workflow"); wsp = wf.add_subparsers(dest="workflow_cmd", required=True)
     for x in ("define", "start", "retry", "approve"):
         cmd = wsp.add_parser(x); cmd.add_argument("--json", default=None); cmd.add_argument("--file", default=None)
@@ -487,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     met = sp.add_parser("metrics"); mtp = met.add_subparsers(dest="metrics_cmd", required=True); mtp.add_parser("json"); mtp.add_parser("prometheus")
     doc = sp.add_parser("doctor"); dcp = doc.add_subparsers(dest="doctor_cmd", required=True); dcp.add_parser("run"); dcp.add_parser("migrate")
-    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook")
+    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol")
 
     auto = sp.add_parser("automation"); atp = auto.add_subparsers(dest="automation_cmd", required=True)
     for x in ("webhook", "cron"):
@@ -520,13 +625,21 @@ def main() -> int:
         args.command = "auth"
         args.auth_cmd = args.command_alias
     store = AuthStore()
-    client = Client(args.base_url, args.token or store.token(), args.pretty, store)
+    client = Client(
+        args.base_url,
+        args.token or store.token(),
+        args.pretty,
+        store,
+        idempotency_key=args.idempotency_key,
+    )
 
     try:
         if args.command == "auth":
             cmd_auth(args, client)
         elif args.command == "chat":
             cmd_chat(args, client)
+        elif args.command == "ask":
+            cmd_ask(args, client)
         elif args.command in {"followup", "sessions", "status", "metrics", "doctor", "ops", "skills"}:
             if args.command == "metrics" and args.metrics_cmd == "prometheus":
                 r = client.req("GET", "/api/metrics/prometheus")

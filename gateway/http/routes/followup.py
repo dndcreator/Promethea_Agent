@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..dispatcher import dispatch_gateway_method
 from gateway.protocol import RequestType
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 @router.post("/followup")
 async def handle_followup(
     request: FollowUpRequest,
+    raw_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     try:
@@ -29,6 +30,7 @@ async def handle_followup(
                 "session_id": request.session_id,
             },
             user_id=user_id,
+            request=raw_request,
         )
         return {
             "status": "success",

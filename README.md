@@ -8,6 +8,22 @@
 
 ---
 
+## Product Positioning
+
+Promethea is a **local-first Agent Runtime infrastructure** with a built-in assistant experience.
+
+- The assistant UI is the default product shell for end users.
+- The runtime (API + workflow + memory + policy + audit) is the core product.
+- CLI and HTTP API are reference access surfaces for users, developers, and other agents.
+
+Architecture contract (machine-readable):
+
+- `/api/ops/capabilities`
+- `/api/ops/abstractions`
+- `/api/ops/runbook`
+
+See: [`docs/infrastructure-profile.md`](docs/infrastructure-profile.md)
+
 ## Why Promethea?
 
 Most agent frameworks solve the "make an LLM call a tool" problem.  
@@ -210,6 +226,7 @@ Key sections:
 | Document | What it covers |
 |---|---|
 | [`docs/runtime-overview.md`](docs/runtime-overview.md) | Full runtime design, pipeline stages, core objects |
+| [`docs/infrastructure-profile.md`](docs/infrastructure-profile.md) | Product identity: local assistant shell + runtime core |
 | [`docs/architecture/memory-model.md`](docs/architecture/memory-model.md) | Memory layers, write gate, recall policy |
 | [`docs/architecture/security-model.md`](docs/architecture/security-model.md) | Namespace layers, enforcement points, audit |
 | [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |

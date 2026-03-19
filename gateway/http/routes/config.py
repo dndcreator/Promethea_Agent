@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import config as config_module
 from gateway_integration import get_gateway_integration
@@ -15,6 +15,49 @@ from .auth import get_current_user_id
 
 router = APIRouter()
 
+ENV_ONLY_SECRET_PATHS = [
+    "api.api_key",
+    "memory.api.api_key",
+    "memory.neo4j.password",
+]
+
+SIMPLE_CONFIG_FIELDS = [
+    "agent_name",
+    "system_prompt",
+    "memory.enabled",
+    "memory.profile",
+    "memory.store_backend",
+    "system.stream_mode",
+]
+
+ADVANCED_CONFIG_FIELDS = [
+    "api.base_url",
+    "api.model",
+    "api.temperature",
+    "api.max_tokens",
+    "api.max_history_rounds",
+    "memory.neo4j.enabled",
+    "memory.neo4j.uri",
+    "memory.neo4j.username",
+    "memory.neo4j.database",
+    "memory.api.use_main_api",
+    "memory.api.base_url",
+    "memory.api.model",
+    "memory.sqlite_graph_path",
+    "memory.flat_memory_path",
+    "memory.migration.mode",
+    "memory.migration.source_backend",
+    "memory.migration.target_backend",
+    "memory.migration.checkpoint",
+    "memory.warm_layer.enabled",
+    "memory.warm_layer.clustering_threshold",
+    "memory.warm_layer.min_cluster_size",
+    "memory.cold_layer.max_summary_length",
+    "memory.cold_layer.compression_threshold",
+    "system.debug",
+    "system.log_level",
+]
+
 
 class ConfigUpdateOptions(BaseModel):
     hot_apply: bool = False
@@ -22,8 +65,13 @@ class ConfigUpdateOptions(BaseModel):
 
 class ConfigUpdateRequest(BaseModel):
     user_id: Optional[str] = None
-    config: Dict[str, Any]
+    config: Optional[Dict[str, Any]] = None
+    config_data: Optional[Dict[str, Any]] = None
     options: Optional[ConfigUpdateOptions] = None
+    hot_apply: Optional[bool] = None
+    hot_reload: Optional[bool] = None
+    validate_config: Optional[bool] = None
+    validate_flag: Optional[bool] = Field(default=None, alias="validate")
 
 
 class ConfigResetRequest(BaseModel):
@@ -136,7 +184,7 @@ def _load_default_config_dict() -> tuple[Path, Dict[str, Any]]:
         config_path = Path("config.json")
 
     if config_path.exists():
-        with open(config_path, "r", encoding="utf-8") as file:
+        with open(config_path, "r", encoding="utf-8-sig") as file:
             return config_path, json.load(file)
 
     return config_path, config_module.PrometheaConfig().model_dump()
@@ -146,6 +194,70 @@ def _resolve_user_id(requested: Optional[str], current_user_id: str) -> str:
     if requested and requested != current_user_id:
         raise HTTPException(status_code=403, detail="cross-user config access is forbidden")
     return current_user_id
+
+
+def _normalize_config_update_request(request: ConfigUpdateRequest) -> Dict[str, Any]:
+    merged_config: Dict[str, Any] = {}
+    if isinstance(request.config_data, dict):
+        _deep_update(merged_config, request.config_data)
+    if isinstance(request.config, dict):
+        _deep_update(merged_config, request.config)
+
+    hot_apply: Optional[bool] = None
+    if request.options is not None:
+        hot_apply = bool(request.options.hot_apply)
+    if hot_apply is None and request.hot_apply is not None:
+        hot_apply = bool(request.hot_apply)
+    if hot_apply is None and request.hot_reload is not None:
+        hot_apply = bool(request.hot_reload)
+
+    validate_requested: bool = True
+    if request.validate_config is not None:
+        validate_requested = bool(request.validate_config)
+    elif request.validate_flag is not None:
+        validate_requested = bool(request.validate_flag)
+
+    return {
+        "config": merged_config,
+        "hot_apply": bool(hot_apply),
+        "validate": validate_requested,
+    }
+
+
+def _build_config_contract() -> Dict[str, Any]:
+    return {
+        "status": "success",
+        "contract": {
+            "name": "promethea_config_contract",
+            "version": "1.0",
+            "inheritance": {
+                "layers": ["default_template", "user_overrides", "env_runtime"],
+                "effective_order": "default_template(+env baseline) -> user_overrides; env-only secrets stay env-owned",
+                "new_user_bootstrap": "default template is materialized as effective baseline, then user overrides are applied",
+            },
+            "env_only_secret_paths": ENV_ONLY_SECRET_PATHS,
+            "update_api": {
+                "path": "/api/config/update",
+                "method": "POST",
+                "canonical_shape": {
+                    "user_id": "optional<string>",
+                    "config": "object",
+                    "options": {"hot_apply": "bool"},
+                },
+                "compat_aliases_accepted": {
+                    "config_data": "alias_of_config",
+                    "hot_reload": "alias_of_options.hot_apply",
+                    "hot_apply": "alias_of_options.hot_apply",
+                    "validate_config": "alias_of_validate",
+                    "validate": "legacy_validate_flag",
+                },
+            },
+            "ui_profiles": {
+                "simple_fields": SIMPLE_CONFIG_FIELDS,
+                "advanced_fields": ADVANCED_CONFIG_FIELDS,
+            },
+        },
+    }
 
 
 @router.get("/config")
@@ -171,13 +283,24 @@ async def get_config(
     }
 
 
+@router.get("/config/contract")
+async def get_config_contract(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    payload = _build_config_contract()
+    payload["user_id"] = current_user_id
+    return payload
+
+
 @router.post("/config")
 async def update_config_legacy(
     request: Dict[str, Any],
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     config_service = _get_config_service()
-    config_payload = request.get("config", {}) or {}
+    config_payload: Dict[str, Any] = {}
+    if isinstance(request.get("config_data"), dict):
+        _deep_update(config_payload, request.get("config_data") or {})
+    if isinstance(request.get("config"), dict):
+        _deep_update(config_payload, request.get("config") or {})
     requested_user_id = request.get("user_id")
     resolved_user_id = _resolve_user_id(requested_user_id, current_user_id)
 
@@ -200,19 +323,26 @@ async def update_config(
 ) -> Dict[str, Any]:
     config_service = _get_config_service()
     resolved_user_id = _resolve_user_id(request.user_id, current_user_id)
-    result = await config_service.update_user_config(resolved_user_id, request.config)
+    normalized = _normalize_config_update_request(request)
+    result = await config_service.update_user_config(
+        resolved_user_id,
+        normalized["config"],
+        validate=bool(normalized["validate"]),
+    )
 
     if not result.get("success"):
         raise HTTPException(status_code=400, detail=result.get("message", "Update failed"))
 
-    hot_apply_requested = bool(request.options.hot_apply) if request.options else False
+    hot_apply_requested = bool(normalized["hot_apply"])
     hot_apply_payload: Dict[str, Any] = {"requested": hot_apply_requested, "success": False}
     if hot_apply_requested:
         try:
             integration = _get_gateway_integration_or_503()
             reload_result = await integration.reload_config()
             hot_apply_payload["success"] = _to_bool(reload_result.get("success"), default=False)
-            hot_apply_payload["message"] = reload_result.get("message")
+            hot_apply_payload["message"] = reload_result.get("message") or (
+                "runtime reloaded" if hot_apply_payload["success"] else None
+            )
             if hot_apply_payload["success"]:
                 hot_apply_payload["reloaded_at"] = reload_result.get("reloaded_at")
         except HTTPException as exc:
@@ -268,7 +398,9 @@ async def diagnose_config(
 ) -> Dict[str, Any]:
     config_service = _get_config_service()
     resolved_user_id = _resolve_user_id(user_id, current_user_id)
-    return config_service.diagnose_config(resolved_user_id)
+    payload = config_service.diagnose_config(resolved_user_id)
+    payload["config"] = _sanitize_config_for_client(payload.get("config") or {})
+    return payload
 
 
 @router.post("/config/reload")
@@ -343,7 +475,7 @@ async def get_runtime_config(current_user_id: str = Depends(get_current_user_id)
         "status": "success",
         "user_id": current_user_id,
         "runtime": runtime,
-        "precedence": "env > user > defaults",
+        "precedence": "defaults(+env baseline) > user overrides; env-only secrets remain env-owned",
     }
 
 

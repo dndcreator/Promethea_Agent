@@ -13,6 +13,7 @@ Goals:
 
 import os
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
 from loguru import logger
@@ -194,13 +195,13 @@ class ConfigService:
         if user_id:
             user_config = user_manager.get_user_config(user_id) if user_id else {}
             # Deep-merge user configuration into the default configuration
-            merged = self._deep_merge(default_dict.copy(), user_config)
+            merged = self._deep_merge(deepcopy(default_dict), user_config)
         else:
-            merged = default_dict.copy()
+            merged = deepcopy(default_dict)
         
-        # 3. Environment variables have highest priority (handled by load_config)
-        # No extra handling here because PrometheaConfig already reads env vars
-        
+        # 3. Keep env-only secret fields pinned to default/env-resolved values.
+        self._apply_env_only_secret_overlay(merged, default_dict)
+
         return self._migrate_payload(merged, warning_key=(user_id or "default"))
 
     def _merge_configs(self, user_id: str, user_config: Dict[str, Any]) -> Dict[str, Any]:
@@ -219,7 +220,9 @@ class ConfigService:
             reload_sandbox_policy()
         
         default_dict = self._default_config.model_dump() if self._default_config else {}
-        return self._deep_merge(default_dict.copy(), user_config)
+        merged = self._deep_merge(deepcopy(default_dict), user_config)
+        self._apply_env_only_secret_overlay(merged, default_dict)
+        return merged
     
     @staticmethod
     def _deep_merge(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
@@ -230,6 +233,37 @@ class ConfigService:
             else:
                 target[key] = value
         return target
+
+    @staticmethod
+    def _get_nested_value(payload: Dict[str, Any], path: tuple[str, ...]) -> Any:
+        cur: Any = payload
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                return None
+            cur = cur.get(key)
+        return cur
+
+    @staticmethod
+    def _set_nested_value(payload: Dict[str, Any], path: tuple[str, ...], value: Any) -> None:
+        cur: Any = payload
+        for key in path[:-1]:
+            if not isinstance(cur, dict):
+                return
+            if key not in cur or not isinstance(cur.get(key), dict):
+                cur[key] = {}
+            cur = cur[key]
+        if isinstance(cur, dict):
+            cur[path[-1]] = value
+
+    def _apply_env_only_secret_overlay(
+        self,
+        merged_payload: Dict[str, Any],
+        default_payload: Dict[str, Any],
+    ) -> None:
+        for path in ENV_ONLY_SECRET_PATHS:
+            value = self._get_nested_value(default_payload, path)
+            if value is not None:
+                self._set_nested_value(merged_payload, path, value)
     
     def get_runtime_config(self, user_id: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
         merged = self.get_merged_config(user_id)
