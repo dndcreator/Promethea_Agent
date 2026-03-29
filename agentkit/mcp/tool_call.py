@@ -222,8 +222,8 @@ async def _execute_single_tool(
                     # Some tools return JSON as a string; parse when possible.
                     if result_data.strip().startswith('{'):
                         result_data = json.loads(result_data)
-                except:
-                    pass
+                except Exception as e:
+                    logger.debug("tool_call: failed to parse string result as JSON: {}", e)
 
             text_output = ""
             images = []

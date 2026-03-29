@@ -1,7 +1,9 @@
 ﻿import json, os
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, TYPE_CHECKING
+from loguru import logger
 
 if TYPE_CHECKING:
     from .message_manager import Session
@@ -22,7 +24,24 @@ class SessionStorage:
             with open(self.path, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             return {sid: Session(**payload) for sid,payload in raw.items()}
-        except Exception:
+        except json.JSONDecodeError as e:
+            backup = f"{self.path}.corrupt.{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            try:
+                os.replace(self.path, backup)
+                logger.warning(
+                    "SessionStorage.load_all detected corrupt JSON and moved it to backup: {} ({})",
+                    backup,
+                    e,
+                )
+            except Exception as move_err:
+                logger.warning(
+                    "SessionStorage.load_all detected corrupt JSON but failed to move backup for {}: {}",
+                    self.path,
+                    move_err,
+                )
+            return {}
+        except Exception as e:
+            logger.warning("SessionStorage.load_all failed for {}: {}", self.path, e)
             return {}
     
     def save_all(self, sessions: Dict[str, "Session"]):
@@ -43,9 +62,9 @@ class SessionStorage:
                 os.fsync(f.fileno())
             
             os.replace(temp_path, target_path)
-        except Exception as e:
+        except Exception:
             try:
                 os.unlink(temp_path)
             except OSError:
                 pass
-            raise e
+            raise

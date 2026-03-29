@@ -69,7 +69,7 @@ class APIConfig(BaseSettings):
 
 
 class Neo4jConfig(BaseSettings):
-    enabled: bool = Field(default=False)
+    enabled: bool = Field(default=True)
     uri: str = Field(default="bolt://localhost:7687")
     username: str = Field(default="neo4j")
     password: str = Field(default="password")
@@ -157,7 +157,7 @@ class MemoryMigrationConfig(BaseSettings):
 
 
 class MemoryConfig(BaseSettings):
-    enabled: bool = Field(default=False)
+    enabled: bool = Field(default=True)
     profile: str = Field(default="balanced")
     store_backend: str = Field(default="neo4j")
     sqlite_graph_path: str = Field(default="memory/sqlite_graph.db")
@@ -188,21 +188,22 @@ class MemoryConfig(BaseSettings):
 
 
 class ReasoningConfig(BaseSettings):
-    enabled: bool = Field(default=False)
+    enabled: bool = Field(default=True)
     mode: str = Field(default="react_tot")
     max_depth: int = Field(default=4, ge=1, le=12)
     max_nodes: int = Field(default=24, ge=4, le=256)
-    max_iterations: int = Field(default=10, ge=1, le=256)
-    max_memory_calls: int = Field(default=4, ge=0, le=64)
-    max_tool_calls: int = Field(default=4, ge=0, le=64)
-    max_replan_rounds: int = Field(default=3, ge=0, le=32)
-    plan_max_steps: int = Field(default=5, ge=1, le=32)
+    max_iterations: int = Field(default=16, ge=1, le=256)
+    max_memory_calls: int = Field(default=6, ge=0, le=64)
+    max_tool_calls: int = Field(default=8, ge=0, le=64)
+    max_replan_rounds: int = Field(default=6, ge=0, le=32)
+    plan_max_steps: int = Field(default=8, ge=1, le=32)
     beam_width: int = Field(default=3, ge=1, le=16)
     branch_factor: int = Field(default=3, ge=1, le=16)
     candidate_votes: int = Field(default=3, ge=1, le=9)
     min_branch_score: float = Field(default=0.0, ge=0.0, le=1.0)
     moirai_export_plan: bool = Field(default=False)
-    moirai_auto_start: bool = Field(default=False)
+    moirai_auto_start: bool = Field(default=True)
+    workflow_tool_bridge: bool = Field(default=True)
     debug_log: bool = Field(default=False)
 
     @field_validator("mode")

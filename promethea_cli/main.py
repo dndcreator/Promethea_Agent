@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import base64
@@ -225,6 +225,7 @@ def cmd_simple(args: argparse.Namespace, c: Client) -> None:
         ("status", "memory"): ("GET", "/api/health/memory", None),
         ("status", "routes"): ("GET", "/api/status/routes", None),
         ("status", "tools"): ("GET", "/api/status/tools", None),
+        ("status", "official-tools"): ("GET", "/api/status/tools/official", None),
         # metrics
         ("metrics", "json"): ("GET", "/api/metrics", None),
         # doctor
@@ -235,6 +236,10 @@ def cmd_simple(args: argparse.Namespace, c: Client) -> None:
         ("ops", "runbook"): ("GET", "/api/ops/runbook", None),
         ("ops", "abstractions"): ("GET", "/api/ops/abstractions", None),
         ("ops", "protocol"): ("GET", "/api/ops/protocol", None),
+        ("ops", "methods"): ("GET", "/api/ops/methods", None),
+        ("ops", "http-contracts"): ("GET", "/api/ops/http-contracts", None),
+        ("ops", "framework-check"): ("GET", "/api/ops/framework-check", None),
+        ("ops", "surfaces"): ("GET", "/api/ops/surfaces", None),
         # skills
         ("skills", "catalog"): ("GET", "/api/skills/catalog", None),
         ("skills", "show"): ("GET", None, None),
@@ -280,8 +285,29 @@ def cmd_config(args: argparse.Namespace, c: Client) -> None:
         c.emit(c.req_json("POST", "/api/config/reload", payload={}))
     elif sub == "runtime":
         c.emit(c.req_json("GET", "/api/config/runtime"))
+    elif sub == "runtime-scoped":
+        params: Dict[str, Any] = {}
+        if args.scope:
+            params["scope"] = args.scope
+        c.emit(c.req_json("GET", "/api/config/runtime/scoped", params=params or None))
     elif sub == "runtime-reload":
         c.emit(c.req_json("POST", "/api/config/runtime/reload", payload={}))
+    elif sub == "effective":
+        params: Dict[str, Any] = {"view": args.view}
+        if args.include_layers:
+            params["include_layers"] = "true"
+        if args.raw:
+            params["raw"] = "true"
+        c.emit(c.req_json("GET", "/api/config/effective", params=params))
+    elif sub == "ui-schema":
+        c.emit(c.req_json("GET", "/api/config/ui-schema", params={"view": args.view}))
+    elif sub == "contract":
+        c.emit(c.req_json("GET", "/api/config/contract"))
+    elif sub == "template":
+        params = {"view": args.view}
+        if args.raw:
+            params["raw"] = "true"
+        c.emit(c.req_json("GET", "/api/config/default-template", params=params))
     elif sub == "preferences":
         c.emit(c.req_json("GET", "/api/config/preferences", params={"scope": args.scope} if args.scope else None))
     elif sub == "tool-policy":
@@ -543,14 +569,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     f = sp.add_parser("followup"); f.add_argument("selected_text"); f.add_argument("query_type"); f.add_argument("session_id"); f.add_argument("--custom-query", default=None)
     ses = sp.add_parser("sessions"); ssp = ses.add_subparsers(dest="sessions_cmd", required=True); ssp.add_parser("list"); ss = ssp.add_parser("show"); ss.add_argument("session_id")
-    st = sp.add_parser("status"); tsp = st.add_subparsers(dest="status_cmd", required=True); [tsp.add_parser(x) for x in ("base", "services", "memory", "routes", "tools")]
+    st = sp.add_parser("status"); tsp = st.add_subparsers(dest="status_cmd", required=True); [tsp.add_parser(x) for x in ("base", "services", "memory", "routes", "tools", "official-tools")]
 
     cfg = sp.add_parser("config"); cgp = cfg.add_subparsers(dest="config_cmd", required=True)
     g = cgp.add_parser("get"); g.add_argument("--view", choices=["basic", "full"], default="full"); g.add_argument("--raw", action="store_true")
     u = cgp.add_parser("update"); u.add_argument("--json", default=None); u.add_argument("--file", default=None); u.add_argument("--hot-apply", action="store_true")
     rs = cgp.add_parser("reset"); rs.add_argument("--no-default", action="store_true")
     sm = cgp.add_parser("switch-model"); sm.add_argument("model"); sm.add_argument("--api-key", default=None); sm.add_argument("--model-base-url", default=None)
-    cgp.add_parser("diagnose"); cgp.add_parser("reload"); cgp.add_parser("runtime"); cgp.add_parser("runtime-reload")
+    cgp.add_parser("diagnose"); cgp.add_parser("reload"); cgp.add_parser("runtime")
+    rts = cgp.add_parser("runtime-scoped"); rts.add_argument("--scope", default=None)
+    cgp.add_parser("runtime-reload")
+    cgp.add_parser("contract")
+    eff = cgp.add_parser("effective"); eff.add_argument("--view", choices=["basic", "full"], default="full"); eff.add_argument("--include-layers", action="store_true"); eff.add_argument("--raw", action="store_true")
+    uis = cgp.add_parser("ui-schema"); uis.add_argument("--view", choices=["simple", "advanced", "both"], default="both")
+    tplt = cgp.add_parser("template"); tplt.add_argument("--view", choices=["basic", "full"], default="full"); tplt.add_argument("--raw", action="store_true")
     pr = cgp.add_parser("preferences"); pr.add_argument("--scope", default=None)
     tp = cgp.add_parser("tool-policy"); tp.add_argument("--agent-id", default=None)
     chn = cgp.add_parser("channel"); chn.add_argument("channel_id")
@@ -592,7 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     met = sp.add_parser("metrics"); mtp = met.add_subparsers(dest="metrics_cmd", required=True); mtp.add_parser("json"); mtp.add_parser("prometheus")
     doc = sp.add_parser("doctor"); dcp = doc.add_subparsers(dest="doctor_cmd", required=True); dcp.add_parser("run"); dcp.add_parser("migrate")
-    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol")
+    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol"); opp.add_parser("methods"); opp.add_parser("http-contracts"); opp.add_parser("framework-check"); opp.add_parser("surfaces")
 
     auto = sp.add_parser("automation"); atp = auto.add_subparsers(dest="automation_cmd", required=True)
     for x in ("webhook", "cron"):
@@ -677,3 +709,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

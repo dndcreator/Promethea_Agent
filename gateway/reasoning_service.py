@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,6 +83,7 @@ class ReasoningService:
         conversation_core: Optional[Any] = None,
         memory_service: Optional[Any] = None,
         tool_service: Optional[Any] = None,
+        workflow_engine: Optional[Any] = None,
         config_service: Optional[Any] = None,
         template_memory: Optional[ReasoningTemplateMemory] = None,
     ) -> None:
@@ -89,6 +91,7 @@ class ReasoningService:
         self.conversation_core = conversation_core
         self.memory_service = memory_service
         self.tool_service = tool_service
+        self.workflow_engine = workflow_engine
         self.config_service = config_service
         if template_memory is not None:
             self.template_memory = template_memory
@@ -284,21 +287,23 @@ class ReasoningService:
         except Exception:
             global_reasoning = {}
         policy: Dict[str, Any] = {
-            "enabled": bool(global_reasoning.get("enabled", False)),
+            # Runtime baseline is full-capability on; users can explicitly disable.
+            "enabled": bool(global_reasoning.get("enabled", True)),
             "mode": str(global_reasoning.get("mode", "react_tot")),
             "max_depth": int(global_reasoning.get("max_depth", 4)),
             "max_nodes": int(global_reasoning.get("max_nodes", 24)),
-            "max_iterations": int(global_reasoning.get("max_iterations", 10)),
-            "max_memory_calls": int(global_reasoning.get("max_memory_calls", 4)),
-            "max_tool_calls": int(global_reasoning.get("max_tool_calls", 4)),
-            "max_replan_rounds": int(global_reasoning.get("max_replan_rounds", 3)),
-            "plan_max_steps": int(global_reasoning.get("plan_max_steps", 5)),
+            "max_iterations": int(global_reasoning.get("max_iterations", 16)),
+            "max_memory_calls": int(global_reasoning.get("max_memory_calls", 6)),
+            "max_tool_calls": int(global_reasoning.get("max_tool_calls", 8)),
+            "max_replan_rounds": int(global_reasoning.get("max_replan_rounds", 6)),
+            "plan_max_steps": int(global_reasoning.get("plan_max_steps", 8)),
             "beam_width": int(global_reasoning.get("beam_width", 3)),
             "branch_factor": int(global_reasoning.get("branch_factor", 3)),
             "candidate_votes": int(global_reasoning.get("candidate_votes", 3)),
             "min_branch_score": float(global_reasoning.get("min_branch_score", 0.0)),
             "moirai_export_plan": bool(global_reasoning.get("moirai_export_plan", False)),
-            "moirai_auto_start": bool(global_reasoning.get("moirai_auto_start", False)),
+            "moirai_auto_start": bool(global_reasoning.get("moirai_auto_start", True)),
+            "workflow_tool_bridge": bool(global_reasoning.get("workflow_tool_bridge", True)),
             "debug_log": bool(
                 global_reasoning.get(
                     "debug_log",
@@ -330,6 +335,7 @@ class ReasoningService:
                 "min_branch_score",
                 "moirai_export_plan",
                 "moirai_auto_start",
+                "workflow_tool_bridge",
                 "debug_log",
             ):
                 if key in reasoning_cfg:
@@ -351,7 +357,11 @@ class ReasoningService:
         )
         policy["moirai_auto_start"] = self._to_bool(
             policy.get("moirai_auto_start"),
-            default=False,
+            default=True,
+        )
+        policy["workflow_tool_bridge"] = self._to_bool(
+            policy.get("workflow_tool_bridge"),
+            default=True,
         )
         policy["debug_log"] = self._to_bool(policy.get("debug_log"), default=False)
         policy["mode"] = str(policy.get("mode", "react_tot")).strip().lower() or "react_tot"
@@ -822,6 +832,7 @@ class ReasoningService:
                 "tree_id": tree.tree_id,
                 "system_prompt": final_prompt,
                 "reasoning_summary": reasoning_summary,
+                "plan_steps": steps,
                 "gate": gate,
                 "template_match": {
                     "matched": bool(template_match.get("matched")),
@@ -1113,6 +1124,7 @@ class ReasoningService:
                         user_message=user_message,
                         observations=observations,
                         user_config=user_config,
+                        policy=policy,
                         run_context=run_context,
                     )
                     self._resume_node_from_waiting_tool(tree=tree, node=node)
@@ -1382,6 +1394,120 @@ class ReasoningService:
         )
         return child.observation
 
+    async def _start_workflow_tool_trace(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        session_id: str,
+        user_id: str,
+        tool_type: str,
+        service_name: str,
+        tool_name: str,
+        args: Dict[str, Any],
+        intent: str,
+        policy: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        if not self.workflow_engine:
+            return None
+        if not self._to_bool((policy or {}).get("workflow_tool_bridge"), default=True):
+            return None
+        try:
+            from .workflow_models import WorkflowDefinition, WorkflowStep
+
+            workflow_id = f"react_tool_{tree.tree_id}_{node.node_id}"
+            definition = WorkflowDefinition(
+                workflow_id=workflow_id,
+                workflow_type="linear",
+                name=f"ReAct Tool {service_name}.{tool_name}",
+                description="Ephemeral workflow trace for a ReAct tool action.",
+                owner_user_id=user_id,
+                steps=[
+                    WorkflowStep(
+                        step_id="tool_action",
+                        step_type="tool_step",
+                        name=f"{service_name}.{tool_name}",
+                        description=intent or node.title,
+                        inputs={
+                            "tool_type": tool_type,
+                            "service_name": service_name,
+                            "tool_name": tool_name,
+                            "args": dict(args or {}),
+                            "tree_id": tree.tree_id,
+                            "node_id": node.node_id,
+                        },
+                    )
+                ],
+                policy={
+                    "source": "reasoning_react",
+                    "tree_id": tree.tree_id,
+                    "node_id": node.node_id,
+                },
+            )
+            self.workflow_engine.define_workflow(definition)
+            start_async = getattr(self.workflow_engine, "start_workflow_async", None)
+            kwargs = {
+                "workflow_id": workflow_id,
+                "session_id": session_id,
+                "user_id": user_id,
+                "workspace_id": session_id,
+                "run_metadata": {
+                    "source": "reasoning_react",
+                    "tree_id": tree.tree_id,
+                    "node_id": node.node_id,
+                    "tool_type": tool_type,
+                    "service_name": service_name,
+                    "tool_name": tool_name,
+                    "args": dict(args or {}),
+                },
+            }
+            if callable(start_async):
+                run = await start_async(**kwargs)
+            else:
+                run = self.workflow_engine.start_workflow(**kwargs)
+            return str(getattr(run, "workflow_run_id", "") or "").strip() or None
+        except Exception as e:
+            logger.debug("ReasoningService: workflow tool trace skipped: {}", e)
+            return None
+
+    def _append_workflow_tool_observation(
+        self,
+        *,
+        workflow_run_id: Optional[str],
+        tool_type: str,
+        service_name: str,
+        tool_name: str,
+        args: Dict[str, Any],
+        observation: str,
+        verify: Dict[str, Any],
+    ) -> None:
+        if not self.workflow_engine or not workflow_run_id:
+            return
+        try:
+            append_method = getattr(self.workflow_engine, "append_run_observation", None)
+            payload = {
+                "kind": "tool",
+                "tool_type": tool_type,
+                "service_name": service_name,
+                "tool_name": tool_name,
+                "args": dict(args or {}),
+                "observation": observation,
+                "verification": dict(verify or {}),
+                "at": time.time(),
+            }
+            if callable(append_method):
+                append_method(workflow_run_id, payload)
+                return
+            run = self.workflow_engine.get_run(workflow_run_id)
+            if not run:
+                return
+            observations = run.run_metadata.setdefault("observations", [])
+            if isinstance(observations, list):
+                observations.append(payload)
+                run.updated_at = datetime.utcnow()
+        except Exception as e:
+            logger.debug("ReasoningService: append workflow observation skipped: {}", e)
+
     async def _run_tool_step(
         self,
         *,
@@ -1393,6 +1519,7 @@ class ReasoningService:
         user_message: str,
         observations: List[str],
         user_config: Optional[Dict[str, Any]],
+        policy: Optional[Dict[str, Any]] = None,
         run_context: Optional[Any] = None,
     ) -> str:
         if not self.tool_service:
@@ -1420,6 +1547,18 @@ class ReasoningService:
         service_name = selected.get("service_name") or selected.get("tool_name")
         tool_name = selected.get("tool_name") or service_name
         args = selected.get("args") or {}
+        workflow_run_id = await self._start_workflow_tool_trace(
+            tree=tree,
+            node=node,
+            session_id=session_id,
+            user_id=user_id,
+            tool_type=tool_type,
+            service_name=service_name,
+            tool_name=tool_name,
+            args=args,
+            intent=str(step.get("tool_intent") or step.get("goal") or node.title),
+            policy=policy,
+        )
         child = self._add_node(
             tree,
             parent_id=node.node_id,
@@ -1430,6 +1569,7 @@ class ReasoningService:
                 "service_name": service_name,
                 "tool_name": tool_name,
                 "args": args,
+                "workflow_run_id": workflow_run_id,
             },
         )
         self._transition_node_status(
@@ -1469,19 +1609,42 @@ class ReasoningService:
 
         tool_call_started = time.time()
         try:
-            result = await self.tool_service.call_tool(
-                tool_name=tool_name,
-                params={
-                    "agentType": tool_type,
-                    "service_name": service_name,
-                    "tool_name": tool_name,
-                    **args,
-                },
-                ctx=ctx,
-                request_id=f"reasoning_{tree.tree_id}",
-                run_context=run_context,
-                user_config=user_config,
+            use_workflow_bridge = bool(workflow_run_id) and bool(
+                self.workflow_engine and hasattr(self.workflow_engine, "run_tool_action")
             )
+            if use_workflow_bridge:
+                wf_payload = await self.workflow_engine.run_tool_action(
+                    workflow_run_id=workflow_run_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    tool_type=tool_type,
+                    service_name=service_name,
+                    tool_name=tool_name,
+                    args=args,
+                    run_context=run_context,
+                    user_config=user_config,
+                    metadata={
+                        "tree_id": tree.tree_id,
+                        "node_id": child.node_id,
+                        "trace_id": trace_id,
+                        "source": "reasoning_react",
+                    },
+                )
+                result = wf_payload.get("result")
+            else:
+                result = await self.tool_service.call_tool(
+                    tool_name=tool_name,
+                    params={
+                        "agentType": tool_type,
+                        "service_name": service_name,
+                        "tool_name": tool_name,
+                        **args,
+                    },
+                    ctx=ctx,
+                    request_id=f"reasoning_{tree.tree_id}",
+                    run_context=run_context,
+                    user_config=user_config,
+                )
         except Exception as e:
             result = f"[tool error] {e}"
 
@@ -1491,6 +1654,15 @@ class ReasoningService:
             observation=result_text,
             user_config=user_config,
             user_id=user_id,
+        )
+        self._append_workflow_tool_observation(
+            workflow_run_id=workflow_run_id,
+            tool_type=tool_type,
+            service_name=service_name,
+            tool_name=tool_name,
+            args=args,
+            observation=result_text,
+            verify=verify,
         )
         child.verifier_state = dict(verify or {})
         child.tool_calls.append(
@@ -1640,6 +1812,10 @@ class ReasoningService:
                 if isinstance(preferred, dict):
                     result["service_name"] = result.get("service_name") or preferred.get("service_name")
                     result["tool_name"] = result.get("tool_name") or preferred.get("tool_name")
+            if (not result.get("service_name") or not result.get("tool_name")) and candidates:
+                top_candidate = candidates[0] if isinstance(candidates[0], dict) else {}
+                result["service_name"] = result.get("service_name") or top_candidate.get("service_name")
+                result["tool_name"] = result.get("tool_name") or top_candidate.get("tool_name")
 
         self._tool_selection_stats["total"] += 1
         chosen = self._normalize_selected_tool(result, catalog)
@@ -1778,10 +1954,10 @@ class ReasoningService:
         use_tool = self._to_bool(selected.get("use_tool"), default=False)
         service_name = str(selected.get("service_name") or "").strip()
         tool_name = str(selected.get("tool_name") or "").strip()
-        if not use_tool or not service_name or not tool_name:
+        if not use_tool or not tool_name:
             return {"use_tool": False}
 
-        match = self._find_catalog_entry(catalog, service_name, tool_name)
+        match = self._resolve_catalog_entry(catalog, service_name, tool_name)
         if not match:
             return {"use_tool": False}
 
@@ -1797,15 +1973,86 @@ class ReasoningService:
             "why": str(selected.get("why") or ""),
         }
 
+    @classmethod
+    def _resolve_catalog_entry(
+        cls,
+        catalog: List[Dict[str, Any]],
+        service_name: str,
+        tool_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        # Prefer exact match first, then tolerant matching to keep generalization.
+        service = str(service_name or "").strip()
+        tool = str(tool_name or "").strip()
+        if not tool:
+            return None
+
+        exact = cls._find_catalog_entry(catalog, service, tool)
+        if exact:
+            return exact
+
+        normalized_service = cls._normalize_tool_id(service)
+        normalized_tool = cls._normalize_tool_id(tool)
+        candidates: List[tuple[float, Dict[str, Any]]] = []
+        for item in catalog:
+            item_service = str(item.get("service_name", "") or "").strip()
+            item_tool = str(item.get("tool_name", "") or "").strip()
+            if not item_tool:
+                continue
+
+            score = 0.0
+            item_service_norm = cls._normalize_tool_id(item_service)
+            item_tool_norm = cls._normalize_tool_id(item_tool)
+
+            if tool and item_tool == tool:
+                score += 10.0
+            elif normalized_tool and item_tool_norm == normalized_tool:
+                score += 8.0
+            elif normalized_tool and normalized_tool in item_tool_norm:
+                score += 4.0
+            elif normalized_tool and item_tool_norm in normalized_tool:
+                score += 2.0
+
+            if service:
+                if item_service == service:
+                    score += 6.0
+                elif normalized_service and item_service_norm == normalized_service:
+                    score += 4.0
+                elif normalized_service and normalized_service in item_service_norm:
+                    score += 1.5
+
+            if score > 0.0:
+                candidates.append((score, item))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: row[0], reverse=True)
+        best_score, best_item = candidates[0]
+
+        # Keep minimum confidence to avoid random tool jumps.
+        if best_score < 7.0:
+            return None
+        return best_item
+
+    @staticmethod
+    def _normalize_tool_id(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
     @staticmethod
     def _find_catalog_entry(
         catalog: List[Dict[str, Any]],
         service_name: str,
         tool_name: str,
     ) -> Optional[Dict[str, Any]]:
+        if not tool_name:
+            return None
         for item in catalog:
-            if str(item.get("service_name", "")) == service_name and str(item.get("tool_name", "")) == tool_name:
-                return item
+            item_service = str(item.get("service_name", "") or "")
+            item_tool = str(item.get("tool_name", "") or "")
+            if item_tool != tool_name:
+                continue
+            if service_name and item_service != service_name:
+                continue
+            return item
         return None
 
     async def _run_think_step(

@@ -16,7 +16,7 @@ class ToolPolicyDecision:
 
 
 class ToolPolicy:
-    """Policy checks for tool invocation with side-effect-safe defaults."""
+    """Policy checks for tool invocation with flexible defaults."""
 
     def __init__(self) -> None:
         self.default_mode = "fast"
@@ -45,8 +45,9 @@ class ToolPolicy:
         allowed_explicitly = self._matches_any(candidates, effective["allow"]) or self._matches_any(
             candidates, effective["skill_allowlist"]
         )
+        strict_side_effect_allowlist = bool(effective.get("strict_side_effect_allowlist", False))
 
-        if spec.side_effect_level != SideEffectLevel.READ_ONLY and not allowed_explicitly:
+        if strict_side_effect_allowlist and spec.side_effect_level != SideEffectLevel.READ_ONLY and not allowed_explicitly:
             return ToolPolicyDecision(
                 False,
                 f"side-effect tool requires explicit allow: {spec.full_name}",
@@ -78,6 +79,7 @@ class ToolPolicy:
         deny: Set[str] = set()
         skill_allowlist: Set[str] = set()
         mode_restrictions: Dict[str, Any] = {}
+        strict_side_effect_allowlist = False
 
         tools_cfg = {}
         if isinstance(user_config, dict) and isinstance(user_config.get("tools"), dict):
@@ -86,6 +88,7 @@ class ToolPolicy:
         allow |= self._to_set(tools_cfg.get("allow"))
         deny |= self._to_set(tools_cfg.get("deny"))
         skill_allowlist |= self._to_set(tools_cfg.get("skill_allowlist"))
+        strict_side_effect_allowlist = bool(tools_cfg.get("strict_side_effect_allowlist", False))
 
         mode = ""
         if run_context is not None:
@@ -97,6 +100,8 @@ class ToolPolicy:
                 skill_allowlist |= self._to_set(context_policy.get("skill_allowlist"))
                 if isinstance(context_policy.get("mode_restrictions"), dict):
                     mode_restrictions = dict(context_policy.get("mode_restrictions") or {})
+                if "strict_side_effect_allowlist" in context_policy:
+                    strict_side_effect_allowlist = bool(context_policy.get("strict_side_effect_allowlist"))
 
         if not mode and run_context is not None:
             session_state = getattr(run_context, "session_state", None)
@@ -108,6 +113,7 @@ class ToolPolicy:
             "skill_allowlist": skill_allowlist,
             "mode": mode or self.default_mode,
             "mode_restrictions": mode_restrictions,
+            "strict_side_effect_allowlist": strict_side_effect_allowlist,
         }
 
     @staticmethod

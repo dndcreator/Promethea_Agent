@@ -17,13 +17,13 @@ Implementation:
 
 - `gateway/workspace_service.py`
 
-## Sandbox Policy (MVP)
+## Sandbox Policy (v1)
 
 - all reads/writes are resolved under workspace root
 - path traversal outside root is blocked
 - write requires workspace permission (`permissions.write=true`)
 
-## Artifact Store (MVP)
+## Artifact Store (v1)
 
 - `create_document`
 - `update_document`
@@ -49,8 +49,9 @@ Events:
 
 ## Extension Path
 
-This MVP is designed for follow-up integration with:
+This v1 baseline is designed for follow-up integration with:
 
 - canvas/desktop artifact editing
 - workflow output routing
 - richer workspace permissions and versioning
+

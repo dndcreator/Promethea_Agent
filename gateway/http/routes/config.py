@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 import config as config_module
+from gateway.config_protocol import normalize_config_update_params
 from gateway_integration import get_gateway_integration
 
 from .auth import get_current_user_id
@@ -27,6 +28,7 @@ SIMPLE_CONFIG_FIELDS = [
     "memory.enabled",
     "memory.profile",
     "memory.store_backend",
+    "reasoning.enabled",
     "system.stream_mode",
 ]
 
@@ -144,36 +146,24 @@ def _to_bool(value: Any, default: bool = False) -> bool:
 
 def _build_basic_config_view(config_data: Dict[str, Any]) -> Dict[str, Any]:
     cfg = config_data or {}
-    api = cfg.get("api") if isinstance(cfg.get("api"), dict) else {}
     memory = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
     reasoning = cfg.get("reasoning") if isinstance(cfg.get("reasoning"), dict) else {}
-    sandbox = cfg.get("sandbox") if isinstance(cfg.get("sandbox"), dict) else {}
     system = cfg.get("system") if isinstance(cfg.get("system"), dict) else {}
     return {
         "config_version": cfg.get("config_version"),
         "agent_name": cfg.get("agent_name"),
         "system_prompt": cfg.get("system_prompt"),
-        "api": {
-            "api_key": api.get("api_key", ""),
-            "base_url": api.get("base_url", ""),
-            "model": api.get("model", ""),
-        },
         "memory": {
-            "enabled": _to_bool(memory.get("enabled"), default=False),
+            "enabled": _to_bool(memory.get("enabled"), default=True),
+            "profile": memory.get("profile", "balanced"),
             "store_backend": memory.get("store_backend", "neo4j"),
         },
         "reasoning": {
-            "enabled": _to_bool(reasoning.get("enabled"), default=False),
+            "enabled": _to_bool(reasoning.get("enabled"), default=True),
             "mode": reasoning.get("mode", "react_tot"),
-        },
-        "sandbox": {
-            "enabled": _to_bool(sandbox.get("enabled"), default=False),
-            "profile": sandbox.get("profile", "off"),
         },
         "system": {
             "stream_mode": _to_bool(system.get("stream_mode"), default=True),
-            "debug": _to_bool(system.get("debug"), default=False),
-            "log_level": system.get("log_level", "INFO"),
         },
     }
 
@@ -197,31 +187,10 @@ def _resolve_user_id(requested: Optional[str], current_user_id: str) -> str:
 
 
 def _normalize_config_update_request(request: ConfigUpdateRequest) -> Dict[str, Any]:
-    merged_config: Dict[str, Any] = {}
-    if isinstance(request.config_data, dict):
-        _deep_update(merged_config, request.config_data)
-    if isinstance(request.config, dict):
-        _deep_update(merged_config, request.config)
-
-    hot_apply: Optional[bool] = None
-    if request.options is not None:
-        hot_apply = bool(request.options.hot_apply)
-    if hot_apply is None and request.hot_apply is not None:
-        hot_apply = bool(request.hot_apply)
-    if hot_apply is None and request.hot_reload is not None:
-        hot_apply = bool(request.hot_reload)
-
-    validate_requested: bool = True
-    if request.validate_config is not None:
-        validate_requested = bool(request.validate_config)
-    elif request.validate_flag is not None:
-        validate_requested = bool(request.validate_flag)
-
-    return {
-        "config": merged_config,
-        "hot_apply": bool(hot_apply),
-        "validate": validate_requested,
-    }
+    raw = request.model_dump()
+    if raw.get("validate") is None and request.validate_flag is not None:
+        raw["validate"] = request.validate_flag
+    return normalize_config_update_params(raw)
 
 
 def _build_config_contract() -> Dict[str, Any]:
@@ -229,7 +198,7 @@ def _build_config_contract() -> Dict[str, Any]:
         "status": "success",
         "contract": {
             "name": "promethea_config_contract",
-            "version": "1.0",
+            "version": "1.1",
             "inheritance": {
                 "layers": ["default_template", "user_overrides", "env_runtime"],
                 "effective_order": "default_template(+env baseline) -> user_overrides; env-only secrets stay env-owned",
@@ -246,11 +215,40 @@ def _build_config_contract() -> Dict[str, Any]:
                 },
                 "compat_aliases_accepted": {
                     "config_data": "alias_of_config",
+                    "updates": "alias_of_config",
                     "hot_reload": "alias_of_options.hot_apply",
                     "hot_apply": "alias_of_options.hot_apply",
                     "validate_config": "alias_of_validate",
                     "validate": "legacy_validate_flag",
                 },
+            },
+            "template_api": {
+                "path": "/api/config/default-template",
+                "method": "GET",
+                "query": {
+                    "view": "basic|full",
+                    "raw": "bool",
+                },
+            },
+            "effective_api": {
+                "path": "/api/config/effective",
+                "method": "GET",
+                "query": {
+                    "view": "basic|full",
+                    "include_layers": "bool",
+                    "raw": "bool",
+                },
+                "source_values": [
+                    "default_template",
+                    "user_override",
+                    "env_only_secret",
+                    "unknown",
+                ],
+            },
+            "ui_schema_api": {
+                "path": "/api/config/ui-schema",
+                "method": "GET",
+                "query": {"view": "simple|advanced|both"},
             },
             "ui_profiles": {
                 "simple_fields": SIMPLE_CONFIG_FIELDS,
@@ -265,22 +263,31 @@ async def get_config(
     user_id: Optional[str] = None,
     raw: bool = False,
     view: Literal["basic", "full"] = "full",
+    include_sources: bool = False,
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     config_service = _get_config_service()
     resolved_user_id = _resolve_user_id(user_id, current_user_id)
-    full_config = _sanitize_config_for_client(config_service.get_merged_config(resolved_user_id))
+    source_paths = SIMPLE_CONFIG_FIELDS if (include_sources and view == "basic") else None
+    effective_bundle = config_service.get_effective_config_with_sources(
+        resolved_user_id,
+        field_paths=source_paths,
+    )
+    full_config = _sanitize_config_for_client(effective_bundle.get("effective") or {})
     config_data = _build_basic_config_view(full_config) if view == "basic" else full_config
     warnings = config_service.get_deprecation_warnings(resolved_user_id)
     if raw:
         return config_data
-    return {
+    payload = {
         "status": "success",
         "user_id": resolved_user_id,
         "config": config_data,
         "view": view,
         "warnings": warnings,
     }
+    if include_sources:
+        payload["sources"] = effective_bundle.get("sources") or {}
+    return payload
 
 
 @router.get("/config/contract")
@@ -288,6 +295,85 @@ async def get_config_contract(current_user_id: str = Depends(get_current_user_id
     payload = _build_config_contract()
     payload["user_id"] = current_user_id
     return payload
+
+
+@router.get("/config/default-template")
+async def get_default_template(
+    raw: bool = False,
+    view: Literal["basic", "full"] = "full",
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_path, template = _load_default_config_dict()
+    sanitized_template = _sanitize_config_for_client(template)
+    template_view = _build_basic_config_view(sanitized_template) if view == "basic" else sanitized_template
+    if raw:
+        return template_view
+
+    return {
+        "status": "success",
+        "user_id": current_user_id,
+        "template": template_view,
+        "view": view,
+        "source": str(config_path),
+        "env_only_secret_paths": ENV_ONLY_SECRET_PATHS,
+        "ui_profiles": {
+            "simple_fields": SIMPLE_CONFIG_FIELDS,
+            "advanced_fields": ADVANCED_CONFIG_FIELDS,
+        },
+    }
+
+
+@router.get("/config/effective")
+async def get_effective_config(
+    user_id: Optional[str] = None,
+    raw: bool = False,
+    view: Literal["basic", "full"] = "full",
+    include_layers: bool = False,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    source_paths = SIMPLE_CONFIG_FIELDS if view == "basic" else None
+    effective_bundle = config_service.get_effective_config_with_sources(
+        resolved_user_id,
+        field_paths=source_paths,
+    )
+    full_config = _sanitize_config_for_client(effective_bundle.get("effective") or {})
+    config_data = _build_basic_config_view(full_config) if view == "basic" else full_config
+    if raw:
+        return config_data
+
+    payload: Dict[str, Any] = {
+        "status": "success",
+        "user_id": resolved_user_id,
+        "view": view,
+        "effective": config_data,
+        "sources": effective_bundle.get("sources") or {},
+    }
+    if include_layers:
+        payload["layers"] = {
+            "default_template": _sanitize_config_for_client(
+                (effective_bundle.get("layers") or {}).get("default_template") or {}
+            ),
+            "user_overrides": _sanitize_config_for_client(
+                (effective_bundle.get("layers") or {}).get("user_overrides") or {}
+            ),
+        }
+    return payload
+
+
+@router.get("/config/ui-schema")
+async def get_config_ui_schema(
+    view: Literal["simple", "advanced", "both"] = "both",
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    _ = current_user_id
+    profile_payload: Dict[str, Any] = {}
+    if view in {"simple", "both"}:
+        profile_payload["simple"] = {"fields": SIMPLE_CONFIG_FIELDS}
+    if view in {"advanced", "both"}:
+        profile_payload["advanced"] = {"fields": ADVANCED_CONFIG_FIELDS}
+    return {"status": "success", "view": view, "profiles": profile_payload}
 
 
 @router.post("/config")

@@ -88,6 +88,7 @@ yarn.lock
 # Temporary files
 .DS_Store
 Thumbs.db
+.tmp/
 
 # Runtime workflow artifacts
 memory/moirai_runs/wf_*.json

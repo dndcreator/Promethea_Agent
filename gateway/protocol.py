@@ -295,7 +295,8 @@ class ConfigReloadParams(BaseModel):
 
 
 class ConfigUpdateParams(BaseModel):
-    """User config update params"""
+    """User config update params (canonical + legacy aliases)."""
+    config: Dict[str, Any] = Field(default_factory=dict)
     config_data: Dict[str, Any] = Field(default_factory=dict)
     validate_config: bool = Field(default=True, alias="validate")
 
@@ -608,16 +609,3 @@ class GatewayProtocol:
             return EventMessage(**raw)
         else:
             raise ValueError(f"Unknown message type: {msg_type}")
-
-
-
-
-
-
-
-
-
-
-
-
-

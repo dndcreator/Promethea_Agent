@@ -25,7 +25,7 @@ Introduce a unified Channel Adapter Framework so entry channels map to the same 
 - reaction/voice support
 - session model
 
-## MVP Adapters
+## v1 Adapters
 
 - `WebChannelAdapter`
 - `HttpApiChannelAdapter`
@@ -43,3 +43,4 @@ Introduce a unified Channel Adapter Framework so entry channels map to the same 
 ## Boundary
 
 Channel-specific identity/session/response details live in adapters; runtime conversation logic remains channel-agnostic.
+

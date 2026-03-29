@@ -152,10 +152,19 @@ class GatewayIntegration:
         self.gateway_server.config_service = ConfigService(event_emitter=event_emitter)
         self.gateway_server.workspace_service = WorkspaceService(event_emitter=event_emitter)
 
+        from gateway.official_tools import register_official_tools
+
         if not self.gateway_server.tool_service:
             from gateway.tool_service import ToolService
 
             self.gateway_server.tool_service = ToolService(event_emitter=event_emitter, mcp_manager=self.gateway_server.mcp_manager)
+        register_official_tools(
+            tool_service=self.gateway_server.tool_service,
+            workspace_service=self.gateway_server.workspace_service,
+            memory_service=self.gateway_server.memory_service,
+            message_manager=message_manager,
+            gateway_server=self.gateway_server,
+        )
 
         memory_adapter = memory_system
         self.gateway_server.memory_service = MemoryService(
@@ -179,17 +188,31 @@ class GatewayIntegration:
             workspace_service=self.gateway_server.workspace_service,
             reasoning_service=self.gateway_server.reasoning_service,
             memory_service=self.gateway_server.memory_service,
+            tool_service=self.gateway_server.tool_service,
         )
+        self.gateway_server.reasoning_service.workflow_engine = self.gateway_server.workflow_engine
 
         self.gateway_server.conversation_service = ConversationService(
             event_emitter=event_emitter,
             conversation_core=conversation_core,
             memory_service=self.gateway_server.memory_service,
             reasoning_service=self.gateway_server.reasoning_service,
+            workflow_engine=self.gateway_server.workflow_engine,
             message_manager=message_manager,
             config_service=self.gateway_server.config_service,
         )
         self.gateway_server.conversation_core = conversation_core
+
+        # Re-register official tools after all dependent services are fully wired.
+        # This closes initialization-order gaps (memory/workflow/runtime dependent tools).
+        register_official_tools(
+            tool_service=self.gateway_server.tool_service,
+            workspace_service=self.gateway_server.workspace_service,
+            memory_service=self.gateway_server.memory_service,
+            message_manager=message_manager,
+            gateway_server=self.gateway_server,
+        )
+
         event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)
 
         logger.info("Dependencies injected into gateway (with service layer)")

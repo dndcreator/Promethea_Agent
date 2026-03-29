@@ -171,8 +171,8 @@ class MemoryService:
             self._recent_write_limit = int(
                 dedupe.get("recent_write_cache_size", self._recent_write_limit)
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MemoryService: failed to resolve write policy from config: {}", e)
         if profile == "conservative":
             self._write_min_user_chars = max(self._write_min_user_chars, 10)
             self._dedupe_min_candidate_chars = max(self._dedupe_min_candidate_chars, 12)
@@ -193,8 +193,8 @@ class MemoryService:
             policy["drain_timeout_s"] = float(
                 sync_cfg.get("drain_timeout_s", policy["drain_timeout_s"])
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MemoryService: failed to resolve sync policy from config: {}", e)
         policy["max_queue_size"] = max(1, int(policy["max_queue_size"]))
         policy["drain_timeout_s"] = max(1.0, float(policy["drain_timeout_s"]))
         return policy
@@ -1280,8 +1280,8 @@ class MemoryService:
             if hasattr(recall_engine, "_calculate_params"):
                 params = recall_engine._calculate_params(request.query_text, entities)
                 recent_days = int(params.get("recent_days", recent_days))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MemoryService: failed to calculate recall params, fallback to default recent_days: {}", e)
 
         try:
             results = recall_engine._three_layer_query(entities, request.session_id, request.user_id, recent_days)

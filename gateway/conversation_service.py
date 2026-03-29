@@ -22,6 +22,7 @@ class ConversationService:
         conversation_core: Optional[PrometheaConversation] = None,
         memory_service: Optional[Any] = None,
         reasoning_service: Optional[Any] = None,
+        workflow_engine: Optional[Any] = None,
         message_manager: Optional[Any] = None,
         config_service: Optional[Any] = None,
     ) -> None:
@@ -29,6 +30,7 @@ class ConversationService:
         self.conversation_core = conversation_core or PrometheaConversation()
         self.memory_service = memory_service
         self.reasoning_service = reasoning_service
+        self.workflow_engine = workflow_engine
         self.message_manager = message_manager
         self.config_service = config_service
         self._session_queues: Dict[str, asyncio.Queue] = {}
@@ -404,8 +406,8 @@ class ConversationService:
                             self.message_manager.abort_turn(
                                 session_id, item["turn_id"], user_id=user_id
                             )
-                        except Exception:
-                            pass
+                        except Exception as abort_err:
+                            logger.debug("ConversationService: abort_turn failed for session {}: {}", session_id, abort_err)
                     return
 
                 delay = min(max_delay, base_delay * (2 ** attempt))
@@ -768,8 +770,8 @@ class ConversationService:
                 )
                 min_chars = int(recall_cfg.get("min_query_chars", min_chars))
                 max_chars = int(recall_cfg.get("max_query_chars", max_chars))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ConversationService: recall filter config fallback used: {}", e)
 
         if self._is_explicit_memory_query(text):
             # Explicit memory/profile lookup should bypass short-query rejection.

@@ -151,12 +151,55 @@ class Neo4jMemoryStore(MemoryStore):
         }
 
     def import_mef(self, payload: Dict[str, Any], *, merge: bool = True) -> Dict[str, Any]:
-        # Kept conservative: no direct graph writes for now.
+        imported_items = 0
+        skipped_items = 0
+        errors: List[str] = []
+        rows = (payload or {}).get("memory_items") or []
+        if not isinstance(rows, list):
+            rows = []
+
+        if not merge:
+            errors.append("merge=false is treated as append-only in neo4j adapter")
+
+        for row in rows:
+            if not isinstance(row, dict):
+                skipped_items += 1
+                continue
+            user_id = str(row.get("user_id") or "default_user").strip() or "default_user"
+            session_id = str(row.get("session_id") or "default_session").strip() or "default_session"
+            role = str(row.get("role") or "user").strip().lower() or "user"
+            content = str(row.get("content") or "")
+            if not content:
+                skipped_items += 1
+                continue
+            try:
+                ok = self.add_message(
+                    session_id=session_id,
+                    role=role,
+                    content=content,
+                    user_id=user_id,
+                    metadata={
+                        "import_source": "mef",
+                        "memory_type": row.get("memory_type"),
+                        "source_layer": row.get("source_layer"),
+                        "created_at": row.get("created_at"),
+                    },
+                )
+                if ok:
+                    imported_items += 1
+                else:
+                    skipped_items += 1
+            except Exception as exc:
+                skipped_items += 1
+                errors.append(str(exc))
+
         return {
-            "ok": False,
-            "imported": {"memory_items": 0, "nodes": 0, "edges": 0},
+            "ok": imported_items > 0 and not errors,
+            "imported": {"memory_items": imported_items, "nodes": 0, "edges": 0},
+            "skipped": {"memory_items": skipped_items, "nodes": 0, "edges": 0},
             "merge": bool(merge),
-            "reason": "neo4j direct import not implemented in unified adapter yet",
+            "errors": errors[:20],
+            "reason": None if imported_items > 0 else "no_importable_memory_items",
         }
 
     def list_memory_entries(

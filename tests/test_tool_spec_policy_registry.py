@@ -51,7 +51,7 @@ def test_policy_allow_deny():
     assert decision.allowed is False
 
 
-def test_side_effect_tool_denied_by_default_without_explicit_allow():
+def test_side_effect_tool_allowed_by_default_for_flexible_runtime():
     policy = ToolPolicy()
     spec = ToolSpec(
         tool_name="write_file",
@@ -60,6 +60,20 @@ def test_side_effect_tool_denied_by_default_without_explicit_allow():
         side_effect_level=SideEffectLevel.WORKSPACE_WRITE,
     )
     run_context = SimpleNamespace(tool_policy={})
+
+    decision = policy.evaluate(spec=spec, run_context=run_context, user_config=None)
+    assert decision.allowed is True
+
+
+def test_side_effect_tool_can_be_strictly_gated_when_requested():
+    policy = ToolPolicy()
+    spec = ToolSpec(
+        tool_name="write_file",
+        service_name="computer_control",
+        source=ToolSource.MCP,
+        side_effect_level=SideEffectLevel.WORKSPACE_WRITE,
+    )
+    run_context = SimpleNamespace(tool_policy={"strict_side_effect_allowlist": True})
 
     decision = policy.evaluate(spec=spec, run_context=run_context, user_config=None)
     assert decision.allowed is False

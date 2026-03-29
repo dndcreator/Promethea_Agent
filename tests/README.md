@@ -15,6 +15,13 @@
 # 全量（默认不跑 live）
 python tests/run_all_tests.py
 
+# 分层套件（推荐先跑 business）
+python tests/run_all_tests.py --suite smoke
+python tests/run_all_tests.py --suite core
+python tests/run_all_tests.py --suite contracts
+python tests/run_all_tests.py --suite business
+python tests/run_all_tests.py --suite full
+
 # 全量 + 覆盖率
 python tests/run_all_tests.py --coverage
 
@@ -26,6 +33,9 @@ python tests/run_all_tests.py --pattern "memory and not live"
 
 # 开启 live 测试
 python tests/run_all_tests.py --live
+
+# 发布前业务回归（自动找解释器并写日志）
+powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite business
 ```
 
 ### 最小回归集合（推荐）

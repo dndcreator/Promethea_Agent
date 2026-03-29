@@ -5,7 +5,7 @@ import json
 import os
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -63,6 +63,17 @@ class SystemInfoResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global Promethea_agent, gateway_integration
+    startup_components: List[Dict[str, str]] = []
+
+    def _mark_component(name: str, status: str, detail: str = "") -> None:
+        startup_components.append(
+            {
+                "name": str(name),
+                "status": str(status),
+                "detail": str(detail or ""),
+            }
+        )
+
     try:
         logger.info("Loading plugin system...")
         try:
@@ -73,8 +84,8 @@ async def lifespan(app: FastAPI):
             mem_enabled = True
             try:
                 mem_enabled = config.memory.enabled
-            except Exception:
-                pass
+            except Exception as config_err:
+                logger.debug("memory plugin enable check failed: {}", config_err)
 
             plugins_config = {
                 "plugins": {"memory": {"enabled": mem_enabled, "config": {}}}
@@ -91,15 +102,18 @@ async def lifespan(app: FastAPI):
                 )
             )
             logger.info("Plugin system loaded")
+            _mark_component("plugin_system", "ok")
         except Exception as e:
             logger.warning(f"Plugin system load failed: {e}")
             traceback.print_exc()
+            _mark_component("plugin_system", "degraded", str(e))
 
         logger.info("Initializing conversation core...")
         from conversation_core import PrometheaConversation
 
         Promethea_agent = PrometheaConversation()
         logger.info("Conversation core initialized")
+        _mark_component("conversation_core", "ok")
 
         logger.info("Initializing MCP registry...")
         try:
@@ -114,8 +128,10 @@ async def lifespan(app: FastAPI):
             logger.info(
                 f"MCP initialized with {len(registered_services)} services: {registered_services}"
             )
+            _mark_component("mcp_registry", "ok", f"services={len(registered_services)}")
         except Exception as e:
             logger.warning(f"MCP initialization failed: {e}")
+            _mark_component("mcp_registry", "degraded", str(e))
 
         logger.info("Initializing gateway integration...")
         try:
@@ -132,12 +148,48 @@ async def lifespan(app: FastAPI):
                 mcp_manager=state.mcp_manager,
             )
             logger.info("Gateway integration initialized")
+            _mark_component("gateway_integration", "ok")
         except Exception as e:
             logger.warning(f"Gateway initialization failed: {e}")
             traceback.print_exc()
+            _mark_component("gateway_integration", "failed", str(e))
+
+        total = len(startup_components)
+        ok_count = sum(1 for item in startup_components if item["status"] == "ok")
+        failed_count = sum(1 for item in startup_components if item["status"] == "failed")
+        degraded_count = sum(1 for item in startup_components if item["status"] == "degraded")
+        if failed_count:
+            startup_status = "failed"
+        elif degraded_count:
+            startup_status = "degraded"
+        else:
+            startup_status = "healthy"
+        state.startup_report = {
+            "status": startup_status,
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "components": startup_components,
+            "summary": {
+                "total": total,
+                "ok": ok_count,
+                "degraded": degraded_count,
+                "failed": failed_count,
+            },
+        }
 
         yield
     except Exception as e:
+        state.startup_report = {
+            "status": "failed",
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "components": startup_components,
+            "summary": {
+                "total": len(startup_components),
+                "ok": sum(1 for item in startup_components if item["status"] == "ok"),
+                "degraded": sum(1 for item in startup_components if item["status"] == "degraded"),
+                "failed": sum(1 for item in startup_components if item["status"] == "failed") + 1,
+            },
+            "error": str(e),
+        }
         logger.error(f"Server startup failed: {e}")
         traceback.print_exc()
         raise
@@ -288,9 +340,18 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    startup = dict(state.startup_report or {})
+    startup_status = str(startup.get("status") or "unknown")
+    gateway_ready = bool(gateway_integration and gateway_integration.get_gateway_server().is_running)
+    if startup_status == "failed" or not gateway_ready:
+        status = "degraded"
+    else:
+        status = "healthy"
     return {
-        "status": "healthy",
+        "status": status,
         "agent_ready": Promethea_agent is not None,
+        "gateway_ready": gateway_ready,
+        "startup_status": startup_status,
         "timestamp": str(asyncio.get_event_loop().time()),
     }
 

@@ -1,0 +1,13 @@
+﻿# Default owners for repository areas.
+# Replace placeholders with actual GitHub handles.
+
+* @dndcreator
+
+/gateway/ @dndcreator
+/memory/ @dndcreator
+/agentkit/ @dndcreator
+/channels/ @dndcreator
+/promethea_cli/ @dndcreator
+/UI/ @dndcreator
+/docs/ @dndcreator
+/tests/ @dndcreator

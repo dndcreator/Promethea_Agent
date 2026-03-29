@@ -20,9 +20,20 @@ Architecture contract (machine-readable):
 
 - `/api/ops/capabilities`
 - `/api/ops/abstractions`
+- `/api/ops/protocol`
+- `/api/ops/methods`
+- `/api/ops/http-contracts`
+- `/api/ops/framework-check`
+- `/api/ops/surfaces`
+- `/api/ops/readiness`
 - `/api/ops/runbook`
 
 See: [`docs/infrastructure-profile.md`](docs/infrastructure-profile.md)
+Docs hub: [`docs/README.md`](docs/README.md)
+Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
+Maintainers: [`MAINTAINERS.md`](MAINTAINERS.md)
+Roadmap: [`ROADMAP.md`](ROADMAP.md)
+Deployment: [`docs/deployment.md`](docs/deployment.md)
 
 ## Why Promethea?
 
@@ -231,12 +242,19 @@ Key sections:
 | [`docs/architecture/security-model.md`](docs/architecture/security-model.md) | Namespace layers, enforcement points, audit |
 | [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |
 | [`docs/architecture/tool-runtime.md`](docs/architecture/tool-runtime.md) | ToolSpec, ToolRegistry, ToolPolicy |
+| [`docs/official-tools.md`](docs/official-tools.md) | Built-in official toolpack and runtime visibility |
 | [`docs/configuration.md`](docs/configuration.md) | Full configuration reference |
 | [`docs/ui-overview.md`](docs/ui-overview.md) | Current Web UI capabilities and limits |
 | [`docs/channels/telegram.md`](docs/channels/telegram.md) | Telegram adapter status and integration notes |
 | [`docs/quickstart-local-model.md`](docs/quickstart-local-model.md) | Using local models (vLLM, Ollama, etc.) |
 | [`docs/scenario-workflow-audit.md`](docs/scenario-workflow-audit.md) | End-to-end demo: workflow + workspace + audit |
+| [`docs/full-business-test-playbook.md`](docs/full-business-test-playbook.md) | Release-grade full business test checklist |
+| [`docs/deployment.md`](docs/deployment.md) | Deployment and production readiness baseline |
+| [`docs/opencloud-gap-analysis-2026-03-25.md`](docs/opencloud-gap-analysis-2026-03-25.md) | Key OSS gap analysis and closures |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
+| [`GOVERNANCE.md`](GOVERNANCE.md) | Project governance and decision model |
+| [`MAINTAINERS.md`](MAINTAINERS.md) | Maintainer responsibilities and ownership |
+| [`ROADMAP.md`](ROADMAP.md) | Product and engineering roadmap |
 
 ---
 

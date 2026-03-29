@@ -9,7 +9,7 @@ from agentkit.mcp.mcp_manager import MCPManager, get_mcp_manager
 
 from .events import EventEmitter
 from .protocol import EventType
-from .tools import ToolPolicy, ToolPolicyDecision, ToolRegistry
+from .tools import SideEffectLevel, ToolPolicy, ToolPolicyDecision, ToolRegistry
 
 
 @dataclass
@@ -126,9 +126,28 @@ class ToolService:
 
         return {"tools": tools, "total": len(tools)}
 
-    async def get_tool_catalog(self) -> List[Dict[str, Any]]:
+    async def get_tool_catalog(
+        self,
+        *,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
         self._sync_registry_from_mcp()
         raw = await self.list_tools()
+        health_by_service: Dict[str, Dict[str, Any]] = {}
+        try:
+            user_id = str(getattr(run_context, "user_id", "") or "").strip() if run_context is not None else None
+            if self.mcp_manager and hasattr(self.mcp_manager, "list_service_health"):
+                rows = self.mcp_manager.list_service_health(user_id=user_id or None) or []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    service_name = str(row.get("service_name") or row.get("id") or "").strip()
+                    if service_name:
+                        health_by_service[service_name] = row
+        except Exception as e:
+            logger.debug(f"Tool catalog health probe skipped: {e}")
+
         catalog: List[Dict[str, Any]] = []
         for service in raw.get("tools", []):
             service_name = service.get("service") or service.get("name")
@@ -136,22 +155,92 @@ class ToolService:
             tool_type = service.get("type", "unknown")
             actions = service.get("actions") or []
             if not actions:
+                tool_name = service_name
+                params = {"agentType": tool_type, "service_name": service_name, "tool_name": tool_name}
+                spec = self.tool_registry.resolve(tool_name=str(tool_name), params=params)
+                decision = None
+                policy_allowed = True
+                policy_reason = "allowed_by_default"
+                if run_context is not None or user_config:
+                    decision = self.tool_policy.evaluate(
+                        spec=spec,
+                        run_context=run_context,
+                        user_config=user_config,
+                    )
+                    policy_allowed = bool(decision.allowed)
+                    policy_reason = str(decision.reason or "")
+                dependency_ready = True
+                dependency_reason = ""
+                if str(tool_type).lower() == "mcp":
+                    row = health_by_service.get(str(service_name))
+                    if row:
+                        status = str(row.get("status") or "").strip().lower()
+                        visibility = str(row.get("user_visibility") or "visible").strip().lower()
+                        dependency_ready = status in {"online", "healthy", "ready", "ok"} and visibility == "visible"
+                        if not dependency_ready:
+                            dependency_reason = f"mcp_{status or 'offline'}"
+                callable_now = bool(policy_allowed and dependency_ready)
+                callable_reason = "callable" if callable_now else (dependency_reason or policy_reason or "not_callable")
+                requires_confirmation = spec.side_effect_level in {
+                    SideEffectLevel.EXTERNAL_WRITE,
+                    SideEffectLevel.PRIVILEGED_HOST_ACTION,
+                }
                 catalog.append(
                     {
                         "tool_type": tool_type,
                         "service_name": service_name,
-                        "tool_name": service_name,
+                        "tool_name": tool_name,
                         "description": service_desc,
+                        "callable_now": callable_now,
+                        "callable_reason": callable_reason,
+                        "policy_allowed": policy_allowed,
+                        "dependency_ready": dependency_ready,
+                        "requires_confirmation": requires_confirmation,
                     }
                 )
                 continue
             for action in actions:
+                tool_name = action.get("name") or service_name
+                params = {"agentType": tool_type, "service_name": service_name, "tool_name": tool_name}
+                spec = self.tool_registry.resolve(tool_name=str(tool_name), params=params)
+                decision = None
+                policy_allowed = True
+                policy_reason = "allowed_by_default"
+                if run_context is not None or user_config:
+                    decision = self.tool_policy.evaluate(
+                        spec=spec,
+                        run_context=run_context,
+                        user_config=user_config,
+                    )
+                    policy_allowed = bool(decision.allowed)
+                    policy_reason = str(decision.reason or "")
+                dependency_ready = True
+                dependency_reason = ""
+                if str(tool_type).lower() == "mcp":
+                    row = health_by_service.get(str(service_name))
+                    if row:
+                        status = str(row.get("status") or "").strip().lower()
+                        visibility = str(row.get("user_visibility") or "visible").strip().lower()
+                        dependency_ready = status in {"online", "healthy", "ready", "ok"} and visibility == "visible"
+                        if not dependency_ready:
+                            dependency_reason = f"mcp_{status or 'offline'}"
+                callable_now = bool(policy_allowed and dependency_ready)
+                callable_reason = "callable" if callable_now else (dependency_reason or policy_reason or "not_callable")
+                requires_confirmation = spec.side_effect_level in {
+                    SideEffectLevel.EXTERNAL_WRITE,
+                    SideEffectLevel.PRIVILEGED_HOST_ACTION,
+                }
                 catalog.append(
                     {
                         "tool_type": tool_type,
                         "service_name": service_name,
-                        "tool_name": action.get("name") or service_name,
+                        "tool_name": tool_name,
                         "description": action.get("description") or service_desc,
+                        "callable_now": callable_now,
+                        "callable_reason": callable_reason,
+                        "policy_allowed": policy_allowed,
+                        "dependency_ready": dependency_ready,
+                        "requires_confirmation": requires_confirmation,
                     }
                 )
         return catalog

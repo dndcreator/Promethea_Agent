@@ -25,8 +25,8 @@ def test_basic_config_view_keeps_key_fields_and_redacted_secrets():
         "system": {"stream_mode": "false", "debug": "true", "log_level": "INFO"},
     }
     view = _build_basic_config_view(raw)
-    assert view["api"]["model"] == "gpt-4.1-mini"
+    assert "api" not in view
     assert view["memory"]["enabled"] is True
-    assert view["sandbox"]["enabled"] is False
+    assert view["memory"]["store_backend"] == "sqlite_graph"
+    assert view["reasoning"]["enabled"] is False
     assert view["system"]["stream_mode"] is False
-    assert view["system"]["debug"] is True

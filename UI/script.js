@@ -2533,9 +2533,9 @@ class MemoryConsoleManager {
             await this.apiFetch('/api/config/update', {
                 method: 'POST',
                 body: JSON.stringify({
-                    config_data: { memory: { profile } },
-                    validate_config: false,
-                    hot_reload: true,
+                    config: { memory: { profile } },
+                    validate: false,
+                    options: { hot_apply: true },
                 }),
             });
         } catch (error) {

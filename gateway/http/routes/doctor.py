@@ -21,6 +21,56 @@ def _bool_status(ok: bool) -> str:
     return "ok" if ok else "error"
 
 
+def _build_recommendations(checks: Dict[str, Dict[str, Any]]) -> list[Dict[str, Any]]:
+    out: list[Dict[str, Any]] = []
+    cfg = checks.get("config_api") or {}
+    if not bool(cfg.get("ok", True)):
+        out.append(
+            {
+                "severity": "high",
+                "component": "config_api",
+                "action": "configure API key in environment variables",
+            }
+        )
+    memory = checks.get("memory") or {}
+    if not bool(memory.get("ok", True)):
+        out.append(
+            {
+                "severity": "high",
+                "component": "memory",
+                "action": "verify memory backend connectivity or disable memory in config",
+            }
+        )
+    plugins = checks.get("plugins") or {}
+    if not bool(plugins.get("ok", True)):
+        out.append(
+            {
+                "severity": "medium",
+                "component": "plugins",
+                "action": "inspect plugin registry errors and disable failing plugins",
+            }
+        )
+    metrics = checks.get("metrics") or {}
+    if not bool(metrics.get("ok", True)):
+        out.append(
+            {
+                "severity": "medium",
+                "component": "metrics",
+                "action": "check metrics collector health and storage permissions",
+            }
+        )
+    gateway = checks.get("gateway") or {}
+    if not bool(gateway.get("ok", True)):
+        out.append(
+            {
+                "severity": "critical",
+                "component": "gateway",
+                "action": "restart gateway service and inspect startup logs",
+            }
+        )
+    return out
+
+
 @router.get("/doctor")
 async def run_doctor() -> Dict[str, Any]:
     checks: Dict[str, Dict[str, Any]] = {}
@@ -96,12 +146,21 @@ async def run_doctor() -> Dict[str, Any]:
     checks["sessions"] = {
         "ok": True,
         "status": "ok",
-        "sessions_in_memory": (
-            len(gateway_server.message_manager.session)
-            if gateway_server.message_manager
-            else 0
-        ),
+        "sessions_in_memory": 0,
     }
+    try:
+        if gateway_server.message_manager:
+            sessions_obj = getattr(gateway_server.message_manager, "session", None)
+            if sessions_obj is None:
+                sessions_obj = getattr(gateway_server.message_manager, "sessions", None)
+            if isinstance(sessions_obj, dict):
+                checks["sessions"]["sessions_in_memory"] = len(sessions_obj)
+            elif isinstance(sessions_obj, (list, tuple, set)):
+                checks["sessions"]["sessions_in_memory"] = len(sessions_obj)
+    except Exception as e:
+        checks["sessions"]["ok"] = False
+        checks["sessions"]["status"] = "error"
+        checks["sessions"]["issues"] = [f"session inventory failed: {e}"]
 
     try:
         metrics_snapshot = state.metrics.get_stats()
@@ -131,10 +190,25 @@ async def run_doctor() -> Dict[str, Any]:
         },
     }
 
-    overall_ok = all(ch.get("ok", True) for ch in checks.values())
+    ok_count = sum(1 for ch in checks.values() if bool(ch.get("ok", True)))
+    total = max(1, len(checks))
+    ratio = ok_count / total
+    if ratio >= 0.99:
+        overall_status = "healthy"
+    elif ratio >= 0.6:
+        overall_status = "degraded"
+    else:
+        overall_status = "unhealthy"
+    recommendations = _build_recommendations(checks)
     return {
-        "status": "ok" if overall_ok else "degraded",
+        "status": overall_status,
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        "summary": {
+            "checks_total": total,
+            "checks_ok": ok_count,
+            "checks_failed": total - ok_count,
+        },
+        "recommendations": recommendations,
         "checks": checks,
     }
 

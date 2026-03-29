@@ -99,16 +99,49 @@ class UserManager:
         user_dir.mkdir(parents=True, exist_ok=True)
         config_path = user_dir / "config.json"
 
-        default_config = {
-            "agent_name": agent_name,
-            "system_prompt": "",
-        }
+        default_config = self._build_user_default_config(agent_name)
 
         try:
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(default_config, f, indent=4, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Create user config failed: {e}")
+
+    @staticmethod
+    def _build_user_default_config(agent_name: str) -> Dict[str, Any]:
+        """
+        Build first-user config from system default template while keeping
+        env-only secrets out of persisted user config files.
+        """
+        try:
+            cfg = load_config().model_dump()
+        except Exception:
+            cfg = {}
+
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        cfg["agent_name"] = agent_name
+        cfg.setdefault("system_prompt", "")
+
+        # Never persist env-only secrets in per-user config files.
+        if isinstance(cfg.get("api"), dict):
+            api_cfg = dict(cfg.get("api") or {})
+            api_cfg.pop("api_key", None)
+            cfg["api"] = api_cfg
+        if isinstance(cfg.get("memory"), dict):
+            mem_cfg = dict(cfg.get("memory") or {})
+            if isinstance(mem_cfg.get("api"), dict):
+                mem_api = dict(mem_cfg.get("api") or {})
+                mem_api.pop("api_key", None)
+                mem_cfg["api"] = mem_api
+            if isinstance(mem_cfg.get("neo4j"), dict):
+                neo_cfg = dict(mem_cfg.get("neo4j") or {})
+                neo_cfg.pop("password", None)
+                mem_cfg["neo4j"] = neo_cfg
+            cfg["memory"] = mem_cfg
+
+        return cfg
 
     def _legacy_config_path(self, user_uuid: str) -> Path:
         return self.users_dir / f"{user_uuid}.json"

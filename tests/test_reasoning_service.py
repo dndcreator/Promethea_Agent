@@ -257,12 +257,21 @@ async def test_resolve_policy_normalizes_moirai_flags():
                 "enabled": True,
                 "moirai_export_plan": "true",
                 "moirai_auto_start": "0",
+                "workflow_tool_bridge": "false",
             }
         },
     )
 
     assert policy["moirai_export_plan"] is True
     assert policy["moirai_auto_start"] is False
+    assert policy["workflow_tool_bridge"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_policy_defaults_to_enabled_when_key_missing():
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+    policy = svc._resolve_policy(user_id="u1", user_config={"reasoning": {}})
+    assert policy["enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -311,6 +320,7 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
     assert call["tool_name"] == "create_flow"
     assert call["params"]["service_name"] == "moirai"
     assert call["params"]["tool_name"] == "create_flow"
+    assert isinstance(result.get("plan_steps"), list)
 
 @pytest.mark.asyncio
 async def test_select_tool_falls_back_to_strategy_when_llm_choice_invalid(monkeypatch):

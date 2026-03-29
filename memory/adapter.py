@@ -636,8 +636,8 @@ class MemoryAdapter:
             caps = self.store.get_capabilities()
             if isinstance(caps, dict):
                 return caps
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MemoryAdapter: get_capabilities fallback due to backend error: %s", e)
         return {
             "backend": self.store_backend,
             "supports_graph": False,

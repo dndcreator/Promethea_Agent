@@ -83,6 +83,11 @@ promethea chat send "hello stream" --stream
 promethea workflow list
 promethea memory graph
 promethea ops capabilities
+promethea ops protocol
+promethea ops methods
+promethea ops http-contracts
+promethea ops framework-check
+promethea ops surfaces
 ```
 
 旧别名兼容：

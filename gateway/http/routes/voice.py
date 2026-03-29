@@ -207,7 +207,28 @@ async def _dispatch_tts(req: VoiceTTSRequest, settings: VoiceRuntimeSettings) ->
     provider = (req.provider or settings.tts_provider or "openai").strip().lower()
     if provider == "elevenlabs":
         return await asyncio.to_thread(_call_elevenlabs_tts_sync, settings=settings, req=req)
+    if provider not in {"", "openai"}:
+        raise HTTPException(status_code=400, detail=f"unsupported tts provider: {provider}")
     return await asyncio.to_thread(_call_openai_tts_sync, settings=settings, req=req)
+
+
+async def _dispatch_stt(
+    *,
+    settings: VoiceRuntimeSettings,
+    filename: str,
+    content_type: str,
+    payload: bytes,
+) -> VoiceSTTResult:
+    provider = (settings.stt_provider or "openai").strip().lower()
+    if provider not in {"", "openai"}:
+        raise HTTPException(status_code=400, detail=f"unsupported stt provider: {provider}")
+    return await asyncio.to_thread(
+        _call_openai_stt_sync,
+        settings=settings,
+        filename=filename,
+        content_type=content_type,
+        payload=payload,
+    )
 
 
 @router.get("/voice/capabilities")
@@ -219,7 +240,8 @@ async def get_voice_capabilities(user_id: str = Depends(get_current_user_id)):
         "voice": {
             "input": "audio+text",
             "wake_word": True,
-            "streaming_output": True,
+            "streaming_output": False,
+            "interaction_mode": "push_to_talk_turn",
             "stt": True,
             "tts": True,
             "providers": {
@@ -243,15 +265,12 @@ async def voice_stt(
     user_id: str = Depends(get_current_user_id),
 ):
     settings = _get_voice_settings()
-    if settings.stt_provider != "openai":
-        raise HTTPException(status_code=400, detail="only openai stt provider is currently supported")
 
     payload = await audio.read()
     if not payload:
         raise HTTPException(status_code=400, detail="empty audio payload")
 
-    result = await asyncio.to_thread(
-        _call_openai_stt_sync,
+    result = await _dispatch_stt(
         settings=settings,
         filename=audio.filename or "voice.webm",
         content_type=audio.content_type or "audio/webm",
@@ -332,8 +351,7 @@ async def voice_ptt(
     if not audio_payload:
         raise HTTPException(status_code=400, detail="empty audio payload")
 
-    stt = await asyncio.to_thread(
-        _call_openai_stt_sync,
+    stt = await _dispatch_stt(
         settings=settings,
         filename=audio.filename or "voice.webm",
         content_type=audio.content_type or "audio/webm",

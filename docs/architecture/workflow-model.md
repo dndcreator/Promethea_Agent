@@ -2,7 +2,7 @@
 
 ## Scope
 
-Workflow Engine MVP introduces a resumable linear workflow runtime with checkpoint support.
+Workflow Engine provides a resumable workflow runtime with checkpoint support and dependency-aware scheduling.
 
 ## Core Objects
 
@@ -11,7 +11,7 @@ Workflow Engine MVP introduces a resumable linear workflow runtime with checkpoi
 - `WorkflowStep`
 - `Checkpoint`
 
-## Step Types (MVP)
+## Step Types (v1)
 
 - `reasoning_step`
 - `tool_step`
@@ -33,7 +33,14 @@ Workflow Engine MVP introduces a resumable linear workflow runtime with checkpoi
 - `advance_to_next_step(...)`
 - `create_checkpoint(...)`
 
-MVP behavior is linear-only (`workflow_type=linear`), with sequential step advancement.
+Supported `workflow_type` values:
+
+- `linear`: strictly sequential, one ready step at a time.
+- `parallel`: execute all ready steps in a batch.
+- `dag`: dependency-graph scheduling (acyclic).
+- `graph`: alias of dependency-graph scheduling (acyclic).
+
+Runtime metadata includes `scheduler_mode` to expose effective scheduling behavior (`sequential`, `dependency_batch`, `dependency_graph`).
 
 ## Checkpoint Policy
 
@@ -67,3 +74,4 @@ Protocol methods:
 - `workflow.checkpoints`
 
 HTTP routes are exposed under `/workflow/*` in gateway HTTP router.
+

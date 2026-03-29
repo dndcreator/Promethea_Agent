@@ -29,6 +29,20 @@ class _DummyCore:
         return {"content": "{\"recall\": false}"}
 
 
+class _DummyWorkflowEngine:
+    def __init__(self):
+        self.defined = []
+        self.started = []
+
+    def define_workflow(self, definition):
+        self.defined.append(definition)
+        return definition
+
+    def start_workflow(self, **kwargs):
+        self.started.append(kwargs)
+        return SimpleNamespace(workflow_run_id="wf_run_test")
+
+
 @pytest.mark.asyncio
 async def test_pipeline_stage_order(monkeypatch):
     service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
@@ -134,6 +148,9 @@ async def test_memory_and_tool_path(monkeypatch):
 
     assert out.status == "success"
     assert out.raw.get("memory_recalled") is True
+    capability_state = out.raw.get("capability_state") or {}
+    assert capability_state.get("degraded") is False
+    assert capability_state.get("memory", {}).get("status") == "ok"
 
 
 @pytest.mark.asyncio
@@ -182,3 +199,108 @@ async def test_fast_mode_prompt_blocks_do_not_include_reasoning():
     prompt_debug = out.raw.get("prompt_assembly") or {}
     used_block_ids = prompt_debug.get("used_block_ids") or []
     assert "reasoning" not in used_block_ids
+
+
+@pytest.mark.asyncio
+async def test_pipeline_attaches_plan_workflow_trace(monkeypatch):
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service.workflow_engine = _DummyWorkflowEngine()
+
+    reasoning = MagicMock()
+    reasoning.is_enabled.return_value = True
+    reasoning.run = AsyncMock(
+        return_value={
+            "used_reasoning": True,
+            "tree_id": "tree_1",
+            "system_prompt": "sys",
+            "plan_steps": [
+                {
+                    "title": "Collect data",
+                    "goal": "Fetch required information",
+                    "requires_tools": True,
+                    "tool_intent": "search",
+                }
+            ],
+        }
+    )
+    service.reasoning_service = reasoning
+
+    async def _deep_mode(_svc, _normalized):
+        return ModeDecision(mode="workflow", reason="test", confidence=1.0)
+
+    monkeypatch.setattr("gateway.conversation_pipeline.stage_mode_detection", _deep_mode)
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="please do a workflow plan", session_id="s1", user_id="u1")
+    )
+
+    assert out.status == "success"
+    trace = out.raw.get("workflow_trace")
+    assert isinstance(trace, dict)
+    assert trace.get("workflow_run_id") == "wf_run_test"
+    assert len(service.workflow_engine.defined) == 1
+    assert len(service.workflow_engine.started) == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_normalizes_plan_step_boolean_strings(monkeypatch):
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service.workflow_engine = _DummyWorkflowEngine()
+
+    reasoning = MagicMock()
+    reasoning.is_enabled.return_value = True
+    reasoning.run = AsyncMock(
+        return_value={
+            "used_reasoning": True,
+            "tree_id": "tree_2",
+            "system_prompt": "sys",
+            "plan_steps": [
+                {
+                    "title": "Do step",
+                    "goal": "Do goal",
+                    "requires_tools": "false",
+                    "requires_memory": "true",
+                }
+            ],
+        }
+    )
+    service.reasoning_service = reasoning
+
+    async def _deep_mode(_svc, _normalized):
+        return ModeDecision(mode="workflow", reason="test", confidence=1.0)
+
+    monkeypatch.setattr("gateway.conversation_pipeline.stage_mode_detection", _deep_mode)
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="workflow bool normalize", session_id="s1", user_id="u1")
+    )
+
+    assert out.status == "success"
+    definition = service.workflow_engine.defined[0]
+    step_inputs = definition.steps[0].inputs
+    assert step_inputs["requires_tools"] is False
+    assert step_inputs["requires_memory"] is True
+
+
+@pytest.mark.asyncio
+async def test_pipeline_exposes_stage_status_and_degraded_reason_when_memory_empty(monkeypatch):
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service._should_recall_memory = AsyncMock(return_value=True)
+    memory = MagicMock()
+    memory.is_enabled.return_value = True
+    memory.get_context = AsyncMock(return_value="")
+    service.memory_service = memory
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="need memory context", session_id="s1", user_id="u1")
+    )
+
+    assert out.status == "success"
+    pipeline = out.raw.get("pipeline") or {}
+    stage_status = pipeline.get("stage_status") or {}
+    memory_status = stage_status.get("memory_recall") or {}
+    assert memory_status.get("status") == "degraded"
+    assert memory_status.get("reason_code") == "empty_context"
+    capability = out.raw.get("capability_state") or {}
+    assert capability.get("degraded") is True
+    assert "memory_recall" in (capability.get("degraded_stages") or [])

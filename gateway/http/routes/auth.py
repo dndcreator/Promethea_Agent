@@ -1,9 +1,9 @@
-﻿import os
+import os
 from datetime import datetime, timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
+from loguru import logger
 
 from ..schemas import (
     ChannelBindRequest,
@@ -13,7 +13,9 @@ from ..schemas import (
     UserRegister,
 )
 from ..user_manager import user_manager
+from ..config_compat import build_user_config_payload
 from config import config
+from gateway_integration import get_gateway_integration
 
 router = APIRouter()
 
@@ -117,31 +119,58 @@ async def get_profile(user_id: str = Depends(get_current_user_id)):
     }
 
 
+def _get_config_service():
+    integration = get_gateway_integration()
+    if not integration:
+        raise HTTPException(status_code=503, detail="Gateway not initialized")
+    gateway_server = integration.get_gateway_server()
+    if not gateway_server or not gateway_server.config_service:
+        raise HTTPException(status_code=503, detail="Config service not initialized")
+    return gateway_server.config_service
+
+
 @router.post("/user/config")
 async def update_config(
     req: UserConfigUpdate,
     user_id: str = Depends(get_current_user_id),
 ):
-    update_data = {}
-    if req.agent_name is not None:
-        update_data["agent_name"] = req.agent_name
-    if req.system_prompt is not None:
-        update_data["system_prompt"] = req.system_prompt
+    payload = build_user_config_payload(req)
+    try:
+        config_service = _get_config_service()
+        result = await config_service.update_user_config(user_id, payload, validate=True)
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "Update config failed"))
 
-    graph_sync_ok = user_manager.update_user_config(
-        user_id,
-        agent_name=req.agent_name,
-        system_prompt=req.system_prompt,
-    )
+        sanitized = dict(result.get("config") or {})
+        if isinstance(sanitized.get("api"), dict):
+            sanitized["api"]["api_key"] = ""
 
-    file_ok = True
-    if update_data:
-        file_ok = user_manager.update_user_config_file(user_id, update_data)
-
-    if not file_ok:
-        raise HTTPException(status_code=500, detail="Update config failed")
-
-    return {"status": "success", "message": "Config updated", "graph_sync_ok": graph_sync_ok}
+        return {
+            "status": "success",
+            "message": result.get("message", "Config updated"),
+            "deprecated": True,
+            "canonical_endpoint": "/api/config/update",
+            "config": sanitized,
+        }
+    except HTTPException as exc:
+        if exc.status_code != 503:
+            raise
+        # Fallback: keep legacy behavior if gateway services are unavailable.
+        graph_sync_ok = user_manager.update_user_config(
+            user_id,
+            agent_name=req.agent_name,
+            system_prompt=req.system_prompt,
+        )
+        file_ok = user_manager.update_user_config_file(user_id, payload) if payload else True
+        if not file_ok:
+            raise HTTPException(status_code=500, detail="Update config failed")
+        return {
+            "status": "success",
+            "message": "Config updated (legacy fallback)",
+            "graph_sync_ok": graph_sync_ok,
+            "deprecated": True,
+            "canonical_endpoint": "/api/config/update",
+        }
 
 
 @router.post("/user/channels/bind")
@@ -177,8 +206,8 @@ async def delete_user_account(
         for sid in list(sessions.keys()):
             raw_sid = sid.split("::", 1)[-1] if "::" in sid else sid
             message_manager.delete_session(raw_sid, user_id=user_id)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("user delete: failed to clear session cache for {}: {}", user_id, e)
 
     success = user_manager.delete_user(user_id)
     if not success:

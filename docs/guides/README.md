@@ -1,0 +1,11 @@
+# Guides
+
+Task-oriented implementation and operation guides.
+
+## Available Guides
+
+- [Business Test Playbook](./business-test-playbook.md)
+- [Add a Tool](../playbooks/how-to-add-a-tool.md)
+- [Add a Skill](../playbooks/how-to-add-a-skill.md)
+- [Add a Channel](../playbooks/how-to-add-a-channel.md)
+- [Debug a Session](../playbooks/how-to-debug-a-session.md)

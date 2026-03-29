@@ -10,6 +10,7 @@ Thank you for your interest. This document explains how to set up a development 
 - [Running tests](#running-tests)
 - [Code style](#code-style)
 - [Project structure](#project-structure)
+- [Governance and ownership](#governance-and-ownership)
 - [Submitting a pull request](#submitting-a-pull-request)
 - [Architecture decision records (ADRs)](#architecture-decision-records)
 - [Backlog tasks](#backlog-tasks)
@@ -110,6 +111,14 @@ example.env       Template for user configuration
 
 Key entry point: `gateway/app.py` — FastAPI application.  
 Startup script: `start_gateway_service.py`.
+
+---
+
+## Governance and ownership
+
+- Governance model: `GOVERNANCE.md`
+- Maintainer responsibility and ownership: `MAINTAINERS.md`
+- Path-based review ownership: `.github/CODEOWNERS`
 
 ---
 

@@ -7,4 +7,10 @@ from .metrics import get_metrics_collector
 
 mcp_manager = MCPManager()
 metrics = get_metrics_collector()
+startup_report = {
+    "status": "unknown",
+    "started_at": None,
+    "components": [],
+    "summary": {"total": 0, "ok": 0, "degraded": 0, "failed": 0},
+}
 

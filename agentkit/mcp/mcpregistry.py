@@ -183,7 +183,7 @@ def initialize_mcp_registry(scan_dir: str = 'agentkit', force: bool = False) -> 
     return list(MCP_REGISTRY.keys())
 
 def is_initialized() -> bool:
-    """TODO: add docstring."""
+    """Return True when at least one MCP-compatible service is registered."""
     return len(MCP_REGISTRY) > 0
 
 def get_service_statistics() -> Dict[str, Any]:
@@ -202,18 +202,26 @@ def ensure_builtin_service():
                 return float(a) + float(b)
             except Exception:
                 return 0.0
+        async def now(self) -> str:
+            return datetime.utcnow().isoformat() + "Z"
+        async def json_get(self, obj: Dict[str, Any], key: str, default: Any = None) -> Any:
+            if not isinstance(obj, dict):
+                return default
+            return obj.get(key, default)
         async def handle_handoff(self, task: Dict[str, Any]) -> Any:
             return {"status": "success", "result": task}
     MCP_REGISTRY["builtin"] = BuiltinService()
     MANIFEST_CACHE["builtin"] = {
         "name": "builtin",
         "label": "Builtin Tools",
-        "version": "0.1.0",
-        "description": "Built-in minimal tools for MVP",
+        "version": "1.0.0",
+        "description": "Built-in baseline tools for fallback runtime availability",
         "capabilities": {
             "invocation_commands": [
                 {"command": "echo", "description": "Echo text"},
-                {"command": "sum", "description": "Sum two numbers"}
+                {"command": "sum", "description": "Sum two numbers"},
+                {"command": "now", "description": "Get current UTC timestamp"},
+                {"command": "json_get", "description": "Read a key from a JSON object"}
             ]
         },
         "inputSchema": {
@@ -221,7 +229,10 @@ def ensure_builtin_service():
             "properties": {
                 "text": {"type": "string"},
                 "a": {"type": "number"},
-                "b": {"type": "number"}
+                "b": {"type": "number"},
+                "obj": {"type": "object"},
+                "key": {"type": "string"},
+                "default": {}
             }
         }
     }

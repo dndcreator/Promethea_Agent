@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import uuid
 from typing import Any, Dict, List, Optional
+
+from loguru import logger
 
 from .protocol import (
     ConversationRunInput,
@@ -20,6 +23,23 @@ from .memory_recall_schema import MemoryRecallRequest
 from .prompt_assembler import PromptAssembler
 
 PROMPT_ASSEMBLER = PromptAssembler()
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off", ""}:
+            return False
+        return default
+    return bool(value)
 
 
 def _normalize_recall_context(value: Any) -> str:
@@ -263,12 +283,120 @@ async def stage_plan_or_reason(
         user_config=user_config,
         run_context=run_context,
     )
+    workflow_trace = await _attach_plan_workflow_trace(
+        service,
+        normalized=normalized,
+        mode=mode,
+        reasoning_result=result if isinstance(result, dict) else {},
+        run_context=run_context,
+    )
+    if workflow_trace and isinstance(result, dict):
+        result = dict(result)
+        result["workflow_trace"] = workflow_trace
     return PlanResult(
         used_reasoning=bool(result.get("used_reasoning")),
         system_prompt=str(result.get("system_prompt", "") or ""),
         base_system_prompt=base_system_prompt,
         reasoning=result if isinstance(result, dict) else {},
     )
+
+
+def _normalize_plan_steps(raw_steps: Any) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    if not isinstance(raw_steps, list):
+        return normalized
+    for idx, item in enumerate(raw_steps):
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or f"Plan Step {idx + 1}").strip() or f"Plan Step {idx + 1}"
+        goal = str(item.get("goal") or title).strip() or title
+        normalized.append(
+            {
+                "title": title,
+                "goal": goal,
+                "requires_memory": _to_bool(item.get("requires_memory"), default=False),
+                "requires_tools": _to_bool(item.get("requires_tools"), default=False),
+                "tool_intent": str(item.get("tool_intent") or "").strip(),
+                "memory_query": str(item.get("memory_query") or "").strip(),
+            }
+        )
+    return normalized
+
+
+async def _attach_plan_workflow_trace(
+    service: Any,
+    *,
+    normalized: NormalizedInput,
+    mode: ModeDecision,
+    reasoning_result: Dict[str, Any],
+    run_context: Optional[Any],
+) -> Dict[str, Any]:
+    if mode.mode not in {"deep", "workflow"}:
+        return {}
+    if not service.workflow_engine:
+        return {}
+    if not bool(reasoning_result.get("used_reasoning")):
+        return {}
+
+    steps = _normalize_plan_steps(reasoning_result.get("plan_steps"))
+    if not steps:
+        return {}
+    try:
+        from .workflow_models import WorkflowDefinition, WorkflowStep
+
+        workflow_id = f"reasoning_plan_{uuid.uuid4().hex}"
+        definition_steps: List[WorkflowStep] = []
+        for idx, step in enumerate(steps):
+            definition_steps.append(
+                WorkflowStep(
+                    step_id=f"plan_{idx + 1}",
+                    step_type="reasoning_step",
+                    name=step["title"],
+                    description=step["goal"],
+                    inputs=step,
+                )
+            )
+        definition = WorkflowDefinition(
+            workflow_id=workflow_id,
+            workflow_type="linear",
+            name=f"Reasoning Plan {workflow_id[-8:]}",
+            description="Ephemeral workflow trace generated from reasoning plan steps.",
+            owner_user_id=normalized.user_id or "default_user",
+            steps=definition_steps,
+            policy={
+                "source": "reasoning_plan",
+                "mode": mode.mode,
+                "tree_id": reasoning_result.get("tree_id"),
+            },
+        )
+        service.workflow_engine.define_workflow(definition)
+        start_async = getattr(service.workflow_engine, "start_workflow_async", None)
+        kwargs = {
+            "workflow_id": workflow_id,
+            "session_id": normalized.session_id or "default_session",
+            "user_id": normalized.user_id or "default_user",
+            "workspace_id": normalized.session_id or "default_workspace",
+            "run_context": run_context,
+            "run_metadata": {
+                "source": "reasoning_plan",
+                "mode": mode.mode,
+                "tree_id": reasoning_result.get("tree_id"),
+                "step_count": len(steps),
+            },
+        }
+        if callable(start_async):
+            run = await start_async(**kwargs)
+        else:
+            run = service.workflow_engine.start_workflow(**kwargs)
+        return {
+            "workflow_id": workflow_id,
+            "workflow_run_id": str(getattr(run, "workflow_run_id", "") or ""),
+            "step_count": len(steps),
+            "source": "reasoning_plan",
+        }
+    except Exception as e:
+        logger.debug("conversation_pipeline: attach plan workflow trace skipped: {}", e)
+        return {}
 
 
 async def stage_tool_execution(
@@ -348,7 +476,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
         "tool_execution",
         "response_synthesis",
     ]
-    state: Dict[str, Any] = {"stages": []}
+    state: Dict[str, Any] = {"stages": [], "stage_status": {}}
     current_stage: Optional[str] = None
     run_context = run_input.run_context
     session_id = run_input.session_id
@@ -377,6 +505,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"user_message_length": len(normalized.user_message)},
         )
         state["stages"].append(current_stage)
+        state["stage_status"][current_stage] = {"status": "ok"}
 
         user_config = run_input.user_config
         if user_config is None and service.config_service and user_id:
@@ -408,6 +537,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"mode": mode.mode, "reason": mode.reason},
         )
         state["stages"].append(current_stage)
+        state["stage_status"][current_stage] = {"status": "ok", "mode": mode.mode}
 
         current_stage = stages[2]
         await _emit_stage_event(
@@ -435,6 +565,14 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"recalled": memory_bundle.recalled},
         )
         state["stages"].append(current_stage)
+        memory_stage_status = "ok" if memory_bundle.recalled else "skipped"
+        if (not memory_bundle.recalled) and str(memory_bundle.reason or "") not in {"mode_fast", "not_needed", "missing_identity"}:
+            memory_stage_status = "degraded"
+        state["stage_status"][current_stage] = {
+            "status": memory_stage_status,
+            "reason_code": str(memory_bundle.reason or ""),
+            "recalled": bool(memory_bundle.recalled),
+        }
 
         current_stage = stages[3]
         await _emit_stage_event(
@@ -463,6 +601,12 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"used_reasoning": plan.used_reasoning},
         )
         state["stages"].append(current_stage)
+        plan_stage_status = "ok" if plan.used_reasoning else ("skipped" if mode.mode == "fast" else "degraded")
+        state["stage_status"][current_stage] = {
+            "status": plan_stage_status,
+            "used_reasoning": bool(plan.used_reasoning),
+            "reason_code": "reasoning_disabled_or_unavailable" if plan_stage_status == "degraded" else "",
+        }
 
         current_stage = stages[4]
         await _emit_stage_event(
@@ -484,6 +628,10 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"enabled": tools.enabled},
         )
         state["stages"].append(current_stage)
+        state["stage_status"][current_stage] = {
+            "status": "ok" if tools.enabled else "skipped",
+            "enabled": bool(tools.enabled),
+        }
 
         current_stage = stages[5]
         await _emit_stage_event(
@@ -514,12 +662,29 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             payload={"status": response.status},
         )
         state["stages"].append(current_stage)
+        state["stage_status"][current_stage] = {"status": "ok", "response_status": response.status}
 
         raw = dict(response.response_data)
+        degraded_stages = [
+            stage_name
+            for stage_name, info in (state.get("stage_status") or {}).items()
+            if isinstance(info, dict) and str(info.get("status") or "") == "degraded"
+        ]
+        capability_state = {
+            "memory": state["stage_status"].get("memory_recall", {}),
+            "reasoning": state["stage_status"].get("planning_reasoning", {}),
+            "tools": state["stage_status"].get("tool_execution", {}),
+            "workflow_trace_attached": bool(isinstance(plan.reasoning, dict) and plan.reasoning.get("workflow_trace")),
+            "degraded": bool(degraded_stages),
+            "degraded_stages": degraded_stages,
+        }
         raw.setdefault("pipeline", state)
         raw.setdefault("mode", mode.mode)
         raw.setdefault("memory_recalled", memory_bundle.recalled)
         raw.setdefault("used_reasoning", plan.used_reasoning)
+        raw.setdefault("capability_state", capability_state)
+        if isinstance(plan.reasoning, dict) and plan.reasoning.get("workflow_trace"):
+            raw.setdefault("workflow_trace", plan.reasoning.get("workflow_trace"))
         return ConversationRunOutput(
             status=response.status,
             content=response.content,

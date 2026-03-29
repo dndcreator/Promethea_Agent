@@ -35,6 +35,7 @@ from channels.adapter_registry import build_default_adapter_registry
 from memory.session_scope import ensure_session_owned
 from .models import RunContext, SessionState
 from skills import build_default_skill_registry
+from .config_protocol import normalize_config_update_params
 
 
 class GatewayServer:
@@ -263,6 +264,7 @@ class GatewayServer:
             return GatewayProtocol.create_response(
                 request_id,
                 False,
+                payload={"error_detail": self._build_error_detail(message=f"invalid request params: {e}", trace_id=trace_id)},
                 error=f"invalid request params: {e}",
             )
 
@@ -285,6 +287,7 @@ class GatewayServer:
             response = GatewayProtocol.create_response(
                 request.id,
                 False,
+                payload={"error_detail": self._build_error_detail(message=f"Unknown request method: {method}", trace_id=trace_id)},
                 error=f"Unknown request method: {method}",
             )
             await self.event_emitter.emit(
@@ -306,6 +309,7 @@ class GatewayServer:
             response = GatewayProtocol.create_response(
                 request.id,
                 False,
+                payload={"error_detail": self._build_error_detail(message=guard_error, trace_id=trace_id)},
                 error=guard_error,
             )
             await self.event_emitter.emit(
@@ -356,6 +360,7 @@ class GatewayServer:
         response = GatewayProtocol.create_response(
             request.id,
             False,
+            payload={"error_detail": self._build_error_detail(message=last_error or "request failed", trace_id=trace_id)},
             error=last_error or "request failed",
         )
         await self.event_emitter.emit(
@@ -371,6 +376,82 @@ class GatewayServer:
             },
         )
         return response
+
+    @staticmethod
+    def _build_error_detail(*, message: str, trace_id: str) -> Dict[str, Any]:
+        msg = str(message or "").lower()
+        code = "gateway_error"
+        if "not found" in msg:
+            code = "not_found"
+        elif "forbidden" in msg:
+            code = "forbidden"
+        elif "unauthorized" in msg:
+            code = "unauthorized"
+        elif "not initialized" in msg:
+            code = "service_unavailable"
+        elif "not enabled" in msg:
+            code = "feature_disabled"
+        elif "timeout" in msg:
+            code = "timeout"
+        elif "invalid" in msg:
+            code = "invalid_request"
+
+        dependency = ""
+        if "memory" in msg:
+            dependency = "memory_service"
+        elif "workflow" in msg:
+            dependency = "workflow_engine"
+        elif "tool" in msg:
+            dependency = "tool_service"
+        elif "mcp" in msg:
+            dependency = "mcp_manager"
+        elif "config" in msg:
+            dependency = "config_service"
+        elif "workspace" in msg:
+            dependency = "workspace_service"
+
+        retryable = code in {"service_unavailable", "timeout"}
+        if code == "service_unavailable" and dependency:
+            advice = f"check {dependency} initialization and runtime dependencies"
+        elif code == "feature_disabled":
+            advice = "enable the feature in user/system configuration"
+        elif code == "timeout":
+            advice = "retry request or increase timeout"
+        elif code in {"forbidden", "unauthorized"}:
+            advice = "verify user/session ownership and policy permissions"
+        elif code == "invalid_request":
+            advice = "validate request parameters and required fields"
+        else:
+            advice = "check logs and gateway status endpoints for diagnostics"
+
+        return {
+            "code": code,
+            "message": str(message or ""),
+            "retryable": retryable,
+            "dependency": dependency,
+            "advice": advice,
+            "trace_id": str(trace_id or ""),
+        }
+
+    def _error_response(
+        self,
+        *,
+        request_id: str,
+        error: str,
+        trace_id: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> ResponseMessage:
+        merged_payload = dict(payload or {})
+        merged_payload["error_detail"] = self._build_error_detail(
+            message=error,
+            trace_id=trace_id,
+        )
+        return GatewayProtocol.create_response(
+            request_id,
+            False,
+            payload=merged_payload,
+            error=error,
+        )
 
     def get_services_health(self) -> Dict[str, Any]:
         """Return service readiness/availability snapshot."""
@@ -585,6 +666,12 @@ class GatewayServer:
                     await connection.send_response(
                         "unknown",
                         False,
+                        payload={
+                            "error_detail": self._build_error_detail(
+                                message=f"Invalid message format: {str(e)}",
+                                trace_id="trace_unknown",
+                            )
+                        },
                         error=f"Invalid message format: {str(e)}"
                     )
                     
@@ -595,10 +682,14 @@ class GatewayServer:
     
     async def _handle_request(self, connection: Connection, request: RequestMessage):
         """Handle a single request message."""
+        trace_id = self._resolve_request_trace_id(request)
+        if isinstance(request.params, dict):
+            request.params.setdefault("trace_id", trace_id)
         await self.event_emitter.emit(
             EventType.REQUEST_RECEIVED,
             {
                 "request_id": request.id,
+                "trace_id": trace_id,
                 "transport": "ws",
                 "method": request.method.value,
                 "connection_id": connection.connection_id,
@@ -618,19 +709,67 @@ class GatewayServer:
         # Lookup handler.
         handler = self._handlers.get(request.method)
         if not handler:
-            await connection.send_response(
-                request.id,
-                False,
-                error=f"Unknown request method: {request.method}"
+            response = self._error_response(
+                request_id=request.id,
+                error=f"Unknown request method: {request.method}",
+                trace_id=trace_id,
             )
+            await connection.send_message(response)
             await self.event_emitter.emit(
                 EventType.REQUEST_FAILED,
                 {
                     "request_id": request.id,
+                    "trace_id": trace_id,
                     "transport": "ws",
                     "method": request.method.value,
                     "connection_id": connection.connection_id,
-                    "error": f"Unknown request method: {request.method}",
+                    "error": response.error,
+                },
+            )
+            return
+
+        try:
+            request.params = self._validate_request_params(
+                request.method,
+                dict(request.params or {}),
+            )
+        except Exception as e:
+            response = self._error_response(
+                request_id=request.id,
+                error=f"invalid request params: {e}",
+                trace_id=trace_id,
+            )
+            await connection.send_message(response)
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request.id,
+                    "trace_id": trace_id,
+                    "transport": "ws",
+                    "method": request.method.value,
+                    "connection_id": connection.connection_id,
+                    "error": response.error,
+                },
+            )
+            return
+
+        guard_error = self._service_guard_error(request.method)
+        if guard_error:
+            response = self._error_response(
+                request_id=request.id,
+                error=guard_error,
+                trace_id=trace_id,
+            )
+            await connection.send_message(response)
+            await self.event_emitter.emit(
+                EventType.REQUEST_FAILED,
+                {
+                    "request_id": request.id,
+                    "trace_id": trace_id,
+                    "transport": "ws",
+                    "method": request.method.value,
+                    "connection_id": connection.connection_id,
+                    "error": response.error,
                 },
             )
             return
@@ -638,38 +777,58 @@ class GatewayServer:
         try:
             # Invoke handler.
             response = await handler(connection, request)
-            
+
+            if not response.ok:
+                merged_payload = dict(response.payload or {})
+                merged_payload.setdefault(
+                    "error_detail",
+                    self._build_error_detail(
+                        message=str(response.error or "request failed"),
+                        trace_id=trace_id,
+                    ),
+                )
+                response = GatewayProtocol.create_response(
+                    request.id,
+                    False,
+                    payload=merged_payload,
+                    error=response.error or "request failed",
+                )
+             
             # Cache successful idempotent responses.
             if request.idempotency_key and response.ok:
                 self._idempotency_cache[request.idempotency_key] = response
-            
+             
             await connection.send_message(response)
-            await self.event_emitter.emit(
-                EventType.REQUEST_COMPLETED,
-                {
-                    "request_id": request.id,
-                    "transport": "ws",
-                    "method": request.method.value,
-                    "connection_id": connection.connection_id,
-                    "ok": response.ok,
-                },
-            )
-            
+            event_type = EventType.REQUEST_COMPLETED if response.ok else EventType.REQUEST_FAILED
+            event_payload = {
+                "request_id": request.id,
+                "trace_id": trace_id,
+                "transport": "ws",
+                "method": request.method.value,
+                "connection_id": connection.connection_id,
+                "ok": response.ok,
+            }
+            if not response.ok:
+                event_payload["error"] = response.error
+            await self.event_emitter.emit(event_type, event_payload)
+             
         except Exception as e:
             logger.error(f"Error handling request {request.method}: {e}")
-            await connection.send_response(
-                request.id,
-                False,
-                error=f"Internal error: {str(e)}"
+            response = self._error_response(
+                request_id=request.id,
+                error=f"Internal error: {str(e)}",
+                trace_id=trace_id,
             )
+            await connection.send_message(response)
             await self.event_emitter.emit(
                 EventType.REQUEST_FAILED,
                 {
                     "request_id": request.id,
+                    "trace_id": trace_id,
                     "transport": "ws",
                     "method": request.method.value,
                     "connection_id": connection.connection_id,
-                    "error": str(e),
+                    "error": response.error,
                 },
             )
     
@@ -733,8 +892,8 @@ class GatewayServer:
                 status_info["conversation_processing"] = (
                     self.conversation_service.get_processing_stats()
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("GatewayServer: failed to fetch conversation processing stats: {}", e)
         return GatewayProtocol.create_response(request.id, True, status_info)
 
     def _get_agents_runtime_state(self) -> Dict[str, Any]:
@@ -784,6 +943,10 @@ class GatewayServer:
         if user_id:
             return str(user_id)
         return "default_user"
+
+    def _resolve_request_trace_id(self, request: RequestMessage) -> str:
+        params = request.params if isinstance(request.params, dict) else {}
+        return str(params.get("trace_id") or f"trace_{request.id}")
 
     def _build_run_context(
         self,
@@ -887,8 +1050,21 @@ class GatewayServer:
         return self.message_manager.get_session(session_id, user_id=user_id) is not None
 
     def _resolve_tool_identity(self, entry_tool_name: str, params: Dict[str, Any]) -> tuple[str, str]:
-        service_name = str(params.get("service_name") or entry_tool_name)
-        tool_name = str(params.get("tool_name") or params.get("command") or entry_tool_name)
+        explicit_service = params.get("service_name")
+        explicit_tool = params.get("tool_name") or params.get("command")
+        if explicit_service or explicit_tool:
+            service_name = str(explicit_service or entry_tool_name)
+            tool_name = str(explicit_tool or entry_tool_name)
+            return service_name, tool_name
+
+        # Keep local-tool ids like "utils.echo" compatible with policy names:
+        # when no explicit service/tool split is provided, use dotted identity once.
+        if "." in str(entry_tool_name):
+            service_name, tool_name = str(entry_tool_name).split(".", 1)
+            return service_name, tool_name
+
+        service_name = str(entry_tool_name)
+        tool_name = str(entry_tool_name)
         return service_name, tool_name
 
     def _resolve_provider_id(self, user_config: Optional[Dict[str, Any]]) -> str:
@@ -910,6 +1086,10 @@ class GatewayServer:
     def _enforce_tool_policy(self, *, entry_tool_name: str, params: Dict[str, Any], user_id: Optional[str]) -> None:
         if not self.tool_policy_engine:
             return
+        # Backward-compat: local tools are first-party extensions and should stay
+        # callable by default unless the runtime ToolService policy blocks later.
+        if self.tool_service and entry_tool_name in getattr(self.tool_service, "_registered_tools", {}):
+            return
         user_cfg = self.config_service.get_merged_config(user_id) if (self.config_service and user_id) else {}
         provider_id = self._resolve_provider_id(user_cfg)
         service_name, tool_name = self._resolve_tool_identity(entry_tool_name, params)
@@ -921,6 +1101,31 @@ class GatewayServer:
         )
         if not decision.allowed:
             raise PermissionError(decision.reason)
+
+    async def _emit_gateway_event(
+        self,
+        *,
+        event_type: EventType,
+        trace_id: Optional[str],
+        request_id: Optional[str],
+        session_id: Optional[str],
+        user_id: Optional[str],
+        payload: Optional[Dict[str, Any]] = None,
+        tags: Optional[list[str]] = None,
+    ) -> None:
+        if not self.event_emitter:
+            return
+        data: Dict[str, Any] = {
+            "trace_id": trace_id,
+            "request_id": request_id,
+            "session_id": session_id,
+            "user_id": user_id,
+        }
+        if isinstance(payload, dict):
+            data.update(payload)
+        if tags:
+            data["tags"] = list(tags)
+        await self.event_emitter.emit(event_type, data)
 
     async def _execute_tool_for_chat(
         self,
@@ -1134,7 +1339,30 @@ class GatewayServer:
                 self.tool_service = ToolService(self.event_emitter)
 
             tools_payload = await self.tool_service.list_tools()
-            
+            try:
+                user_id = self._resolve_request_user_id(connection, request)
+                run_context = SimpleNamespace(
+                    user_id=user_id,
+                    tool_policy=(request.params or {}).get("tool_policy") or {},
+                    session_state=SimpleNamespace(
+                        reasoning_mode=str((request.params or {}).get("requested_mode") or "fast")
+                    ),
+                )
+                user_cfg = (
+                    self.config_service.get_merged_config(user_id)
+                    if self.config_service and user_id
+                    else None
+                )
+                catalog = await self.tool_service.get_tool_catalog(
+                    run_context=run_context,
+                    user_config=user_cfg if isinstance(user_cfg, dict) else None,
+                )
+            except Exception:
+                catalog = await self.tool_service.get_tool_catalog()
+            callable_now = sum(1 for row in catalog if bool((row or {}).get("callable_now")))
+            tools_payload["catalog"] = catalog
+            tools_payload["catalog_total"] = len(catalog)
+            tools_payload["catalog_callable_now"] = callable_now
             return GatewayProtocol.create_response(request.id, True, tools_payload)
         except Exception as e:
             logger.error(f"Error listing tools: {e}")
@@ -2169,7 +2397,17 @@ class GatewayServer:
                 tags=["conversation"],
             )
             conversation_output = await self.conversation_service.run_conversation(conversation_input)
-            tool_call_outcome = conversation_output.raw
+            if isinstance(conversation_output, dict):
+                tool_call_outcome = conversation_output
+            else:
+                raw_payload = getattr(conversation_output, "raw", None)
+                if isinstance(raw_payload, dict):
+                    tool_call_outcome = raw_payload
+                else:
+                    tool_call_outcome = {
+                        "status": str(getattr(conversation_output, "status", "success") or "success"),
+                        "content": str(getattr(conversation_output, "content", "") or ""),
+                    }
 
             if tool_call_outcome.get("status") == "needs_confirmation":
                 next_pending = dict(tool_call_outcome)
@@ -2357,8 +2595,8 @@ class GatewayServer:
                 try:
                     loop = asyncio.get_running_loop()
                     loop.create_task(self.event_emitter.emit(EventType.SECURITY_BOUNDARY_VIOLATION, payload))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("GatewayServer: failed to emit SECURITY_BOUNDARY_VIOLATION event: {}", e)
             raise WorkspaceSandboxError("forbidden workspace access")
 
         wid = params.get("workspace_id") or params.get("session_id") or "default"
@@ -2531,7 +2769,7 @@ class GatewayServer:
             user_id = self._resolve_request_user_id(connection, request)
             session_id = str(params.get("session_id") or "default_session")
             workspace_id = str(params.get("workspace_id") or session_id)
-            run = self.workflow_engine.start_workflow(
+            run = await self.workflow_engine.start_workflow_async(
                 workflow_id=workflow_id,
                 session_id=session_id,
                 user_id=user_id,
@@ -2582,7 +2820,7 @@ class GatewayServer:
             if not run_id:
                 return GatewayProtocol.create_response(request.id, False, error="workflow_run_id is required")
             self._get_owned_workflow_run(connection, request, run_id)
-            run = self.workflow_engine.resume_workflow(run_id, run_context=request.params)
+            run = await self.workflow_engine.resume_workflow_async(run_id, run_context=request.params)
             return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
         except WorkflowError as e:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
@@ -2600,7 +2838,7 @@ class GatewayServer:
             if not run_id or not step_id:
                 return GatewayProtocol.create_response(request.id, False, error="workflow_run_id and step_id are required")
             self._get_owned_workflow_run(connection, request, run_id)
-            run = self.workflow_engine.retry_step(run_id, step_id, run_context=request.params)
+            run = await self.workflow_engine.retry_step_async(run_id, step_id, run_context=request.params)
             return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
         except WorkflowError as e:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
@@ -2619,7 +2857,7 @@ class GatewayServer:
                 return GatewayProtocol.create_response(request.id, False, error="workflow_run_id and step_id are required")
             approver = str(params.get("approved_by") or self._resolve_request_user_id(connection, request))
             self._get_owned_workflow_run(connection, request, run_id)
-            run = self.workflow_engine.approve_step(run_id, step_id, approver, run_context=request.params)
+            run = await self.workflow_engine.approve_step_async(run_id, step_id, approver, run_context=request.params)
             return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
         except WorkflowError as e:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
@@ -2695,25 +2933,43 @@ class GatewayServer:
                 )
             
             user_id = self._resolve_request_user_id(connection, request)
-            
-            config_updates = request.params.get("config", {})
+            normalized = normalize_config_update_params(request.params or {})
+            config_updates = normalized["config"]
             if not config_updates:
                 return GatewayProtocol.create_response(
                     request.id, False, error="config updates are required"
                 )
-            
-            result = await self.config_service.update_user_config(user_id, config_updates)
+
+            result = await self.config_service.update_user_config(
+                user_id,
+                config_updates,
+                validate=bool(normalized["validate"]),
+            )
+            if not result.get("success"):
+                return GatewayProtocol.create_response(
+                    request.id,
+                    False,
+                    error=result.get("message") or "config update failed",
+                )
+
+            hot_apply_payload: Dict[str, Any] = {"requested": bool(normalized["hot_apply"]), "success": False}
+            if normalized["hot_apply"]:
+                reload_result = await self.config_service.reload_default_config()
+                hot_apply_payload["success"] = bool(reload_result.get("success"))
+                hot_apply_payload["message"] = reload_result.get("message")
+                if reload_result.get("reloaded_at"):
+                    hot_apply_payload["reloaded_at"] = reload_result.get("reloaded_at")
+            result["hot_apply"] = hot_apply_payload
             
             return GatewayProtocol.create_response(
                 request.id,
-                result["success"],
-                payload=result if result["success"] else None,
-                error=result.get("message") if not result["success"] else None
+                True,
+                payload=result,
             )
         except Exception as e:
             logger.error(f"Error updating config: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))
-    
+
     async def _handle_config_reset(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
         """Handle user configuration reset."""
         try:

@@ -43,4 +43,9 @@ Current UI-bound examples:
 
 - Runtime capabilities snapshot: `/api/ops/capabilities`
 - Runtime abstraction contract: `/api/ops/abstractions`
+- Protocol contract: `/api/ops/protocol`
+- WebSocket method contracts: `/api/ops/methods`
+- HTTP endpoint contracts: `/api/ops/http-contracts`
+- Runtime consistency check: `/api/ops/framework-check`
+- Protocol surface discovery: `/api/ops/surfaces`
 - Operational guide: `/api/ops/runbook`

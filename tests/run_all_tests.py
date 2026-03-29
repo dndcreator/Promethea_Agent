@@ -1,10 +1,11 @@
-﻿"""Unified test runner for local development.
+"""Unified test runner for local development and release audit.
 
 Examples:
   python tests/run_all_tests.py
-  python tests/run_all_tests.py --live
+  python tests/run_all_tests.py --suite business
+  python tests/run_all_tests.py --live --suite full
   python tests/run_all_tests.py --file test_gateway_basic.py
-  python tests/run_all_tests.py --pattern "test_memory_*.py"
+  python tests/run_all_tests.py --pattern "memory and not live"
   python tests/run_all_tests.py --coverage
 """
 
@@ -17,17 +18,49 @@ import sys
 from pathlib import Path
 
 
+SUITE_FILES: dict[str, list[str]] = {
+    "smoke": [
+        "tests/test_mvp_business_smoke.py",
+        "tests/test_business_journeys.py",
+    ],
+    "core": [
+        "tests/test_conversation_pipeline_staging.py",
+        "tests/test_reasoning_service.py",
+        "tests/test_tool_service.py",
+        "tests/test_workflow_engine_mvp.py",
+    ],
+    "contracts": [
+        "tests/test_protocol_surface_contracts.py",
+        "tests/test_http_contract_registry.py",
+        "tests/test_config_protocol.py",
+        "tests/test_gateway_tools_list_contract.py",
+        "tests/test_gateway_ws_error_model.py",
+        "tests/test_http_dispatcher_error_model.py",
+    ],
+    "business": [
+        "tests/test_business_journeys.py",
+        "tests/test_mvp_business_smoke.py",
+        "tests/test_official_tools.py",
+        "tests/test_voice_routes.py",
+        "tests/test_ops_readiness.py",
+    ],
+    "full": [
+        "tests",
+    ],
+}
+
+
 def _build_pytest_args(args: argparse.Namespace, root: Path) -> list[str]:
-    test_target: str
     if args.file:
         target = (root / "tests" / args.file).resolve()
         if not target.exists():
             raise FileNotFoundError(f"test file not found: {target}")
-        test_target = str(target)
+        targets = [str(target)]
     else:
-        test_target = str((root / "tests").resolve())
+        raw_targets = SUITE_FILES.get(args.suite, SUITE_FILES["full"])
+        targets = [str((root / rel).resolve()) for rel in raw_targets]
 
-    cmd = [sys.executable, "-m", "pytest", test_target]
+    cmd = [sys.executable, "-m", "pytest", *targets]
 
     if args.pattern:
         cmd.extend(["-k", args.pattern])
@@ -47,6 +80,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Promethea Agent test runner")
     parser.add_argument("--live", action="store_true", help="run live integration tests")
     parser.add_argument("--file", type=str, help="run a single test file under tests/")
+    parser.add_argument(
+        "--suite",
+        type=str,
+        choices=sorted(SUITE_FILES.keys()),
+        default="full",
+        help="predefined test suite profile",
+    )
     parser.add_argument(
         "--pattern",
         type=str,
@@ -74,6 +114,7 @@ def main() -> int:
     print("Promethea Agent - Test Runner")
     print("=" * 80)
     print(f"mode: {'LIVE' if args.live else 'UNIT'}")
+    print(f"suite: {args.suite}")
     print("command:", " ".join(cmd))
 
     result = subprocess.run(cmd, cwd=str(root), check=False)

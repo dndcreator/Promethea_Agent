@@ -28,6 +28,7 @@ from .config_migrations import (
     collect_deprecation_warnings,
     migrate_config,
 )
+from .config_protocol import to_bool
 
 ENV_ONLY_SECRET_PATHS = (
     ("api", "api_key"),
@@ -264,6 +265,78 @@ class ConfigService:
             value = self._get_nested_value(default_payload, path)
             if value is not None:
                 self._set_nested_value(merged_payload, path, value)
+
+    @staticmethod
+    def _flatten_payload(
+        payload: Dict[str, Any],
+        *,
+        prefix: str = "",
+        out: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        result = out if out is not None else {}
+        if not isinstance(payload, dict):
+            return result
+        for key, value in payload.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                ConfigService._flatten_payload(value, prefix=path, out=result)
+            else:
+                result[path] = value
+        return result
+
+    def get_effective_config_with_sources(
+        self,
+        user_id: Optional[str] = None,
+        *,
+        field_paths: Optional[list[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return effective runtime config plus per-field source provenance.
+
+        Source values:
+        - env_only_secret: path is env-owned and cannot be user-overridden
+        - user_override: value comes from user override file
+        - default_template: value comes from default template/env baseline
+        - unknown: fallback when path cannot be resolved
+        """
+        if not self._default_config:
+            self._load_default_config()
+            reload_sandbox_policy()
+
+        default_payload = self._migrate_payload(
+            self._default_config.model_dump() if self._default_config else {},
+            warning_key="default",
+        )
+        effective = self.get_merged_config(user_id)
+        user_overrides = user_manager.get_user_config(user_id) if user_id else {}
+
+        default_flat = self._flatten_payload(default_payload)
+        effective_flat = self._flatten_payload(effective)
+        user_flat = self._flatten_payload(user_overrides if isinstance(user_overrides, dict) else {})
+
+        selected_paths = field_paths if field_paths else sorted(effective_flat.keys())
+        env_only_path_set = {".".join(path) for path in ENV_ONLY_SECRET_PATHS}
+
+        provenance: Dict[str, str] = {}
+        for path in selected_paths:
+            if path in env_only_path_set:
+                provenance[path] = "env_only_secret"
+            elif path in user_flat:
+                provenance[path] = "user_override"
+            elif path in default_flat:
+                provenance[path] = "default_template"
+            else:
+                provenance[path] = "unknown"
+
+        return {
+            "user_id": user_id,
+            "effective": effective,
+            "sources": provenance,
+            "layers": {
+                "default_template": default_payload,
+                "user_overrides": user_overrides if isinstance(user_overrides, dict) else {},
+            },
+        }
     
     def get_runtime_config(self, user_id: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, Any]:
         merged = self.get_merged_config(user_id)
@@ -333,10 +406,16 @@ class ConfigService:
             Result dict: {"success": bool, "message": str, "config": dict}.
         """
         try:
-            if hasattr(params_or_user_id, "config_data"):
+            if hasattr(params_or_user_id, "config_data") or hasattr(params_or_user_id, "config"):
                 params_obj = params_or_user_id
                 user_id = user_id or kwargs.get("user_id")
-                config_updates = getattr(params_obj, "config_data", {}) or {}
+                config_updates = {}
+                legacy_updates = getattr(params_obj, "config_data", {}) or {}
+                canonical_updates = getattr(params_obj, "config", {}) or {}
+                if isinstance(legacy_updates, dict):
+                    config_updates = self._deep_merge(config_updates, dict(legacy_updates))
+                if isinstance(canonical_updates, dict):
+                    config_updates = self._deep_merge(config_updates, dict(canonical_updates))
                 validate = getattr(
                     params_obj,
                     "validate_config",
@@ -350,6 +429,9 @@ class ConfigService:
 
             if config_updates is None:
                 config_updates = {}
+            if not isinstance(config_updates, dict):
+                return {"success": False, "message": "config updates must be an object", "config": {}}
+            validate = to_bool(validate, default=True)
             config_updates, blocked_secret_fields = self._strip_env_only_secret_updates(config_updates)
 
             current_config = user_manager.get_user_config(user_id)
@@ -727,16 +809,3 @@ class ConfigService:
             "warnings": sorted(set(warnings)),
             "config": config
         }
-
-
-
-
-
-
-
-
-
-
-
-
-

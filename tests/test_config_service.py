@@ -1,4 +1,4 @@
-﻿"""
+"""
 ConfigService 
 ?
 """
@@ -123,3 +123,41 @@ class TestConfigService:
         assert merged["memory"]["api"]["api_key"] == default_payload["memory"]["api"]["api_key"]
         assert merged["memory"]["neo4j"]["password"] == default_payload["memory"]["neo4j"]["password"]
 
+    def test_get_effective_config_with_sources_marks_user_and_env_paths(self):
+        service = ConfigService()
+        with patch("gateway.config_service.user_manager") as mock_user_manager:
+            mock_user_manager.get_user_config.return_value = {
+                "api": {"model": "my-model", "api_key": "cannot-win"},
+                "system": {"stream_mode": False},
+            }
+            payload = service.get_effective_config_with_sources(
+                "test_user",
+                field_paths=["api.model", "api.api_key", "system.stream_mode"],
+            )
+
+        sources = payload.get("sources") or {}
+        assert sources.get("api.model") == "user_override"
+        assert sources.get("api.api_key") == "env_only_secret"
+        assert sources.get("system.stream_mode") == "user_override"
+
+
+
+    @pytest.mark.asyncio
+    async def test_update_user_config_merges_canonical_and_legacy_param_shapes(self):
+        service = ConfigService(event_emitter=EventEmitter())
+
+        with patch("gateway.config_service.user_manager") as mock_user_manager:
+            mock_user_manager.get_user_config.return_value = {"agent_name": "Promethea"}
+            mock_user_manager.update_user_config_file.return_value = True
+
+            from gateway.protocol import ConfigUpdateParams
+            params = ConfigUpdateParams(
+                config_data={"memory": {"enabled": False}},
+                config={"memory": {"profile": "balanced"}},
+            )
+
+            result = await service.update_user_config(params, user_id="test_user", validate=False)
+            assert result["success"] is True
+            persisted = mock_user_manager.update_user_config_file.call_args[0][1]
+            assert persisted.get("memory", {}).get("enabled") is False
+            assert persisted.get("memory", {}).get("profile") == "balanced"

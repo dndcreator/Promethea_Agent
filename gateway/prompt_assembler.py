@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set
+from loguru import logger
 
 from .prompt_blocks import PromptBlock, PromptBlockType
 from .protocol import MemoryRecallBundle, ModeDecision, PlanResult, ToolExecutionBundle
@@ -303,8 +304,8 @@ class PromptAssembler:
                     "compacted": debug["compacted"],
                     "estimated_total_tokens": debug["estimated_total_tokens"],
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("PromptAssembler: failed to attach prompt block debug info: {}", e)
 
         return {
             "system_prompt": prompt,
