@@ -7,6 +7,7 @@ from typing import Optional
 
 import requests
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.params import Form as FormParam
 from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -112,6 +113,12 @@ def _get_elevenlabs_api_key() -> str:
     if not api_key:
         raise HTTPException(status_code=400, detail="VOICE__ELEVENLABS_API_KEY or VOICE__API_KEY is required for elevenlabs provider")
     return api_key
+
+
+def _normalize_form_value(value, default=None):
+    if isinstance(value, FormParam):
+        return default
+    return value
 
 
 def _detect_mime(audio_format: str) -> str:
@@ -346,6 +353,17 @@ async def voice_ptt(
     user_id: str = Depends(get_current_user_id),
 ):
     settings = _get_voice_settings()
+    session_id = _normalize_form_value(session_id, None)
+    wake_word = _normalize_form_value(wake_word, None)
+    speak = bool(_normalize_form_value(speak, True))
+    tts_provider = _normalize_form_value(tts_provider, None)
+    tts_voice = _normalize_form_value(tts_voice, None)
+    tts_format = _normalize_form_value(tts_format, "mp3") or "mp3"
+    tts_speed = _normalize_form_value(tts_speed, None)
+    tts_stability = _normalize_form_value(tts_stability, None)
+    tts_similarity_boost = _normalize_form_value(tts_similarity_boost, None)
+    tts_style = _normalize_form_value(tts_style, None)
+    tts_use_speaker_boost = _normalize_form_value(tts_use_speaker_boost, None)
 
     audio_payload = await audio.read()
     if not audio_payload:

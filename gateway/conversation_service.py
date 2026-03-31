@@ -711,6 +711,31 @@ class ConversationService:
         if quick_decision is not None:
             return quick_decision
 
+        # Performance guard: avoid an extra LLM classifier round-trip for short,
+        # non-memory-like turns.
+        llm_classifier_min_chars = 24
+        try:
+            if self.config_service:
+                cfg = (
+                    self.config_service.get_merged_config(user_id)
+                    if user_id
+                    else self.config_service.get_default_config().model_dump()
+                )
+                recall_cfg = (
+                    cfg.get("memory", {})
+                    .get("gating", {})
+                    .get("recall_filter", {})
+                )
+                llm_classifier_min_chars = int(
+                    recall_cfg.get("llm_classifier_min_query_chars", llm_classifier_min_chars)
+                )
+        except Exception as e:
+            logger.debug("ConversationService: recall llm threshold fallback used: {}", e)
+
+        text = (query or "").strip()
+        if len(text) < max(8, llm_classifier_min_chars):
+            return False
+
         try:
             judge_prompt = (
                 "You are a binary classifier. Decide whether answering the user query "

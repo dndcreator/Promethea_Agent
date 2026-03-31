@@ -9,12 +9,14 @@ Promethea docs are organized for two audiences:
 ### Getting Started
 - [Getting Started Overview](./getting-started/README.md)
 - [Quickstart](./getting-started/quickstart.md)
+- [Real User Setup](./getting-started/real-user-setup.md)
 - [Local Assistant Basics](./getting-started/local-assistant.md)
 
 ### Concepts
 - [Concepts Overview](./concepts/README.md)
 - [Runtime Model](./runtime-overview.md)
 - [Infrastructure Profile](./infrastructure-profile.md)
+- [Claude Code Comparative Deep Dive (2026-04)](./claude-code-open-source-comparative-deep-dive-2026-04.md)
 
 ### Reference
 - [Reference Overview](./reference/README.md)

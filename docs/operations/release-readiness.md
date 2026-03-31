@@ -16,6 +16,14 @@ powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite c
 powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite business
 ```
 
+One-shot preflight gate (recommended for real-machine validation):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/run_release_preflight.ps1
+```
+
+The script checks endpoint health (`/api/health`, `/api/status`, `/api/ops/*`, `/api/doctor`), runs suites, and writes a timestamped report to `logs/release-preflight/`.
+
 ## Recommended Evidence Bundle
 
 - readiness JSON

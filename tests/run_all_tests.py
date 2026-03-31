@@ -15,6 +15,7 @@ import argparse
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 
@@ -44,6 +45,14 @@ SUITE_FILES: dict[str, list[str]] = {
         "tests/test_voice_routes.py",
         "tests/test_ops_readiness.py",
     ],
+    "business_plus": [
+        "tests/test_business_journeys.py",
+        "tests/test_mvp_business_smoke.py",
+        "tests/test_official_tools.py",
+        "tests/test_voice_routes.py",
+        "tests/test_ops_readiness.py",
+        "tests/business_plus/test_business_plus_flows.py",
+    ],
     "full": [
         "tests",
     ],
@@ -60,7 +69,19 @@ def _build_pytest_args(args: argparse.Namespace, root: Path) -> list[str]:
         raw_targets = SUITE_FILES.get(args.suite, SUITE_FILES["full"])
         targets = [str((root / rel).resolve()) for rel in raw_targets]
 
-    cmd = [sys.executable, "-m", "pytest", *targets]
+    tmp_root = root / ".tmp" / "pytest"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_tmp = tmp_root / f"run-{stamp}-{os.getpid()}"
+    run_tmp.mkdir(parents=True, exist_ok=True)
+
+    # Force pytest temp artifacts to stay inside repository workspace.
+    os.environ["TEMP"] = str(run_tmp)
+    os.environ["TMP"] = str(run_tmp)
+    os.environ["TMPDIR"] = str(run_tmp)
+    os.environ["PYTEST_DEBUG_TEMPROOT"] = str(run_tmp)
+
+    cmd = [sys.executable, "-m", "pytest", "--basetemp", str(run_tmp / "base"), *targets]
 
     if args.pattern:
         cmd.extend(["-k", args.pattern])

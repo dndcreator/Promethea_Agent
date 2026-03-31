@@ -2,6 +2,9 @@
 
 This guide provides production-oriented deployment baseline for Promethea.
 
+If your target is "new users can run it with minimal support", start from:
+- [Getting Started / Real User Setup](./getting-started/real-user-setup.md)
+
 ## 1. Deployment Modes
 
 - Local single-node (default)
@@ -37,7 +40,9 @@ Recommended runtime toggles:
 pip install -r requirements.txt
 ```
 
-2. Prepare `.env` from `example.env`.
+2. Prepare `.env` from `env.example`.
+   - Keep the provider trio coherent: `API__API_KEY`, `API__BASE_URL`, `API__MODEL`.
+   - For first-time users, prefer `MEMORY__STORE_BACKEND=sqlite_graph` to reduce external dependencies.
 
 3. Start service:
 

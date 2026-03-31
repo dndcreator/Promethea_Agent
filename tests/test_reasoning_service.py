@@ -281,7 +281,7 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
 
     async def fake_gate(**kwargs):
         return {
-            "needs_reasoning": False,
+            "needs_reasoning": True,
             "needs_memory": False,
             "needs_tools": True,
             "complexity": "low",
@@ -294,9 +294,23 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
     async def fake_summarize_tree(**kwargs):
         return ""
 
+    async def fake_plan_steps(**kwargs):
+        return [
+            {
+                "title": "tooling step",
+                "goal": "help me with tooling",
+                "requires_memory": False,
+                "memory_query": "",
+                "requires_tools": True,
+                "tool_intent": "help me with tooling",
+                "notes": "",
+            }
+        ]
+
     monkeypatch.setattr(svc, "_gate_reasoning", fake_gate)
     monkeypatch.setattr(svc, "_execute_step", fake_execute_step)
     monkeypatch.setattr(svc, "_summarize_tree", fake_summarize_tree)
+    monkeypatch.setattr(svc, "_plan_steps", fake_plan_steps)
 
     result = await svc.run(
         session_id="s1",

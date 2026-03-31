@@ -89,7 +89,19 @@ yarn.lock
 .DS_Store
 Thumbs.db
 .tmp/
+_pytest_session_tmp/
+_pytest_case_tmp/
 
 # Runtime workflow artifacts
 memory/moirai_runs/wf_*.json
+memory/moirai_runs/opro_*.json
+memory/moirai_runs/*.json
+
+# Runtime user config/state (generated locally)
+config/users/
+
+# Test coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
 

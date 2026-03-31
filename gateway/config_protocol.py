@@ -47,15 +47,15 @@ def normalize_config_update_params(raw_params: Dict[str, Any]) -> Dict[str, Any]
     options = params.get("options")
     if isinstance(options, dict) and "hot_apply" in options:
         hot_apply = to_bool(options.get("hot_apply"), default=False)
-    if hot_apply is None and "hot_apply" in params:
+    if hot_apply is None and params.get("hot_apply") is not None:
         hot_apply = to_bool(params.get("hot_apply"), default=False)
     if hot_apply is None and "hot_reload" in params:
         hot_apply = to_bool(params.get("hot_reload"), default=False)
 
     validate: Optional[bool] = None
-    if "validate" in params:
+    if params.get("validate") is not None:
         validate = to_bool(params.get("validate"), default=True)
-    elif "validate_config" in params:
+    elif params.get("validate_config") is not None:
         validate = to_bool(params.get("validate_config"), default=True)
 
     return {

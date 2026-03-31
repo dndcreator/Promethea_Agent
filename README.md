@@ -34,6 +34,7 @@ Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
 Maintainers: [`MAINTAINERS.md`](MAINTAINERS.md)
 Roadmap: [`ROADMAP.md`](ROADMAP.md)
 Deployment: [`docs/deployment.md`](docs/deployment.md)
+User setup (copy-and-run): [`docs/getting-started/real-user-setup.md`](docs/getting-started/real-user-setup.md)
 
 ## Why Promethea?
 
@@ -134,10 +135,10 @@ pip install -r requirements.txt
 
 ```bash
 # Windows
-copy example.env .env
+copy env.example .env
 
 # macOS / Linux
-cp example.env .env
+cp env.example .env
 ```
 
 Open `.env` and set **at minimum these three fields** (they are coupled — all three must match your provider):
@@ -161,12 +162,7 @@ API__MODEL=your-local-model-id
 
 > ⚠️ `API__BASE_URL` and `API__MODEL` must match. Changing only the key will not work.
 
-Choose a memory backend (start here if you want zero external dependencies):
-
-```bash
-MEMORY__ENABLED=true
-MEMORY__STORE_BACKEND=sqlite_graph   # or flat_memory
-```
+Non-sensitive runtime options (including memory backend, default `neo4j`) come from `config/default.json`.
 
 ### 3. Run
 

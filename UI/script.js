@@ -1,36 +1,36 @@
 ﻿const I18N = {
     zh: {
-        lang_name: "绠€浣撲腑鏂?,
+        lang_name: "绠€浣撲腑鏂",
         auth_login: "馃攼 鐧诲綍",
         auth_register: "馃摑 娉ㄥ唽",
         auth_submit_login: "鐧诲綍",
         auth_submit_register: "娉ㄥ唽骞跺垱寤?Agent",
-        auth_switch_to_register: "鍘绘敞鍐?,
-        auth_switch_to_login: "鍘荤櫥褰?,
+        auth_switch_to_register: "鍘绘敞鍐",
+        auth_switch_to_login: "鍘荤櫥褰",
         auth_no_account: "杩樻病鏈夎处鍙凤紵",
-        auth_has_account: "宸叉湁璐﹀彿锛?,
+        auth_has_account: "宸叉湁璐﹀彿锛",
         auth_register_success: "娉ㄥ唽鎴愬姛锛岃鐧诲綍",
-        auth_welcome_back: "娆㈣繋鍥炴潵锛亄agent} 宸插噯澶囧氨缁€?,
+        auth_welcome_back: "娆㈣繋鍥炴潵锛亄agent} 宸插噯澶囧氨缁€",
         auth_failed: "鎿嶄綔澶辫触",
         auth_invalid: "璁よ瘉澶辨晥锛岃閲嶆柊鐧诲綍",
-        logout_confirm: "纭畾瑕侀€€鍑虹櫥褰曞悧锛?,
+        logout_confirm: "纭畾瑕侀€€鍑虹櫥褰曞悧锛",
         chat_placeholder: "杈撳叆浣犵殑闂...",
-        chat_need_session: "璇峰厛寮€濮嬩竴涓細璇?,
+        chat_need_session: "璇峰厛寮€濮嬩竴涓細璇",
         memory_loading: "姝ｅ湪鍔犺浇璁板繂鍥?..",
-        memory_disabled: "璁板繂绯荤粺鏈惎鐢ㄦ垨鏈氨缁?,
+        memory_disabled: "璁板繂绯荤粺鏈惎鐢ㄦ垨鏈氨缁",
         memory_fail: "鍔犺浇澶辫触: {msg}",
         memory_no_data: "褰撳墠绛涢€夋潯浠舵棤鏁版嵁",
         memory_no_nodes: "鏆傛棤鍙睍绀虹殑璁板繂鑺傜偣",
         memory_select_detail: "閫夋嫨宸︿晶鑺傜偣鏌ョ湅璇︽儏",
         memory_action_fail: "{label}澶辫触: {msg}",
-        app_welcome: "娆㈣繋浣跨敤鏅綏绫冲▍AI鍔╂墜锛乗n\n鎴戞槸浣犵殑鏅鸿兘瀵硅瘽浼欎即锛屽彲浠ュ府浣狅細\n鈥?鍥炵瓟闂\n鈥?鍒嗘瀽鏂囨。\n鈥?缂栧啓浠ｇ爜\n鈥?鍒涙剰鍐欎綔\n\n寮€濮嬪璇濆惂锛?,
-        ui_memory_workbench: "馃 璁板繂宸ヤ綔鍙?,
+        app_welcome: "娆㈣繋浣跨敤鏅綏绫冲▍AI鍔╂墜锛乗n\n鎴戞槸浣犵殑鏅鸿兘瀵硅瘽浼欎即锛屽彲浠ュ府浣狅細\n鈥?鍥炵瓟闂\n鈥?鍒嗘瀽鏂囨。\n鈥?缂栧啓浠ｇ爜\n鈥?鍒涙剰鍐欎綔\n\n寮€濮嬪璇濆惂锛",
+        ui_memory_workbench: "馃 璁板繂宸ヤ綔鍙",
         ui_lang_title: "閫夋嫨璇█ / Choose Language",
         ui_lang_desc: "璇烽€夋嫨鐣岄潰璇█锛堝悗绔棩蹇椾笉鍙楀奖鍝嶏級",
         ui_metrics: "馃搳 鎬ц兘缁熻",
         ui_doctor: "馃┖ 绯荤粺鑷 Doctor",
         ui_settings: "鈿欙笍 绯荤粺璁剧疆",
-        ui_memory: "馃 璁板繂宸ヤ綔鍙?,
+        ui_memory: "馃 璁板繂宸ヤ綔鍙",
         ui_memory_cluster: "鑱氱被",
         ui_memory_summary: "鎽樿",
         ui_memory_decay: "琛板噺",
@@ -41,46 +41,46 @@
         ui_memory_filter_all_layers: "鍏ㄩ儴灞傜骇",
         ui_memory_filter_all_types: "鍏ㄩ儴绫诲瀷",
         ui_memory_search_placeholder: "鎼滅储璁板繂鍐呭 / 鑺傜偣ID / 绫诲瀷...",
-        ui_memory_total_nodes: "鎬昏妭鐐?,
-        ui_memory_total_edges: "鎬诲叧绯?,
+        ui_memory_total_nodes: "鎬昏妭鐐",
+        ui_memory_total_edges: "鎬诲叧绯",
         ui_memory_hot: "鐑眰 Hot",
         ui_memory_warm: "娓╁眰 Warm",
         ui_memory_cold: "鍐峰眰 Cold",
         ui_memory_detail_id: "ID",
         ui_memory_detail_type: "绫诲瀷",
         ui_memory_detail_layer: "灞傜骇",
-        ui_memory_detail_importance: "閲嶈鎬?,
+        ui_memory_detail_importance: "閲嶈鎬",
         ui_memory_detail_access: "璁块棶娆℃暟",
-        ui_memory_detail_edges: "鍏宠仈杈?,
+        ui_memory_detail_edges: "鍏宠仈杈",
         ui_sessions: "浼氳瘽鍘嗗彶",
         ui_chat_tab: "瀵硅瘽",
         ui_current_session: "褰撳墠浼氳瘽",
-        ui_not_started: "鏈紑濮?,
-        ui_auth_username: "鐢ㄦ埛鍚?,
+        ui_not_started: "鏈紑濮",
+        ui_auth_username: "鐢ㄦ埛鍚",
         ui_auth_password: "瀵嗙爜",
         ui_auth_agent_name: "Agent 鍚嶅瓧",
         ui_auth_username_placeholder: "璇疯緭鍏ョ敤鎴峰悕",
-        ui_auth_password_placeholder: "璇疯緭鍏ュ瘑鐮?,
+        ui_auth_password_placeholder: "璇疯緭鍏ュ瘑鐮",
         ui_auth_agent_placeholder: "缁欎綘鐨勫姪鎵嬭捣涓悕瀛?(榛樿: Promethea)",
-        ui_app_title: "鏅綏绫冲▍AI鍔╂墜 - 缁堢鐗?,
+        ui_app_title: "鏅綏绫冲▍AI鍔╂墜 - 缁堢鐗",
         ui_logo_text: "鏅綏绫冲▍",
         ui_new_chat_title: "鏂板缓浼氳瘽",
         ui_avatar_hint: "鐐瑰嚮涓婁紶褰㈣薄",
         ui_avatar_remove_title: "绉婚櫎褰㈣薄",
-        ui_api_status_title: "API杩炴帴鐘舵€?,
-        ui_memory_status_title: "璁板繂绯荤粺鐘舵€?,
-        ui_logout_title: "閫€鍑虹櫥褰?,
+        ui_api_status_title: "API杩炴帴鐘舵€",
+        ui_memory_status_title: "璁板繂绯荤粺鐘舵€",
+        ui_logout_title: "閫€鍑虹櫥褰",
         ui_doctor_title: "绯荤粺鑷 Doctor",
         ui_metrics_title: "鎬ц兘缁熻",
         ui_settings_title: "绯荤粺璁剧疆",
-        ui_memory_graph_title: "鏌ョ湅璁板繂鍥?,
+        ui_memory_graph_title: "鏌ョ湅璁板繂鍥",
         ui_confirm_title: "鈿狅笍 鏁忔劅鎿嶄綔纭",
         ui_confirm_desc: "Agent 灏濊瘯鎵ц浠ヤ笅楂橀闄╂搷浣滐紝闇€瑕佹偍鐨勬壒鍑嗭細",
         ui_confirm_tool: "宸ュ叿:",
         ui_confirm_args: "鍙傛暟:",
         ui_confirm_reject: "鎷掔粷",
         ui_confirm_approve: "鎵瑰噯鎵ц",
-        ui_metrics_token: "Token娑堣€?,
+        ui_metrics_token: "Token娑堣€",
         ui_metrics_cost: "浼扮畻鎴愭湰",
         ui_metrics_llm: "LLM璋冪敤",
         ui_metrics_avg: "骞冲潎",
@@ -92,34 +92,34 @@
         ui_quickask_btn: "馃 杩介棶",
         ui_thinking: "姝ｅ湪鎬濊€?..",
         ui_thinking_deep: "馃 姝ｅ湪娣卞害鎬濊€?..",
-        ui_thinking_process: "馃挱 娣卞害鎬濊€冭繃绋?,
+        ui_thinking_process: "馃挱 娣卞害鎬濊€冭繃绋",
         ui_tool_detected: "妫€娴嬪埌宸ュ叿璋冪敤...",
-        ui_followup_title: "馃挰 閽堝姝ゅ唴瀹硅拷闂?,
-        ui_followup_why: "鉂?涓轰粈涔?,
-        ui_followup_risk: "鈿狅笍 鏈夊暐鍧?,
+        ui_followup_title: "馃挰 閽堝姝ゅ唴瀹硅拷闂",
+        ui_followup_why: "鉂?涓轰粈涔",
+        ui_followup_risk: "鈿狅笍 鏈夊暐鍧",
         ui_followup_alt: "馃攧 鏇夸唬鏂规",
         ui_followup_custom: "鎴栬€呰嚜瀹氫箟杩介棶...",
-        ui_followup_send: "鍙戦€?,
+        ui_followup_send: "鍙戦€",
         ui_followup_fail: "杩介棶澶辫触锛岃閲嶈瘯",
         ui_bind_need_id: "璇疯緭鍏ヨ处鍙稩D",
-        ui_bind_success: "鉁?缁戝畾鎴愬姛锛?,
+        ui_bind_success: "鉁?缁戝畾鎴愬姛锛",
         ui_bind_fail: "鉂?缁戝畾澶辫触: {msg}",
         ui_save_progress: "姝ｅ湪淇濆瓨...",
-        ui_save_success: "鉁?閰嶇疆宸蹭繚瀛樺苟鐢熸晥锛?,
+        ui_save_success: "鉁?閰嶇疆宸蹭繚瀛樺苟鐢熸晥锛",
         ui_save_fail: "鉂?淇濆瓨澶辫触: {msg}",
-        ui_save_btn: "淇濆瓨骞跺簲鐢?,
+        ui_save_btn: "淇濆瓨骞跺簲鐢",
         ui_settings_loading: "姝ｅ湪鍔犺浇閰嶇疆...",
         ui_settings_load_fail: "鍔犺浇澶辫触: {msg}",
         ui_settings_reset: "閲嶇疆",
-        ui_rejected: "鉂?宸叉嫆缁濇墽琛岃鎿嶄綔銆?,
-        ui_tool_running: "馃敡 璋冪敤宸ュ叿锛歿name}锛堣繍琛屼腑锛?,
-        ui_tool_done: "馃敡 璋冪敤宸ュ叿锛歿name}锛堝凡瀹屾垚锛?,
+        ui_rejected: "鉂?宸叉嫆缁濇墽琛岃鎿嶄綔銆",
+        ui_tool_running: "馃敡 璋冪敤宸ュ叿锛歿name}锛堣繍琛屼腑锛",
+        ui_tool_done: "馃敡 璋冪敤宸ュ叿锛歿name}锛堝凡瀹屾垚锛",
         ui_tool_failed: "宸ュ叿璋冪敤澶辫触",
         ui_error_unknown: "鏈煡閿欒",
         ui_switch_session_fail: "鍒囨崲浼氳瘽澶辫触: {msg}",
         ui_settings_personal: "馃懁 涓€у寲璁剧疆",
         ui_settings_personal_api: "馃攽 涓汉 API 閰嶇疆 (鍙€?",
-        ui_settings_personal_api_hint: "鍦ㄦ濉啓鐨勯厤缃皢瑕嗙洊绯荤粺榛樿鍊笺€傜暀绌哄垯浣跨敤榛樿閰嶇疆銆?,
+        ui_settings_personal_api_hint: "鍦ㄦ濉啓鐨勯厤缃皢瑕嗙洊绯荤粺榛樿鍊笺€傜暀绌哄垯浣跨敤榛樿閰嶇疆銆",
         ui_settings_bind: "馃敆 绀句氦璐﹀彿缁戝畾",
         ui_settings_sys_api: "馃攽 API 閰嶇疆",
         ui_settings_sys: "鈿?绯荤粺閰嶇疆",
@@ -137,13 +137,13 @@
         ui_label_log_level: "鏃ュ織绾у埆",
         ui_label_memory_enabled: "鍚敤璁板繂绯荤粺",
         ui_label_neo4j_enabled: "鍚敤Neo4j",
-        ui_label_neo4j_user: "鐢ㄦ埛鍚?,
-        ui_label_neo4j_db: "鏁版嵁搴?,
+        ui_label_neo4j_user: "鐢ㄦ埛鍚",
+        ui_label_neo4j_db: "鏁版嵁搴",
         ui_label_warm_enabled: "鍚敤娓╁眰",
-        ui_label_cluster_threshold: "鑱氱被闃堝€?,
+        ui_label_cluster_threshold: "鑱氱被闃堝€",
         ui_label_min_cluster: "鏈€灏忕皣澶у皬",
         ui_label_summary_len: "鎽樿闀垮害",
-        ui_label_compress_threshold: "鍘嬬缉闃堝€?,
+        ui_label_compress_threshold: "鍘嬬缉闃堝€",
         ui_status_running_doctor: "姝ｅ湪杩愯绯荤粺鑷锛岃绋嶅€?..",
         ui_status_running_migrate: "姝ｅ湪淇 / 杩佺Щ閰嶇疆锛岃绋嶅€?..",
         ui_memory_btn_short: "璁板繂",
@@ -153,7 +153,7 @@
         memory_sync_idle: "璁板繂鍚屾绌洪棽",
         memory_sync_running: "璁板繂鍚屾涓? {pending}",
         memory_sync_error: "璁板繂鍚屾寮傚父",
-        memory_sync_wait_close: "璁板繂鍚屾灏氭湭瀹屾垚锛岃绋嶅€欏啀鍏抽棴椤甸潰銆?,
+        memory_sync_wait_close: "璁板繂鍚屾灏氭湭瀹屾垚锛岃绋嶅€欏啀鍏抽棴椤甸潰銆",
     },
     en: {
         lang_name: "English",
@@ -587,7 +587,7 @@ class LanguageManager {
         if (settingsBtn) settingsBtn.textContent = t("ui_settings");
         if (memoryGraphBtn) memoryGraphBtn.textContent = t("ui_memory_btn_short");
         const langSwitchBtn = document.getElementById("langSwitchBtn");
-        if (langSwitchBtn) langSwitchBtn.title = getCurrentLang() === "en" ? "Language" : "璇█";
+        if (langSwitchBtn) langSwitchBtn.title = getCurrentLang() === "en" ? "Language" : "语言";
         if (langSwitchBtn) langSwitchBtn.textContent = t("lang_name");
         const logoutBtnText = document.getElementById("logoutBtn");
         if (logoutBtnText) logoutBtnText.textContent = t("ui_logout_title");
@@ -650,7 +650,14 @@ class LanguageManager {
         const currentSessionLabel = document.getElementById("currentSessionLabel");
         if (currentSessionLabel) currentSessionLabel.textContent = t("ui_current_session");
         const currentSessionValue = document.getElementById("currentSession");
-        if (currentSessionValue && (currentSessionValue.textContent === "鏈紑濮? || currentSessionValue.textContent === "Not Started")) {
+        if (
+            currentSessionValue
+            && (
+                (currentSessionValue.textContent || '').trim() === ''
+                || currentSessionValue.textContent === "Not Started"
+                || currentSessionValue.textContent === "未开始"
+            )
+        ) {
             currentSessionValue.textContent = t("ui_not_started");
         }
 
@@ -870,12 +877,17 @@ class AuthManager {
         }
     }
     
-    logout() {
+    logout(options = {}) {
+        const shouldReload = options.reload !== false;
         localStorage.removeItem('auth_token');
         localStorage.removeItem('user_id');
         localStorage.removeItem('agent_name');
         localStorage.removeItem('username');
-        location.reload();
+        if (shouldReload) {
+            location.reload();
+            return;
+        }
+        this.modal.style.display = 'flex';
     }
 }
 
@@ -942,7 +954,7 @@ class TerminalChatApp {
         
         const response = await fetch(url, options);
         if (response.status === 401) {
-            this.authManager.logout();
+            this.authManager.logout({ reload: false });
             throw new Error(t("auth_invalid"));
         }
         return response;
@@ -982,7 +994,7 @@ class TerminalChatApp {
         this.sendButton.addEventListener('click', () => this.sendMessage());
         
         // Press Enter to send (Shift+Enter inserts a newline)
-        this.messageInput.addEventListener('keypress', (e) => {
+        this.messageInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 this.sendMessage();
@@ -1418,10 +1430,10 @@ class TerminalChatApp {
             const data = await response.json();
             const sessions = data.sessions || [];
             
-            // 鏇存柊浼氳瘽鏁伴噺
+            // 更新会话数量
             this.sessionCountEl.textContent = sessions.length;
             
-            // 娓呯┖骞堕噸鏂版覆鏌撲細璇濆垪琛?
+            // 清空并重新渲染会话列表
             this.sessionList.innerHTML = '';
             
             if (sessions.length === 0) {
@@ -1437,23 +1449,25 @@ class TerminalChatApp {
             sessions.forEach(session => {
                 const li = document.createElement('li');
                 
-                // 鐢熸垚浼氳瘽鏍囬锛堜娇鐢ㄦ渶鍚庝竴鏉℃秷鎭殑鍓?0涓瓧绗︼級
-                const title = session.last_message && session.last_message.trim() 
-                    ? session.last_message.slice(0, 20) + (session.last_message.length > 20 ? '...' : '')
-                    : (getCurrentLang() === 'en' ? 'New session' : '新会话');
+                // 优先使用后端生成的会话标题（类似 GPT 风格），再回退到最后一条消息预览
+                const title = session.title && String(session.title).trim()
+                    ? String(session.title).trim()
+                    : (session.last_message && session.last_message.trim()
+                        ? session.last_message.slice(0, 32) + (session.last_message.length > 32 ? '...' : '')
+                        : (getCurrentLang() === 'en' ? 'New session' : '新会话'));
                 
                 li.textContent = title;
                 li.title = getCurrentLang() === 'en'
                     ? `Session ID: ${session.session_id}\nCreated: ${new Date(session.created_at * 1000).toLocaleString()}\nMessages: ${session.message_count}`
-                    : `浼氳瘽ID: ${session.session_id}\n鍒涘缓鏃堕棿: ${new Date(session.created_at * 1000).toLocaleString()}\n娑堟伅鏁伴噺: ${session.message_count}`;
+                    : `会话ID: ${session.session_id}\n创建时间: ${new Date(session.created_at * 1000).toLocaleString()}\n消息数量: ${session.message_count}`;
                 li.dataset.sid = session.session_id;
                 
-                // 楂樹寒褰撳墠浼氳瘽
+                // 高亮当前会话
                 if (this.currentSessionId === session.session_id) {
                     li.classList.add('active');
                 }
                 
-                // 鐐瑰嚮鍒囨崲浼氳瘽
+                // 点击切换会话
                 li.addEventListener('click', () => {
                     this.switchSession(session.session_id);
                 });
@@ -1462,7 +1476,7 @@ class TerminalChatApp {
             });
             
         } catch (error) {
-            console.error('鍒锋柊浼氳瘽鍒楄〃澶辫触:', error);
+            console.error('刷新会话列表失败:', error);
             this.sessionCountEl.textContent = '?';
         }
     }
@@ -1476,11 +1490,11 @@ class TerminalChatApp {
             
             const data = await response.json();
             
-            // 鏇存柊褰撳墠浼氳瘽
+            // 更新当前会话
             this.currentSessionId = sessionId;
             this.currentSessionEl.textContent = sessionId.slice(0, 8) + '...';
             
-            // 娓呯┖娑堟伅鍖哄煙骞跺姞杞藉巻鍙?
+            // 清空消息区域并加载历史
             this.chatMessages.innerHTML = '';
             
             const messages = data.messages || [];
@@ -1492,16 +1506,16 @@ class TerminalChatApp {
                 });
             }
             
-            // 鏇存柊渚ц竟鏍忛珮浜?
+            // 更新侧边栏高亮
             Array.from(this.sessionList.children).forEach(li => {
                 li.classList.toggle('active', li.dataset.sid === sessionId);
             });
             
-            // 鑱氱劍杈撳叆妗?
+            // 聚焦输入框
             this.focusInput();
             
         } catch (error) {
-            console.error('鍒囨崲浼氳瘽澶辫触:', error);
+            console.error('切换会话失败:', error);
             this.addMessage('assistant', t("ui_switch_session_fail", { msg: error.message }));
         }
     }
@@ -1523,6 +1537,7 @@ class TerminalChatApp {
     async sendMessage() {
         const message = this.messageInput.value.trim();
         if (!message || this.isTyping) return;
+        const streamEnabled = this.isStreamEnabled();
         
         // 娣诲姞鐢ㄦ埛娑堟伅
         this.addMessage('user', message);
@@ -1560,7 +1575,7 @@ class TerminalChatApp {
                 body: JSON.stringify({ 
                     message: message,
                     session_id: this.currentSessionId || null,
-                    stream: true  // 鍚敤娴佸紡
+                    stream: streamEnabled
                 })
             });
             
@@ -1570,7 +1585,7 @@ class TerminalChatApp {
             
             // 澶勭悊SSE娴佸紡鍝嶅簲
             const contentType = (response.headers.get('content-type') || '').toLowerCase();
-            if (!response.body || contentType.includes('application/json')) {
+            if (!streamEnabled || !response.body || contentType.includes('application/json')) {
                 const data = await response.json().catch(() => ({}));
                 const text = data?.response || data?.content || data?.message || '';
                 textArea.innerHTML = String(text).replace(/\n/g, '<br>');
@@ -1587,7 +1602,7 @@ class TerminalChatApp {
             let buffer = '';
             let fullText = '';
             
-            textArea.innerHTML = '';  // 娓呯┖"姝ｅ湪鎬濊€?
+            textArea.innerHTML = '';  // clear previous thinking placeholder
             
             let doneReceived = false;
             while (true) {
@@ -1769,17 +1784,47 @@ class TerminalChatApp {
 
             // 娴佸紡瀹屾垚鍚庡埛鏂颁竴娆′細璇濆垪琛ㄥ嵆鍙?
             await this.refreshSessions();
+            // Some providers/proxies may return sparse SSE chunks; recover visible assistant text from session history.
+            if (!fullText.trim() && this.currentSessionId) {
+                await this.recoverAssistantTextFromSession(textArea);
+            }
             
         } catch (error) {
-            console.error('鍙戦€佹秷鎭け璐?', error);
+            console.error('发送消息失败:', error);
             contentDiv.innerHTML = `${t("auth_failed")}: ${error.message}`;
             this.setAvatarStatus('idle');
+        } finally {
+            // Ensure the send lock is always released, even when early-returning
+            // from the non-stream response path.
+            this.sendButton.disabled = false;
+            this.isTyping = false;
+            this.focusInput();
         }
-        
-        // 閲嶆柊鍚敤鍙戦€佹寜閽?
-        this.sendButton.disabled = false;
-        this.isTyping = false;
-        this.focusInput();
+    }
+
+    isStreamEnabled() {
+        const streamToggle = document.getElementById('streamMode');
+        if (!streamToggle) return true;
+        return !!streamToggle.checked;
+    }
+
+    async recoverAssistantTextFromSession(textArea) {
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions/${this.currentSessionId}`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const messages = Array.isArray(data?.messages) ? data.messages : [];
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const item = messages[i] || {};
+                if (item.role === 'assistant' && String(item.content || '').trim()) {
+                    textArea.innerHTML = String(item.content).replace(/\n/g, '<br>');
+                    this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+                    break;
+                }
+            }
+        } catch (e) {
+            console.warn('recover assistant text failed:', e);
+        }
     }
     
     focusInput() {
@@ -2228,8 +2273,22 @@ class MemoryGraphVisualization {
     }
 
     renderGraph(nodes, edges) {
-        const width = this.graphCanvas.clientWidth;
-        const height = this.graphCanvas.clientHeight;
+        let width = this.graphCanvas.clientWidth;
+        let height = this.graphCanvas.clientHeight;
+        if (width < 120 || height < 120) {
+            const rect = this.graphCanvas.getBoundingClientRect();
+            width = Math.max(width, Math.floor(rect.width || 0));
+            height = Math.max(height, Math.floor(rect.height || 0));
+        }
+        if (width < 120 || height < 120) {
+            this.graphCanvas.innerHTML = `<div class="memory-empty">${t("memory_loading")}</div>`;
+            return;
+        }
+
+        if (typeof window.d3 === 'undefined') {
+            this.renderGraphFallback(nodes, edges, width, height);
+            return;
+        }
 
         d3.select(this.graphCanvas).selectAll('*').remove();
         if (this.simulation) {
@@ -2355,6 +2414,81 @@ class MemoryGraphVisualization {
         }
     }
 
+    renderGraphFallback(nodes, edges, width, height) {
+        this.graphCanvas.innerHTML = '';
+        if (!nodes.length) {
+            this.graphCanvas.innerHTML = `<div class="memory-empty">${t("memory_no_nodes")}</div>`;
+            return;
+        }
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.max(80, Math.min(width, height) * 0.35);
+        const byId = new Map(nodes.map((n) => [n.id, n]));
+        const pos = new Map();
+        nodes.forEach((n, idx) => {
+            const angle = (Math.PI * 2 * idx) / Math.max(1, nodes.length);
+            pos.set(n.id, {
+                x: cx + Math.cos(angle) * radius,
+                y: cy + Math.sin(angle) * radius,
+            });
+        });
+
+        const layerColors = { 0: '#ff5a6b', 1: '#f59e0b', 2: '#0ea5e9' };
+        const ns = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(ns, 'svg');
+        svg.setAttribute('width', String(width));
+        svg.setAttribute('height', String(height));
+        svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+        edges.forEach((edge) => {
+            const sourceId = typeof edge.source === 'object' ? edge.source?.id : edge.source;
+            const targetId = typeof edge.target === 'object' ? edge.target?.id : edge.target;
+            const a = pos.get(sourceId);
+            const b = pos.get(targetId);
+            if (!a || !b || !byId.has(sourceId) || !byId.has(targetId)) return;
+            const line = document.createElementNS(ns, 'line');
+            line.setAttribute('x1', String(a.x));
+            line.setAttribute('y1', String(a.y));
+            line.setAttribute('x2', String(b.x));
+            line.setAttribute('y2', String(b.y));
+            line.setAttribute('stroke', '#64748b');
+            line.setAttribute('stroke-opacity', '0.45');
+            line.setAttribute('stroke-width', '1.2');
+            svg.appendChild(line);
+        });
+
+        nodes.forEach((node) => {
+            const p = pos.get(node.id);
+            if (!p) return;
+            const g = document.createElementNS(ns, 'g');
+            g.style.cursor = 'pointer';
+            g.addEventListener('click', () => this.selectNode(node.id));
+
+            const circle = document.createElementNS(ns, 'circle');
+            circle.setAttribute('cx', String(p.x));
+            circle.setAttribute('cy', String(p.y));
+            circle.setAttribute('r', String(10 + (node.importance || 0) * 8));
+            circle.setAttribute('fill', layerColors[node.layer] || '#94a3b8');
+            circle.setAttribute('stroke', '#ffffff');
+            circle.setAttribute('stroke-width', '1.5');
+            g.appendChild(circle);
+
+            const title = document.createElementNS(ns, 'title');
+            title.textContent = `${node.type || 'node'} | ${(node.content || '').slice(0, 120)}`;
+            g.appendChild(title);
+
+            svg.appendChild(g);
+        });
+
+        this.graphCanvas.appendChild(svg);
+    }
+
+    onGraphTabVisible() {
+        if (!this.modal || this.modal.style.display === 'none') return;
+        if (!Array.isArray(this.filteredNodes) || !Array.isArray(this.filteredEdges)) return;
+        this.renderGraph(this.filteredNodes, this.filteredEdges);
+    }
+
     async runMemoryAction(action, labelKey) {
         if (!this.currentSessionId) return;
         const label = t(labelKey);
@@ -2473,17 +2607,23 @@ class MemoryConsoleManager {
         const next = String(tabName || 'console');
         this.tabButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.tab === next));
         this.panels.forEach((panel) => panel.classList.toggle('active', panel.dataset.panel === next));
+        if (next === 'graph') {
+            this.graphViz.onGraphTabVisible();
+        }
     }
 
-    async show(sessionId = null) {
+    async show(sessionId = null, preferredTab = 'graph') {
         await this.graphViz.show(sessionId || null);
-        await this.loadProfile();
-        await this.loadCapabilities();
-        await this.loadDiagnostics();
-        await this.refreshEntries();
-        await this.refreshWriteDecisions();
-        await this.refreshRecallRuns();
-        await this.pollWriteProposals();
+        this.switchTab(preferredTab || 'graph');
+        await Promise.allSettled([
+            this.loadProfile(),
+            this.loadCapabilities(),
+            this.loadDiagnostics(),
+            this.refreshEntries(),
+            this.refreshWriteDecisions(),
+            this.refreshRecallRuns(),
+            this.pollWriteProposals(),
+        ]);
         if (this.pollTimer) clearInterval(this.pollTimer);
         this.pollTimer = setInterval(() => this.pollWriteProposals(), 15000);
     }
@@ -2804,24 +2944,24 @@ class SettingsManager {
                         <span class="channel-icon">${this.getChannelIcon(channel)}</span>
                         <span class="channel-name">${channel}</span>
                         <span class="account-id">${accountId}</span>
-                        <span class="status-badge">${getCurrentLang() === 'en' ? 'Bound' : '宸茬粦瀹?}</span>
+                        <span class="status-badge">${getCurrentLang() === 'en' ? 'Bound' : '已绑定'}</span>
                     `;
                     listEl.appendChild(item);
                 }
             }
         } catch (error) {
-            console.error('鍔犺浇缁戝畾娓犻亾澶辫触:', error);
+            console.error('加载绑定渠道失败:', error);
         }
     }
     
     getChannelIcon(channel) {
         const icons = {
-            'telegram': '鉁堬笍',
-            'wechat': '馃挰',
-            'dingtalk': '閽?,
-            'feishu': '馃惁'
+            'telegram': 'TG',
+            'wechat': 'WX',
+            'dingtalk': '钉钉',
+            'feishu': '飞书'
         };
-        return icons[channel] || '馃敆';
+        return icons[channel] || '绑定';
     }
     
     async handleBindChannel() {
@@ -3365,27 +3505,48 @@ function hideStartupOverlay() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const languageManager = new LanguageManager();
-    languageManager.init();
+    // Hard fail-safe: never keep startup overlay forever on unexpected JS errors.
+    setTimeout(() => hideStartupOverlay(), 3500);
 
-    const app = new TerminalChatApp();
-    const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
-    const memoryConsole = new MemoryConsoleManager(app.apiBaseUrl, memoryViz);
-    const settingsManager = new SettingsManager(app.apiBaseUrl);
-    const metricsManager = new MetricsManager(app.apiBaseUrl);
-    const doctorManager = new DoctorManager(app.apiBaseUrl);
-    const avatarManager = new AvatarManager();
-    
-    document.getElementById('memoryGraphBtn').addEventListener('click', (event) => {
-        // Default: global user memory. Hold Alt to inspect current session scope.
-        if (event.altKey && app.currentSessionId) {
-            memoryConsole.show(app.currentSessionId);
-            return;
+    try {
+        const languageManager = new LanguageManager();
+        languageManager.init();
+
+        const app = new TerminalChatApp();
+        const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
+        const memoryConsole = new MemoryConsoleManager(app.apiBaseUrl, memoryViz);
+        const settingsManager = new SettingsManager(app.apiBaseUrl);
+        const metricsManager = new MetricsManager(app.apiBaseUrl);
+        const doctorManager = new DoctorManager(app.apiBaseUrl);
+        const avatarManager = new AvatarManager();
+        
+        const memoryGraphBtn = document.getElementById('memoryGraphBtn');
+        if (memoryGraphBtn) {
+            memoryGraphBtn.addEventListener('click', (event) => {
+                // Default: current session memory graph. Hold Alt to inspect global scope.
+                if (event.altKey) {
+                    memoryConsole.show(null, 'graph');
+                    return;
+                }
+                memoryConsole.show(app.currentSessionId || null, 'graph');
+            });
         }
-        memoryConsole.show();
-    });
-    
-    document.getElementById('settingsBtn').addEventListener('click', () => {
-        settingsManager.show();
-    });
+
+        window.addEventListener('resize', () => {
+            memoryViz.onGraphTabVisible();
+        });
+
+        const settingsBtn = document.getElementById('settingsBtn');
+        if (settingsBtn) {
+            settingsBtn.addEventListener('click', () => {
+                settingsManager.show();
+            });
+        }
+        void metricsManager;
+        void doctorManager;
+        void avatarManager;
+    } catch (error) {
+        console.error('UI bootstrap failed:', error);
+        hideStartupOverlay();
+    }
 });

@@ -10,6 +10,17 @@ from agentkit.security.sandbox import get_sandbox_policy
 logger = logging.getLogger(__name__)
 
 
+def _resolve_ddgs_class():
+    try:
+        from ddgs import DDGS
+
+        return DDGS
+    except ImportError:
+        from duckduckgo_search import DDGS
+
+        return DDGS
+
+
 class WebSearchService:
     """Simple DuckDuckGo search wrapper with sandbox-aware network guard."""
 
@@ -25,7 +36,12 @@ class WebSearchService:
             return f"Sandbox blocked web search: {decision.reason}"
         return None
 
-    async def search(self, query: str, max_results: Optional[int] = None) -> str:
+    async def search(
+        self,
+        query: str,
+        max_results: Optional[int] = None,
+        num_results: Optional[int] = None,
+    ) -> str:
         """Run a general web search."""
         blocked = self._ensure_network_allowed()
         if blocked:
@@ -34,10 +50,11 @@ class WebSearchService:
             if not query or not query.strip():
                 return "Error: query cannot be empty"
 
-            limit = max_results if max_results and max_results > 0 else self.max_results
+            requested = max_results if max_results and max_results > 0 else num_results
+            limit = requested if requested and requested > 0 else self.max_results
 
             try:
-                from duckduckgo_search import DDGS
+                DDGS = _resolve_ddgs_class()
 
                 logger.info("Search: %s (max=%s)", query, limit)
                 results = []
@@ -60,7 +77,7 @@ class WebSearchService:
                     )
                 return "\n".join(formatted)
             except ImportError:
-                return "Missing dependency: install duckduckgo-search"
+                return "Missing dependency: install ddgs"
         except Exception as e:
             logger.error("Search failed: %s", e)
             return f"Error: search failed: {e}"
@@ -71,7 +88,7 @@ class WebSearchService:
         if blocked:
             return blocked
         try:
-            from duckduckgo_search import DDGS
+            DDGS = _resolve_ddgs_class()
 
             with DDGS() as ddgs:
                 answers = list(ddgs.answers(query))
@@ -90,15 +107,21 @@ class WebSearchService:
             logger.error("Quick answer failed: %s", e)
             return await self.search(query, max_results=3)
 
-    async def news_search(self, query: str, max_results: Optional[int] = None) -> str:
+    async def news_search(
+        self,
+        query: str,
+        max_results: Optional[int] = None,
+        num_results: Optional[int] = None,
+    ) -> str:
         """Search news results."""
         blocked = self._ensure_network_allowed()
         if blocked:
             return blocked
         try:
-            from duckduckgo_search import DDGS
+            DDGS = _resolve_ddgs_class()
 
-            limit = max_results if max_results and max_results > 0 else self.max_results
+            requested = max_results if max_results and max_results > 0 else num_results
+            limit = requested if requested and requested > 0 else self.max_results
             results = []
             with DDGS() as ddgs:
                 for result in ddgs.news(query, max_results=limit):
@@ -122,7 +145,7 @@ class WebSearchService:
                 )
             return "\n".join(formatted)
         except ImportError:
-            return "Missing dependency: install duckduckgo-search"
+            return "Missing dependency: install ddgs"
         except Exception as e:
             logger.error("News search failed: %s", e)
             return f"Error: news search failed: {e}"

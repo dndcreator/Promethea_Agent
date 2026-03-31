@@ -9,11 +9,16 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import dotenv_values
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_ROOT / ".env"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "default.json"
+LEGACY_CONFIG_PATH = PROJECT_ROOT / "config.json"
+
 
 class SystemConfig(BaseSettings):
     version: str = Field(default="1.0")
-    base_dir: Path = Field(default_factory=lambda: Path(__file__).parent)
-    log_dir: Path = Field(default_factory=lambda: Path(__file__).parent / "logs")
+    base_dir: Path = Field(default_factory=lambda: PROJECT_ROOT)
+    log_dir: Path = Field(default_factory=lambda: PROJECT_ROOT / "logs")
     stream_mode: bool = Field(default=True)
     debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
@@ -297,7 +302,7 @@ class PrometheaConfig(BaseSettings):
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
         extra="ignore",
@@ -324,36 +329,70 @@ def _set_nested_value(target: dict, path: tuple[str, ...], value: Any) -> None:
     current[path[-1]] = value
 
 
-def _overlay_explicit_env_values(merged_data: dict, base_from_env: PrometheaConfig) -> None:
-    env_map = {
-        ("api", "api_key"): "API__API_KEY",
-        ("api", "model"): "API__MODEL",
-        ("api", "failover_models"): "API__FAILOVER_MODELS",
-        ("memory", "api", "api_key"): "MEMORY__API__API_KEY",
-        ("memory", "neo4j", "password"): "MEMORY__NEO4J__PASSWORD",
-    }
+def _resolve_key_case_insensitive(payload: dict, key: str) -> Optional[str]:
+    if key in payload:
+        return key
+    key_lower = key.lower()
+    for existing in payload.keys():
+        if str(existing).lower() == key_lower:
+            return str(existing)
+    return None
 
+
+def _get_nested_value_ci(payload: dict, path: tuple[str, ...]) -> tuple[bool, Any]:
+    current: Any = payload
+    for segment in path:
+        if not isinstance(current, dict):
+            return False, None
+        resolved = _resolve_key_case_insensitive(current, segment)
+        if resolved is None:
+            return False, None
+        current = current.get(resolved)
+    return True, current
+
+
+def _set_nested_value_ci(payload: dict, path: tuple[str, ...], value: Any) -> bool:
+    current: Any = payload
+    for segment in path[:-1]:
+        if not isinstance(current, dict):
+            return False
+        resolved = _resolve_key_case_insensitive(current, segment)
+        if resolved is None:
+            return False
+        current = current.get(resolved)
+    if not isinstance(current, dict):
+        return False
+    last = _resolve_key_case_insensitive(current, path[-1])
+    if last is None:
+        return False
+    current[last] = value
+    return True
+
+
+def _overlay_explicit_env_values(merged_data: dict, base_from_env: PrometheaConfig) -> None:
     env_data = base_from_env.model_dump()
     explicit_env_keys = set(os.environ.keys())
-    env_file = dotenv_values(".env")
+    env_file = dotenv_values(str(ENV_FILE)) if ENV_FILE.exists() else {}
     explicit_env_keys.update(str(k) for k in env_file.keys() if k)
-    for path, env_name in env_map.items():
-        if env_name not in explicit_env_keys:
+    for env_name in sorted(explicit_env_keys):
+        if "__" not in env_name:
             continue
-
-        value: Any = env_data
-        for segment in path:
-            value = value[segment]
-        _set_nested_value(merged_data, path, value)
+        path = tuple(seg for seg in str(env_name).split("__") if seg)
+        if not path:
+            continue
+        found, value = _get_nested_value_ci(env_data, path)
+        if not found:
+            continue
+        _set_nested_value_ci(merged_data, path, value)
 
 
 def load_config() -> PrometheaConfig:
     base_from_env = PrometheaConfig()
     merged_data = base_from_env.model_dump()
 
-    config_path = Path("config/default.json")
+    config_path = DEFAULT_CONFIG_PATH
     if not config_path.exists():
-        legacy_path = Path("config.json")
+        legacy_path = LEGACY_CONFIG_PATH
         config_path = legacy_path if legacy_path.exists() else None
 
     if config_path and config_path.exists():

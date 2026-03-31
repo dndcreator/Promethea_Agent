@@ -68,7 +68,7 @@ async def get_services_status():
     ratio = ok_count / total
     if ratio >= 0.99:
         overall = "healthy"
-    elif ratio >= 0.6:
+    elif ratio >= 0.5:
         overall = "degraded"
     else:
         overall = "unhealthy"

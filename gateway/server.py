@@ -389,6 +389,8 @@ class GatewayServer:
             code = "unauthorized"
         elif "not initialized" in msg:
             code = "service_unavailable"
+        elif "unavailable" in msg:
+            code = "service_unavailable"
         elif "not enabled" in msg:
             code = "feature_disabled"
         elif "timeout" in msg:

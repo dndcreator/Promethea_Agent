@@ -1,43 +1,93 @@
-﻿"""
-?fixtures
-"""
+"""Shared pytest fixtures and test-environment normalization for this repo."""
+
+from __future__ import annotations
+
 import os
+import shutil
 import sys
+import tempfile
+import uuid
 from pathlib import Path
 from typing import Generator
-
-# TODO: comment cleaned
-project_root = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(project_root))
+from unittest.mock import MagicMock
 
 import pytest
-from unittest.mock import Mock, MagicMock
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PYTEST_SESSION_TMP = PROJECT_ROOT / "_pytest_session_tmp"
+PYTEST_CASE_TMP = PROJECT_ROOT / "_pytest_case_tmp"
+
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def _force_repo_local_temp_dirs() -> None:
+    """Force all temp artifacts to stay inside repository workspace."""
+    PYTEST_SESSION_TMP.mkdir(parents=True, exist_ok=True)
+    os.environ["TEMP"] = str(PYTEST_SESSION_TMP)
+    os.environ["TMP"] = str(PYTEST_SESSION_TMP)
+    os.environ["TMPDIR"] = str(PYTEST_SESSION_TMP)
+    os.environ["PYTEST_DEBUG_TEMPROOT"] = str(PYTEST_SESSION_TMP)
+    tempfile.tempdir = str(PYTEST_SESSION_TMP)
+
+
+def _patch_pytest_cleanup_guard() -> None:
+    """Ignore cleanup-only PermissionError on Windows temp symlink scan."""
+    try:
+        import _pytest.pathlib as _pytest_pathlib
+
+        original = _pytest_pathlib.cleanup_dead_symlinks
+
+        def _safe_cleanup_dead_symlinks(root):
+            try:
+                original(root)
+            except PermissionError:
+                return
+
+        _pytest_pathlib.cleanup_dead_symlinks = _safe_cleanup_dead_symlinks
+    except Exception:
+        return
+
+
+_force_repo_local_temp_dirs()
+_patch_pytest_cleanup_guard()
 
 
 @pytest.fixture
-def project_root_path():
-    """TODO: add docstring."""
-    return Path(__file__).resolve().parent.parent
+def tmp_path() -> Generator[Path, None, None]:
+    """Provide per-test temp path under repository-local `_pytest_case_tmp/`."""
+    PYTEST_CASE_TMP.mkdir(parents=True, exist_ok=True)
+    case_dir = PYTEST_CASE_TMP / f"case-{uuid.uuid4().hex}"
+    case_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        yield case_dir
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
 
 
 @pytest.fixture
-def test_config():
-    """TODO: add docstring."""
+def project_root_path() -> Path:
+    """Return absolute project root path."""
+    return PROJECT_ROOT
+
+
+@pytest.fixture
+def test_config() -> dict:
+    """Return a minimal test config object used by multiple unit tests."""
     return {
         "api": {
             "api_key": "test-key",
             "base_url": "https://api.test.com/v1",
-            "model": "test-model"
+            "model": "test-model",
         },
         "memory": {
-            "enabled": False  # TODO: comment cleaned
-        }
+            "enabled": False,
+        },
     }
 
 
 @pytest.fixture
-def mock_event_emitter():
-    """TODO: add docstring."""
+def mock_event_emitter() -> MagicMock:
+    """Provide a generic event emitter mock."""
     emitter = MagicMock()
     emitter.on = MagicMock()
     emitter.emit = MagicMock()
@@ -46,8 +96,8 @@ def mock_event_emitter():
 
 
 @pytest.fixture
-def mock_connection_manager():
-    """TODO: add docstring."""
+def mock_connection_manager() -> MagicMock:
+    """Provide a connection manager mock."""
     manager = MagicMock()
     manager.add_connection = MagicMock()
     manager.remove_connection = MagicMock()
@@ -56,8 +106,8 @@ def mock_connection_manager():
 
 
 @pytest.fixture
-def mock_memory_adapter():
-    """TODO: add docstring."""
+def mock_memory_adapter() -> MagicMock:
+    """Provide a memory adapter mock with disabled state by default."""
     adapter = MagicMock()
     adapter.is_enabled = MagicMock(return_value=False)
     adapter.add_message = MagicMock(return_value=True)
@@ -66,8 +116,8 @@ def mock_memory_adapter():
 
 
 @pytest.fixture
-def mock_message_manager():
-    """TODO: add docstring."""
+def mock_message_manager() -> MagicMock:
+    """Provide a minimal message manager mock."""
     manager = MagicMock()
     manager.create_session = MagicMock()
     manager.get_session = MagicMock(return_value=None)
@@ -77,17 +127,10 @@ def mock_message_manager():
 
 
 @pytest.fixture(autouse=True)
-def reset_environment(monkeypatch):
-    """TODO: add docstring."""
-    # TODO: comment cleaned
+def reset_environment(monkeypatch) -> Generator[None, None, None]:
+    """Isolate environment variables per test and set test-mode marker."""
     original_env = os.environ.copy()
-    
-    # TODO: comment cleaned
     monkeypatch.setenv("PROMETHEA_TEST", "1")
-    
     yield
-    
-    # TODO: comment cleaned
     os.environ.clear()
     os.environ.update(original_env)
-

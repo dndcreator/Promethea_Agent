@@ -297,11 +297,13 @@ class WorkflowEngine:
             "approved_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        if run.status == RUN_STATUS_WAITING_HUMAN and run.current_step_id == step_id:
+        if run.current_step_id == step_id and step.status == STEP_STATUS_WAITING_HUMAN:
+            # Approval may arrive while paused; mark the step runnable and let resume continue.
             step.status = STEP_STATUS_PENDING
-            run.status = RUN_STATUS_RUNNING
-            run.updated_at = datetime.utcnow()
-            return self.advance_to_next_step(workflow_run_id, run_context=run_context)
+            if run.status == RUN_STATUS_WAITING_HUMAN:
+                run.status = RUN_STATUS_RUNNING
+                run.updated_at = datetime.utcnow()
+                return self.advance_to_next_step(workflow_run_id, run_context=run_context)
         return run
 
     async def approve_step_async(
@@ -322,11 +324,13 @@ class WorkflowEngine:
             "approved_at": datetime.utcnow().isoformat() + "Z",
         }
 
-        if run.status == RUN_STATUS_WAITING_HUMAN and run.current_step_id == step_id:
+        if run.current_step_id == step_id and step.status == STEP_STATUS_WAITING_HUMAN:
+            # Approval may arrive while paused; mark the step runnable and let resume continue.
             step.status = STEP_STATUS_PENDING
-            run.status = RUN_STATUS_RUNNING
-            run.updated_at = datetime.utcnow()
-            return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+            if run.status == RUN_STATUS_WAITING_HUMAN:
+                run.status = RUN_STATUS_RUNNING
+                run.updated_at = datetime.utcnow()
+                return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
         return run
 
     def create_checkpoint(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any], artifact_refs: Optional[List[Dict[str, Any]]] = None) -> Checkpoint:

@@ -151,6 +151,16 @@ class MessageManager:
         one_line = " ".join(raw.split())
         return one_line[:40] + ("..." if len(one_line) > 40 else "")
 
+    def _derive_title_from_messages(self, session: Session) -> str:
+        """Best-effort title recovery for legacy sessions without a title."""
+        for msg in session.messages:
+            if msg.role != "user":
+                continue
+            candidate = self._generate_session_title(msg.content)
+            if candidate and candidate != "New Chat":
+                return candidate
+        return "New Chat"
+
     def _is_noisy_memory_content(self, role: str, content: str) -> bool:
         """Best-effort filter for tool logs / traceback / transport errors."""
         text = (content or "").strip()
@@ -487,6 +497,12 @@ class MessageManager:
             return None
         session = self.session.get(key)
         owner_user_id, raw_session_id = self._split_session_key(key)
+        title = (session.title or "").strip() if session else ""
+        if session and (not title or title == "New Chat") and session.messages:
+            title = self._derive_title_from_messages(session)
+            if title != session.title:
+                session.title = title
+                self.session_store.save_all(self.session)
         last_msg_preview = (
             session.messages[-1].content[:100] + "..." if session.messages else ""
         )
@@ -495,7 +511,7 @@ class MessageManager:
             "user_id": owner_user_id or "default_user",
             "created_at": session.created_at,
             "last_activity": session.last_activity,
-            "title": session.title,
+            "title": title or "New Chat",
             "message_count": len(session.messages),
             "conversation_rounds": len(session.messages) // 2,
             "agent_type": session.agent_type,

@@ -605,9 +605,11 @@ class ReasoningService:
             user_id=user_id,
         )
 
-        # Keep the fast path for normal/simple chats. Only enter react-only for
-        # simple requests that explicitly need memory/tool interaction.
-        if not is_complex and not needs_memory and not needs_tools:
+        # Keep reasoning as an explicit complexity gate.
+        # Memory/tool usage should remain independent capabilities and may run
+        # in non-reasoning path (for example, direct memory recall in
+        # ConversationService).
+        if not is_complex:
             return {"used_reasoning": False, "gate": gate}
 
         tree = self._create_tree(session_id=session_id, user_id=user_id, root_goal=user_message)
@@ -869,6 +871,13 @@ class ReasoningService:
         user_id: Optional[str],
     ) -> Dict[str, Any]:
         heuristic = self._heuristic_gate(user_message)
+        # Fast path: for clearly simple turns, skip the extra LLM gate call.
+        if (
+            not self._to_bool(heuristic.get("needs_reasoning"), default=False)
+            and not self._to_bool(heuristic.get("needs_memory"), default=False)
+            and not self._to_bool(heuristic.get("needs_tools"), default=False)
+        ):
+            return heuristic
         prompt = (
             "You are a reasoning gate. Decide whether the user task needs an explicit "
             "system-level reasoning tree before answering. Return strict JSON with keys: "

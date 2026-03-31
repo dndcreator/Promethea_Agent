@@ -5,9 +5,10 @@ Use this section if you are new to Promethea.
 ## Recommended Reading Order
 
 1. [Quickstart](./quickstart.md)
-2. [Local Assistant Basics](./local-assistant.md)
-3. [Configuration](../configuration.md)
-4. [Reference API](../reference/http-api.md)
+2. [Real User Setup (copy-and-run)](./real-user-setup.md)
+3. [Local Assistant Basics](./local-assistant.md)
+4. [Configuration](../configuration.md)
+5. [Reference API](../reference/http-api.md)
 
 ## Outcomes
 

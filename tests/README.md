@@ -20,6 +20,7 @@ python tests/run_all_tests.py --suite smoke
 python tests/run_all_tests.py --suite core
 python tests/run_all_tests.py --suite contracts
 python tests/run_all_tests.py --suite business
+python tests/run_all_tests.py --suite business_plus
 python tests/run_all_tests.py --suite full
 
 # 全量 + 覆盖率
@@ -42,6 +43,10 @@ powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite b
 ```powershell
 pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_tool_service.py
 ```
+
+### 场景增强测试组织
+- `tests/business_plus/`: 贴近业务链路的轻量真实场景测试（chat/tool/workflow 组合流程）。
+- `tests/business_plus/README.md`: `business_plus` 用例边界、命名约定与新增标准。
 
 ## English
 

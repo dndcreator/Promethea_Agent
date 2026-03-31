@@ -16,8 +16,9 @@ All environment variable names use `__` as a nested delimiter:
 ## Quick setup
 
 ```bash
-cp example.env .env
-# Edit .env: set API__API_KEY, API__BASE_URL, API__MODEL
+cp env.example .env
+# Edit .env secrets (minimum: API__API_KEY)
+# Non-sensitive defaults (API__BASE_URL / API__MODEL / memory backend) come from config/default.json
 python start_gateway_service.py
 ```
 
@@ -241,12 +242,6 @@ See:
 | `PROMPTS__PROMETHEA_SYSTEM_PROMPT` | _(see `config.py`)_ |
 
 Override the agent's system prompt via `.env` or `config/default.json`.
-
----
-
-## Full example `.env`
-
-See `example.env` for a complete, commented example covering all four API provider options and all backend choices.
 
 ---
 

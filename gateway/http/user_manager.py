@@ -1,6 +1,8 @@
 ﻿import json
+import os
 import uuid
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -28,7 +30,7 @@ class UserManager:
         if not self.connector:
             logger.warning("Neo4j is unavailable, user graph operations are disabled")
 
-        self.users_dir = Path("config/users")
+        self.users_dir = Path(__file__).resolve().parents[2] / "config" / "users"
         self.users_dir.mkdir(parents=True, exist_ok=True)
 
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
@@ -102,10 +104,32 @@ class UserManager:
         default_config = self._build_user_default_config(agent_name)
 
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(default_config, f, indent=4, ensure_ascii=False)
+            self._write_json_atomic(config_path, default_config)
         except Exception as e:
             logger.error(f"Create user config failed: {e}")
+
+    @staticmethod
+    def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+        """
+        Atomically write JSON to disk to avoid truncated/corrupted files
+        when process interruption happens during write.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_file = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=str(path.parent))
+        tmp_path = Path(tmp_file)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise
 
     @staticmethod
     def _build_user_default_config(agent_name: str) -> Dict[str, Any]:
@@ -114,7 +138,7 @@ class UserManager:
         env-only secrets out of persisted user config files.
         """
         try:
-            cfg = load_config().model_dump()
+            cfg = load_config().model_dump(mode="json")
         except Exception:
             cfg = {}
 
@@ -165,6 +189,21 @@ class UserManager:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Read user config failed: {e}")
+            # Auto-heal corrupted/truncated config files to avoid repeated runtime failures.
+            try:
+                if config_path.exists():
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    backup_path = config_path.with_suffix(f".corrupt-{stamp}.json")
+                    shutil.move(str(config_path), str(backup_path))
+                    logger.warning(f"Corrupted user config moved to backup: {backup_path}")
+                user = self.get_user_by_id(user_uuid)
+                agent_name = user.get("agent_name", "Promethea") if user else "Promethea"
+                self.create_user_config(user_uuid, agent_name)
+                healed_path = self._current_config_path(user_uuid)
+                with open(healed_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as heal_err:
+                logger.error(f"Failed to auto-heal user config for {user_uuid}: {heal_err}")
             return {}
 
     def update_user_config_file(self, user_uuid: str, config_data: Dict[str, Any]) -> bool:
@@ -204,8 +243,7 @@ class UserManager:
         current_config = self._deep_merge(current_config, sanitized)
 
         try:
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(current_config, f, indent=4, ensure_ascii=False)
+            self._write_json_atomic(config_path, current_config)
             return True
         except Exception as e:
             logger.error(f"Update user config failed: {e}")
@@ -372,3 +410,5 @@ class UserManager:
 
 
 user_manager = UserManager()
+
+
