@@ -4,6 +4,7 @@ import argparse
 import base64
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -210,6 +211,105 @@ def cmd_ask(args: argparse.Namespace, c: Client) -> None:
     )
     cmd_chat(shim, c)
 
+
+
+
+def _render_reasoning_snapshot(payload: Dict[str, Any]) -> str:
+    lines = []
+    tree_id = str(payload.get("tree_id", "") or "")
+    status = str(payload.get("status", "") or "")
+    session_id = str(payload.get("session_id", "") or "")
+    node_count = int(payload.get("node_count", 0) or 0)
+    stats = payload.get("stats", {}) if isinstance(payload.get("stats"), dict) else {}
+    control = payload.get("control", {}) if isinstance(payload.get("control"), dict) else {}
+    lines.append(f"Tree: {tree_id}  Status: {status}  Session: {session_id}")
+    lines.append(
+        "Stats: "
+        f"iter={stats.get('iterations', 0)} "
+        f"think={stats.get('think_calls', 0)} "
+        f"memory={stats.get('memory_calls', 0)} "
+        f"tool={stats.get('tool_calls', 0)} "
+        f"nodes={node_count}"
+    )
+    lines.append(
+        "Control: "
+        f"stop_requested={bool(control.get('stop_requested'))} "
+        f"pending_steer={int(control.get('pending_steering_notes', 0) or 0)}"
+    )
+    raw_nodes = payload.get("nodes", [])
+    nodes = raw_nodes if isinstance(raw_nodes, list) else []
+    if nodes:
+        lines.append("Latest Nodes:")
+        for node in nodes[:8]:
+            if not isinstance(node, dict):
+                continue
+            nid = str(node.get("node_id", "") or "")[:8]
+            kind = str(node.get("kind", "") or "")
+            nstatus = str(node.get("status", "") or "")
+            title = str(node.get("title", "") or "").replace("\n", " ").strip()
+            if len(title) > 72:
+                title = title[:69] + "..."
+            lines.append(f"  - [{nstatus}] ({kind}) {nid} {title}")
+    return "\n".join(lines)
+
+
+def cmd_reasoning(args: argparse.Namespace, c: Client) -> None:
+    sub = args.reasoning_cmd
+    if sub == "list":
+        params = {
+            "session_id": args.session_id,
+            "include_pending": not args.no_pending,
+            "limit": args.limit,
+        }
+        c.emit(c.req_json("GET", "/api/reasoning/active", params=params))
+        return
+    if sub == "show":
+        data = c.req_json(
+            "GET",
+            f"/api/reasoning/tree/{args.tree_id}",
+            params={"include_nodes": not args.no_nodes},
+        )
+        if args.visual:
+            print(_render_reasoning_snapshot(data))
+            return
+        c.emit(data)
+        return
+    if sub == "stop":
+        c.emit(
+            c.req_json(
+                "POST",
+                f"/api/reasoning/tree/{args.tree_id}/stop",
+                payload={"reason": args.reason},
+            )
+        )
+        return
+    if sub == "steer":
+        c.emit(
+            c.req_json(
+                "POST",
+                f"/api/reasoning/tree/{args.tree_id}/steer",
+                payload={"note": args.note},
+            )
+        )
+        return
+    if sub == "watch":
+        interval = max(0.2, float(args.interval))
+        rounds = max(1, int(args.rounds))
+        for i in range(rounds):
+            data = c.req_json(
+                "GET",
+                f"/api/reasoning/tree/{args.tree_id}",
+                params={"include_nodes": True},
+            )
+            print(_render_reasoning_snapshot(data))
+            if i < rounds - 1:
+                print("-" * 80)
+            status = str(data.get("status", "") or "").lower()
+            if status in {"succeeded", "failed", "skipped"}:
+                break
+            time.sleep(interval)
+        return
+    raise CliError(f"unknown reasoning command: {sub}")
 
 
 def cmd_simple(args: argparse.Namespace, c: Client) -> None:
@@ -623,6 +723,13 @@ def build_parser() -> argparse.ArgumentParser:
     sr = scp.add_parser("report"); sr.add_argument("--limit", type=int, default=100)
     se = scp.add_parser("events"); se.add_argument("--action", default=None); se.add_argument("--limit", type=int, default=100)
 
+    rsn = sp.add_parser("reasoning"); rsp = rsn.add_subparsers(dest="reasoning_cmd", required=True)
+    rl = rsp.add_parser("list"); rl.add_argument("--session-id", default=None); rl.add_argument("--no-pending", action="store_true"); rl.add_argument("--limit", type=int, default=20)
+    rshow = rsp.add_parser("show"); rshow.add_argument("tree_id"); rshow.add_argument("--no-nodes", action="store_true"); rshow.add_argument("--visual", action="store_true")
+    rstop = rsp.add_parser("stop"); rstop.add_argument("tree_id"); rstop.add_argument("--reason", default="")
+    rsteer = rsp.add_parser("steer"); rsteer.add_argument("tree_id"); rsteer.add_argument("note")
+    rwatch = rsp.add_parser("watch"); rwatch.add_argument("tree_id"); rwatch.add_argument("--interval", type=float, default=1.0); rwatch.add_argument("--rounds", type=int, default=30)
+
     met = sp.add_parser("metrics"); mtp = met.add_subparsers(dest="metrics_cmd", required=True); mtp.add_parser("json"); mtp.add_parser("prometheus")
     doc = sp.add_parser("doctor"); dcp = doc.add_subparsers(dest="doctor_cmd", required=True); dcp.add_parser("run"); dcp.add_parser("migrate")
     ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol"); opp.add_parser("methods"); opp.add_parser("http-contracts"); opp.add_parser("framework-check"); opp.add_parser("surfaces"); opp.add_parser("governance")
@@ -681,6 +788,8 @@ def main() -> int:
                 print(r.text)
             else:
                 cmd_simple(args, client)
+        elif args.command == "reasoning":
+            cmd_reasoning(args, client)
         elif args.command == "config":
             cmd_config(args, client)
         elif args.command == "memory":
@@ -710,6 +819,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
 
 
 

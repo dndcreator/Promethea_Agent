@@ -1,0 +1,17 @@
+{
+  "nodes": {
+    "b": {
+      "node_id": "b",
+      "kind": "task",
+      "data": {
+        "title": "B"
+      },
+      "tags": [
+        "todo"
+      ],
+      "created_at": 1775058809.9461973,
+      "updated_at": 1775058809.9461973
+    }
+  },
+  "edges": []
+}

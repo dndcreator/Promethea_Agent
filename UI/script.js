@@ -480,6 +480,10 @@ Object.assign(I18N.zh, {
     ui_memory_backend_neo4j: "Neo4j（图数据库）",
     ui_memory_backend_sqlite_graph: "SQLite Graph（轻量）",
     ui_memory_backend_flat: "Flat Memory（兜底）",
+    ui_reasoning_title: "推理可视化",
+    ui_reasoning_steer_placeholder: "输入纠偏提示...",
+    ui_reasoning_steer: "纠偏",
+    ui_reasoning_stop: "中止",
 });
 
 Object.assign(I18N.en, {
@@ -498,6 +502,10 @@ Object.assign(I18N.en, {
     ui_memory_backend_neo4j: "Neo4j (Graph)",
     ui_memory_backend_sqlite_graph: "SQLite Graph (Lightweight)",
     ui_memory_backend_flat: "Flat Memory (Fallback)",
+    ui_reasoning_title: "Reasoning",
+    ui_reasoning_steer_placeholder: "Enter steering note...",
+    ui_reasoning_steer: "Steer",
+    ui_reasoning_stop: "Stop",
 });
 
 function getCurrentLang() {
@@ -599,6 +607,14 @@ class LanguageManager {
 
         const messageInput = document.getElementById("messageInput");
         if (messageInput) messageInput.placeholder = t("chat_placeholder");
+        const reasoningTitle = document.getElementById("reasoningPanelTitle");
+        if (reasoningTitle) reasoningTitle.textContent = t("ui_reasoning_title");
+        const reasoningSteerInput = document.getElementById("reasoningSteerInput");
+        if (reasoningSteerInput) reasoningSteerInput.placeholder = t("ui_reasoning_steer_placeholder");
+        const reasoningSteerBtn = document.getElementById("reasoningSteerBtn");
+        if (reasoningSteerBtn) reasoningSteerBtn.textContent = t("ui_reasoning_steer");
+        const reasoningStopBtn = document.getElementById("reasoningStopBtn");
+        if (reasoningStopBtn) reasoningStopBtn.textContent = t("ui_reasoning_stop");
 
         const metricsTitle = document.querySelector("#metricsModal .modal-header h2");
         if (metricsTitle) metricsTitle.textContent = t("ui_metrics");
@@ -901,6 +917,14 @@ class TerminalChatApp {
         this.currentSessionEl = document.getElementById('currentSession');
         this.sessionCountEl = document.getElementById('sessionCount');
         this.connectionStatusEl = document.getElementById('connectionStatus');
+        this.reasoningPanelEl = document.getElementById('reasoningPanel');
+        this.reasoningTreeIdEl = document.getElementById('reasoningTreeId');
+        this.reasoningStatusEl = document.getElementById('reasoningStatus');
+        this.reasoningStatsEl = document.getElementById('reasoningStats');
+        this.reasoningNodesEl = document.getElementById('reasoningNodes');
+        this.reasoningSteerInputEl = document.getElementById('reasoningSteerInput');
+        this.reasoningSteerBtn = document.getElementById('reasoningSteerBtn');
+        this.reasoningStopBtn = document.getElementById('reasoningStopBtn');
         
         // Additional UI elements
         this.apiStatusEl = document.getElementById('apiStatus');
@@ -934,6 +958,8 @@ class TerminalChatApp {
         };
         this.toolCatalog = [];
         this.statusPollTimer = null;
+        this.reasoningPollTimer = null;
+        this.currentReasoningTreeId = null;
         // Mapping: tool_call_id -> corresponding DOM elements
         this.toolCallElements = new Map();
         
@@ -1083,6 +1109,123 @@ class TerminalChatApp {
         // Confirmation modal actions
         this.approveToolBtn.addEventListener('click', () => this.handleToolConfirmation('approve'));
         this.rejectToolBtn.addEventListener('click', () => this.handleToolConfirmation('reject'));
+        if (this.reasoningStopBtn) {
+            this.reasoningStopBtn.addEventListener('click', () => this.stopReasoningTree());
+        }
+        if (this.reasoningSteerBtn) {
+            this.reasoningSteerBtn.addEventListener('click', () => this.steerReasoningTree());
+        }
+    }
+
+    resetReasoningPanel() {
+        this.currentReasoningTreeId = null;
+        if (this.reasoningPollTimer) {
+            clearInterval(this.reasoningPollTimer);
+            this.reasoningPollTimer = null;
+        }
+        if (this.reasoningPanelEl) this.reasoningPanelEl.classList.add('hidden');
+        if (this.reasoningTreeIdEl) this.reasoningTreeIdEl.textContent = '-';
+        if (this.reasoningStatusEl) this.reasoningStatusEl.textContent = 'idle';
+        if (this.reasoningStatsEl) this.reasoningStatsEl.textContent = 'iter=0, nodes=0';
+        if (this.reasoningNodesEl) this.reasoningNodesEl.textContent = '';
+        if (this.reasoningSteerInputEl) this.reasoningSteerInputEl.value = '';
+    }
+
+    attachReasoningTree(treeId) {
+        if (!treeId) return;
+        this.currentReasoningTreeId = treeId;
+        if (this.reasoningPanelEl) this.reasoningPanelEl.classList.remove('hidden');
+        if (this.reasoningTreeIdEl) this.reasoningTreeIdEl.textContent = treeId.slice(0, 12);
+        this.pollReasoningTree();
+        if (this.reasoningPollTimer) clearInterval(this.reasoningPollTimer);
+        this.reasoningPollTimer = setInterval(() => this.pollReasoningTree(), 1000);
+    }
+
+    async attachLatestReasoningForSession(sessionId) {
+        if (!sessionId) return;
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/reasoning/active?session_id=${encodeURIComponent(sessionId)}&limit=5`);
+            if (!response.ok) return;
+            const data = await response.json();
+            const items = Array.isArray(data?.items) ? data.items : [];
+            const active = items.find(item => String(item?.status || '').toLowerCase() === 'running') || items[0];
+            if (active?.tree_id) {
+                this.attachReasoningTree(active.tree_id);
+            }
+        } catch (e) {
+            console.warn('attach latest reasoning failed:', e);
+        }
+    }
+
+    async pollReasoningTree() {
+        if (!this.currentReasoningTreeId) return;
+        try {
+            const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/reasoning/tree/${this.currentReasoningTreeId}`);
+            if (!response.ok) {
+                if (this.reasoningPollTimer) {
+                    clearInterval(this.reasoningPollTimer);
+                    this.reasoningPollTimer = null;
+                }
+                return;
+            }
+            const data = await response.json();
+            const status = String(data?.status || 'running');
+            const stats = data?.stats || {};
+            const iter = stats.iterations || 0;
+            const nodes = data?.node_count || 0;
+            if (this.reasoningStatusEl) this.reasoningStatusEl.textContent = status;
+            if (this.reasoningStatsEl) this.reasoningStatsEl.textContent = `iter=${iter}, nodes=${nodes}, think=${stats.think_calls || 0}, tool=${stats.tool_calls || 0}`;
+            if (this.reasoningNodesEl) {
+                const list = Array.isArray(data?.nodes) ? data.nodes.slice(0, 8) : [];
+                const lines = list.map(node => {
+                    const nid = String(node?.node_id || '').slice(0, 8);
+                    const kind = String(node?.kind || '');
+                    const nstatus = String(node?.status || '');
+                    const title = String(node?.title || '').replace(/\s+/g, ' ').trim();
+                    return `[${nstatus}] (${kind}) ${nid} ${title}`;
+                });
+                this.reasoningNodesEl.textContent = lines.join('\n');
+            }
+            if (["succeeded", "failed", "skipped"].includes(status.toLowerCase())) {
+                if (this.reasoningPollTimer) {
+                    clearInterval(this.reasoningPollTimer);
+                    this.reasoningPollTimer = null;
+                }
+            }
+        } catch (e) {
+            console.warn('poll reasoning tree failed:', e);
+        }
+    }
+
+    async stopReasoningTree() {
+        if (!this.currentReasoningTreeId) return;
+        try {
+            await this.fetchWithAuth(`${this.apiBaseUrl}/api/reasoning/tree/${this.currentReasoningTreeId}/stop`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: 'stopped_from_web_ui' }),
+            });
+            await this.pollReasoningTree();
+        } catch (e) {
+            console.warn('stop reasoning tree failed:', e);
+        }
+    }
+
+    async steerReasoningTree() {
+        if (!this.currentReasoningTreeId || !this.reasoningSteerInputEl) return;
+        const note = this.reasoningSteerInputEl.value.trim();
+        if (!note) return;
+        try {
+            await this.fetchWithAuth(`${this.apiBaseUrl}/api/reasoning/tree/${this.currentReasoningTreeId}/steer`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ note }),
+            });
+            this.reasoningSteerInputEl.value = '';
+            await this.pollReasoningTree();
+        } catch (e) {
+            console.warn('steer reasoning tree failed:', e);
+        }
     }
     
     async handleToolConfirmation(action) {
@@ -1483,6 +1626,7 @@ class TerminalChatApp {
     
     async switchSession(sessionId) {
         if (!sessionId || this.currentSessionId === sessionId) return;
+        this.resetReasoningPanel();
         
         try {
             const response = await this.fetchWithAuth(`${this.apiBaseUrl}/api/sessions/${sessionId}`);
@@ -1513,6 +1657,7 @@ class TerminalChatApp {
             
             // 聚焦输入框
             this.focusInput();
+            await this.attachLatestReasoningForSession(sessionId);
             
         } catch (error) {
             console.error('切换会话失败:', error);
@@ -1524,6 +1669,7 @@ class TerminalChatApp {
         this.currentSessionId = null;
         this.currentSessionEl.textContent = t("ui_not_started");
         this.chatMessages.innerHTML = '';
+        this.resetReasoningPanel();
         this.addWelcomeMessage();
         
         // 娓呴櫎渚ц竟鏍忛珮浜?
@@ -1538,6 +1684,7 @@ class TerminalChatApp {
         const message = this.messageInput.value.trim();
         if (!message || this.isTyping) return;
         const streamEnabled = this.isStreamEnabled();
+        this.resetReasoningPanel();
         
         // 娣诲姞鐢ㄦ埛娑堟伅
         this.addMessage('user', message);
@@ -1719,6 +1866,10 @@ class TerminalChatApp {
                         err.textContent = data.content || t("ui_tool_failed");
                         toolArea.appendChild(err);
                         this.chatMessages.scrollTop = this.chatMessages.scrollHeight;
+                    } else if (data.type === 'reasoning_meta') {
+                        if (data.tree_id) {
+                            this.attachReasoningTree(data.tree_id);
+                        }
                     } else if (data.type === 'done') {
                         // done 鏃跺鏈€缁堟枃鏈仛涓€娆♀€滈噸澶嶈緭鍑衡€濆幓閲嶅苟閲嶇粯锛岄伩鍏嶇暀涓?A\n\nA 杩欑缁撴灉
                         const dedupeText = (text) => {
@@ -1771,6 +1922,9 @@ class TerminalChatApp {
                                 tool_name: data.tool_name || 'reasoning.success_label',
                                 args: data.args || {}
                             });
+                        }
+                        if (data.tree_id) {
+                            this.attachReasoningTree(data.tree_id);
                         }
                         doneReceived = true;
                         break;

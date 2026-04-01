@@ -5,7 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -104,6 +104,7 @@ class ReasoningService:
         self._active_trees: Dict[str, ReasoningTree] = {}
         self._pending_outcomes: Dict[str, Dict[str, Any]] = {}
         self._pending_human_reviews: Dict[str, Dict[str, Any]] = {}
+        self._runtime_controls: Dict[str, Dict[str, Any]] = {}
         self._completed_runs = 0
         self._failed_runs = 0
         self.tool_strategy = ToolStrategyEngine()
@@ -132,10 +133,205 @@ class ReasoningService:
             "active_trees": len(self._active_trees),
             "pending_outcomes": len(self._pending_outcomes),
             "pending_human_reviews": len(self._pending_human_reviews),
+            "controlled_trees": len(self._runtime_controls),
             "completed_runs": self._completed_runs,
             "failed_runs": self._failed_runs,
             "tool_selection": dict(self._tool_selection_stats),
             "tool_quality": self._runtime_tool_quality_hints(limit=8),
+        }
+
+    def list_runtime_trees(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        include_pending: bool = True,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        rows: List[Dict[str, Any]] = []
+        for tree in self._active_trees.values():
+            if user_id and tree.user_id != user_id:
+                continue
+            if session_id and tree.session_id != session_id:
+                continue
+            rows.append(self._serialize_tree(tree, include_nodes=False))
+        if include_pending:
+            for item in self._pending_outcomes.values():
+                payload = item.get("tree", {}) if isinstance(item, dict) else {}
+                if not isinstance(payload, dict):
+                    continue
+                if user_id and str(payload.get("user_id", "")) != str(user_id):
+                    continue
+                if session_id and str(payload.get("session_id", "")) != str(session_id):
+                    continue
+                rows.append(self._serialize_tree_payload(payload, include_nodes=False))
+        rows.sort(key=lambda it: float(it.get("updated_at") or 0.0), reverse=True)
+        return {"items": rows[: max(1, int(limit))], "total": len(rows)}
+
+    def get_runtime_tree(
+        self,
+        *,
+        tree_id: str,
+        user_id: Optional[str] = None,
+        include_nodes: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        tree = self._active_trees.get(tree_id)
+        if tree:
+            if user_id and tree.user_id != user_id:
+                return None
+            return self._serialize_tree(tree, include_nodes=include_nodes)
+        outcome = self._pending_outcomes.get(tree_id)
+        if not outcome:
+            return None
+        payload = outcome.get("tree", {}) if isinstance(outcome, dict) else {}
+        if not isinstance(payload, dict):
+            return None
+        if user_id and str(payload.get("user_id", "")) != str(user_id):
+            return None
+        return self._serialize_tree_payload(payload, include_nodes=include_nodes)
+
+    def request_stop(
+        self,
+        *,
+        tree_id: str,
+        user_id: Optional[str],
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        tree = self._active_trees.get(tree_id)
+        if not tree:
+            return {"status": "missing", "tree_id": tree_id}
+        if user_id and tree.user_id != user_id:
+            return {"status": "forbidden", "tree_id": tree_id}
+        control = self._runtime_controls.setdefault(tree_id, {})
+        control["stop_requested"] = True
+        control["stop_reason"] = str(reason or "").strip()
+        control["stop_requested_at"] = time.time()
+        tree.stats["stop_requested"] = True
+        tree.updated_at = time.time()
+        return {"status": "accepted", "tree_id": tree_id, "stop_requested": True}
+
+    def add_steering_note(
+        self,
+        *,
+        tree_id: str,
+        user_id: Optional[str],
+        note: str,
+    ) -> Dict[str, Any]:
+        clean = str(note or "").strip()
+        if not clean:
+            return {"status": "invalid", "reason": "empty_note", "tree_id": tree_id}
+        tree = self._active_trees.get(tree_id)
+        if not tree:
+            return {"status": "missing", "tree_id": tree_id}
+        if user_id and tree.user_id != user_id:
+            return {"status": "forbidden", "tree_id": tree_id}
+        control = self._runtime_controls.setdefault(tree_id, {})
+        notes = control.setdefault("steering_notes", [])
+        entry = {"note": clean, "created_at": time.time()}
+        notes.append(entry)
+        tree.stats["pending_steering_notes"] = len(notes)
+        tree.stats["steering_notes_total"] = int(tree.stats.get("steering_notes_total", 0)) + 1
+        tree.updated_at = time.time()
+        return {"status": "accepted", "tree_id": tree_id, "pending_notes": len(notes)}
+
+    def _is_stop_requested(self, tree_id: str) -> bool:
+        control = self._runtime_controls.get(tree_id, {})
+        return bool(control.get("stop_requested"))
+
+    def _consume_steering_notes(self, tree_id: str) -> List[Dict[str, Any]]:
+        control = self._runtime_controls.get(tree_id)
+        if not control:
+            return []
+        notes = control.get("steering_notes")
+        if not isinstance(notes, list) or not notes:
+            return []
+        consumed = list(notes)
+        control["steering_notes"] = []
+        return consumed
+
+    def _serialize_tree_payload(
+        self,
+        payload: Dict[str, Any],
+        *,
+        include_nodes: bool,
+    ) -> Dict[str, Any]:
+        tree_id = str(payload.get("tree_id", "") or "")
+        control = self._runtime_controls.get(tree_id, {})
+        nodes = payload.get("nodes", [])
+        if include_nodes and isinstance(nodes, list):
+            node_rows = [
+                {
+                    "node_id": str(node.get("node_id", "")),
+                    "parent_id": node.get("parent_id"),
+                    "kind": str(node.get("kind", "")),
+                    "title": str(node.get("title", "")),
+                    "status": str(node.get("status", "")),
+                    "observation": str(node.get("observation", "") or ""),
+                    "summary": str(node.get("summary", "") or ""),
+                    "updated_at": float(node.get("updated_at") or 0.0),
+                }
+                for node in nodes
+                if isinstance(node, dict)
+            ]
+        else:
+            node_rows = []
+        return {
+            "tree_id": tree_id,
+            "session_id": str(payload.get("session_id", "") or ""),
+            "user_id": str(payload.get("user_id", "") or ""),
+            "root_goal": str(payload.get("root_goal", "") or ""),
+            "status": str(payload.get("status", "") or ""),
+            "created_at": float(payload.get("created_at") or 0.0),
+            "updated_at": float(payload.get("updated_at") or 0.0),
+            "stats": dict(payload.get("stats", {}) or {}),
+            "root_node_id": payload.get("root_node_id"),
+            "node_count": len(nodes) if isinstance(nodes, list) else 0,
+            "nodes": node_rows,
+            "control": {
+                "stop_requested": bool(control.get("stop_requested")),
+                "stop_reason": str(control.get("stop_reason", "") or ""),
+                "pending_steering_notes": len(control.get("steering_notes", []) or []),
+            },
+            "source": "pending_outcome",
+        }
+
+    def _serialize_tree(self, tree: ReasoningTree, *, include_nodes: bool) -> Dict[str, Any]:
+        control = self._runtime_controls.get(tree.tree_id, {})
+        if include_nodes:
+            node_rows = [
+                {
+                    "node_id": node.node_id,
+                    "parent_id": node.parent_id,
+                    "kind": node.kind,
+                    "title": node.title,
+                    "status": node.status,
+                    "observation": node.observation,
+                    "summary": node.summary,
+                    "updated_at": node.updated_at,
+                }
+                for node in tree.nodes.values()
+            ]
+            node_rows.sort(key=lambda it: float(it.get("updated_at") or 0.0), reverse=True)
+        else:
+            node_rows = []
+        return {
+            "tree_id": tree.tree_id,
+            "session_id": tree.session_id,
+            "user_id": tree.user_id,
+            "root_goal": tree.root_goal,
+            "status": tree.status,
+            "created_at": tree.created_at,
+            "updated_at": tree.updated_at,
+            "stats": dict(tree.stats),
+            "root_node_id": tree.root_node_id,
+            "node_count": len(tree.nodes),
+            "nodes": node_rows,
+            "control": {
+                "stop_requested": bool(control.get("stop_requested")),
+                "stop_reason": str(control.get("stop_reason", "") or ""),
+                "pending_steering_notes": len(control.get("steering_notes", []) or []),
+            },
+            "source": "active",
         }
 
     def record_outcome(
@@ -614,6 +810,11 @@ class ReasoningService:
 
         tree = self._create_tree(session_id=session_id, user_id=user_id, root_goal=user_message)
         self._active_trees[tree.tree_id] = tree
+        self._runtime_controls[tree.tree_id] = {
+            "stop_requested": False,
+            "stop_reason": "",
+            "steering_notes": [],
+        }
         start_payload = {
             "tree_id": tree.tree_id,
             "session_id": session_id,
@@ -719,10 +920,17 @@ class ReasoningService:
                 frontier = initial_nodes[:1]
 
             iteration_budget = policy["max_iterations"] if is_complex else 1
+            stopped_by_user = False
 
             while frontier and tree.stats["iterations"] < iteration_budget:
+                if self._is_stop_requested(tree.tree_id):
+                    stopped_by_user = True
+                    break
                 next_candidates: List[str] = []
                 for node_id in frontier:
+                    if self._is_stop_requested(tree.tree_id):
+                        stopped_by_user = True
+                        break
                     tree.stats["iterations"] += 1
                     extra_steps = await self._execute_step(
                         tree=tree,
@@ -767,8 +975,12 @@ class ReasoningService:
                 else:
                     frontier = []
 
-            tree.status = SUCCEEDED
-            tree.stats["termination"] = "max_iterations" if tree.stats["iterations"] >= iteration_budget else "completed"
+            if stopped_by_user:
+                tree.status = SKIPPED
+                tree.stats["termination"] = "stopped_by_user"
+            else:
+                tree.status = SUCCEEDED
+                tree.stats["termination"] = "max_iterations" if tree.stats["iterations"] >= iteration_budget else "completed"
             reasoning_summary = await self._summarize_tree(
                 tree=tree,
                 user_message=user_message,
@@ -861,6 +1073,7 @@ class ReasoningService:
             raise
         finally:
             self._active_trees.pop(tree.tree_id, None)
+            self._runtime_controls.pop(tree.tree_id, None)
 
     async def _gate_reasoning(
         self,
@@ -1025,6 +1238,8 @@ class ReasoningService:
         run_context: Optional[Any] = None,
     ) -> List[Dict[str, Any]]:
         node = tree.nodes[node_id]
+        if self._is_stop_requested(tree.tree_id):
+            return []
         if node.status in TERMINAL_STATES:
             return []
 
@@ -1055,6 +1270,33 @@ class ReasoningService:
         await self._emit_node(tree, node, EventType.REASONING_NODE_CREATED)
         observations: List[str] = []
         step = dict(node.metadata)
+        steering_notes = self._consume_steering_notes(tree.tree_id)
+        if steering_notes:
+            note_lines: List[str] = []
+            for entry in steering_notes:
+                if not isinstance(entry, dict):
+                    continue
+                text = str(entry.get("note", "") or "").strip()
+                if text:
+                    note_lines.append(f"- {text}")
+            if note_lines:
+                steering_observation = "User steering guidance:\n" + "\n".join(note_lines)
+                observations.append(steering_observation)
+                step["steering_guidance"] = "\n".join(note_lines)
+                node.metadata["steering_guidance"] = step["steering_guidance"]
+                tree.stats["pending_steering_notes"] = 0
+                tree.stats["steering_applied"] = int(tree.stats.get("steering_applied", 0)) + len(note_lines)
+                await self._emit(
+                    EventType.REASONING_OBSERVATION_RECEIVED,
+                    {
+                        "tree_id": tree.tree_id,
+                        "session_id": tree.session_id,
+                        "user_id": tree.user_id,
+                        "node_id": node.node_id,
+                        "kind": "steering",
+                        "count": len(note_lines),
+                    },
+                )
         strategy_hints = (
             self.template_memory.get_strategy_hints(user_id=user_id)
             if self.template_memory
@@ -1064,6 +1306,8 @@ class ReasoningService:
         extra_steps: List[Dict[str, Any]] = []
 
         try:
+            if self._is_stop_requested(tree.tree_id):
+                return []
             if step.get("requires_memory") and tree.stats["memory_calls"] < policy["max_memory_calls"]:
                 memory_query = step.get("memory_query") or step.get("goal") or node.title
                 memory_observation = await self._run_memory_lookup(
@@ -1080,6 +1324,8 @@ class ReasoningService:
 
             react_rounds = max(1, int(policy["max_replan_rounds"]) + 1)
             for _ in range(react_rounds):
+                if self._is_stop_requested(tree.tree_id):
+                    break
                 decision = await self._replan_step(
                     tree=tree,
                     node=node,
@@ -1157,7 +1403,7 @@ class ReasoningService:
 
                 break
 
-            if not observations:
+            if not self._is_stop_requested(tree.tree_id) and not observations:
                 think_observation = await self._run_think_step(
                     tree=tree,
                     node=node,
@@ -1170,7 +1416,12 @@ class ReasoningService:
                 if think_observation:
                     observations.append(f"Think:\n{think_observation}")
 
-            if not extra_steps and observations and self._node_depth(tree, node_id) < policy["max_depth"]:
+            if (
+                not self._is_stop_requested(tree.tree_id)
+                and not extra_steps
+                and observations
+                and self._node_depth(tree, node_id) < policy["max_depth"]
+            ):
                 expanded = await self._plan_steps(
                     tree=tree,
                     user_message=user_message,
@@ -1513,7 +1764,7 @@ class ReasoningService:
             observations = run.run_metadata.setdefault("observations", [])
             if isinstance(observations, list):
                 observations.append(payload)
-                run.updated_at = datetime.utcnow()
+                run.updated_at = datetime.now(timezone.utc)
         except Exception as e:
             logger.debug("ReasoningService: append workflow observation skipped: {}", e)
 
@@ -2519,39 +2770,3 @@ class ReasoningService:
         uid = str(user_id or "default_user").strip() or "default_user"
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in uid)
         return safe[:128] or "default_user"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

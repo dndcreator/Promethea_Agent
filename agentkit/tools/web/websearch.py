@@ -82,16 +82,23 @@ class WebSearchService:
             logger.error("Search failed: %s", e)
             return f"Error: search failed: {e}"
 
-    async def quick_answer(self, query: str) -> str:
+    async def quick_answer(
+        self,
+        query: Optional[str] = None,
+        question: Optional[str] = None,
+    ) -> str:
         """Try instant answer first, fallback to normal search."""
         blocked = self._ensure_network_allowed()
         if blocked:
             return blocked
+        resolved_query = (query or question or "").strip()
+        if not resolved_query:
+            return "Error: query cannot be empty"
         try:
             DDGS = _resolve_ddgs_class()
 
             with DDGS() as ddgs:
-                answers = list(ddgs.answers(query))
+                answers = list(ddgs.answers(resolved_query))
                 if answers:
                     answer = answers[0]
                     text = answer.get("text", "")
@@ -100,12 +107,12 @@ class WebSearchService:
                     if url:
                         result += f"\nSource: {url}"
                     return result
-            return await self.search(query, max_results=3)
+            return await self.search(resolved_query, max_results=3)
         except ImportError:
-            return await self.search(query, max_results=3)
+            return await self.search(resolved_query, max_results=3)
         except Exception as e:
             logger.error("Quick answer failed: %s", e)
-            return await self.search(query, max_results=3)
+            return await self.search(resolved_query, max_results=3)
 
     async def news_search(
         self,

@@ -1,7 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
@@ -63,7 +63,7 @@ class WorkflowEngine:
             raise WorkflowError("workflow must contain at least one step")
         self._normalize_definition(definition)
         self._validate_definition(definition)
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         definition.updated_at = now
         if not definition.created_at:
             definition.created_at = now
@@ -227,7 +227,7 @@ class WorkflowEngine:
         if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED}:
             return run
         run.status = RUN_STATUS_PAUSED
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         self._emit(
             EventType.CONVERSATION_STAGE_FINISHED,
             {
@@ -245,7 +245,7 @@ class WorkflowEngine:
         if run.status != RUN_STATUS_PAUSED:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return self.advance_to_next_step(workflow_run_id, run_context=run_context)
 
     async def resume_workflow_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -253,7 +253,7 @@ class WorkflowEngine:
         if run.status != RUN_STATUS_PAUSED:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
 
     def retry_step(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -268,7 +268,7 @@ class WorkflowEngine:
         step.outputs = {}
         run.status = RUN_STATUS_RUNNING
         run.current_step_id = step.step_id
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return self.advance_to_next_step(workflow_run_id, run_context=run_context)
 
     async def retry_step_async(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -283,7 +283,7 @@ class WorkflowEngine:
         step.outputs = {}
         run.status = RUN_STATUS_RUNNING
         run.current_step_id = step.step_id
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
 
     def approve_step(self, workflow_run_id: str, step_id: str, approved_by: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -294,7 +294,7 @@ class WorkflowEngine:
         approvals = run.run_metadata.setdefault("approvals", {})
         approvals[step_id] = {
             "approved_by": approved_by,
-            "approved_at": datetime.utcnow().isoformat() + "Z",
+            "approved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
         if run.current_step_id == step_id and step.status == STEP_STATUS_WAITING_HUMAN:
@@ -302,7 +302,7 @@ class WorkflowEngine:
             step.status = STEP_STATUS_PENDING
             if run.status == RUN_STATUS_WAITING_HUMAN:
                 run.status = RUN_STATUS_RUNNING
-                run.updated_at = datetime.utcnow()
+                run.updated_at = datetime.now(timezone.utc)
                 return self.advance_to_next_step(workflow_run_id, run_context=run_context)
         return run
 
@@ -321,7 +321,7 @@ class WorkflowEngine:
         approvals = run.run_metadata.setdefault("approvals", {})
         approvals[step_id] = {
             "approved_by": approved_by,
-            "approved_at": datetime.utcnow().isoformat() + "Z",
+            "approved_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
 
         if run.current_step_id == step_id and step.status == STEP_STATUS_WAITING_HUMAN:
@@ -329,7 +329,7 @@ class WorkflowEngine:
             step.status = STEP_STATUS_PENDING
             if run.status == RUN_STATUS_WAITING_HUMAN:
                 run.status = RUN_STATUS_RUNNING
-                run.updated_at = datetime.utcnow()
+                run.updated_at = datetime.now(timezone.utc)
                 return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
         return run
 
@@ -346,7 +346,7 @@ class WorkflowEngine:
         )
         self._checkpoints.setdefault(run.workflow_run_id, []).append(checkpoint)
         run.checkpoint_id = checkpoint.checkpoint_id
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return checkpoint
 
     def list_checkpoints(self, workflow_run_id: str) -> List[Checkpoint]:
@@ -362,7 +362,7 @@ class WorkflowEngine:
         # Keep trace payload bounded for long-lived runs.
         if len(observations) > 200:
             run.run_metadata["observations"] = observations[-200:]
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         return run
 
     async def run_tool_action(
@@ -411,7 +411,7 @@ class WorkflowEngine:
             "args": dict(args or {}),
             "result": result,
             "observation": observation,
-            "at": datetime.utcnow().isoformat() + "Z",
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "workflow_managed": True,
         }
         if workflow_run_id:
@@ -421,7 +421,7 @@ class WorkflowEngine:
                 if step and step.step_type == "tool_step":
                     step.outputs.update(payload)
                     step.status = STEP_STATUS_SUCCEEDED
-                    run.updated_at = datetime.utcnow()
+                    run.updated_at = datetime.now(timezone.utc)
             except Exception:
                 pass
         return payload
@@ -440,12 +440,12 @@ class WorkflowEngine:
             if not ready_steps:
                 if self._has_blocked_pending_steps(run):
                     run.status = RUN_STATUS_FAILED
-                    run.updated_at = datetime.utcnow()
+                    run.updated_at = datetime.now(timezone.utc)
                     run.run_metadata["workflow_error"] = "workflow blocked by unresolved dependencies"
                     run.run_metadata["failure"] = {"code": "workflow_blocked", "message": "workflow blocked by unresolved dependencies"}
                     return run
                 run.status = RUN_STATUS_COMPLETED
-                run.completed_at = datetime.utcnow()
+                run.completed_at = datetime.now(timezone.utc)
                 run.updated_at = run.completed_at
                 self._emit(
                     EventType.CONVERSATION_COMPLETE,
@@ -478,7 +478,7 @@ class WorkflowEngine:
                 step = waiting_steps[0]
                 run.status = RUN_STATUS_WAITING_HUMAN
                 run.current_step_id = step.step_id
-                run.updated_at = datetime.utcnow()
+                run.updated_at = datetime.now(timezone.utc)
                 self.create_checkpoint(run.workflow_run_id, step.step_id, run_context=run_context)
                 return run
 
@@ -487,7 +487,7 @@ class WorkflowEngine:
                 step = failed_steps[0]
                 run.status = RUN_STATUS_FAILED
                 run.current_step_id = step.step_id
-                run.updated_at = datetime.utcnow()
+                run.updated_at = datetime.now(timezone.utc)
                 self.create_checkpoint(run.workflow_run_id, step.step_id, run_context=run_context)
                 return run
 
@@ -703,7 +703,7 @@ class WorkflowEngine:
         workflow_type = str(run.run_metadata.get("workflow_type") or "linear").strip().lower() or "linear"
         run.current_step_id = self._select_next_ready_step_id(run.steps, workflow_type=workflow_type)
         run.status = RUN_STATUS_RUNNING if run.current_step_id else RUN_STATUS_COMPLETED
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         if run.current_step_id is None:
             run.completed_at = run.updated_at
 
@@ -738,7 +738,7 @@ class WorkflowEngine:
     def _refresh_run_cursor(self, run: WorkflowRun, *, workflow_type: str) -> None:
         run.current_step_id = self._select_next_ready_step_id(run.steps, workflow_type=workflow_type)
         run.status = RUN_STATUS_RUNNING if run.current_step_id else RUN_STATUS_COMPLETED
-        run.updated_at = datetime.utcnow()
+        run.updated_at = datetime.now(timezone.utc)
         if run.current_step_id is None:
             run.completed_at = run.updated_at
 
@@ -903,8 +903,3 @@ class WorkflowEngine:
             loop.create_task(_emit_event())
         except Exception:
             pass
-
-
-
-
-

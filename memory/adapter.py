@@ -6,6 +6,7 @@ import json
 import os
 import time
 import uuid
+import unicodedata
 from typing import Any, Dict, List, Optional
 import threading
 from datetime import datetime, timezone
@@ -268,7 +269,7 @@ class MemoryAdapter:
         user_id: str,
         metadata: Optional[dict] = None,
     ) -> bool:
-        text = str(content or "").strip()
+        text = self._normalize_message_text(content).strip()
         if not text:
             return False
         event = {
@@ -478,12 +479,13 @@ class MemoryAdapter:
         """
         if not self.enabled:
             return False
+        normalized_content = self._normalize_message_text(content)
 
         if bool(getattr(self, "_raw_log_enabled", False)):
             appended = self._append_raw_log_event(
                 session_id=session_id,
                 role=role,
-                content=content,
+                content=normalized_content,
                 user_id=user_id,
                 metadata=metadata,
             )
@@ -495,10 +497,68 @@ class MemoryAdapter:
         return self._write_message_to_store(
             session_id=session_id,
             role=role,
-            content=content,
+            content=normalized_content,
             user_id=user_id,
             metadata=metadata,
         )
+
+    _MOJIBAKE_MARKERS = (
+        "Ã", "Â", "�", "锟", "锛", "浣", "鏄", "鐨", "鍙", "鎴", "涓", "闂", "鎵",
+    )
+
+    @classmethod
+    def _text_corruption_score(cls, text: str) -> int:
+        if not text:
+            return 0
+        score = 0
+        score += text.count("�") * 20
+        for marker in cls._MOJIBAKE_MARKERS:
+            score += text.count(marker)
+        for ch in text:
+            if ord(ch) < 32 and ch not in ("\n", "\r", "\t"):
+                score += 5
+        return score
+
+    @classmethod
+    def _repair_common_mojibake(cls, text: str) -> str:
+        if not text:
+            return text
+        marker_hits = sum(text.count(m) for m in cls._MOJIBAKE_MARKERS)
+        has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in text)
+        has_katakana = any("\u30a0" <= ch <= "\u30ff" for ch in text)
+        has_hangul = any("\uac00" <= ch <= "\ud7a3" for ch in text)
+        has_euro = "€" in text
+        if marker_hits < 2 and "�" not in text and not (has_cjk and (has_katakana or has_hangul or has_euro)):
+            return text
+
+        best = text
+        best_score = cls._text_corruption_score(text)
+        original_digits = sum(ch.isdigit() for ch in text)
+        for enc in ("gb18030", "cp1252", "latin-1"):
+            for mode in ("strict", "ignore"):
+                try:
+                    candidate = text.encode(enc, errors=mode).decode("utf-8", errors=mode)
+                except Exception:
+                    continue
+                if not candidate.strip():
+                    continue
+                score = cls._text_corruption_score(candidate)
+                digit_drift = max(0, sum(ch.isdigit() for ch in candidate) - original_digits)
+                score += digit_drift * 2
+                if score < best_score:
+                    best = candidate
+                    best_score = score
+        return best
+
+    @classmethod
+    def _normalize_message_text(cls, content: Any) -> str:
+        text = str(content or "")
+        if not text:
+            return ""
+        text = text.replace("\x00", "")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = unicodedata.normalize("NFC", text)
+        return cls._repair_common_mojibake(text)
 
     def _get_context(self, session_id: str) -> list:
         """Get recent context messages (up to last 5) for a session."""

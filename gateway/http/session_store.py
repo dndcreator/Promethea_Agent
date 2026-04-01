@@ -1,6 +1,6 @@
-﻿import json, os
+import json, os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, TYPE_CHECKING
 from loguru import logger
@@ -25,7 +25,7 @@ class SessionStorage:
                 raw = json.load(f)
             return {sid: Session(**payload) for sid,payload in raw.items()}
         except json.JSONDecodeError as e:
-            backup = f"{self.path}.corrupt.{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+            backup = f"{self.path}.corrupt.{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
             try:
                 os.replace(self.path, backup)
                 logger.warning(

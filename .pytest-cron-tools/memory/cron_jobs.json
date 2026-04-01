@@ -1,0 +1,18 @@
+[
+  {
+    "job_id": "job_0e26ba42f8424aa09dc7161e5fe0bd11",
+    "name": "due-job",
+    "interval_seconds": 1,
+    "service_name": "runtime_tools",
+    "tool_name": "gateway_action",
+    "args": {
+      "action": "status"
+    },
+    "enabled": true,
+    "created_at": 1775058809.6556275,
+    "updated_at": 9999999999.0,
+    "last_run_at": 9999999999.0,
+    "next_run_at": 10000000000.0,
+    "last_error": ""
+  }
+]

@@ -94,6 +94,24 @@
 
             <div class="terminal-body">
                 <div class="chat-messages" id="chatMessages"></div>
+                <div class="reasoning-panel hidden" id="reasoningPanel">
+                    <div class="reasoning-panel-header">
+                        <strong id="reasoningPanelTitle">Reasoning</strong>
+                        <span id="reasoningTreeId">-</span>
+                    </div>
+                    <div class="reasoning-panel-body">
+                        <div class="reasoning-meta-row">
+                            <span id="reasoningStatus">idle</span>
+                            <span id="reasoningStats">iter=0, nodes=0</span>
+                        </div>
+                        <div class="reasoning-controls">
+                            <input type="text" id="reasoningSteerInput" placeholder="Steer note...">
+                            <button id="reasoningSteerBtn" class="send-btn" type="button">Steer</button>
+                            <button id="reasoningStopBtn" class="doctor-btn" type="button">Stop</button>
+                        </div>
+                        <div class="reasoning-nodes" id="reasoningNodes"></div>
+                    </div>
+                </div>
                 <div class="terminal-input-wrapper">
                     <div class="terminal-input-line">
                         <input type="text" id="messageInput" placeholder="Type your message...">

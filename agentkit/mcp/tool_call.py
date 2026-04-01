@@ -10,7 +10,9 @@ class ToolConfirmationRequired(Exception):
     def __init__(self, tool_call_id: str, tool_name: str, args: dict, all_tool_calls: list):
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
-        self.args = args
+        # Do not assign payload to BaseException.args because CPython coerces
+        # it to a tuple, which breaks downstream schema validation expecting dict.
+        self.tool_args = args
         self.all_tool_calls = all_tool_calls
 
 def parse_tool_calls(content: str) -> list:
@@ -319,7 +321,7 @@ async def tool_call_loop(
                     'status': 'needs_confirmation',
                     'tool_call_id': e.tool_call_id,
                     'tool_name': e.tool_name,
-                    'args': e.args,
+                    'args': e.tool_args,
                     'current_messages': current_messages, # Save current conversation state
                     'pending_tool_calls': e.all_tool_calls, # Save the full batch of pending tool calls
                     'content': current_ai_content          # Save the AI reply content

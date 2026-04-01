@@ -18,6 +18,21 @@ from .auth import get_current_user_id
 router = APIRouter()
 
 
+def _normalize_tool_args(value):
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (list, tuple)):
+        try:
+            if all(isinstance(item, (list, tuple)) and len(item) == 2 for item in value):
+                return {str(k): v for k, v in value}
+        except Exception:
+            pass
+        return {"_args_list": list(value)}
+    return {"_arg": value}
+
+
 def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
     event_emitter = getattr(gateway_server, "event_emitter", None)
     if not event_emitter:
@@ -81,15 +96,60 @@ async def chat(
                         yield _sse({"type": "error", "content": "failed to start turn"})
                         return
 
-                    prepared = await gateway_server.conversation_service.prepare_chat_turn(
-                        session_id=session_id,
-                        user_id=user_id,
-                        user_message=user_text,
-                        channel="web",
-                        include_recent=True,
+                    prepared_task = asyncio.create_task(
+                        gateway_server.conversation_service.prepare_chat_turn(
+                            session_id=session_id,
+                            user_id=user_id,
+                            user_message=user_text,
+                            channel="web",
+                            include_recent=True,
+                        )
                     )
+                    discovered_tree_id = None
+                    while not prepared_task.done():
+                        reasoning_service = gateway_server.reasoning_service
+                        if reasoning_service and session_id:
+                            try:
+                                active_rows = reasoning_service.list_runtime_trees(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    include_pending=False,
+                                    limit=5,
+                                ).get("items", [])
+                            except Exception:
+                                active_rows = []
+                            for row in active_rows:
+                                tree_id = str((row or {}).get("tree_id", "") or "")
+                                if not tree_id:
+                                    continue
+                                if discovered_tree_id == tree_id:
+                                    continue
+                                discovered_tree_id = tree_id
+                                yield _sse(
+                                    {
+                                        "type": "reasoning_meta",
+                                        "tree_id": tree_id,
+                                        "session_id": session_id,
+                                        "status": (row or {}).get("status"),
+                                    }
+                                )
+                                break
+                        await asyncio.sleep(0.2)
+                    prepared = await prepared_task
                     messages = prepared["messages"]
                     user_config = prepared["user_config"]
+                    reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+                    tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
+                    if tree_id and tree_id != discovered_tree_id:
+                        yield _sse(
+                            {
+                                "type": "reasoning_meta",
+                                "tree_id": tree_id,
+                                "session_id": session_id,
+                                "mode": reasoning_meta.get("mode"),
+                                "status": reasoning_meta.get("status"),
+                            }
+                        )
 
                     full_text = ""
                     stream_failed = False
@@ -133,8 +193,6 @@ async def chat(
                         return
 
                     done_payload = {"type": "done", "session_id": session_id}
-                    reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
-                    tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
                     if gateway_server.reasoning_service and tree_id:
                         assessment = await gateway_server.reasoning_service.assess_outcome(
                             tree_id=tree_id,
@@ -167,8 +225,11 @@ async def chat(
                                     "tool_call_id": review_id,
                                     "tool_name": "reasoning.success_label",
                                     "args": pending["args"],
+                                    "tree_id": tree_id,
                                 }
                             )
+                        else:
+                            done_payload["tree_id"] = tree_id
 
                     yield _sse(done_payload)
                     if not stream_failed:
@@ -243,7 +304,7 @@ async def chat(
             status=mapped.get("status", "success"),
             tool_call_id=mapped.get("tool_call_id"),
             tool_name=mapped.get("tool_name"),
-            args=mapped.get("args"),
+            args=_normalize_tool_args(mapped.get("args")),
         )
     except HTTPException:
         raise
@@ -274,7 +335,7 @@ async def confirm_tool(
             status=payload.get("status", "success"),
             tool_call_id=payload.get("tool_call_id"),
             tool_name=payload.get("tool_name"),
-            args=payload.get("args"),
+            args=_normalize_tool_args(payload.get("args")),
         )
     except HTTPException:
         raise

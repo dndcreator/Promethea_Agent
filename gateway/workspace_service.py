@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -147,7 +147,7 @@ class WorkspaceService:
                 {
                     "path": str(p.relative_to(root)).replace("\\", "/"),
                     "size": p.stat().st_size,
-                    "updated_at": datetime.utcfromtimestamp(p.stat().st_mtime).isoformat() + "Z",
+                    "updated_at": datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat().replace("+00:00", "Z"),
                 }
             )
         return rows
@@ -177,7 +177,7 @@ class WorkspaceService:
             raise FileNotFoundError(f"artifact not found: {relative_path}")
         snap_dir = root / ".snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%f")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
         snap_name = f"{ts}__{src.name}"
         dst = snap_dir / snap_name
         shutil.copy2(src, dst)

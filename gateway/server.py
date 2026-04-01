@@ -2400,7 +2400,7 @@ class GatewayServer:
                         "status": "needs_confirmation",
                         "tool_call_id": e.tool_call_id,
                         "tool_name": e.tool_name,
-                        "args": e.args,
+                        "args": e.tool_args,
                         "current_messages": current_messages,
                         "pending_tool_calls": e.all_tool_calls,
                         "content": pending.get("content", ""),
@@ -2418,7 +2418,7 @@ class GatewayServer:
                             "session_id": session_id,
                             "tool_call_id": e.tool_call_id,
                             "tool_name": e.tool_name,
-                            "args": e.args,
+                            "args": e.tool_args,
                             "response": f"Tool `{e.tool_name}` requires confirmation.",
                         },
                     )

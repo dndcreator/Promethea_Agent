@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import platform
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
 
@@ -202,7 +202,7 @@ async def run_doctor() -> Dict[str, Any]:
     recommendations = _build_recommendations(checks)
     return {
         "status": overall_status,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "summary": {
             "checks_total": total,
             "checks_ok": ok_count,
@@ -232,7 +232,7 @@ async def migrate_config() -> Dict[str, Any]:
 
     backup_path: Path | None = None
     if config_path.exists():
-        ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
         backup_path = config_path.with_suffix(f".json.bak.{ts}")
         try:
             shutil.copy2(config_path, backup_path)
@@ -268,5 +268,3 @@ async def migrate_config() -> Dict[str, Any]:
         "config_path": str(config_path),
         "backup": str(backup_path) if backup_path else None,
     }
-
-

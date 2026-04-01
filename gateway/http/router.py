@@ -16,6 +16,7 @@ from .routes.skills import router as skills_router
 from .routes.voice import router as voice_router
 from .routes.ops import router as ops_router
 from .routes.workflow import router as workflow_router
+from .routes.reasoning import router as reasoning_router
 from .routes.security import router as security_router
 
 router = APIRouter()
@@ -34,6 +35,7 @@ router.include_router(skills_router)
 router.include_router(voice_router)
 router.include_router(ops_router)
 router.include_router(workflow_router)
+router.include_router(reasoning_router)
 router.include_router(security_router)
 
 

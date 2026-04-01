@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -28,7 +28,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False
 
 def create_access_token(data: dict):
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -213,4 +213,3 @@ async def delete_user_account(
     if not success:
         raise HTTPException(status_code=500, detail="Delete user failed")
     return {"status": "success", "message": "User account deleted"}
-
