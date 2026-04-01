@@ -246,3 +246,111 @@ class TestToolService:
         assert row.get("policy_allowed") is False
         assert row.get("callable_now") is False
 
+
+    @pytest.mark.asyncio
+    async def test_tool_hooks_are_invoked_on_success_and_error(self):
+        class _HookMgr:
+            def __init__(self):
+                self.before = 0
+                self.after = 0
+                self.error = 0
+
+            async def before_tool_call(self, payload):
+                _ = payload
+                self.before += 1
+                return payload
+
+            async def after_tool_call(self, payload):
+                _ = payload
+                self.after += 1
+                return payload
+
+            async def on_tool_error(self, payload):
+                _ = payload
+                self.error += 1
+                return payload
+
+        class OkTool:
+            tool_id = "local.ok"
+            name = "ok"
+            description = "ok"
+
+            async def invoke(self, args, ctx=None):
+                _ = (args, ctx)
+                return {"ok": True}
+
+        class BadTool:
+            tool_id = "local.bad"
+            name = "bad"
+            description = "bad"
+
+            async def invoke(self, args, ctx=None):
+                _ = (args, ctx)
+                raise RuntimeError("boom")
+
+        hooks = _HookMgr()
+        service = ToolService(event_emitter=EventEmitter(), hook_manager=hooks)
+        service.register_tool(OkTool())
+        service.register_tool(BadTool())
+
+        out = await service.call_tool("local.ok", {"x": 1})
+        assert out["ok"] is True
+
+        with pytest.raises(RuntimeError):
+            await service.call_tool("local.bad", {"x": 1})
+
+        assert hooks.before == 2
+        assert hooks.after == 1
+        assert hooks.error == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_events_include_tenant_and_environment_from_run_context(self):
+        service = ToolService(event_emitter=EventEmitter())
+
+        class EchoTool:
+            tool_id = "local.echo_ctx"
+            name = "echo_ctx"
+            description = "echo"
+
+            async def invoke(self, args, ctx=None):
+                _ = (args, ctx)
+                return {"ok": True}
+
+        service.register_tool(EchoTool())
+
+        captured = []
+
+        async def _capture(event_type, payload):
+            captured.append((event_type, payload))
+
+        service._emit_event = AsyncMock(side_effect=_capture)
+        run_context = type(
+            "Ctx",
+            (),
+            {
+                "trace_id": "trace_1",
+                "request_id": "req_1",
+                "session_state": type(
+                    "S",
+                    (),
+                    {
+                        "session_id": "s1",
+                        "user_id": "u1",
+                        "trace_id": "trace_1",
+                        "tenant_id": "tenant_a",
+                        "environment": "prod",
+                    },
+                )(),
+            },
+        )()
+
+        out = await service.call_tool(
+            "local.echo_ctx",
+            {"x": 1},
+            run_context=run_context,
+            ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+        )
+        assert out["ok"] is True
+        start_payload = captured[0][1]
+        assert start_payload.get("tenant_id") == "tenant_a"
+        assert start_payload.get("environment") == "prod"

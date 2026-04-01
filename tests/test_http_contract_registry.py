@@ -1,4 +1,4 @@
-from gateway.http.http_contracts import build_http_contracts, index_http_contracts
+﻿from gateway.http.http_contracts import build_http_contracts, index_http_contracts
 from gateway.http.surface_discovery import collect_http_surface_from_routes
 
 
@@ -8,8 +8,10 @@ def test_http_contract_registry_contains_core_endpoints():
     assert "config.update" in indexed
     assert "ops.protocol" in indexed
     assert "ops.http_contracts" in indexed
+    assert "ops.governance" in indexed
     assert indexed["config.update"]["path"] == "/api/config/update"
     assert indexed["ops.http_contracts"]["path"] == "/api/ops/http-contracts"
+    assert indexed["ops.governance"]["path"] == "/api/ops/governance"
 
 
 def test_http_contract_registry_marks_expected_stability_levels():
@@ -17,6 +19,7 @@ def test_http_contract_registry_marks_expected_stability_levels():
     stability = {item["id"]: item["stability"] for item in contracts}
     assert stability["config.update"] == "stable"
     assert stability["ops.surfaces"] == "stable"
+    assert stability["ops.governance"] == "stable"
 
 
 def test_http_contract_registry_can_cover_runtime_surface_routes():

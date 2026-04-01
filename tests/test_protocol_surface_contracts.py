@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+﻿from types import SimpleNamespace
 
 from gateway.config_protocol import normalize_config_update_params
 from gateway.http.config_compat import build_user_config_payload
@@ -75,12 +75,14 @@ def test_ops_surfaces_includes_contract_endpoints():
     assert payload["surfaces"]["contracts"]["http_contracts"] == "/api/ops/http-contracts"
     assert payload["surfaces"]["contracts"]["framework_check"] == "/api/ops/framework-check"
     assert payload["surfaces"]["contracts"]["readiness"] == "/api/ops/readiness"
+    assert payload["surfaces"]["contracts"]["governance"] == "/api/ops/governance"
     assert payload["surfaces"]["contracts"]["config"] == "/api/config/contract"
     assert "stable" in payload["surfaces"]["stability_levels"]
     assert payload["surfaces"]["cli_reference"]["ops.surfaces"]["command"] == "promethea ops surfaces"
     assert payload["surfaces"]["cli_reference"]["ops.methods"]["http"] == "GET /api/ops/methods"
     assert payload["surfaces"]["cli_reference"]["ops.http_contracts"]["command"] == "promethea ops http-contracts"
     assert payload["surfaces"]["cli_reference"]["ops.readiness"]["http"] == "GET /api/ops/readiness"
+    assert payload["surfaces"]["cli_reference"]["ops.governance"]["command"] == "promethea ops governance"
 
 
 def test_collect_http_surface_marks_legacy_and_compat_routes():

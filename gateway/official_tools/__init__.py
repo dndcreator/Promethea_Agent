@@ -13,6 +13,7 @@ from .memory_tools import (
     MemorySummarizeSessionTool,
 )
 from .runtime_tools import RuntimeListToolsTool, RuntimeProcessingStatsTool, RuntimeServicesTool
+from .skill_tools import SkillRunTool
 from .session_tools import SessionInfoTool, SessionListTool, SessionRecentMessagesTool
 from .text_tools import TextFindMatchesTool, TextNormalizeJsonTool, TextWordStatsTool
 from .utility_tools import UtilsHashTextTool, UtilsNowTool, UtilsUuidTool
@@ -80,6 +81,7 @@ def register_official_tools(
         WebExtractLinksTool(),
         RuntimeExecCommandTool(),
         RuntimeReadEnvTool(),
+        SkillRunTool(gateway_server=gateway_server),
     ]
     if memory_service is not None:
         tools.extend(

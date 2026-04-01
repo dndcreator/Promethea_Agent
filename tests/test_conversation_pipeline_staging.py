@@ -304,3 +304,27 @@ async def test_pipeline_exposes_stage_status_and_degraded_reason_when_memory_emp
     capability = out.raw.get("capability_state") or {}
     assert capability.get("degraded") is True
     assert "memory_recall" in (capability.get("degraded_stages") or [])
+
+@pytest.mark.asyncio
+async def test_pipeline_exposes_task_graph_and_context_budget_contracts():
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="contract check", session_id="s1", user_id="u1")
+    )
+
+    assert out.status == "success"
+    task_graph = out.raw.get("task_graph") or {}
+    assert task_graph.get("version") == "1.0"
+    assert isinstance(task_graph.get("nodes"), list)
+    assert isinstance(task_graph.get("edges"), list)
+    assert task_graph.get("current_node_id")
+
+    context_budget = out.raw.get("context_budget") or {}
+    assert context_budget.get("version") == "1.0"
+    assert "compacted" in context_budget
+    assert isinstance(context_budget.get("used_block_ids"), list)
+    orchestration = out.raw.get("orchestration") or {}
+    assert orchestration.get("version") == "1.0"
+    assert orchestration.get("execution_core") == "single_loop_runtime"
+    assert isinstance(orchestration.get("reasoning_engine"), dict)

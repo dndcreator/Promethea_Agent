@@ -498,12 +498,12 @@ class ConversationService:
         if run_context is not None:
             active_skill = getattr(run_context, "active_skill", None)
             if isinstance(active_skill, dict) and active_skill:
-                skill_instruction = str(active_skill.get("system_instruction") or "").strip()
-                if skill_instruction:
+                skill_listing = str(active_skill.get("listing_prompt") or "").strip()
+                if skill_listing:
                     base_system_prompt = (
-                        f"{base_system_prompt}\n\n{skill_instruction}".strip()
+                        f"{base_system_prompt}\n\n{skill_listing}".strip()
                         if base_system_prompt
-                        else skill_instruction
+                        else skill_listing
                     )
                 if not getattr(run_context, "requested_mode", None):
                     requested_mode = str(active_skill.get("default_mode") or "").strip()
@@ -814,14 +814,14 @@ class ConversationService:
         if not lowered:
             return False
         cn_markers = (
-            "我叫什么",
-            "我叫啥",
-            "我的名字",
-            "你记得我",
-            "你还记得",
-            "我是谁",
-            "我的偏好",
-            "我的设定",
+            "\u6211\u53eb\u4ec0\u4e48",
+            "\u6211\u53eb\u5565",
+            "\u6211\u7684\u540d\u5b57",
+            "\u4f60\u8bb0\u5f97\u6211",
+            "\u4f60\u8fd8\u8bb0\u5f97",
+            "\u6211\u662f\u8c01",
+            "\u6211\u7684\u504f\u597d",
+            "\u6211\u7684\u8bbe\u5b9a",
         )
         en_markers = (
             "what is my name",
@@ -950,9 +950,6 @@ class ConversationService:
             "queue_dropped": self._queue_dropped,
             "queue_coalesced": self._queue_coalesced,
         }
-
-
-
 
 
 

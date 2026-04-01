@@ -21,6 +21,11 @@ from .protocol import (
 
 from .memory_recall_schema import MemoryRecallRequest
 from .prompt_assembler import PromptAssembler
+from .runtime_governance import (
+    build_context_budget_snapshot,
+    build_orchestration_snapshot,
+    build_task_graph_snapshot,
+)
 
 PROMPT_ASSEMBLER = PromptAssembler()
 
@@ -62,11 +67,17 @@ def _extract_context_fields(
         request_id = getattr(run_context, "request_id", None)
         run_session_id = getattr(run_context, "session_id", None)
         run_user_id = getattr(run_context, "user_id", None)
+        tenant_id = getattr(run_context, "tenant_id", None)
+        environment = getattr(run_context, "environment", None)
         session_state = getattr(run_context, "session_state", None)
         if run_session_id is None and session_state is not None:
             run_session_id = getattr(session_state, "session_id", None)
         if run_user_id is None and session_state is not None:
             run_user_id = getattr(session_state, "user_id", None)
+        if tenant_id is None and session_state is not None:
+            tenant_id = getattr(session_state, "tenant_id", None)
+        if environment is None and session_state is not None:
+            environment = getattr(session_state, "environment", None)
         if trace_id is None and session_state is not None:
             trace_id = getattr(session_state, "trace_id", None)
         if trace_id:
@@ -77,6 +88,10 @@ def _extract_context_fields(
             fields["session_id"] = str(run_session_id)
         if run_user_id:
             fields["user_id"] = str(run_user_id)
+        if tenant_id:
+            fields["tenant_id"] = str(tenant_id)
+        if environment:
+            fields["environment"] = str(environment)
     if session_id and "session_id" not in fields:
         fields["session_id"] = str(session_id)
     if user_id and "user_id" not in fields:
@@ -678,11 +693,34 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             "degraded": bool(degraded_stages),
             "degraded_stages": degraded_stages,
         }
+        workflow_trace = (
+            plan.reasoning.get("workflow_trace")
+            if isinstance(plan.reasoning, dict)
+            else None
+        )
+        task_graph = build_task_graph_snapshot(
+            stage_status=state.get("stage_status", {}),
+            mode=mode.mode,
+            response_status=response.status,
+            workflow_trace=workflow_trace if isinstance(workflow_trace, dict) else None,
+        )
+        context_budget = build_context_budget_snapshot(
+            raw.get("prompt_assembly", {}) if isinstance(raw.get("prompt_assembly"), dict) else {}
+        )
+        orchestration = build_orchestration_snapshot(
+            mode=mode.mode,
+            used_reasoning=bool(plan.used_reasoning),
+            workflow_trace=workflow_trace if isinstance(workflow_trace, dict) else None,
+            reasoning=plan.reasoning if isinstance(plan.reasoning, dict) else None,
+        )
         raw.setdefault("pipeline", state)
         raw.setdefault("mode", mode.mode)
         raw.setdefault("memory_recalled", memory_bundle.recalled)
         raw.setdefault("used_reasoning", plan.used_reasoning)
         raw.setdefault("capability_state", capability_state)
+        raw.setdefault("task_graph", task_graph)
+        raw.setdefault("context_budget", context_budget)
+        raw.setdefault("orchestration", orchestration)
         if isinstance(plan.reasoning, dict) and plan.reasoning.get("workflow_trace"):
             raw.setdefault("workflow_trace", plan.reasoning.get("workflow_trace"))
         return ConversationRunOutput(

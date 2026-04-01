@@ -9,6 +9,7 @@ from ..dispatcher import get_gateway_server
 from .. import state
 from ..surface_discovery import build_surface_payload, collect_http_surface_from_routes
 from gateway.protocol_contracts import build_domain_contracts, build_ws_method_contracts
+from gateway.runtime_governance import build_runtime_governance_contract
 from ..http_contracts import build_http_contracts
 from gateway.protocol import RequestType
 
@@ -104,6 +105,7 @@ async def ops_protocol() -> Dict[str, Any]:
                 "config_template_endpoint": "/api/config/default-template",
                 "http_contracts_endpoint": "/api/ops/http-contracts",
                 "surface_discovery_endpoint": "/api/ops/surfaces",
+                "governance_endpoint": "/api/ops/governance",
             },
             "transports": {
                 "http": {
@@ -198,6 +200,10 @@ async def ops_protocol() -> Dict[str, Any]:
                 "stability_levels": ["stable", "compat", "legacy"],
                 "deprecation_policy": "legacy endpoints remain available with canonical endpoint hints before removal",
                 "change_policy": "breaking changes require version bump and migration notes",
+                "runtime_contracts": {
+                    "task_graph": "1.0",
+                    "context_budget": "1.0",
+                },
             },
         },
     }
@@ -335,6 +341,13 @@ async def ops_surfaces(request: Request) -> Dict[str, Any]:
     return build_surface_payload(request.app.routes)
 
 
+@router.get("/ops/governance")
+async def ops_governance() -> Dict[str, Any]:
+    payload = build_runtime_governance_contract()
+    payload["generated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return payload
+
+
 @router.get("/ops/runbook")
 async def ops_runbook() -> Dict[str, Any]:
     return {
@@ -347,13 +360,14 @@ async def ops_runbook() -> Dict[str, Any]:
             "5) Check /api/ops/methods for WS method schemas and compatibility aliases.",
             "6) Check /api/ops/http-contracts for canonical HTTP request/response contracts.",
             "7) Check /api/ops/surfaces for full protocol surface discovery.",
-            "8) Check /api/ops/framework-check for runtime contract consistency.",
-            "9) Check /api/ops/readiness for go/no-go signal and startup/service drift.",
-            "10) Check /api/config/contract for config inheritance and update schema.",
-            "11) Check /api/config/default-template for bootstrap defaults and UI field groups.",
-            "12) If chat errors occur, validate /api/config runtime and API key.",
-            "13) If memory errors occur, verify Neo4j and memory flags.",
-            "14) For automation calls, verify AUTOMATION__TOKEN header.",
+            "8) Check /api/ops/governance for task-graph/context-budget contracts.",
+            "9) Check /api/ops/framework-check for runtime contract consistency.",
+            "10) Check /api/ops/readiness for go/no-go signal and startup/service drift.",
+            "11) Check /api/config/contract for config inheritance and update schema.",
+            "12) Check /api/config/default-template for bootstrap defaults and UI field groups.",
+            "13) If chat errors occur, validate /api/config runtime and API key.",
+            "14) If memory errors occur, verify Neo4j and memory flags.",
+            "15) For automation calls, verify AUTOMATION__TOKEN header.",
         ],
     }
 

@@ -30,9 +30,6 @@ class SkillRegistry:
         if not raw:
             return default
         raw = raw.lstrip("\ufeff")
-
-        # We intentionally accept JSON syntax in .yaml files so we do not add
-        # a hard dependency on external YAML libraries.
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
@@ -52,6 +49,73 @@ class SkillRegistry:
         if enabled_only:
             rows = [s for s in rows if s.enabled]
         return sorted(rows, key=lambda s: s.skill_id)
+
+    def list_skills_for_user(
+        self,
+        *,
+        user_config: Optional[Dict[str, Any]],
+        model_invocable_only: bool = False,
+    ) -> List[SkillSpec]:
+        rows = [
+            s
+            for s in self.list_skills(enabled_only=True)
+            if self._is_skill_enabled_for_user(s.skill_id, user_config=user_config)
+        ]
+        if model_invocable_only:
+            rows = [s for s in rows if bool(s.model_invocable)]
+        return sorted(rows, key=lambda s: s.skill_id)
+
+    def build_listing_prompt(
+        self,
+        *,
+        user_config: Optional[Dict[str, Any]],
+        max_chars: int = 8000,
+        per_skill_desc_limit: int = 250,
+    ) -> Dict[str, Any]:
+        max_chars = int(max_chars or 8000)
+        if max_chars <= 256:
+            max_chars = 256
+        per_skill_desc_limit = int(per_skill_desc_limit or 250)
+        if per_skill_desc_limit <= 32:
+            per_skill_desc_limit = 32
+
+        lines: List[str] = [
+            "Skills are available via tool `skill.run`.",
+            "Use `skill.run` only when the task clearly matches a listed skill.",
+            "Do not assume skill internals before calling `skill.run`.",
+            "",
+            "Available skills:",
+        ]
+        items: List[Dict[str, Any]] = []
+        for spec in self.list_skills_for_user(user_config=user_config, model_invocable_only=True):
+            desc = str(spec.when_to_use or spec.description or "").strip()
+            if len(desc) > per_skill_desc_limit:
+                desc = f"{desc[:per_skill_desc_limit].rstrip()}..."
+            row = f"- {spec.skill_id}: {desc}" if desc else f"- {spec.skill_id}"
+            projected = "\n".join(lines + [row])
+            if len(projected) > max_chars:
+                break
+            lines.append(row)
+            items.append(
+                {
+                    "skill_id": spec.skill_id,
+                    "name": spec.name,
+                    "description": spec.description,
+                    "when_to_use": spec.when_to_use,
+                    "category": spec.category,
+                    "version": spec.version,
+                    "model_invocable": bool(spec.model_invocable),
+                    "execution_context": spec.execution_context,
+                }
+            )
+
+        return {
+            "listing_prompt": "\n".join(lines).strip(),
+            "skills": items,
+            "count": len(items),
+            "max_chars": max_chars,
+            "per_skill_desc_limit": per_skill_desc_limit,
+        }
 
     def load_official_packs(self, *, clear_existing: bool = True) -> int:
         if clear_existing:
@@ -92,7 +156,18 @@ class SkillRegistry:
             tool_allowlist = tool_allowlist_raw
         else:
             tool_allowlist = []
-        tool_allowlist = [str(x).strip() for x in tool_allowlist if str(x).strip()]
+
+        manifest_allowed = manifest.get("allowed_tools") if isinstance(manifest.get("allowed_tools"), list) else []
+        merged_allowed = list(tool_allowlist) + list(manifest_allowed)
+        allowed_tools = [str(x).strip() for x in merged_allowed if str(x).strip()]
+        # keep deterministic order
+        dedup_allowed: List[str] = []
+        seen = set()
+        for t in allowed_tools:
+            if t in seen:
+                continue
+            seen.add(t)
+            dedup_allowed.append(t)
 
         examples_raw = self._read_struct(
             os.path.join(pack_dir, "examples.json"),
@@ -108,6 +183,14 @@ class SkillRegistry:
         if not isinstance(eval_raw, list):
             eval_raw = []
 
+        raw_context = str(manifest.get("execution_context") or manifest.get("context") or "inline").strip().lower()
+        execution_context = raw_context if raw_context in {"inline", "fork"} else "inline"
+
+        if "model_invocable" in manifest:
+            model_invocable = bool(manifest.get("model_invocable"))
+        else:
+            model_invocable = not bool(manifest.get("disable_model_invocation", False))
+
         try:
             examples = [SkillExample(**item) for item in examples_raw if isinstance(item, dict)]
             evaluation_cases = [
@@ -119,9 +202,16 @@ class SkillRegistry:
                 skill_id=str(manifest.get("skill_id") or os.path.basename(pack_dir)),
                 name=str(manifest.get("name") or os.path.basename(pack_dir)),
                 description=str(manifest.get("description") or ""),
+                when_to_use=str(manifest.get("when_to_use") or ""),
                 category=str(manifest.get("category") or "general"),
+                model_invocable=bool(model_invocable),
+                execution_context=execution_context,
                 system_instruction=system_instruction,
-                tool_allowlist=tool_allowlist,
+                allowed_tools=dedup_allowed,
+                tool_allowlist=dedup_allowed,
+                model_override=str(manifest.get("model_override") or ""),
+                effort_override=str(manifest.get("effort_override") or ""),
+                permission_profile=str(manifest.get("permission_profile") or "default"),
                 prompt_block_policy=(manifest.get("prompt_block_policy") or {}),
                 default_mode=str(manifest.get("default_mode") or "fast"),
                 examples=examples,
@@ -182,7 +272,6 @@ class SkillRegistry:
                 if "enabled" in row:
                     return bool(row.get("enabled"))
 
-        # Backward compatibility with plugin-style config.
         plugins_cfg = user_config.get("plugins")
         if isinstance(plugins_cfg, dict) and isinstance(plugins_cfg.get(skill_id), dict):
             return bool(plugins_cfg.get(skill_id, {}).get("enabled", True))

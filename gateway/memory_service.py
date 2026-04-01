@@ -1111,7 +1111,7 @@ class MemoryService:
     def get_sync_stats(self) -> Dict[str, Any]:
         queue_size = self._sync_queue.qsize() if self._sync_queue else 0
         pending = queue_size + self._sync_active
-        return {
+        stats = {
             "enabled": self.enabled and self.memory_adapter is not None,
             "pending": pending,
             "queued": queue_size,
@@ -1130,6 +1130,13 @@ class MemoryService:
                 else None
             ),
         }
+        try:
+            adapter = self.memory_adapter
+            if adapter and hasattr(adapter, "get_pipeline_status"):
+                stats["pipeline"] = adapter.get_pipeline_status()
+        except Exception as e:
+            logger.debug("MemoryService: get_pipeline_status failed: {}", e)
+        return stats
 
     async def wait_until_idle(self, timeout_s: Optional[float] = None) -> bool:
         deadline = time.time() + timeout_s if timeout_s else None
@@ -1151,6 +1158,16 @@ class MemoryService:
                 await worker
             except asyncio.CancelledError:
                 pass
+        try:
+            adapter = self.memory_adapter
+            if adapter and hasattr(adapter, "shutdown"):
+                adapter_ok = bool(adapter.shutdown(timeout_s=float(timeout_s)))
+                drained = bool(drained and adapter_ok)
+            elif adapter and hasattr(adapter, "flush_raw_log"):
+                adapter_ok = bool(adapter.flush_raw_log(timeout_s=float(timeout_s)))
+                drained = bool(drained and adapter_ok)
+        except Exception as e:
+            logger.debug("MemoryService: adapter shutdown/flush skipped: {}", e)
         return drained
 
     # ===== Memory query API =====

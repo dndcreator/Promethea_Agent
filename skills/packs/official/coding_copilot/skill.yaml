@@ -1,13 +1,25 @@
-﻿{
+{
   "skill_id": "coding_copilot",
   "name": "Coding Copilot",
   "description": "Engineer-focused coding execution with safe tool usage and structured delivery.",
+  "when_to_use": "Use for code changes, debugging, test fixes, and refactors with explicit engineering constraints.",
   "category": "engineering",
+  "model_invocable": true,
+  "execution_context": "inline",
+  "allowed_tools": [
+    "workspace.*",
+    "text.*",
+    "data.*",
+    "math.calculate",
+    "runtime.list_tools",
+    "skill.run"
+  ],
+  "permission_profile": "default",
   "prompt_block_policy": {
     "disable": ["response_format"],
     "prefer": ["identity", "policy", "workspace", "reasoning"]
   },
   "default_mode": "deep",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "enabled": true
 }

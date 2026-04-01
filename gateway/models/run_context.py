@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -40,3 +40,11 @@ class RunContext(BaseModel):
     @property
     def user_id(self) -> str:
         return self.session_state.user_id
+
+    @property
+    def tenant_id(self) -> Optional[str]:
+        return self.session_state.tenant_id
+
+    @property
+    def environment(self) -> Optional[str]:
+        return self.session_state.environment

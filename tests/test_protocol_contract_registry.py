@@ -1,4 +1,4 @@
-from gateway.protocol_contracts import build_domain_contracts, build_ws_method_contracts
+﻿from gateway.protocol_contracts import build_domain_contracts, build_ws_method_contracts
 
 
 def test_ws_method_contracts_include_config_update_aliases():
@@ -23,4 +23,6 @@ def test_domain_contracts_publish_core_domains():
     assert "config" in domains
     assert "memory" in domains
     assert "workflow" in domains
+    assert "ops" in domains
     assert "/api/config/update" in domains["config"]["http"]
+    assert "/api/ops/governance" in domains["ops"]["http"]

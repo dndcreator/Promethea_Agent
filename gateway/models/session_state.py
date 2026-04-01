@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -11,6 +11,8 @@ class SessionState(BaseModel):
 
     session_id: str
     user_id: str
+    tenant_id: Optional[str] = None
+    environment: Optional[str] = None
     agent_id: Optional[str] = None
     channel_id: Optional[str] = None
     workspace_id: Optional[str] = None

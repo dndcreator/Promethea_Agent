@@ -161,6 +161,26 @@ class MemoryMigrationConfig(BaseSettings):
         return value
 
 
+class MemoryRawLogConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    path: str = Field(default="memory/raw_log.jsonl")
+    state_path: str = Field(default="memory/raw_log.state.json")
+    defer_hot_write: bool = Field(default=True)
+    flush_interval_s: float = Field(default=5.0, ge=0.2)
+    max_batch_size: int = Field(default=32, ge=1, le=2048)
+
+
+class HippocampusConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    cluster_every_messages: int = Field(default=12, ge=1)
+    cluster_min_interval_s: int = Field(default=300, ge=0)
+    idle_cluster_delay_s: int = Field(default=120, ge=10)
+    idle_cluster_min_messages: int = Field(default=2, ge=1)
+    idle_cluster_min_interval_s: int = Field(default=60, ge=0)
+    summary_min_interval_s: int = Field(default=600, ge=0)
+    decay_interval_s: int = Field(default=24 * 3600, ge=60)
+
+
 class MemoryConfig(BaseSettings):
     enabled: bool = Field(default=True)
     profile: str = Field(default="balanced")
@@ -174,6 +194,8 @@ class MemoryConfig(BaseSettings):
     cold_layer: ColdLayerConfig = Field(default_factory=ColdLayerConfig)
     gating: MemoryGatingConfig = Field(default_factory=MemoryGatingConfig)
     migration: MemoryMigrationConfig = Field(default_factory=MemoryMigrationConfig)
+    raw_log: MemoryRawLogConfig = Field(default_factory=MemoryRawLogConfig)
+    hippocampus: HippocampusConfig = Field(default_factory=HippocampusConfig)
 
     @field_validator("store_backend")
     @classmethod

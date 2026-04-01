@@ -963,10 +963,14 @@ class GatewayServer:
         trace_id = str(params.get("trace_id") or f"trace_{request.id}")
         requested_mode = params.get("requested_mode")
         requested_skill = params.get("requested_skill")
+        tenant_id = str(params.get("tenant_id") or "").strip() or None
+        environment = str(params.get("environment") or params.get("env") or "").strip() or None
 
         session_state = SessionState(
             session_id=str(session_id),
             user_id=str(user_id),
+            tenant_id=tenant_id,
+            environment=environment,
             channel_id=str(channel_id),
             reasoning_mode=str(requested_mode) if requested_mode else None,
             active_skill_id=str(requested_skill) if requested_skill else None,
@@ -981,6 +985,7 @@ class GatewayServer:
             request_id=request.id,
             trace_id=trace_id,
             session_state=session_state,
+            user_identity={"user_id": str(user_id), "tenant_id": tenant_id, "environment": environment},
             input_payload=params,
             normalized_input={
                 "text": str(params.get("message") or params.get("query") or ""),
@@ -1002,22 +1007,65 @@ class GatewayServer:
         if not self.skill_registry:
             return None
 
+        listing_cfg = (user_config or {}).get("skills") if isinstance(user_config, dict) else {}
+        listing_budget = 1200
+        listing_desc_limit = 250
+        if isinstance(listing_cfg, dict):
+            try:
+                listing_budget = int(listing_cfg.get("listing_max_chars") or 1200)
+            except Exception:
+                listing_budget = 1200
+            try:
+                listing_desc_limit = int(listing_cfg.get("listing_desc_limit") or 250)
+            except Exception:
+                listing_desc_limit = 250
+
+        if hasattr(self.skill_registry, "build_listing_prompt"):
+            listing = self.skill_registry.build_listing_prompt(
+                user_config=user_config,
+                max_chars=listing_budget,
+                per_skill_desc_limit=listing_desc_limit,
+            )
+        else:
+            listing = {"listing_prompt": "", "skills": []}
+
         spec = self.skill_registry.resolve_skill_for_user(
             requested_skill=requested_skill,
             user_config=user_config,
         )
         if spec is None:
+            run_context.session_state.active_skill_id = None
+            run_context.active_skill = {
+                "listing_prompt": listing.get("listing_prompt", ""),
+                "available_skills": listing.get("skills", []),
+                "lazy_injection": True,
+            }
             return None
+
+        allowed_tools = list(getattr(spec, "allowed_tools", []) or [])
+        if not allowed_tools:
+            allowed_tools = list(getattr(spec, "tool_allowlist", []) or [])
 
         skill_payload = {
             "skill_id": spec.skill_id,
             "name": spec.name,
+            "description": spec.description,
+            "when_to_use": spec.when_to_use,
             "category": spec.category,
+            "model_invocable": bool(getattr(spec, "model_invocable", True)),
+            "execution_context": str(getattr(spec, "execution_context", "inline") or "inline"),
             "system_instruction": spec.system_instruction,
-            "tool_allowlist": list(spec.tool_allowlist),
+            "allowed_tools": allowed_tools,
+            "tool_allowlist": list(getattr(spec, "tool_allowlist", []) or []),
+            "model_override": str(getattr(spec, "model_override", "") or ""),
+            "effort_override": str(getattr(spec, "effort_override", "") or ""),
+            "permission_profile": str(getattr(spec, "permission_profile", "default") or "default"),
             "prompt_block_policy": dict(spec.prompt_block_policy or {}),
             "default_mode": spec.default_mode,
             "version": spec.version,
+            "listing_prompt": listing.get("listing_prompt", ""),
+            "available_skills": listing.get("skills", []),
+            "lazy_injection": True,
         }
 
         run_context.requested_skill = spec.skill_id
@@ -1031,13 +1079,20 @@ class GatewayServer:
         existing_allowlist = existing_policy.get("skill_allowlist") or []
         merged_allowlist = []
         seen = set()
-        for item in list(existing_allowlist) + list(spec.tool_allowlist):
+        baseline = ["skill.run"]
+        for item in list(existing_allowlist) + list(allowed_tools) + list(spec.tool_allowlist) + baseline:
             name = str(item).strip()
             if not name or name in seen:
                 continue
             seen.add(name)
             merged_allowlist.append(name)
         existing_policy["skill_allowlist"] = merged_allowlist
+
+        permission_profile = str(getattr(spec, "permission_profile", "default") or "default").lower()
+        if permission_profile == "restricted":
+            existing_policy["strict_side_effect_allowlist"] = True
+        elif permission_profile == "open":
+            existing_policy["strict_side_effect_allowlist"] = False
         run_context.tool_policy = existing_policy
 
         if isinstance(spec.prompt_block_policy, dict) and spec.prompt_block_policy:
@@ -1156,7 +1211,6 @@ class GatewayServer:
 
         if not self.tool_service:
             self.tool_service = ToolService(self.event_emitter)
-        self._enforce_tool_policy(entry_tool_name=tool_name, params=args, user_id=user_id)
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
@@ -1403,8 +1457,19 @@ class GatewayServer:
                     "request_method": request.method,
                 },
             )
-
-            self._enforce_tool_policy(entry_tool_name=tool_name, params=tool_params, user_id=user_id)
+            session_id = str(tool_params.get("session_id") or request.params.get("session_id") or f"tool_{request.id}")
+            run_context = self._build_run_context(
+                request=request,
+                session_id=session_id,
+                user_id=user_id,
+                channel_id=str(request.params.get("channel") or "api"),
+                input_payload=request.params,
+            )
+            user_config = (
+                self.config_service.get_merged_config(user_id)
+                if self.config_service and user_id
+                else None
+            )
 
             result = await self.tool_service.call_tool(
                 tool_name=tool_name,
@@ -1412,6 +1477,8 @@ class GatewayServer:
                 ctx=ctx,
                 request_id=request.id,
                 connection_id=connection.connection_id,
+                run_context=run_context,
+                user_config=user_config if isinstance(user_config, dict) else None,
             )
             
             return GatewayProtocol.create_response(
@@ -3200,7 +3267,6 @@ class GatewayServer:
             
             # Cleanup stale websocket connections.
             await self.connection_manager.cleanup_stale_connections()
-
 
 
 

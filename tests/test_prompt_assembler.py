@@ -100,3 +100,42 @@ def test_assemble_outputs_debug_and_updates_run_context_prompt_blocks():
     assert "used_block_ids" in out["debug"]
     assert isinstance(run_context.prompt_blocks, dict)
     assert "estimated_total_tokens" in run_context.prompt_blocks
+
+
+def test_compact_blocks_respects_protect_list():
+    assembler = PromptAssembler()
+    blocks = [
+        PromptBlock(
+            block_id="identity",
+            block_type=PromptBlockType.IDENTITY,
+            source="t",
+            content="x" * 200,
+            priority=100,
+            can_compact=False,
+        ),
+        PromptBlock(
+            block_id="memory",
+            block_type=PromptBlockType.MEMORY,
+            source="t",
+            content="m" * 200,
+            priority=20,
+            can_compact=True,
+        ),
+        PromptBlock(
+            block_id="tools",
+            block_type=PromptBlockType.TOOLS,
+            source="t",
+            content="t" * 200,
+            priority=10,
+            can_compact=True,
+        ),
+    ]
+    assembler.estimate_tokens(blocks)
+    result = assembler.compact_blocks(
+        blocks,
+        budget=60,
+        budget_policy={"protect": ["memory"]},
+    )
+    kept_ids = [b.block_id for b in result["blocks"]]
+    assert "memory" in kept_ids
+    assert "tools" not in kept_ids

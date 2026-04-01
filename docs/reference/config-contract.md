@@ -14,3 +14,7 @@ Key principles:
 - defaults define baseline behavior for new users
 - user config overrides defaults
 - secrets remain env-managed
+
+Additional memory keys:
+- memory.raw_log (append-only write-ahead log and replay)
+- memory.hippocampus (idle/background consolidation cadence for warm/cold layers)

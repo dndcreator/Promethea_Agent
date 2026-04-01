@@ -64,7 +64,7 @@
                                       "max_summary_length":  500,
                                       "compression_threshold":  50
                                   },
-                   "gating":  {
+                    "gating":  {
                                   "recall_filter":  {
                                                         "enabled":  true,
                                                         "min_query_chars":  6,
@@ -79,11 +79,29 @@
                                   "dedupe":  {
                                                  "recent_write_cache_size":  2000,
                                                  "min_candidate_chars":  8
-                                             }
+                                              }
                               },
-                   "migration": {
-                       "mode": "off",
-                       "source_backend": "",
+                    "raw_log": {
+                        "enabled": true,
+                        "path": "memory/raw_log.jsonl",
+                        "state_path": "memory/raw_log.state.json",
+                        "defer_hot_write": true,
+                        "flush_interval_s": 5.0,
+                        "max_batch_size": 32
+                    },
+                    "hippocampus": {
+                        "enabled": true,
+                        "cluster_every_messages": 12,
+                        "cluster_min_interval_s": 300,
+                        "idle_cluster_delay_s": 120,
+                        "idle_cluster_min_messages": 2,
+                        "idle_cluster_min_interval_s": 60,
+                        "summary_min_interval_s": 600,
+                        "decay_interval_s": 86400
+                    },
+                    "migration": {
+                        "mode": "off",
+                        "source_backend": "",
                        "target_backend": "",
                        "checkpoint": ""
                    }

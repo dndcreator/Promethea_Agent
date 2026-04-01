@@ -1,6 +1,7 @@
-﻿from types import SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import threading
+import json
 
 import pytest
 
@@ -343,3 +344,103 @@ async def test_interaction_completed_persists_verifier_metadata(monkeypatch):
     assert metadata["verify_reason"] == "explicit user preference"
     assert metadata["verify_evidence"] == "please keep it concise"
     assert metadata["verify_attribution"] == "user"
+
+
+def test_raw_log_replay_writes_store_and_updates_offset(tmp_path):
+    from memory.adapter import MemoryAdapter
+
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter.enabled = True
+    adapter.store_backend = "flat_memory"
+    adapter.store = MagicMock()
+    adapter.store.add_message.return_value = True
+    adapter.hot_layer = None
+    adapter._dual_write_store = None
+    adapter._hot_layer_lock = threading.Lock()
+    adapter._raw_log_enabled = True
+    adapter._raw_log_defer_hot_write = True
+    adapter._raw_log_flush_interval_s = 5.0
+    adapter._raw_log_max_batch_size = 16
+    adapter._raw_log_path = str(tmp_path / "raw_log.jsonl")
+    adapter._raw_log_state_path = str(tmp_path / "raw_log.state.json")
+    adapter._raw_log_lock = threading.Lock()
+    adapter._raw_log_replay_lock = threading.Lock()
+    adapter._raw_log_wakeup_event = threading.Event()
+    adapter._raw_log_stop_event = threading.Event()
+    adapter._raw_log_state = {"last_offset": 0, "last_entry_id": "", "updated_at": 0.0}
+    adapter._on_message_saved_after_store = lambda *args, **kwargs: None
+
+    ok = adapter._append_raw_log_event(
+        session_id="s1",
+        role="user",
+        content="Remember my preference: concise answers.",
+        user_id="u1",
+        metadata={"memory_type": "preference"},
+    )
+    assert ok is True
+
+    processed = adapter._replay_raw_log_once(max_records=8)
+    assert processed == 1
+    assert adapter.store.add_message.call_count == 1
+    assert int(adapter._raw_log_state.get("last_offset", 0)) > 0
+    with open(adapter._raw_log_state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    assert int(state.get("last_offset", 0)) > 0
+
+
+def test_on_message_saved_skips_when_raw_log_deferred():
+    from memory.adapter import MemoryAdapter
+
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter.enabled = True
+    adapter.hot_layer = object()
+    adapter._raw_log_enabled = True
+    adapter._raw_log_defer_hot_write = True
+
+    called = {"count": 0}
+    adapter._on_message_saved_after_store = (
+        lambda *args, **kwargs: called.__setitem__("count", called["count"] + 1)
+    )
+    adapter.on_message_saved("s1", "user", "u1")
+    assert called["count"] == 0
+
+def test_raw_log_replay_does_not_require_append_lock(tmp_path):
+    from memory.adapter import MemoryAdapter
+
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter.enabled = True
+    adapter.store_backend = "flat_memory"
+    adapter.store = MagicMock()
+    adapter.store.add_message.return_value = True
+    adapter.hot_layer = None
+    adapter._dual_write_store = None
+    adapter._hot_layer_lock = threading.Lock()
+    adapter._raw_log_enabled = True
+    adapter._raw_log_defer_hot_write = True
+    adapter._raw_log_flush_interval_s = 5.0
+    adapter._raw_log_max_batch_size = 16
+    adapter._raw_log_path = str(tmp_path / "raw_log.jsonl")
+    adapter._raw_log_state_path = str(tmp_path / "raw_log.state.json")
+    adapter._raw_log_lock = threading.Lock()
+    adapter._raw_log_replay_lock = threading.Lock()
+    adapter._raw_log_wakeup_event = threading.Event()
+    adapter._raw_log_stop_event = threading.Event()
+    adapter._raw_log_state = {"last_offset": 0, "last_entry_id": "", "updated_at": 0.0}
+    adapter._on_message_saved_after_store = lambda *args, **kwargs: None
+
+    assert adapter._append_raw_log_event(
+        session_id="s1",
+        role="user",
+        content="Queue-safe replay test",
+        user_id="u1",
+        metadata={},
+    )
+
+    adapter._raw_log_lock.acquire()
+    try:
+        processed = adapter._replay_raw_log_once(max_records=4)
+    finally:
+        adapter._raw_log_lock.release()
+
+    assert processed == 1
+    assert adapter.store.add_message.call_count == 1

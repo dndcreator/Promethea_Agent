@@ -8,6 +8,7 @@ Promethea exposes a protocol-discoverable runtime.
 - `GET /api/ops/methods`
 - `GET /api/ops/http-contracts`
 - `GET /api/ops/surfaces`
+- `GET /api/ops/governance`
 - `GET /api/ops/framework-check`
 - `GET /api/ops/readiness`
 

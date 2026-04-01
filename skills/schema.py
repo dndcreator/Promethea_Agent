@@ -25,9 +25,16 @@ class SkillSpec(BaseModel):
     skill_id: str
     name: str
     description: str = ""
+    when_to_use: str = ""
     category: str = "general"
+    model_invocable: bool = True
+    execution_context: str = "inline"
     system_instruction: str = ""
+    allowed_tools: List[str] = Field(default_factory=list)
     tool_allowlist: List[str] = Field(default_factory=list)
+    model_override: str = ""
+    effort_override: str = ""
+    permission_profile: str = "default"
     prompt_block_policy: Dict[str, Any] = Field(default_factory=dict)
     default_mode: str = "fast"
     examples: List[SkillExample] = Field(default_factory=list)

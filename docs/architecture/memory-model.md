@@ -87,3 +87,19 @@ Inspector foundation:
 - in-memory recall run history per process
 - run list query and run detail query via gateway methods
 - each recall run records selected items, dropped candidates, filters, strategy, and metrics
+
+## Four-Layer Pipeline (2026-04 Upgrade)
+
+Memory pipeline is now split by responsibility:
+
+1. `L0 raw_log`: append-only write-ahead log (`memory/raw_log.jsonl`)
+2. `L1 hot`: online structured memory write (current store backend)
+3. `L2 warm`: concept clustering and stabilization
+4. `L3 cold`: summary consolidation and forgetting/decay policy
+
+Operational rules:
+
+- write-gated candidates are persisted to `L0` first
+- hot writes can be deferred and replayed from raw log
+- idle/background consolidation improves warm/cold quality
+- replay checkpoint (`memory/raw_log.state.json`) supports crash recovery and abrupt-exit continuity

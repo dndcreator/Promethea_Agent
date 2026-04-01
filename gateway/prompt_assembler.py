@@ -89,14 +89,21 @@ class PromptAssembler:
         if run_context is not None:
             active_skill = getattr(run_context, "active_skill", None)
             if isinstance(active_skill, dict):
-                skill_instruction = str(active_skill.get("system_instruction") or "").strip()
-                if skill_instruction:
+                skill_listing = str(active_skill.get("listing_prompt") or "").strip()
+                if not skill_listing:
+                    skill_id = str(active_skill.get("skill_id") or "").strip()
+                    if skill_id:
+                        skill_listing = (
+                            "Skills are available via tool `skill.run`.\n"
+                            f"Active skill: {skill_id}. Call `skill.run` to load full instructions."
+                        )
+                if skill_listing:
                     blocks.append(
                         PromptBlock(
                             block_id="skill",
                             block_type=PromptBlockType.SKILL,
                             source="skill_registry",
-                            content=skill_instruction,
+                            content=skill_listing,
                             priority=95,
                             can_compact=False,
                             metadata={
@@ -201,7 +208,39 @@ class PromptAssembler:
             total += est
         return {"total": total, "by_block": by_block}
 
-    def compact_blocks(self, blocks: List[PromptBlock], budget: Optional[int]) -> Dict[str, Any]:
+    def _resolve_budget_policy(
+        self,
+        *,
+        run_context: Optional[Any],
+        user_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cfg = user_config if isinstance(user_config, dict) else {}
+        context_cfg = cfg.get("context_budget") if isinstance(cfg.get("context_budget"), dict) else {}
+        strategy = str(context_cfg.get("strategy") or "weighted_truncation").strip() or "weighted_truncation"
+        drop_order = str(context_cfg.get("drop_order") or "lowest_priority_compactable_last").strip() or "lowest_priority_compactable_last"
+        protect_raw = context_cfg.get("protect") if isinstance(context_cfg.get("protect"), list) else []
+        protect = [self._normalize_block_name(x) for x in protect_raw if self._normalize_block_name(x)]
+
+        runtime_policy = getattr(run_context, "debug_flags", {}) if run_context is not None else {}
+        if isinstance(runtime_policy, dict):
+            override = runtime_policy.get("context_budget_policy")
+            if isinstance(override, dict):
+                strategy = str(override.get("strategy") or strategy)
+                drop_order = str(override.get("drop_order") or drop_order)
+                if isinstance(override.get("protect"), list):
+                    protect = [self._normalize_block_name(x) for x in override.get("protect") if self._normalize_block_name(x)]
+
+        return {
+            "strategy": strategy,
+            "drop_order": drop_order,
+            "protect": protect,
+        }
+    def compact_blocks(
+        self,
+        blocks: List[PromptBlock],
+        budget: Optional[int],
+        budget_policy: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         if not budget or budget <= 0:
             return {
                 "blocks": blocks,
@@ -221,9 +260,20 @@ class PromptAssembler:
 
         dropped: List[str] = []
         kept = list(sorted_blocks)
-        for block in reversed(sorted_blocks):
+        policy = budget_policy or {}
+        protect = set(str(x) for x in (policy.get("protect") or []))
+        drop_order = str(policy.get("drop_order") or "lowest_priority_compactable_last").strip()
+        if drop_order == "highest_priority_first":
+            candidates = list(sorted_blocks)
+        else:
+            # Keep backward-compatible default: trim from tail of sorted list.
+            candidates = list(reversed(sorted_blocks))
+        for block in candidates:
             if total <= budget:
                 break
+            normalized_block = self._normalize_block_name(block.block_id)
+            if normalized_block in protect:
+                continue
             if not block.can_compact:
                 continue
             if block in kept:
@@ -273,7 +323,8 @@ class PromptAssembler:
         if run_context is not None:
             budget = getattr(run_context, "token_budget", None)
 
-        compacted = self.compact_blocks(blocks, budget)
+        budget_policy = self._resolve_budget_policy(run_context=run_context, user_config=user_config)
+        compacted = self.compact_blocks(blocks, budget, budget_policy=budget_policy)
         kept_blocks = compacted["blocks"]
         prompt = self.render_prompt(kept_blocks)
 
@@ -294,6 +345,7 @@ class PromptAssembler:
             ],
             "dropped_block_ids": compacted["dropped_block_ids"],
             "compacted": compacted["compacted"],
+            "budget_policy": budget_policy,
         }
 
         if run_context is not None:
@@ -312,3 +364,4 @@ class PromptAssembler:
             "blocks": kept_blocks,
             "debug": debug,
         }
+

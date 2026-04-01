@@ -343,3 +343,64 @@ async def test_web_fetch_text_rejects_non_http_scheme(tmp_path: Path):
             "web.fetch_text",
             {"url": "file:///tmp/a.txt"},
         )
+
+@pytest.mark.asyncio
+async def test_official_skill_run_tool_returns_instruction():
+    tool_service = ToolService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, tool_service=tool_service)
+    from skills import build_default_skill_registry
+
+    gateway.skill_registry = build_default_skill_registry()
+    register_official_tools(tool_service=tool_service, workspace_service=None, gateway_server=gateway)
+
+    catalog = await tool_service.get_tool_catalog()
+    names = {str(row.get("tool_name") or "") for row in catalog}
+    assert "skill.run" in names
+
+    out = await tool_service.call_tool(
+        "skill.run",
+        {"skill_id": "coding_copilot"},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert out.get("ok") is True
+    assert (out.get("skill") or {}).get("skill_id") == "coding_copilot"
+    assert isinstance(out.get("instruction"), str)
+    assert len(out.get("instruction") or "") > 0
+
+@pytest.mark.asyncio
+async def test_skill_run_respects_model_invocable_gate():
+    tool_service = ToolService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, tool_service=tool_service)
+
+    from skills.registry import SkillRegistry
+    from skills.schema import SkillSpec
+
+    registry = SkillRegistry(packs_root="")
+    registry.register(
+        SkillSpec(
+            skill_id="manual_only",
+            name="Manual Only",
+            model_invocable=False,
+            execution_context="inline",
+            system_instruction="manual skill",
+        )
+    )
+    gateway.skill_registry = registry
+
+    register_official_tools(tool_service=tool_service, workspace_service=None, gateway_server=gateway)
+
+    blocked = await tool_service.call_tool(
+        "skill.run",
+        {"skill_id": "manual_only"},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert blocked.get("ok") is False
+    assert blocked.get("reason") == "model_invocation_disabled"
+
+    allowed = await tool_service.call_tool(
+        "skill.run",
+        {"skill_id": "manual_only", "allow_manual": True},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert allowed.get("ok") is True
+    assert (allowed.get("skill") or {}).get("skill_id") == "manual_only"

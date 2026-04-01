@@ -119,7 +119,13 @@ def build_domain_contracts() -> Dict[str, Any]:
         "conversation": {
             "http": ["/api/chat", "/api/chat/confirm", "/api/followup"],
             "ws_methods": ws_by_domain.get("conversation", []),
-            "canonical_request": {"message": "string", "session_id": "optional<string>", "stream": "bool"},
+            "canonical_request": {
+                "message": "string",
+                "session_id": "optional<string>",
+                "stream": "bool",
+                "tenant_id": "optional<string>",
+                "environment": "optional<string>",
+            },
             "canonical_response": {"status": "success|error", "response": "string", "session_id": "string"},
         },
         "config": {
@@ -167,5 +173,16 @@ def build_domain_contracts() -> Dict[str, Any]:
             "http": ["/api/status", "/api/status/services", "/api/status/routes"],
             "ws_methods": ws_by_domain.get("system", []),
             "notes": "health/system methods remain lightweight compatibility surfaces.",
+        },
+        "ops": {
+            "http": [
+                "/api/ops/protocol",
+                "/api/ops/methods",
+                "/api/ops/http-contracts",
+                "/api/ops/surfaces",
+                "/api/ops/governance",
+            ],
+            "ws_methods": [],
+            "notes": "ops endpoints expose runtime contracts, discovery, and governance surfaces.",
         },
     }

@@ -9,6 +9,7 @@ from agentkit.mcp.mcp_manager import MCPManager, get_mcp_manager
 
 from .events import EventEmitter
 from .protocol import EventType
+from .runtime_hooks import RuntimeHookManager, get_runtime_hook_manager
 from .tools import SideEffectLevel, ToolPolicy, ToolPolicyDecision, ToolRegistry
 
 
@@ -48,12 +49,14 @@ class ToolService:
         mcp_manager: Optional[MCPManager] = None,
         tool_registry: Optional[ToolRegistry] = None,
         tool_policy: Optional[ToolPolicy] = None,
+        hook_manager: Optional[RuntimeHookManager] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.mcp_manager = mcp_manager or get_mcp_manager()
         self._registered_tools: Dict[str, Tool] = {}
         self.tool_registry = tool_registry or ToolRegistry()
         self.tool_policy = tool_policy or ToolPolicy()
+        self.hook_manager = hook_manager or get_runtime_hook_manager()
 
     def register_tool(self, tool: Tool) -> None:
         if tool.tool_id in self._registered_tools:
@@ -253,6 +256,8 @@ class ToolService:
         request_id = getattr(run_context, "request_id", None)
         session_value = getattr(run_context, "session_id", None)
         user_value = getattr(run_context, "user_id", None)
+        tenant_id = getattr(run_context, "tenant_id", None)
+        environment = getattr(run_context, "environment", None)
         if session_value is None:
             session_state = getattr(run_context, "session_state", None)
             session_value = getattr(session_state, "session_id", None) if session_state is not None else None
@@ -260,6 +265,10 @@ class ToolService:
                 user_value = getattr(session_state, "user_id", None) if session_state is not None else None
             if trace_id is None:
                 trace_id = getattr(session_state, "trace_id", None) if session_state is not None else None
+            if tenant_id is None:
+                tenant_id = getattr(session_state, "tenant_id", None) if session_state is not None else None
+            if environment is None:
+                environment = getattr(session_state, "environment", None) if session_state is not None else None
         fields: Dict[str, Any] = {}
         if trace_id:
             fields["trace_id"] = str(trace_id)
@@ -269,6 +278,10 @@ class ToolService:
             fields["session_id"] = str(session_value)
         if user_value:
             fields["user_id"] = str(user_value)
+        if tenant_id:
+            fields["tenant_id"] = str(tenant_id)
+        if environment:
+            fields["environment"] = str(environment)
         return fields
 
     def _build_context_fields(
@@ -385,6 +398,16 @@ class ToolService:
         )
         spec = auth["spec"]
         decision = auth["decision"]
+        hook_payload_base = {
+            "tool_name": str(tool_name),
+            "params": dict(params or {}),
+            "request_id": request_id,
+            "connection_id": connection_id,
+            "context": dict(context_fields or {}),
+            "spec": spec.model_dump(mode="json"),
+            "policy": (decision.effective if decision else {}),
+        }
+        await self._run_hook("before_tool_call", hook_payload_base)
 
         local_tool = self._registered_tools.get(tool_name)
         if local_tool is not None:
@@ -414,6 +437,14 @@ class ToolService:
                         "result": result,
                     },
                 )
+                await self._run_hook(
+                    "after_tool_call",
+                    {
+                        **hook_payload_base,
+                        "result": result,
+                        "tool_type": "local",
+                    },
+                )
                 return result
             except Exception as e:
                 logger.error(f"Local tool invocation failed [{tool_name}]: {e}")
@@ -426,6 +457,14 @@ class ToolService:
                         "tool_type": "local",
                         "tool_id": tool_name,
                         "error": str(e),
+                    },
+                )
+                await self._run_hook(
+                    "on_tool_error",
+                    {
+                        **hook_payload_base,
+                        "error": str(e),
+                        "tool_type": "local",
                     },
                 )
                 raise
@@ -468,6 +507,14 @@ class ToolService:
                         "result": result,
                     },
                 )
+                await self._run_hook(
+                    "after_tool_call",
+                    {
+                        **hook_payload_base,
+                        "result": result,
+                        "tool_type": "agent",
+                    },
+                )
                 return result
             except Exception as e:
                 await self._emit_event(
@@ -479,6 +526,14 @@ class ToolService:
                         "tool_type": "agent",
                         "agent_name": agent_name,
                         "error": str(e),
+                    },
+                )
+                await self._run_hook(
+                    "on_tool_error",
+                    {
+                        **hook_payload_base,
+                        "error": str(e),
+                        "tool_type": "agent",
                     },
                 )
                 raise
@@ -524,6 +579,16 @@ class ToolService:
                     "result": result,
                 },
             )
+            await self._run_hook(
+                "after_tool_call",
+                {
+                    **hook_payload_base,
+                    "result": result,
+                    "tool_type": "mcp",
+                    "service_name": service_name,
+                    "actual_tool_name": actual_tool_name,
+                },
+            )
             return result
         except Exception as e:
             logger.error(f"MCP tool invocation failed [{service_name}.{actual_tool_name}]: {e}")
@@ -539,7 +604,31 @@ class ToolService:
                     "error": str(e),
                 },
             )
+            await self._run_hook(
+                "on_tool_error",
+                {
+                    **hook_payload_base,
+                    "error": str(e),
+                    "tool_type": "mcp",
+                    "service_name": service_name,
+                    "actual_tool_name": actual_tool_name,
+                },
+            )
             raise
+
+    async def _run_hook(self, hook_name: str, payload: Dict[str, Any]) -> None:
+        manager = self.hook_manager
+        if manager is None:
+            return
+        fn = getattr(manager, hook_name, None)
+        if not callable(fn):
+            return
+        try:
+            maybe = fn(dict(payload or {}))
+            if hasattr(maybe, "__await__"):
+                await maybe
+        except Exception as e:
+            logger.debug(f"ToolService hook '{hook_name}' failed (ignored): {e}")
 
     async def _emit_event(self, event: EventType, payload: Dict[str, Any]) -> None:
         if not self.event_emitter:

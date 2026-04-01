@@ -64,12 +64,19 @@ def _to_catalog_item(spec, *, enabled: bool) -> Dict[str, Any]:
         "id": spec.skill_id,
         "name": spec.name,
         "description": spec.description,
+        "when_to_use": spec.when_to_use,
         "category": spec.category,
         "version": spec.version,
         "source": spec.source,
         "enabled": bool(enabled and spec.enabled),
         "default_mode": spec.default_mode,
+        "model_invocable": bool(getattr(spec, "model_invocable", True)),
+        "execution_context": str(getattr(spec, "execution_context", "inline") or "inline"),
+        "allowed_tools": list(getattr(spec, "allowed_tools", []) or spec.tool_allowlist),
         "tool_allowlist": list(spec.tool_allowlist),
+        "model_override": str(getattr(spec, "model_override", "") or ""),
+        "effort_override": str(getattr(spec, "effort_override", "") or ""),
+        "permission_profile": str(getattr(spec, "permission_profile", "default") or "default"),
         "example_count": len(spec.examples),
         "evaluation_case_count": len(spec.evaluation_cases),
     }
@@ -147,7 +154,6 @@ async def install_skill(
                     }
                 }
             },
-            # Keep backward-compatible plugin switch for existing logic.
             "plugins": {
                 request.skill_id: {
                     "enabled": bool(request.enabled),

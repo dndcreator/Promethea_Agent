@@ -240,6 +240,7 @@ def cmd_simple(args: argparse.Namespace, c: Client) -> None:
         ("ops", "http-contracts"): ("GET", "/api/ops/http-contracts", None),
         ("ops", "framework-check"): ("GET", "/api/ops/framework-check", None),
         ("ops", "surfaces"): ("GET", "/api/ops/surfaces", None),
+        ("ops", "governance"): ("GET", "/api/ops/governance", None),
         # skills
         ("skills", "catalog"): ("GET", "/api/skills/catalog", None),
         ("skills", "show"): ("GET", None, None),
@@ -624,7 +625,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     met = sp.add_parser("metrics"); mtp = met.add_subparsers(dest="metrics_cmd", required=True); mtp.add_parser("json"); mtp.add_parser("prometheus")
     doc = sp.add_parser("doctor"); dcp = doc.add_subparsers(dest="doctor_cmd", required=True); dcp.add_parser("run"); dcp.add_parser("migrate")
-    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol"); opp.add_parser("methods"); opp.add_parser("http-contracts"); opp.add_parser("framework-check"); opp.add_parser("surfaces")
+    ops = sp.add_parser("ops"); opp = ops.add_subparsers(dest="ops_cmd", required=True); opp.add_parser("capabilities"); opp.add_parser("runbook"); opp.add_parser("abstractions"); opp.add_parser("protocol"); opp.add_parser("methods"); opp.add_parser("http-contracts"); opp.add_parser("framework-check"); opp.add_parser("surfaces"); opp.add_parser("governance")
 
     auto = sp.add_parser("automation"); atp = auto.add_subparsers(dest="automation_cmd", required=True)
     for x in ("webhook", "cron"):
@@ -709,5 +710,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
 
 

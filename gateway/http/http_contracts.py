@@ -20,6 +20,8 @@ def _core_contracts() -> List[Dict[str, Any]]:
                 "stream": "bool",
                 "requested_mode": "optional<string>",
                 "requested_skill": "optional<string>",
+                "tenant_id": "optional<string>",
+                "environment": "optional<string>",
             },
             "response": {
                 "status": "success|error",
@@ -206,6 +208,16 @@ def _core_contracts() -> List[Dict[str, Any]]:
             "auth_required": False,
             "request": {},
             "response": {"status": "success", "surfaces": "object"},
+        },
+        {
+            "id": "ops.governance",
+            "path": "/api/ops/governance",
+            "method": "GET",
+            "domain": "ops",
+            "stability": "stable",
+            "auth_required": False,
+            "request": {},
+            "response": {"status": "success", "governance": "object"},
         },
     ]
 

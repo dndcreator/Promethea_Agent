@@ -2,9 +2,14 @@
 conversation system to the richer multi-layer memory system (hot / warm / cold).
 """
 import logging
+import json
+import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from .session_scope import scoped_session_id
 from .backends import FlatMemoryStore, Neo4jMemoryStore, SqliteGraphMemoryStore
 
@@ -14,11 +19,11 @@ logger = logging.getLogger(__name__)
 class MemoryAdapter:
     """
     Memory system adapter.
-    
+
     Exposes a very small API that the rest of the agent can call, while
     internally delegating to the hot/warm/cold/forgetting managers.
     """
-    
+
     def __init__(self):
         """Initialise the adapter and (best-effort) memory stack."""
         self.enabled = False
@@ -56,6 +61,30 @@ class MemoryAdapter:
             'summary_min_interval_s': 600,
             'decay_interval_s': 24 * 3600,
         }
+        self._raw_log_defaults = {
+            "enabled": True,
+            "path": "memory/raw_log.jsonl",
+            "state_path": "memory/raw_log.state.json",
+            "defer_hot_write": True,
+            "flush_interval_s": 5.0,
+            "max_batch_size": 32,
+        }
+        self._raw_log_enabled = False
+        self._raw_log_path = "memory/raw_log.jsonl"
+        self._raw_log_state_path = "memory/raw_log.state.json"
+        self._raw_log_defer_hot_write = True
+        self._raw_log_flush_interval_s = 5.0
+        self._raw_log_max_batch_size = 32
+        self._raw_log_lock = threading.Lock()
+        self._raw_log_replay_lock = threading.Lock()
+        self._raw_log_stop_event = threading.Event()
+        self._raw_log_wakeup_event = threading.Event()
+        self._raw_log_worker = None
+        self._raw_log_state = {
+            "last_offset": 0,
+            "last_entry_id": "",
+            "updated_at": 0.0,
+        }
         self._maintenance_persist_keys = (
             'messages',
             'messages_since_cluster',
@@ -65,7 +94,7 @@ class MemoryAdapter:
             'last_decay_at',
         )
         self._init_memory_system()
-    
+
     def _init_memory_system(self):
         """Initialise memory system (fail-soft: never raise to callers)."""
         try:
@@ -75,7 +104,7 @@ class MemoryAdapter:
             self._load_maintenance_defaults_from_config(config)
             mem_cfg = getattr(config, "memory", None)
             self.store_backend = str(getattr(mem_cfg, "store_backend", "neo4j") or "neo4j").strip().lower()
-            
+
             # Check if memory is enabled in config
             if not config.memory.enabled:
                 logger.info("Memory system disabled (config.memory.enabled = false)")
@@ -85,6 +114,7 @@ class MemoryAdapter:
                 sqlite_path = str(getattr(mem_cfg, "sqlite_graph_path", "memory/sqlite_graph.db") or "memory/sqlite_graph.db")
                 self.store = SqliteGraphMemoryStore(sqlite_path)
                 self.enabled = self.store.is_ready()
+                self._init_raw_log_system(config)
                 logger.info(f"Memory adapter initialised with backend=sqlite_graph path={sqlite_path}")
                 return
 
@@ -92,6 +122,7 @@ class MemoryAdapter:
                 flat_path = str(getattr(mem_cfg, "flat_memory_path", "memory/flat_memory.jsonl") or "memory/flat_memory.jsonl")
                 self.store = FlatMemoryStore(flat_path)
                 self.enabled = self.store.is_ready()
+                self._init_raw_log_system(config)
                 logger.info(f"Memory adapter initialised with backend=flat_memory path={flat_path}")
                 return
 
@@ -114,55 +145,178 @@ class MemoryAdapter:
                 recall_engine=self.recall_engine,
             )
             self.enabled = True
+            self._init_raw_log_system(config)
             logger.info("Memory adapter initialised with backend=neo4j")
-                
+
         except Exception as e:
             logger.warning(f"Memory system initialisation failed: {e}")
             self.enabled = False
 
     def _load_maintenance_defaults_from_config(self, config):
         warm = getattr(config.memory, "warm_layer", None)
-        if warm is None:
+        if warm is not None:
+            self._maintenance_defaults['cluster_every_messages'] = max(
+                1, int(getattr(warm, 'cluster_every_messages', self._maintenance_defaults['cluster_every_messages']))
+            )
+            self._maintenance_defaults['cluster_min_interval_s'] = max(
+                0, int(getattr(warm, 'cluster_min_interval_s', self._maintenance_defaults['cluster_min_interval_s']))
+            )
+            self._maintenance_defaults['idle_cluster_delay_s'] = max(
+                10, int(getattr(warm, 'idle_cluster_delay_s', self._maintenance_defaults['idle_cluster_delay_s']))
+            )
+            self._maintenance_defaults['idle_cluster_min_messages'] = max(
+                1, int(getattr(warm, 'idle_cluster_min_messages', self._maintenance_defaults['idle_cluster_min_messages']))
+            )
+            self._maintenance_defaults['idle_cluster_min_interval_s'] = max(
+                0, int(getattr(warm, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
+            )
+
+        hip = getattr(config.memory, "hippocampus", None)
+        if hip is not None and bool(getattr(hip, "enabled", True)):
+            self._maintenance_defaults['cluster_every_messages'] = max(
+                1, int(getattr(hip, 'cluster_every_messages', self._maintenance_defaults['cluster_every_messages']))
+            )
+            self._maintenance_defaults['cluster_min_interval_s'] = max(
+                0, int(getattr(hip, 'cluster_min_interval_s', self._maintenance_defaults['cluster_min_interval_s']))
+            )
+            self._maintenance_defaults['idle_cluster_delay_s'] = max(
+                10, int(getattr(hip, 'idle_cluster_delay_s', self._maintenance_defaults['idle_cluster_delay_s']))
+            )
+            self._maintenance_defaults['idle_cluster_min_messages'] = max(
+                1, int(getattr(hip, 'idle_cluster_min_messages', self._maintenance_defaults['idle_cluster_min_messages']))
+            )
+            self._maintenance_defaults['idle_cluster_min_interval_s'] = max(
+                0, int(getattr(hip, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
+            )
+            self._maintenance_defaults['summary_min_interval_s'] = max(
+                0, int(getattr(hip, 'summary_min_interval_s', self._maintenance_defaults['summary_min_interval_s']))
+            )
+            self._maintenance_defaults['decay_interval_s'] = max(
+                60, int(getattr(hip, 'decay_interval_s', self._maintenance_defaults['decay_interval_s']))
+            )
+
+    def _init_raw_log_system(self, config):
+        mem_cfg = getattr(config, "memory", None)
+        raw_cfg = getattr(mem_cfg, "raw_log", None) if mem_cfg is not None else None
+
+        self._raw_log_enabled = bool(getattr(raw_cfg, "enabled", self._raw_log_defaults["enabled"]))
+        self._raw_log_path = str(getattr(raw_cfg, "path", self._raw_log_defaults["path"]) or self._raw_log_defaults["path"])
+        self._raw_log_state_path = str(
+            getattr(raw_cfg, "state_path", self._raw_log_defaults["state_path"]) or self._raw_log_defaults["state_path"]
+        )
+        self._raw_log_defer_hot_write = bool(
+            getattr(raw_cfg, "defer_hot_write", self._raw_log_defaults["defer_hot_write"])
+        )
+        self._raw_log_flush_interval_s = max(
+            0.2,
+            float(getattr(raw_cfg, "flush_interval_s", self._raw_log_defaults["flush_interval_s"]) or self._raw_log_defaults["flush_interval_s"]),
+        )
+        self._raw_log_max_batch_size = max(
+            1,
+            int(getattr(raw_cfg, "max_batch_size", self._raw_log_defaults["max_batch_size"]) or self._raw_log_defaults["max_batch_size"]),
+        )
+
+        if not self._raw_log_enabled:
             return
-        self._maintenance_defaults['cluster_every_messages'] = max(
-            1, int(getattr(warm, 'cluster_every_messages', self._maintenance_defaults['cluster_every_messages']))
-        )
-        self._maintenance_defaults['cluster_min_interval_s'] = max(
-            0, int(getattr(warm, 'cluster_min_interval_s', self._maintenance_defaults['cluster_min_interval_s']))
-        )
-        self._maintenance_defaults['idle_cluster_delay_s'] = max(
-            10, int(getattr(warm, 'idle_cluster_delay_s', self._maintenance_defaults['idle_cluster_delay_s']))
-        )
-        self._maintenance_defaults['idle_cluster_min_messages'] = max(
-            1, int(getattr(warm, 'idle_cluster_min_messages', self._maintenance_defaults['idle_cluster_min_messages']))
-        )
-        self._maintenance_defaults['idle_cluster_min_interval_s'] = max(
-            0, int(getattr(warm, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
-        )
-    
-    def add_message(
+
+        Path(self._raw_log_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self._raw_log_state_path).parent.mkdir(parents=True, exist_ok=True)
+        if not Path(self._raw_log_path).exists():
+            Path(self._raw_log_path).touch()
+        self._raw_log_state = self._load_raw_log_state()
+        self._start_raw_log_worker()
+        # Replay pending writes from last checkpoint to avoid loss on abrupt exits.
+        self._replay_raw_log_once(max_records=self._raw_log_max_batch_size * 2)
+
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _load_raw_log_state(self) -> Dict[str, Any]:
+        try:
+            if not Path(self._raw_log_state_path).exists():
+                return {"last_offset": 0, "last_entry_id": "", "updated_at": 0.0}
+            with open(self._raw_log_state_path, "r", encoding="utf-8") as f:
+                obj = json.load(f)
+            if not isinstance(obj, dict):
+                return {"last_offset": 0, "last_entry_id": "", "updated_at": 0.0}
+            return {
+                "last_offset": max(0, int(obj.get("last_offset", 0) or 0)),
+                "last_entry_id": str(obj.get("last_entry_id", "") or ""),
+                "updated_at": float(obj.get("updated_at", 0.0) or 0.0),
+            }
+        except Exception:
+            return {"last_offset": 0, "last_entry_id": "", "updated_at": 0.0}
+
+    def _persist_raw_log_state(self) -> None:
+        payload = {
+            "last_offset": max(0, int(self._raw_log_state.get("last_offset", 0) or 0)),
+            "last_entry_id": str(self._raw_log_state.get("last_entry_id", "") or ""),
+            "updated_at": float(time.time()),
+        }
+        tmp_path = f"{self._raw_log_state_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp_path, self._raw_log_state_path)
+
+    def _append_raw_log_event(
         self,
+        *,
         session_id: str,
         role: str,
         content: str,
-        user_id: str = "default_user",
+        user_id: str,
         metadata: Optional[dict] = None,
     ) -> bool:
-        """
-        Add a message into the memory system.
-        
-        Args:
-            session_id: Conversation/session identifier.
-            role: "user" or "assistant".
-            content: Message text.
-            user_id: Logical user id (default "default_user").
-            
-        Returns:
-            bool: whether the message was successfully processed.
-        """
-        if not self.enabled:
+        text = str(content or "").strip()
+        if not text:
+            return False
+        event = {
+            "entry_id": f"raw_{uuid.uuid4().hex}",
+            "created_at": self._utc_now_iso(),
+            "session_id": str(session_id),
+            "role": str(role),
+            "content": text,
+            "user_id": str(user_id or "default_user"),
+            "metadata": dict(metadata or {}),
+        }
+        try:
+            with self._raw_log_lock:
+                with open(self._raw_log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            self._raw_log_wakeup_event.set()
+            return True
+        except Exception as e:
+            logger.error(f"Raw log append failed: {e}")
             return False
 
+    def _read_next_raw_log_event(self, start_offset: int):
+        with open(self._raw_log_path, "r", encoding="utf-8") as f:
+            f.seek(max(0, int(start_offset)))
+            line = f.readline()
+            if not line:
+                return None, int(start_offset)
+            next_offset = f.tell()
+        text = str(line or "").strip()
+        if not text:
+            return {}, next_offset
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict):
+                return obj, next_offset
+            return {}, next_offset
+        except Exception:
+            return {}, next_offset
+
+    def _write_message_to_store(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        user_id: str,
+        metadata: Optional[dict] = None,
+    ) -> bool:
         primary_ok = False
         try:
             if self.store is not None:
@@ -201,9 +355,151 @@ class MemoryAdapter:
                 )
             except Exception as e:
                 logger.debug(f"Dual-write memory store failed: {e}")
-
         return primary_ok
-    
+
+    def _replay_raw_log_once(self, max_records: Optional[int] = None) -> int:
+        if not self._raw_log_enabled:
+            return 0
+        if not Path(self._raw_log_path).exists():
+            return 0
+
+        processed = 0
+        hard_limit = max(1, int(max_records or self._raw_log_max_batch_size))
+        with self._raw_log_replay_lock:
+            offset = int(self._raw_log_state.get("last_offset", 0) or 0)
+            while processed < hard_limit:
+                event, next_offset = self._read_next_raw_log_event(offset)
+                if event is None:
+                    break
+                # malformed or empty line: skip forward.
+                if not event:
+                    offset = next_offset
+                    self._raw_log_state["last_offset"] = offset
+                    continue
+
+                ok = self._write_message_to_store(
+                    session_id=str(event.get("session_id") or ""),
+                    role=str(event.get("role") or "user"),
+                    content=str(event.get("content") or ""),
+                    user_id=str(event.get("user_id") or "default_user"),
+                    metadata=(event.get("metadata") if isinstance(event.get("metadata"), dict) else {}),
+                )
+                if not ok:
+                    # keep offset unchanged for retry on next round.
+                    break
+
+                offset = next_offset
+                self._raw_log_state["last_offset"] = offset
+                self._raw_log_state["last_entry_id"] = str(event.get("entry_id") or "")
+                processed += 1
+                try:
+                    self._on_message_saved_after_store(
+                        str(event.get("session_id") or ""),
+                        str(event.get("role") or "user"),
+                        str(event.get("user_id") or "default_user"),
+                    )
+                except Exception:
+                    pass
+
+            self._raw_log_state["updated_at"] = float(time.time())
+            self._persist_raw_log_state()
+        return processed
+
+    def _raw_log_worker_loop(self):
+        while not self._raw_log_stop_event.is_set():
+            timeout = self._raw_log_flush_interval_s
+            self._raw_log_wakeup_event.wait(timeout=timeout)
+            self._raw_log_wakeup_event.clear()
+            if self._raw_log_stop_event.is_set():
+                break
+            try:
+                self._replay_raw_log_once(max_records=self._raw_log_max_batch_size)
+            except Exception as e:
+                logger.debug(f"Raw log worker skipped batch due to error: {e}")
+
+    def _start_raw_log_worker(self):
+        worker = getattr(self, "_raw_log_worker", None)
+        if worker is not None and worker.is_alive():
+            return
+        self._raw_log_stop_event.clear()
+        self._raw_log_worker = threading.Thread(
+            target=self._raw_log_worker_loop,
+            daemon=True,
+            name="memory-raw-log-worker",
+        )
+        self._raw_log_worker.start()
+
+    def flush_raw_log(self, timeout_s: float = 5.0) -> bool:
+        if not self._raw_log_enabled:
+            return True
+        deadline = time.time() + max(0.2, float(timeout_s))
+        while time.time() < deadline:
+            progress = self._replay_raw_log_once(max_records=self._raw_log_max_batch_size)
+            try:
+                file_size = Path(self._raw_log_path).stat().st_size
+            except Exception:
+                file_size = int(self._raw_log_state.get("last_offset", 0) or 0)
+            offset = int(self._raw_log_state.get("last_offset", 0) or 0)
+            if offset >= file_size:
+                return True
+            if progress <= 0:
+                time.sleep(0.05)
+        return False
+
+    def shutdown(self, timeout_s: float = 5.0) -> bool:
+        drained = self.flush_raw_log(timeout_s=timeout_s)
+        if self._raw_log_enabled:
+            self._raw_log_stop_event.set()
+            self._raw_log_wakeup_event.set()
+            worker = getattr(self, "_raw_log_worker", None)
+            if worker and worker.is_alive():
+                worker.join(timeout=max(0.2, float(timeout_s)))
+        return drained
+
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: str,
+        user_id: str = "default_user",
+        metadata: Optional[dict] = None,
+    ) -> bool:
+        """
+        Add a message into the memory system.
+
+        Args:
+            session_id: Conversation/session identifier.
+            role: "user" or "assistant".
+            content: Message text.
+            user_id: Logical user id (default "default_user").
+
+        Returns:
+            bool: whether the message was successfully processed.
+        """
+        if not self.enabled:
+            return False
+
+        if bool(getattr(self, "_raw_log_enabled", False)):
+            appended = self._append_raw_log_event(
+                session_id=session_id,
+                role=role,
+                content=content,
+                user_id=user_id,
+                metadata=metadata,
+            )
+            # Optional compatibility mode: process immediately.
+            if appended and not bool(getattr(self, "_raw_log_defer_hot_write", True)):
+                self._replay_raw_log_once(max_records=1)
+            return appended
+
+        return self._write_message_to_store(
+            session_id=session_id,
+            role=role,
+            content=content,
+            user_id=user_id,
+            metadata=metadata,
+        )
+
     def _get_context(self, session_id: str) -> list:
         """Get recent context messages (up to last 5) for a session."""
         if session_id not in self._session_cache:
@@ -214,31 +510,31 @@ class MemoryAdapter:
         """Update in-memory context cache."""
         if session_id not in self._session_cache:
             self._session_cache[session_id] = []
-        
+
         self._session_cache[session_id].append({
             "role": role,
             "content": content
         })
-        
+
         # Limit cache size per session to at most 10 messages
         if len(self._session_cache[session_id]) > 10:
             self._session_cache[session_id] = self._session_cache[session_id][-10:]
-    
+
     def get_context(self, query: str, session_id: str, user_id: str = "default_user") -> str:
         """
         Retrieve related memory context (auto recall).
-        
+
         Args:
             query: Current user query text.
             session_id: Conversation/session identifier.
             user_id: Logical user id.
-            
+
         Returns:
             Formatted context string (may be empty).
         """
         if not self.enabled:
             return ""
-        
+
         try:
             if self.store is not None:
                 return self.store.get_context(query=query, session_id=session_id, user_id=user_id)
@@ -249,7 +545,7 @@ class MemoryAdapter:
         except Exception as e:
             logger.error(f"Failed to get memory context: {e}")
             return ""
-    
+
     def _ensure_managers(self):
         if not self._config or not self.hot_layer:
             return
@@ -366,7 +662,7 @@ class MemoryAdapter:
         except Exception as e:
             logger.debug(f"Persist maintenance state failed: {e}")
 
-    def on_message_saved(self, session_id: str, role: str, user_id: str = 'default_user'):
+    def _on_message_saved_after_store(self, session_id: str, role: str, user_id: str = 'default_user'):
         if not self.enabled or not self.hot_layer:
             return
 
@@ -383,6 +679,13 @@ class MemoryAdapter:
                 self._schedule_idle_cluster_check(scoped_sid)
         except Exception as e:
             logger.debug(f"Memory maintenance skipped: {e}")
+
+    def on_message_saved(self, session_id: str, role: str, user_id: str = 'default_user'):
+        # In raw-log deferred mode, maintenance is triggered only after the event
+        # is actually persisted into the hot store by replay worker.
+        if bool(getattr(self, "_raw_log_enabled", False)) and bool(getattr(self, "_raw_log_defer_hot_write", False)):
+            return
+        self._on_message_saved_after_store(session_id, role, user_id)
 
     def _schedule_maintenance(self, session_id: str, state: dict):
         with self._maintenance_lock:
@@ -700,7 +1003,7 @@ class MemoryAdapter:
         self._dual_write_store = None
         self.configure_migration(mode="cutover", source_backend=snapshot.get("source_backend"), target_backend=self.store_backend)
         return {"ok": True, "mode": "cutover", "imported": imported, "active_backend": self.store_backend}
-    
+
     def is_enabled(self) -> bool:
         """Return True if the memory system is initialised and usable."""
         if not self.enabled:
@@ -711,6 +1014,27 @@ class MemoryAdapter:
             except Exception:
                 return False
         return self.hot_layer is not None
+
+    def get_pipeline_status(self) -> Dict[str, Any]:
+        state = dict(getattr(self, "_raw_log_state", {}) or {})
+        pending_estimate = 0
+        if bool(getattr(self, "_raw_log_enabled", False)):
+            try:
+                sz = Path(str(getattr(self, "_raw_log_path", ""))).stat().st_size
+                pending_estimate = max(0, int(sz) - int(state.get("last_offset", 0) or 0))
+            except Exception:
+                pending_estimate = 0
+        return {
+            "enabled": bool(self.enabled),
+            "backend": str(self.store_backend or ""),
+            "raw_log_enabled": bool(getattr(self, "_raw_log_enabled", False)),
+            "raw_log_defer_hot_write": bool(getattr(self, "_raw_log_defer_hot_write", False)),
+            "raw_log_last_offset": int(state.get("last_offset", 0) or 0),
+            "raw_log_pending_bytes_estimate": pending_estimate,
+            "raw_log_worker_alive": bool(
+                getattr(self, "_raw_log_worker", None) is not None and getattr(self, "_raw_log_worker").is_alive()
+            ),
+        }
 
 
 _memory_adapter_instance: Optional[MemoryAdapter] = None
