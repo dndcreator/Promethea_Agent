@@ -21,6 +21,7 @@ from .protocol import (
 
 from .memory_recall_schema import MemoryRecallRequest
 from .prompt_assembler import PromptAssembler
+from .soul_service import build_soul_response_payload, schedule_soul_evolution
 from .runtime_governance import (
     build_context_budget_snapshot,
     build_orchestration_snapshot,
@@ -54,6 +55,70 @@ def _normalize_recall_context(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return ""
+
+
+def _extract_recall_snippet(context: str, *, max_chars: int = 80) -> str:
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    lines = [ln.strip("- ").strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("[")]
+    if not lines:
+        return ""
+    snippet = lines[0].replace("\n", " ").strip()
+    if len(snippet) > max_chars:
+        snippet = snippet[: max(1, int(max_chars) - 3)] + "..."
+    return snippet
+
+
+def _build_memory_visibility(
+    *,
+    memory_bundle: MemoryRecallBundle,
+    feedback_hints: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    notices: List[str] = []
+    recall_notice = ""
+    if memory_bundle.recalled:
+        snippet = _extract_recall_snippet(memory_bundle.context)
+        if snippet:
+            recall_notice = f"我参考了你的历史记忆：{snippet}"
+        else:
+            recall_notice = "我参考了你的历史记忆来回答。"
+        notices.append(recall_notice)
+
+    saved_rows = [row for row in (feedback_hints or []) if str((row or {}).get("type", "")) == "memory_saved"]
+    review_rows = [row for row in (feedback_hints or []) if str((row or {}).get("type", "")) == "memory_review_needed"]
+    write_notice = ""
+    review_notice = ""
+    if saved_rows:
+        first = saved_rows[-1]
+        mt = str(first.get("memory_type") or "记忆")
+        write_notice = f"已记住你的一条{mt}信息。"
+        notices.append(write_notice)
+    if review_rows:
+        first = review_rows[-1]
+        mt = str(first.get("memory_type") or "记忆")
+        review_notice = f"检测到{mt}冲突，待你确认后再写入。"
+        notices.append(review_notice)
+
+    return {
+        "enabled": bool(memory_bundle.recalled or feedback_hints),
+        "recalled": bool(memory_bundle.recalled),
+        "recall_notice": recall_notice,
+        "write_notice": write_notice,
+        "review_notice": review_notice,
+        "feedback_hints": list(feedback_hints or []),
+        "notices": notices,
+    }
+
+
+def _memory_visibility_enabled(user_config: Optional[Dict[str, Any]]) -> bool:
+    cfg = user_config if isinstance(user_config, dict) else {}
+    memory_cfg = cfg.get("memory", {}) if isinstance(cfg.get("memory", {}), dict) else {}
+    visibility = memory_cfg.get("visibility", {}) if isinstance(memory_cfg.get("visibility", {}), dict) else {}
+    value = visibility.get("enabled")
+    if value is None:
+        return True
+    return _to_bool(value, default=True)
 
 def _extract_context_fields(
     run_context: Optional[Any],
@@ -439,6 +504,40 @@ async def stage_response_synthesis(
     run_input: ConversationRunInput,
     user_config: Optional[Dict[str, Any]],
 ) -> ResponseDraft:
+    org_context: Dict[str, Any] = {}
+    if run_input.run_context is not None:
+        rs0 = getattr(run_input.run_context, "reasoning_state", None)
+        if isinstance(rs0, dict) and isinstance(rs0.get("org_context"), dict):
+            org_context = dict(rs0.get("org_context") or {})
+    if (
+        getattr(service, "org_context_service", None)
+        and normalized.user_id
+        and isinstance(user_config, dict)
+        and not org_context
+    ):
+        try:
+            org_context = await service.org_context_service.recall_for_turn(
+                query=normalized.user_message,
+                user_id=normalized.user_id,
+                user_config=user_config,
+                audience=str((normalized.metadata or {}).get("audience") or ""),
+                context_type=None,
+                top_k=None,
+            )
+        except Exception as e:
+            logger.debug("conversation_pipeline: org context recall skipped: {}", e)
+            org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
+
+    if run_input.run_context is not None:
+        rs = getattr(run_input.run_context, "reasoning_state", None)
+        if isinstance(rs, dict):
+            rs["org_context"] = dict(org_context or {})
+        else:
+            try:
+                setattr(run_input.run_context, "reasoning_state", {"org_context": dict(org_context or {})})
+            except Exception:
+                pass
+
     messages: List[Dict[str, Any]] = []
     if run_input.messages:
         messages = [dict(m) for m in run_input.messages]
@@ -473,7 +572,34 @@ async def stage_response_synthesis(
         tool_executor=tools.tool_executor,
     )
     final_response = response_data if isinstance(response_data, dict) else {"raw": response_data}
+    feedback_hints: List[Dict[str, Any]] = []
+    if service.memory_service and normalized.session_id and normalized.user_id:
+        drain = getattr(service.memory_service, "drain_visibility_hints", None)
+        if callable(drain):
+            try:
+                hint_out = drain(
+                    session_id=normalized.session_id,
+                    user_id=normalized.user_id,
+                    limit=3,
+                )
+                feedback_hints = list(hint_out or [])
+            except Exception:
+                feedback_hints = []
+    memory_visibility = _build_memory_visibility(memory_bundle=memory_bundle, feedback_hints=feedback_hints)
+    if _memory_visibility_enabled(user_config):
+        final_response["memory_visibility"] = memory_visibility
+    else:
+        final_response["memory_visibility"] = {"enabled": False, "notices": []}
     final_response.setdefault("prompt_assembly", prompt_assembly)
+    final_response["soul"] = build_soul_response_payload(user_config)
+    final_response["org_context"] = {
+        "enabled": bool((org_context or {}).get("enabled")),
+        "recalled": bool((org_context or {}).get("recalled")),
+        "org_id": str((org_context or {}).get("org_id") or ""),
+        "audience": str((org_context or {}).get("audience") or ""),
+        "backend": str((org_context or {}).get("backend") or ""),
+        "items": list((org_context or {}).get("items") or []),
+    }
     return ResponseDraft(
         status=str(final_response.get("status", "success") or "success"),
         content=str(final_response.get("content", "") or ""),
@@ -666,6 +792,13 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             mode=mode,
             run_input=run_input,
             user_config=user_config,
+        )
+        await schedule_soul_evolution(
+            service=service,
+            user_id=normalized.user_id,
+            user_config=user_config,
+            user_message=normalized.user_message,
+            assistant_message=response.content,
         )
         await _emit_stage_event(
             service,

@@ -33,6 +33,23 @@ def _normalize_tool_args(value):
     return {"_arg": value}
 
 
+def _summarize_memory_visibility(value):
+    if not isinstance(value, dict):
+        return None
+    enabled = bool(value.get("enabled"))
+    notices = value.get("notices")
+    feedback_hints = value.get("feedback_hints")
+    return {
+        "enabled": enabled,
+        "recalled": bool(value.get("recalled")),
+        "recall_notice": str(value.get("recall_notice") or ""),
+        "write_notice": str(value.get("write_notice") or ""),
+        "review_notice": str(value.get("review_notice") or ""),
+        "notices": [str(x) for x in (notices or []) if str(x).strip()],
+        "feedback_hints": list(feedback_hints or []),
+    }
+
+
 def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
     event_emitter = getattr(gateway_server, "event_emitter", None)
     if not event_emitter:
@@ -152,7 +169,9 @@ async def chat(
                         )
 
                     full_text = ""
+                    memory_write_summary = None
                     stream_failed = False
+                    run_chat_loop_result = {}
                     async for chunk in gateway_server.conversation_service.call_llm_stream(
                         messages, user_config=user_config, user_id=user_id
                     ):
@@ -164,7 +183,7 @@ async def chat(
                             yield _sse({"type": "text", "content": chunk})
 
                     if stream_failed:
-                        result = await gateway_server.conversation_service.run_chat_loop(
+                        run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
                             messages,
                             user_config=user_config,
                             session_id=session_id,
@@ -178,7 +197,7 @@ async def chat(
                                 connection_id=f"http_stream_{turn_id}",
                             ),
                         )
-                        full_text = result.get("content", "")
+                        full_text = run_chat_loop_result.get("content", "")
                         if full_text:
                             yield _sse({"type": "text", "content": full_text})
 
@@ -192,7 +211,33 @@ async def chat(
                         yield _sse({"type": "error", "content": "failed to commit turn"})
                         return
 
+                    if isinstance(run_chat_loop_result, dict):
+                        memory_write_summary = _summarize_memory_visibility(
+                            run_chat_loop_result.get("memory_visibility")
+                        )
+                    if not memory_write_summary:
+                        memory_service = getattr(gateway_server.conversation_service, "memory_service", None)
+                        drain = getattr(memory_service, "drain_visibility_hints", None) if memory_service else None
+                        if callable(drain) and session_id and user_id:
+                            try:
+                                rows = list(drain(session_id=session_id, user_id=user_id, limit=3) or [])
+                                if rows:
+                                    memory_write_summary = {
+                                        "enabled": True,
+                                        "recalled": False,
+                                        "recall_notice": "",
+                                        "write_notice": "",
+                                        "review_notice": "",
+                                        "notices": [],
+                                        "feedback_hints": rows,
+                                    }
+                            except Exception:
+                                memory_write_summary = None
+
                     done_payload = {"type": "done", "session_id": session_id}
+                    if memory_write_summary:
+                        done_payload["memory_write_summary"] = memory_write_summary
+                        done_payload["memory_visibility"] = memory_write_summary
                     if gateway_server.reasoning_service and tree_id:
                         assessment = await gateway_server.reasoning_service.assess_outcome(
                             tree_id=tree_id,
@@ -305,6 +350,7 @@ async def chat(
             tool_call_id=mapped.get("tool_call_id"),
             tool_name=mapped.get("tool_name"),
             args=_normalize_tool_args(mapped.get("args")),
+            memory_write_summary=_summarize_memory_visibility(mapped.get("memory_write_summary")),
         )
     except HTTPException:
         raise
@@ -336,6 +382,7 @@ async def confirm_tool(
             tool_call_id=payload.get("tool_call_id"),
             tool_name=payload.get("tool_name"),
             args=_normalize_tool_args(payload.get("args")),
+            memory_write_summary=_summarize_memory_visibility(payload.get("memory_write_summary")),
         )
     except HTTPException:
         raise

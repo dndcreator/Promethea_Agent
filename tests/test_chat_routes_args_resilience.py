@@ -18,6 +18,12 @@ async def test_chat_route_normalizes_non_dict_args(monkeypatch):
             "tool_call_id": "tc1",
             "tool_name": "execute_command",
             "args": ("command", "description", "service_name", "agentType"),
+            "memory_write_summary": {
+                "enabled": True,
+                "write_notice": "saved",
+                "notices": ["saved"],
+                "feedback_hints": [{"type": "memory_saved"}],
+            },
         }
 
     monkeypatch.setattr(
@@ -36,6 +42,8 @@ async def test_chat_route_normalizes_non_dict_args(monkeypatch):
     assert out.status == "needs_confirmation"
     assert isinstance(out.args, dict)
     assert out.args == {"_args_list": ["command", "description", "service_name", "agentType"]}
+    assert isinstance(out.memory_write_summary, dict)
+    assert out.memory_write_summary.get("enabled") is True
 
 
 @pytest.mark.asyncio
@@ -49,6 +57,11 @@ async def test_chat_confirm_route_normalizes_non_dict_args(monkeypatch):
             "tool_call_id": "tc1",
             "tool_name": "execute_command",
             "args": ("command", "description"),
+            "memory_write_summary": {
+                "enabled": True,
+                "review_notice": "needs review",
+                "feedback_hints": [{"type": "memory_review_needed"}],
+            },
         }
 
     monkeypatch.setattr(chat_routes, "dispatch_gateway_method", _fake_dispatch)
@@ -65,3 +78,4 @@ async def test_chat_confirm_route_normalizes_non_dict_args(monkeypatch):
 
     assert out.status == "needs_confirmation"
     assert out.args == {"_args_list": ["command", "description"]}
+    assert out.memory_write_summary.get("enabled") is True

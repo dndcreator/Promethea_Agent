@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 import config as config_module
 from gateway.config_protocol import normalize_config_update_params
+from gateway.soul_service import build_soul_response_payload
 from gateway_integration import get_gateway_integration
 
 from .auth import get_current_user_id
@@ -30,6 +31,7 @@ SIMPLE_CONFIG_FIELDS = [
     "memory.store_backend",
     "reasoning.enabled",
     "system.stream_mode",
+    "org_brain.enabled",
 ]
 
 ADVANCED_CONFIG_FIELDS = [
@@ -58,6 +60,21 @@ ADVANCED_CONFIG_FIELDS = [
     "memory.cold_layer.compression_threshold",
     "system.debug",
     "system.log_level",
+    "org_brain.org_id",
+    "org_brain.recall_priority",
+    "org_brain.confirmation_queue",
+    "org_brain.audience_default",
+    "org_brain.max_upload_bytes",
+    "org_brain.allowed_suffixes",
+    "org_brain.recall_top_k_default",
+    "org_brain.recall_context_type_default",
+    "org_brain.chat_top_k",
+    "org_brain.chat_context_type",
+    "org_brain.summary_label",
+    "org_brain.summary_max_items",
+    "org_brain.extract_text_max_chars",
+    "org_brain.heuristic_max_lines",
+    "org_brain.heuristic_max_items",
 ]
 
 
@@ -149,6 +166,7 @@ def _build_basic_config_view(config_data: Dict[str, Any]) -> Dict[str, Any]:
     memory = cfg.get("memory") if isinstance(cfg.get("memory"), dict) else {}
     reasoning = cfg.get("reasoning") if isinstance(cfg.get("reasoning"), dict) else {}
     system = cfg.get("system") if isinstance(cfg.get("system"), dict) else {}
+    org_brain = cfg.get("org_brain") if isinstance(cfg.get("org_brain"), dict) else {}
     return {
         "config_version": cfg.get("config_version"),
         "agent_name": cfg.get("agent_name"),
@@ -165,6 +183,14 @@ def _build_basic_config_view(config_data: Dict[str, Any]) -> Dict[str, Any]:
         "system": {
             "stream_mode": _to_bool(system.get("stream_mode"), default=True),
         },
+        "org_brain": {
+            "enabled": _to_bool(org_brain.get("enabled"), default=False),
+            "org_id": org_brain.get("org_id", ""),
+            "recall_priority": org_brain.get("recall_priority", "blend"),
+            "confirmation_queue": _to_bool(org_brain.get("confirmation_queue"), default=True),
+            "audience_default": org_brain.get("audience_default", "业务部门"),
+        },
+        "soul": build_soul_response_payload(cfg),
     }
 
 
@@ -250,6 +276,10 @@ def _build_config_contract() -> Dict[str, Any]:
                 "method": "GET",
                 "query": {"view": "simple|advanced|both"},
             },
+            "soul_api": {
+                "path": "/api/config/soul",
+                "method": "GET",
+            },
             "ui_profiles": {
                 "simple_fields": SIMPLE_CONFIG_FIELDS,
                 "advanced_fields": ADVANCED_CONFIG_FIELDS,
@@ -282,6 +312,7 @@ async def get_config(
         "status": "success",
         "user_id": resolved_user_id,
         "config": config_data,
+        "soul": build_soul_response_payload(full_config),
         "view": view,
         "warnings": warnings,
     }
@@ -348,6 +379,7 @@ async def get_effective_config(
         "user_id": resolved_user_id,
         "view": view,
         "effective": config_data,
+        "soul": build_soul_response_payload(full_config),
         "sources": effective_bundle.get("sources") or {},
     }
     if include_layers:
@@ -525,6 +557,21 @@ async def get_user_preferences(
     prefs = config_service.get_user_preferences(resolved_user_id, scope=scope)
     prefs = _sanitize_config_for_client(prefs)
     return {"status": "success", "user_id": resolved_user_id, "preferences": prefs, "scope": scope}
+
+
+@router.get("/config/soul")
+async def get_soul_config(
+    user_id: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    config_service = _get_config_service()
+    resolved_user_id = _resolve_user_id(user_id, current_user_id)
+    cfg = config_service.get_merged_config(resolved_user_id)
+    return {
+        "status": "success",
+        "user_id": resolved_user_id,
+        "soul": build_soul_response_payload(cfg),
+    }
 
 
 @router.get("/config/tool-policy")

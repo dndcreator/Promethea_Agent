@@ -444,3 +444,27 @@ def test_raw_log_replay_does_not_require_append_lock(tmp_path):
 
     assert processed == 1
     assert adapter.store.add_message.call_count == 1
+
+
+def test_memory_visibility_hints_record_and_drain():
+    from gateway.memory_service import MemoryService
+
+    svc = MemoryService(memory_adapter=MagicMock())
+    svc._record_visibility_hint(
+        session_id="s1",
+        user_id="u1",
+        memory_type="preference",
+        target_memory_layer="profile_memory",
+        decision="allow",
+        reason="durable_factual_state",
+        persisted=True,
+        requires_user_confirmation=False,
+        content="prefer concise answers",
+        conflict_candidates=[],
+        proposal_id=None,
+    )
+
+    rows = svc.drain_visibility_hints(session_id="s1", user_id="u1", limit=3)
+    assert len(rows) == 1
+    assert rows[0]["type"] == "memory_saved"
+    assert svc.drain_visibility_hints(session_id="s1", user_id="u1", limit=3) == []

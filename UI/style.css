@@ -738,7 +738,7 @@ select {
 }
 
 .reasoning-nodes {
-    max-height: 180px;
+    max-height: 280px;
     overflow: auto;
     border: 1px solid var(--border-default);
     border-radius: 8px;
@@ -746,6 +746,91 @@ select {
     background: #fbfdff;
     font: 12px/1.45 var(--font-mono);
     white-space: pre-wrap;
+}
+
+.reasoning-tree-view {
+    display: grid;
+    gap: 8px;
+    font: 12px/1.45 var(--font-mono);
+}
+
+.reasoning-tree-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.reasoning-group,
+.reasoning-node,
+.reasoning-subgroup {
+    border: 1px solid var(--border-default);
+    border-radius: 8px;
+    background: #ffffff;
+    overflow: hidden;
+}
+
+.reasoning-group summary,
+.reasoning-node summary,
+.reasoning-subgroup summary {
+    cursor: pointer;
+    padding: 6px 8px;
+    background: #f8fafc;
+    color: #334155;
+}
+
+.reasoning-node summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.reasoning-group-body {
+    padding: 8px;
+    display: grid;
+    gap: 6px;
+    color: #1f2937;
+}
+
+.reasoning-group-body pre {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    background: #0b1220;
+    color: #dbeafe;
+    border-radius: 8px;
+    padding: 8px;
+}
+
+.reasoning-empty {
+    color: #64748b;
+    font-style: italic;
+}
+
+.pill {
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    padding: 1px 8px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 11px;
+}
+
+.pill.runtime-success {
+    border-color: #86efac;
+    background: #ecfdf3;
+    color: #166534;
+}
+
+.pill.runtime-failed {
+    border-color: #fca5a5;
+    background: #fef2f2;
+    color: #991b1b;
+}
+
+.pill.runtime-unsure {
+    border-color: #fcd34d;
+    background: #fffbeb;
+    color: #92400e;
 }
 
 .message {
@@ -759,6 +844,11 @@ select {
 
 .message.assistant {
     justify-content: flex-start;
+}
+
+.message.assistant.with-memory-hint {
+    align-items: flex-start;
+    gap: 10px;
 }
 
 .message-content {
@@ -812,6 +902,108 @@ select {
 .message-content code {
     font-family: var(--font-mono);
     font-size: 0.95em;
+}
+
+.memory-hint-panel {
+    position: relative;
+    margin-top: 4px;
+}
+
+.memory-hint-trigger {
+    list-style: none;
+    cursor: pointer;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 12px;
+    line-height: 1;
+    padding: 7px 10px;
+    user-select: none;
+}
+
+.memory-hint-trigger::-webkit-details-marker {
+    display: none;
+}
+
+.memory-hint-panel[open] .memory-hint-trigger {
+    border-color: #93c5fd;
+    background: #eff6ff;
+    color: #1d4ed8;
+}
+
+.memory-hint-body {
+    position: absolute;
+    top: 36px;
+    left: 0;
+    z-index: 8;
+    min-width: 280px;
+    max-width: 420px;
+    border: 1px solid #bfdbfe;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 16px 30px rgba(15, 23, 42, 0.14);
+    padding: 10px 12px;
+    display: grid;
+    gap: 8px;
+}
+
+.memory-hint-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.memory-hint-row {
+    display: grid;
+    grid-template-columns: 58px 1fr;
+    gap: 8px;
+    align-items: start;
+    font-size: 12px;
+}
+
+.memory-hint-row .label {
+    color: #475569;
+    font-weight: 600;
+}
+
+.memory-hint-row .value {
+    color: #1e293b;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.memory-hint-meta {
+    white-space: pre-wrap;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    background: #f8fafc;
+    color: #334155;
+    font-size: 11px;
+    padding: 8px;
+}
+
+.memory-hint-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+.memory-action {
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #334155;
+    font-size: 12px;
+    height: 28px;
+    padding: 0 10px;
+    cursor: pointer;
+}
+
+.memory-action.primary {
+    border-color: #93c5fd;
+    background: #eff6ff;
+    color: #1d4ed8;
 }
 
 .tool-area {
@@ -1259,6 +1451,12 @@ select {
 .form-group textarea {
     min-height: 112px;
     resize: vertical;
+}
+
+#soulPromptReadonly[readonly] {
+    background: var(--bg-muted);
+    border-style: dashed;
+    color: var(--text-normal);
 }
 
 .form-group input:focus,

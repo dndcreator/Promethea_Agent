@@ -148,9 +148,36 @@ async def test_memory_and_tool_path(monkeypatch):
 
     assert out.status == "success"
     assert out.raw.get("memory_recalled") is True
+    assert "[记忆]" not in out.content
+    assert (out.raw.get("memory_visibility") or {}).get("enabled") is True
     capability_state = out.raw.get("capability_state") or {}
     assert capability_state.get("degraded") is False
     assert capability_state.get("memory", {}).get("status") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_exposes_memory_visibility_feedback():
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service._should_recall_memory = AsyncMock(return_value=False)
+    memory = MagicMock()
+    memory.is_enabled.return_value = True
+    memory.drain_visibility_hints.return_value = [
+        {
+            "type": "memory_saved",
+            "memory_type": "preference",
+            "content_preview": "prefer concise answers",
+        }
+    ]
+    service.memory_service = memory
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="hello", session_id="s1", user_id="u1")
+    )
+
+    mv = out.raw.get("memory_visibility") or {}
+    assert mv.get("enabled") is True
+    assert "已记住" in str(mv.get("write_notice") or "")
+    assert "[记忆]" not in out.content
 
 
 @pytest.mark.asyncio

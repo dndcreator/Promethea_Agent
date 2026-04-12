@@ -40,16 +40,55 @@ def test_collect_blocks_contains_expected_types():
     assert PromptBlockType.WORKSPACE in block_types
     assert PromptBlockType.POLICY in block_types
     assert PromptBlockType.RESPONSE_FORMAT in block_types
+    assert PromptBlockType.PERSONA in block_types
 
 
 def test_sort_blocks_by_priority_desc():
     assembler = PromptAssembler()
     blocks = [
-        PromptBlock(block_id="a", block_type=PromptBlockType.IDENTITY, source="t", content="1", priority=10),
-        PromptBlock(block_id="b", block_type=PromptBlockType.POLICY, source="t", content="2", priority=99),
+        PromptBlock(
+            block_id="a",
+            block_type=PromptBlockType.IDENTITY,
+            source="t",
+            content="1",
+            priority=10,
+            metadata={"runtime_stability": "stable"},
+        ),
+        PromptBlock(
+            block_id="b",
+            block_type=PromptBlockType.POLICY,
+            source="t",
+            content="2",
+            priority=99,
+            metadata={"runtime_stability": "stable"},
+        ),
     ]
     out = assembler.sort_blocks(blocks)
     assert [b.block_id for b in out] == ["b", "a"]
+
+
+def test_sort_blocks_prefers_stable_bucket_before_dynamic():
+    assembler = PromptAssembler()
+    blocks = [
+        PromptBlock(
+            block_id="dynamic_high",
+            block_type=PromptBlockType.POLICY,
+            source="t",
+            content="x",
+            priority=99,
+            metadata={"runtime_stability": "dynamic"},
+        ),
+        PromptBlock(
+            block_id="stable_low",
+            block_type=PromptBlockType.RESPONSE_FORMAT,
+            source="t",
+            content="y",
+            priority=10,
+            metadata={"runtime_stability": "stable"},
+        ),
+    ]
+    out = assembler.sort_blocks(blocks)
+    assert [b.block_id for b in out] == ["stable_low", "dynamic_high"]
 
 
 def test_compact_blocks_drops_low_priority_compactable():
@@ -98,6 +137,8 @@ def test_assemble_outputs_debug_and_updates_run_context_prompt_blocks():
     assert isinstance(out["system_prompt"], str)
     assert "debug" in out
     assert "used_block_ids" in out["debug"]
+    assert "used_static_block_ids" in out["debug"]
+    assert "used_dynamic_block_ids" in out["debug"]
     assert isinstance(run_context.prompt_blocks, dict)
     assert "estimated_total_tokens" in run_context.prompt_blocks
 
@@ -139,3 +180,114 @@ def test_compact_blocks_respects_protect_list():
     kept_ids = [b.block_id for b in result["blocks"]]
     assert "memory" in kept_ids
     assert "tools" not in kept_ids
+
+
+def test_persona_module_selected_by_user_message():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        input_payload={"message": "I feel anxious, can you keep me company and help me debug"},
+    )
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="deep", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={},
+    )
+    ids = [b.block_id for b in blocks]
+    assert "soul_core" in ids
+    assert "persona_core" in ids
+    assert "persona_module" in ids
+    persona_mod = next((b for b in blocks if b.block_id == "persona_module"), None)
+    assert persona_mod is not None
+    assert "never change safety" in (persona_mod.content or "").lower()
+
+
+def test_prompt_block_policy_disable_persona_hides_all_persona_blocks():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        input_payload={"message": "I feel anxious"},
+        prompt_block_policy={"disable": ["persona"]},
+    )
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="deep", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={},
+    )
+    ids = {b.block_id for b in blocks}
+    assert "soul_core" not in ids
+    assert "persona_core" not in ids
+    assert "persona_module" not in ids
+
+
+def test_soul_disabled_removes_soul_block_only():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(input_payload={"message": "hello"})
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={"persona": {"soul": {"enabled": False}}},
+    )
+    ids = {b.block_id for b in blocks}
+    assert "soul_core" not in ids
+    assert "persona_core" in ids
+
+
+def test_org_context_block_injected_when_enabled_and_recalled():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        reasoning_state={
+            "org_context": {
+                "summary_text": "Organization context hints:\n- [董事会/formal] 三大战略: 强调长期稳健增长",
+                "org_id": "org_demo",
+                "audience": "董事会",
+            }
+        }
+    )
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="deep", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={"org_brain": {"enabled": True}},
+    )
+    org_block = next((b for b in blocks if b.block_id == "org_context"), None)
+    assert org_block is not None
+    assert org_block.block_type == PromptBlockType.ORG_CONTEXT
+    assert "organization context hints" in (org_block.content or "").lower()
+
+
+def test_org_context_override_persona_drops_persona_blocks():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        reasoning_state={
+            "org_context": {
+                "summary_text": "Organization context hints:\n- [董事会/formal] 三大战略: 强调长期稳健增长",
+                "org_id": "org_demo",
+                "audience": "董事会",
+                "recall_priority": "override_persona",
+            }
+        },
+        input_payload={"message": "I feel anxious and need help"},
+    )
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="deep", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={"org_brain": {"enabled": True}},
+    )
+    ids = {b.block_id for b in blocks}
+    assert "org_context" in ids
+    assert "persona_core" not in ids
+    assert "persona_module" not in ids
+    assert "soul_core" not in ids

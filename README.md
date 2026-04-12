@@ -104,6 +104,18 @@ Channel adapters normalize every input source to the same gateway contract:
 - MCP service health snapshots (`online / offline / degraded`)
 - `MemoryRecallInspector` — see exactly what was recalled, dropped, and why
 
+### Prompt Runtime: Static + Dynamic Assembly
+- Prompt is assembled per turn from structured blocks, not one static template.
+- Stable blocks (identity/persona/soul) are placed before dynamic blocks for cache-friendly reuse.
+- Dynamic blocks include memory recall, reasoning notes, tool/policy/workspace context.
+- Prompt block usage and compaction results are exposed in response debug metadata.
+
+### Soul Prompt (User-Scoped, UI Read-Only, Auto-Evolving)
+- Each user has an isolated `persona.soul` profile.
+- Web UI shows soul prompt as read-only; users cannot directly edit it in settings.
+- Runtime may evolve soul content asynchronously after turns (rate-limited, style-only constraints).
+- Soul content cannot override safety/policy/tool/reasoning rules.
+
 ---
 
 ## Quickstart
@@ -225,6 +237,7 @@ Key sections:
 | `memory.neo4j` | `uri`, `username`, `password` | Only needed for Neo4j backend |
 | `sandbox` | `enabled`, `profile` | Set `profile=strict` in production |
 | `reasoning` | `enabled`, `mode` | `react_tot` is the only supported mode |
+| `persona.soul` | `enabled`, `auto_evolve`, `content` | User-scoped style layer, UI read-only |
 
 ---
 

@@ -25,6 +25,7 @@ class ConversationService:
         workflow_engine: Optional[Any] = None,
         message_manager: Optional[Any] = None,
         config_service: Optional[Any] = None,
+        org_context_service: Optional[Any] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core or PrometheaConversation()
@@ -33,6 +34,7 @@ class ConversationService:
         self.workflow_engine = workflow_engine
         self.message_manager = message_manager
         self.config_service = config_service
+        self.org_context_service = org_context_service
         self._session_queues: Dict[str, asyncio.Queue] = {}
         self._session_workers: Dict[str, asyncio.Task] = {}
         self._session_urgent: Dict[str, Dict[str, Any]] = {}
@@ -514,6 +516,42 @@ class ConversationService:
                     if isinstance(policy, dict):
                         run_context.prompt_block_policy = dict(policy)
 
+        org_context = {}
+        if self.org_context_service and isinstance(user_config, dict):
+            try:
+                org_context = await self.org_context_service.recall_for_turn(
+                    query=user_message,
+                    user_id=user_id,
+                    user_config=user_config,
+                    audience=(
+                        str(((getattr(run_context, "input_payload", {}) or {}).get("metadata") or {}).get("audience") or "")
+                        if run_context is not None
+                        else ""
+                    ),
+                    context_type=None,
+                    top_k=None,
+                )
+            except Exception as e:
+                logger.debug("ConversationService: org context recall skipped: {}", e)
+                org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
+
+        org_summary = str((org_context or {}).get("summary_text") or "").strip()
+        if org_summary:
+            base_system_prompt = (
+                f"{base_system_prompt}\n\n{org_summary}".strip()
+                if base_system_prompt
+                else org_summary
+            )
+        if run_context is not None:
+            rs = getattr(run_context, "reasoning_state", None)
+            if isinstance(rs, dict):
+                rs["org_context"] = dict(org_context or {})
+            else:
+                try:
+                    setattr(run_context, "reasoning_state", {"org_context": dict(org_context or {})})
+                except Exception:
+                    pass
+
         recent_messages: List[Dict[str, Any]] = []
         if include_recent and self.message_manager:
             recent_messages = self.message_manager.get_recent_messages(
@@ -558,6 +596,7 @@ class ConversationService:
             "base_system_prompt": base_system_prompt,
             "recent_messages": recent_messages,
             "reasoning": reasoning_result,
+            "org_context": org_context,
         }
 
     async def _process_conversation_once(

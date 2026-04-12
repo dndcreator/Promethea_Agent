@@ -91,6 +91,7 @@ Thumbs.db
 .tmp/
 _pytest_session_tmp/
 _pytest_case_tmp/
+.pytest-*/
 
 # Runtime workflow artifacts
 memory/moirai_runs/wf_*.json

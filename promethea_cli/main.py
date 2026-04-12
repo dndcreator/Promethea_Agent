@@ -613,6 +613,58 @@ def cmd_voice(args: argparse.Namespace, c: Client) -> None:
     raise CliError(f"unknown voice command: {sub}")
 
 
+
+def cmd_org_brain(args: argparse.Namespace, c: Client) -> None:
+    sub = args.org_brain_cmd
+    if sub == "status":
+        c.emit(c.req_json("GET", "/api/org-brain/status"))
+        return
+    if sub == "ingest":
+        body: Dict[str, Any] = {
+            "source_doc_id": args.source_doc_id,
+            "text": args.text,
+            "use_llm": not args.no_llm,
+        }
+        if args.org_id:
+            body["org_id"] = args.org_id
+        if args.audience:
+            body["audience"] = args.audience
+        if args.register:
+            body["register"] = args.register
+        c.emit(c.req_json("POST", "/api/org-brain/ingest", payload=body))
+        return
+    if sub == "ingest-file":
+        p = Path(args.file)
+        if not p.exists() or not p.is_file():
+            raise CliError(f"file not found: {p}")
+        form: Dict[str, Any] = {
+            "source_doc_id": args.source_doc_id or p.stem,
+            "use_llm": str(not args.no_llm).lower(),
+        }
+        if args.org_id:
+            form["org_id"] = args.org_id
+        if args.audience:
+            form["audience"] = args.audience
+        if args.register:
+            form["register"] = args.register
+        with p.open("rb") as f:
+            files = {"file": (p.name, f, args.content_type)}
+            c.emit(c.req_json("POST", "/api/org-brain/ingest-file", files=files, form=form))
+        return
+    if sub == "recall":
+        body: Dict[str, Any] = {
+            "topic": args.topic,
+            "context_type": args.context_type,
+            "top_k": int(args.top_k),
+        }
+        if args.org_id:
+            body["org_id"] = args.org_id
+        if args.audience:
+            body["audience"] = args.audience
+        c.emit(c.req_json("POST", "/api/org-brain/recall", payload=body))
+        return
+    raise CliError(f"unknown org-brain command: {sub}")
+
 def cmd_call(args: argparse.Namespace, c: Client) -> None:
     path = args.path if args.path.startswith("/") else "/" + args.path
     params: Dict[str, str] = {}
@@ -747,6 +799,30 @@ def build_parser() -> argparse.ArgumentParser:
     vts = vsp.add_parser("tts"); vts.add_argument("text"); vts.add_argument("--provider", default=None); vts.add_argument("--voice", default=None); vts.add_argument("--format", default="mp3"); vts.add_argument("--speed", type=float, default=None); vts.add_argument("--stability", type=float, default=None); vts.add_argument("--similarity-boost", dest="similarity_boost", type=float, default=None); vts.add_argument("--style", type=float, default=None); vts.add_argument("--use-speaker-boost", dest="use_speaker_boost", action="store_true"); vts.add_argument("--out", default=None)
     vp = vsp.add_parser("ptt"); vp.add_argument("file"); vp.add_argument("--content-type", default="audio/webm"); vp.add_argument("--session-id", default=None); vp.add_argument("--wake-word", default=None); vp.add_argument("--speak", action="store_true"); vp.add_argument("--tts-provider", default=None); vp.add_argument("--tts-voice", default=None); vp.add_argument("--tts-format", default="mp3")
 
+    org = sp.add_parser("org-brain")
+    obp = org.add_subparsers(dest="org_brain_cmd", required=True)
+    obp.add_parser("status")
+    obi = obp.add_parser("ingest")
+    obi.add_argument("source_doc_id")
+    obi.add_argument("text")
+    obi.add_argument("--org-id", default=None)
+    obi.add_argument("--audience", default=None)
+    obi.add_argument("--register", default=None)
+    obi.add_argument("--no-llm", action="store_true")
+    obif = obp.add_parser("ingest-file")
+    obif.add_argument("file")
+    obif.add_argument("--source-doc-id", default=None)
+    obif.add_argument("--org-id", default=None)
+    obif.add_argument("--audience", default=None)
+    obif.add_argument("--register", default=None)
+    obif.add_argument("--content-type", default="application/octet-stream")
+    obif.add_argument("--no-llm", action="store_true")
+    obr = obp.add_parser("recall")
+    obr.add_argument("topic")
+    obr.add_argument("--org-id", default=None)
+    obr.add_argument("--audience", default=None)
+    obr.add_argument("--context-type", default="writing")
+    obr.add_argument("--top-k", type=int, default=5)
     call = sp.add_parser("call")
     call.add_argument("method", choices=["GET", "POST", "PATCH", "DELETE"])
     call.add_argument("path")
@@ -804,6 +880,8 @@ def main() -> int:
             cmd_batch(args, client)
         elif args.command == "voice":
             cmd_voice(args, client)
+        elif args.command == "org-brain":
+            cmd_org_brain(args, client)
         elif args.command == "call":
             cmd_call(args, client)
         else:
@@ -819,6 +897,10 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+
 
 
 

@@ -83,6 +83,14 @@ This avoids hardcoding stale assumptions.
 - `GET /api/config/default-template`
 - `GET /api/config/contract`
 - `GET /api/config/ui-schema`
+- `GET /api/config/soul`
+
+### Org Brain (B-side Context)
+
+- `GET /api/org-brain/status`
+- `POST /api/org-brain/ingest`
+- `POST /api/org-brain/ingest-file` (`multipart/form-data`, field name: `file`)
+- `POST /api/org-brain/recall`
 
 ### Voice
 
@@ -153,6 +161,11 @@ curl -X POST http://127.0.0.1:8000/api/chat \
     "mode": "auto"
   }'
 ```
+
+Chat response may include:
+- `memory_visibility`: memory recall/write feedback summary for UI rendering.
+- `prompt_assembly`: prompt block usage/compaction debug snapshot.
+- `soul`: current user-scoped soul prompt summary (`content`, `version`, `updated_at`).
 
 ### Example: list callable tools
 

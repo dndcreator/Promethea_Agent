@@ -18,6 +18,7 @@ from .routes.ops import router as ops_router
 from .routes.workflow import router as workflow_router
 from .routes.reasoning import router as reasoning_router
 from .routes.security import router as security_router
+from .routes.org_brain import router as org_brain_router
 
 router = APIRouter()
 
@@ -37,6 +38,7 @@ router.include_router(ops_router)
 router.include_router(workflow_router)
 router.include_router(reasoning_router)
 router.include_router(security_router)
+router.include_router(org_brain_router)
 
 
 

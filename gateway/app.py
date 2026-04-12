@@ -22,6 +22,7 @@ from gateway.http import state
 from gateway.http.middleware import register_http_middlewares
 from gateway.http.router import router as chat_router
 from gateway.http.routes.auth import router as auth_router
+from gateway.kernel_scheduler_service import KernelSchedulerService
 
 
 class ConnectionManager:
@@ -73,6 +74,30 @@ async def lifespan(app: FastAPI):
                 "detail": str(detail or ""),
             }
         )
+
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = (os.getenv(name) or "").strip().lower()
+        if not raw:
+            return bool(default)
+        return raw in {"1", "true", "yes", "on"}
+
+    def _env_float(name: str, default: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return float(default)
+        try:
+            return float(raw)
+        except Exception:
+            return float(default)
+
+    def _env_int(name: str, default: int) -> int:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            return int(raw)
+        except Exception:
+            return int(default)
 
     try:
         logger.info("Loading plugin system...")
@@ -154,6 +179,33 @@ async def lifespan(app: FastAPI):
             traceback.print_exc()
             _mark_component("gateway_integration", "failed", str(e))
 
+        try:
+            scheduler_enabled = _env_bool("KERNEL_SCHEDULER__ENABLED", True)
+            scheduler_tick = _env_float("KERNEL_SCHEDULER__TICK_SECONDS", 5.0)
+            scheduler_max_jobs = _env_int("KERNEL_SCHEDULER__MAX_JOBS_PER_TICK", 10)
+            scheduler_start_paused = _env_bool("KERNEL_SCHEDULER__START_PAUSED", False)
+
+            state.kernel_scheduler = KernelSchedulerService(
+                workspace_root=str(os.getcwd()),
+                enabled=scheduler_enabled,
+                tick_seconds=scheduler_tick,
+                max_jobs_per_tick=scheduler_max_jobs,
+            )
+            if gateway_integration and gateway_integration.get_gateway_server():
+                gateway_integration.get_gateway_server().kernel_scheduler = state.kernel_scheduler
+            started = await state.kernel_scheduler.start(paused=scheduler_start_paused)
+            if started:
+                _mark_component(
+                    "kernel_scheduler",
+                    "ok",
+                    f"tick={scheduler_tick}s max_jobs_per_tick={scheduler_max_jobs}",
+                )
+            else:
+                _mark_component("kernel_scheduler", "degraded", "disabled by config")
+        except Exception as e:
+            logger.warning(f"Kernel scheduler init failed: {e}")
+            _mark_component("kernel_scheduler", "degraded", str(e))
+
         total = len(startup_components)
         ok_count = sum(1 for item in startup_components if item["status"] == "ok")
         failed_count = sum(1 for item in startup_components if item["status"] == "failed")
@@ -195,6 +247,16 @@ async def lifespan(app: FastAPI):
         raise
     finally:
         logger.info("Cleaning up resources...")
+
+        if state.kernel_scheduler:
+            try:
+                await state.kernel_scheduler.stop()
+            except Exception as e:
+                logger.warning(f"Kernel scheduler cleanup failed: {e}")
+            finally:
+                if gateway_integration and gateway_integration.get_gateway_server():
+                    gateway_integration.get_gateway_server().kernel_scheduler = None
+                state.kernel_scheduler = None
 
         if gateway_integration:
             try:

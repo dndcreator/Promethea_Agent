@@ -48,12 +48,41 @@ async def get_status():
         if getattr(gateway_server, "reasoning_service", None)
         else {"enabled": False, "active_trees": 0}
     )
+    scheduler = getattr(state, "kernel_scheduler", None)
+    scheduler_status = (
+        scheduler.get_status()
+        if scheduler
+        else {
+            "enabled": False,
+            "running": False,
+            "paused": True,
+            "tick_seconds": None,
+            "max_jobs_per_tick": None,
+            "total_ticks": 0,
+            "total_jobs_run": 0,
+        }
+    )
+    org_profile = {}
+    config_service = getattr(gateway_server, "config_service", None)
+    org_svc = getattr(gateway_server, "org_context_service", None)
+    if config_service and org_svc:
+        try:
+            merged = config_service.get_merged_config(None)
+            org_profile = org_svc.resolve_org_profile(merged)
+        except Exception:
+            org_profile = {}
     return {
         "status": "running",
         "conversation_ready": conversation_ready,
         "memory_active": memory_status,
         "memory_sync": memory_sync,
         "reasoning": reasoning,
+        "org_brain": {
+            "service_ready": org_svc is not None,
+            "enabled_default": bool(org_profile.get("enabled", False)),
+            "org_id_default": str(org_profile.get("org_id") or ""),
+        },
+        "scheduler": scheduler_status,
         "startup": dict(state.startup_report or {}),
     }
 

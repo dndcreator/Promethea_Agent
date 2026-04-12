@@ -43,6 +43,7 @@ def test_build_config_contract_shape():
     assert "/api/config/default-template" == contract["template_api"]["path"]
     assert "/api/config/effective" == contract["effective_api"]["path"]
     assert "/api/config/ui-schema" == contract["ui_schema_api"]["path"]
+    assert "/api/config/soul" == contract["soul_api"]["path"]
     assert "api.api_key" in contract["env_only_secret_paths"]
     assert "memory.enabled" in contract["ui_profiles"]["simple_fields"]
 
@@ -61,6 +62,8 @@ def test_basic_config_view_excludes_api_fields_for_simple_ui():
     )
     assert "api" not in out
     assert out["memory"]["enabled"] is True
+    assert "soul" in out
+    assert out["soul"]["read_only_in_ui"] is True
 
 
 def test_basic_config_view_defaults_to_enabled_for_memory_and_reasoning():

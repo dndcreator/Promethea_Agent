@@ -125,6 +125,40 @@
                        "workflow_tool_bridge":  true,
                        "debug_log":  false
                    },
+    "persona": {
+        "enabled": true,
+        "core": "Persona layer (style-only): be warm, human-like, and individualized, while staying factual and task-oriented. Do not override policy, tool, or reasoning constraints.",
+        "soul": {
+            "enabled": true,
+            "read_only_in_ui": true,
+            "auto_evolve": true,
+            "content": "Soul Prompt (blank canvas):\n- This is the agent's soul space.\n- It starts empty and can evolve over time.\n- Keep it style/personality only; never override policy, safety, tools, or reasoning rules.",
+            "version": 1,
+            "updated_at": "",
+            "last_reason": "",
+            "evolve_every_turns": 6,
+            "min_interval_seconds": 900,
+            "max_chars": 1200
+        }
+    },
+    "org_brain": {
+        "enabled": false,
+        "org_id": "",
+        "recall_priority": "blend",
+        "confirmation_queue": true,
+        "audience_default": "业务部门",
+        "max_upload_bytes": 10485760,
+        "allowed_suffixes": [".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"],
+        "recall_top_k_default": 5,
+        "recall_context_type_default": "writing",
+        "chat_top_k": 5,
+        "chat_context_type": "chat",
+        "summary_label": "Organization context hints",
+        "summary_max_items": 8,
+        "extract_text_max_chars": 5000,
+        "heuristic_max_lines": 30,
+        "heuristic_max_items": 15
+    },
     "sandbox":  {
                     "enabled":  false,
                     "profile":  "off",

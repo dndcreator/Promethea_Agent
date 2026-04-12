@@ -21,6 +21,10 @@ class AutomationTriggerRequest(BaseModel):
     source: str = "webhook"
 
 
+class SchedulerRunOnceRequest(BaseModel):
+    max_jobs: int = 10
+
+
 def _enforce_automation_token(token: Optional[str]) -> None:
     expected = (os.getenv("AUTOMATION__TOKEN") or "").strip()
     if not expected:
@@ -80,3 +84,63 @@ async def trigger_cron_wakeup(
         "user_id": request.user_id,
         **payload,
     }
+
+
+@router.get("/automation/scheduler/status")
+async def get_scheduler_status():
+    from .. import state
+
+    scheduler = getattr(state, "kernel_scheduler", None)
+    if not scheduler:
+        return {
+            "status": "unavailable",
+            "scheduler": {
+                "enabled": False,
+                "running": False,
+                "paused": True,
+                "tick_seconds": None,
+                "max_jobs_per_tick": None,
+                "total_ticks": 0,
+                "total_jobs_run": 0,
+            },
+        }
+    return {"status": "success", "scheduler": scheduler.get_status()}
+
+
+@router.post("/automation/scheduler/run-once")
+async def run_scheduler_once(
+    request: SchedulerRunOnceRequest,
+    x_automation_token: Optional[str] = Header(default=None),
+):
+    from .. import state
+
+    _enforce_automation_token(x_automation_token)
+    scheduler = getattr(state, "kernel_scheduler", None)
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="kernel scheduler not initialized")
+    out = await scheduler.run_once(max_jobs=max(1, int(request.max_jobs)))
+    return {"status": "success", "result": out, "scheduler": scheduler.get_status()}
+
+
+@router.post("/automation/scheduler/pause")
+async def pause_scheduler(x_automation_token: Optional[str] = Header(default=None)):
+    from .. import state
+
+    _enforce_automation_token(x_automation_token)
+    scheduler = getattr(state, "kernel_scheduler", None)
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="kernel scheduler not initialized")
+    await scheduler.pause()
+    return {"status": "success", "scheduler": scheduler.get_status()}
+
+
+@router.post("/automation/scheduler/resume")
+async def resume_scheduler(x_automation_token: Optional[str] = Header(default=None)):
+    from .. import state
+
+    _enforce_automation_token(x_automation_token)
+    scheduler = getattr(state, "kernel_scheduler", None)
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="kernel scheduler not initialized")
+    await scheduler.resume()
+    return {"status": "success", "scheduler": scheduler.get_status()}

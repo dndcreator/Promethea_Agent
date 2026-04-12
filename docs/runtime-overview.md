@@ -92,6 +92,11 @@ Runtime composes final user-visible response from:
 - reasoning summary
 - tool/workflow observations
 
+Prompt assembly model:
+- stable blocks first (identity/persona/soul)
+- dynamic blocks second (memory/reasoning/tools/policy/workspace)
+- optional budget compaction with block-level debug output
+
 ### Stage 7: Memory Write Governance
 
 Before long-term persistence, memory write gate evaluates candidate writes (`allow/deny/defer`).
@@ -100,6 +105,16 @@ Before long-term persistence, memory write gate evaluates candidate writes (`all
 
 Runtime emits structured events for later inspection and debugging.
 
+### Runtime Persona/Soul Evolution (Async Side Loop)
+
+After response synthesis, runtime may trigger asynchronous soul evolution:
+- input: latest user message + assistant response + current `persona.soul`
+- decision: LLM returns `should_update` and candidate soul text
+- guardrails: style-only scope, rate limit, max length
+- persistence: user-scoped config update to `persona.soul.*`
+
+This side loop does not block current turn latency.
+
 ## Capability Layers
 
 ### Memory
@@ -107,6 +122,13 @@ Runtime emits structured events for later inspection and debugging.
 - hot/warm/cold style recall and storage behavior
 - recall policy by mode
 - write gating before persistence
+
+### Enterprise Context (Org Brain)
+
+- optional `org_brain` capability, disabled by default
+- org-scoped ingest and recall (`org_id`) via dedicated API routes
+- prompt injection only when `org_brain.enabled=true` and recall returns context
+- no coupling to personal mode when disabled
 
 ### Tools and MCP
 

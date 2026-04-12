@@ -481,6 +481,12 @@
                             <label for="userSystemPrompt">Custom System Prompt</label>
                             <textarea id="userSystemPrompt" name="user.system_prompt" rows="5" placeholder="Customize your assistant persona..."></textarea>
                         </div>
+                        <div class="form-group">
+                            <label for="soulPromptReadonly" id="labelSoulPrompt">Soul Prompt (Read-only)</label>
+                            <textarea id="soulPromptReadonly" rows="6" readonly placeholder="Soul prompt will appear here..."></textarea>
+                            <p class="settings-hint" id="soulPromptHint">This is auto-evolved by the agent. UI is view-only to keep behavior isolation.</p>
+                            <small id="soulPromptMeta" class="settings-hint"></small>
+                        </div>
                     </div>
 
                     <div class="settings-section">
@@ -504,6 +510,67 @@
                                 <input type="number" id="userMaxTokens" name="user.api.max_tokens" min="100" max="10000">
                             </div>
                         </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <h3 id="settingsSectionOrgBrainTitle">Enterprise Context (B-side)</h3>
+                        <p class="settings-hint">Upload organization materials and build context graph hints for enterprise outputs.</p>
+                        <div class="form-group checkbox-group">
+                            <label>
+                                <input type="checkbox" id="orgBrainEnabled" name="org_brain.enabled">
+                                <span>Enable Org Brain</span>
+                            </label>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="orgBrainOrgId">Org ID</label>
+                                <input type="text" id="orgBrainOrgId" name="org_brain.org_id" placeholder="acme-enterprise">
+                            </div>
+                            <div class="form-group">
+                                <label for="orgBrainAudienceDefault">Default Audience</label>
+                                <input type="text" id="orgBrainAudienceDefault" name="org_brain.audience_default" placeholder="board">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="orgBrainRecallPriority">Recall Priority</label>
+                                <select id="orgBrainRecallPriority" name="org_brain.recall_priority">
+                                    <option value="blend">blend</option>
+                                    <option value="override_persona">override_persona</option>
+                                </select>
+                            </div>
+                            <div class="form-group checkbox-group">
+                                <label>
+                                    <input type="checkbox" id="orgBrainConfirmationQueue" name="org_brain.confirmation_queue">
+                                    <span>Enable confirmation queue</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="orgBrainFileInput">Upload File</label>
+                                <input type="file" id="orgBrainFileInput" accept=".txt,.md,.markdown,.csv,.json,.docx,.pdf">
+                            </div>
+                            <div class="form-group">
+                                <label for="orgBrainSourceDocId">Source Doc ID</label>
+                                <input type="text" id="orgBrainSourceDocId" placeholder="optional-doc-id">
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="orgBrainAudienceInput">Audience (ingest)</label>
+                                <input type="text" id="orgBrainAudienceInput" placeholder="board / business / regulator">
+                            </div>
+                            <div class="form-group">
+                                <label for="orgBrainRegisterInput">Register (ingest)</label>
+                                <input type="text" id="orgBrainRegisterInput" placeholder="formal / technical / operational">
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="button" class="btn-secondary" id="orgBrainStatusBtn">Check Status</button>
+                            <button type="button" class="btn-primary" id="orgBrainUploadBtn">Upload & Ingest</button>
+                        </div>
+                        <pre id="orgBrainResult" class="doctor-output"></pre>
                     </div>
 
                     <div class="settings-section">

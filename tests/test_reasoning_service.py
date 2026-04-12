@@ -371,3 +371,97 @@ async def test_select_tool_falls_back_to_strategy_when_llm_choice_invalid(monkey
     assert selected["tool_name"] == "browser_action"
 
 
+@pytest.mark.asyncio
+async def test_run_marks_failed_when_runtime_outcome_failed(monkeypatch):
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+
+    async def fake_gate(**kwargs):
+        return {
+            "needs_reasoning": True,
+            "needs_memory": False,
+            "needs_tools": True,
+            "complexity": "high",
+            "reason": "test",
+        }
+
+    async def fake_plan_steps(**kwargs):
+        return [
+            {
+                "title": "step-1",
+                "goal": "do it",
+                "requires_memory": False,
+                "memory_query": "",
+                "requires_tools": True,
+                "tool_intent": "search",
+                "notes": "",
+            }
+        ]
+
+    async def fake_execute_step(**kwargs):
+        return []
+
+    async def fake_summarize_tree(**kwargs):
+        return "runtime trace"
+
+    async def fake_decide_runtime_outcome(**kwargs):
+        return {
+            "status": "failed",
+            "reason": "all retries exhausted",
+            "confidence": 0.92,
+            "suggestion": "ask user for credentials",
+        }
+
+    monkeypatch.setattr(svc, "_gate_reasoning", fake_gate)
+    monkeypatch.setattr(svc, "_plan_steps", fake_plan_steps)
+    monkeypatch.setattr(svc, "_execute_step", fake_execute_step)
+    monkeypatch.setattr(svc, "_summarize_tree", fake_summarize_tree)
+    monkeypatch.setattr(svc, "_decide_runtime_outcome", fake_decide_runtime_outcome)
+
+    result = await svc.run(
+        session_id="s_fail",
+        user_id="u1",
+        user_message="finish task",
+        recent_messages=[],
+        base_system_prompt="You are helpful.",
+        user_config={"reasoning": {"enabled": True}},
+    )
+
+    assert result["used_reasoning"] is True
+    assert result["status"] == "failed"
+    assert result["runtime_outcome"]["status"] == "failed"
+    assert "Execution encountered persistent blockers" in result["system_prompt"]
+
+
+@pytest.mark.asyncio
+async def test_decide_runtime_outcome_hard_block_fails_without_progress(monkeypatch):
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+    tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="task")
+    node = svc._add_node(tree, parent_id=tree.root_node_id, kind="tool", title="tool step")
+    node.status = "failed"
+    node.observation = "[tool verification failed] timeout"
+    tree.stats["iterations"] = 4
+    tree.stats["tool_calls"] = 3
+    tree.stats["tool_failures"] = 3
+
+    async def fake_judge_runtime_feasibility(**kwargs):
+        return {"outcome": "unsure", "confidence": 0.2, "reason": "unsure", "suggestion": ""}
+
+    monkeypatch.setattr(svc, "_judge_runtime_feasibility", fake_judge_runtime_feasibility)
+
+    result = await svc._decide_runtime_outcome(
+        user_message="task",
+        tree=tree,
+        policy={
+            "max_iterations": 8,
+            "max_tool_calls": 8,
+            "max_replan_rounds": 3,
+            "failure_confidence_threshold": 0.55,
+        },
+        iteration_budget=8,
+        user_config={},
+        user_id="u1",
+    )
+
+    assert result["status"] == "failed"
+
+

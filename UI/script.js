@@ -124,6 +124,8 @@
         ui_settings_sys_api: "馃攽 API 閰嶇疆",
         ui_settings_sys: "鈿?绯荤粺閰嶇疆",
         ui_settings_memory: "馃 璁板繂绯荤粺",
+        ui_settings_soul: "馃 Soul Prompt (read-only)",
+        ui_settings_soul_hint: "Soul 鐢?Agent 鑷姩婕斿寲锛屽墠绔粎灞曠ず銆?",
         ui_label_user_agent: "Agent 鍚嶅瓧",
         ui_label_user_prompt: "鑷畾涔?System Prompt",
         ui_placeholder_user_prompt: "鑷畾涔変綘鐨?Agent 浜鸿...",
@@ -280,6 +282,8 @@
         ui_settings_sys_api: "馃攽 API Config",
         ui_settings_sys: "鈿?System Config",
         ui_settings_memory: "馃 Memory System",
+        ui_settings_soul: "Soul Prompt (Read-only)",
+        ui_settings_soul_hint: "Auto-evolved by the agent. This field is view-only.",
         ui_label_user_agent: "Agent Name",
         ui_label_user_prompt: "Custom System Prompt",
         ui_placeholder_user_prompt: "Customize your agent persona...",
@@ -435,6 +439,8 @@ Object.assign(I18N.zh, {
     ui_settings_sys_api: "系统 API 配置",
     ui_settings_sys: "系统配置",
     ui_settings_memory: "记忆系统",
+    ui_settings_soul: "灵魂 Prompt（只读）",
+    ui_settings_soul_hint: "该内容由 Agent 自动演化，前端仅展示。",
     ui_label_user_agent: "Agent 名称",
     ui_label_user_prompt: "自定义 System Prompt",
     ui_placeholder_user_prompt: "自定义你的助手人设...",
@@ -729,6 +735,8 @@ class LanguageManager {
         setTextById("settingsSectionMemoryTitle", "ui_settings_memory");
         setTextById("settingsPersonalApiHint", "ui_settings_personal_api_hint");
         setTextById("labelHotApply", "ui_settings_hot_apply");
+        setTextById("labelSoulPrompt", "ui_settings_soul");
+        setTextById("soulPromptHint", "ui_settings_soul_hint");
         setTextById("labelBaseUrl", "ui_label_base_url");
         setTextById("labelMemoryStoreBackend", "ui_label_memory_backend");
 
@@ -1141,6 +1149,163 @@ class TerminalChatApp {
         this.reasoningPollTimer = setInterval(() => this.pollReasoningTree(), 1000);
     }
 
+    formatReasoningPanelHtml(data) {
+        const esc = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        const prettyJson = (value) => esc(JSON.stringify(value, null, 2));
+        const stats = (data && typeof data.stats === 'object' && data.stats) ? data.stats : {};
+        const status = String(data?.status || 'running');
+        const termination = String(stats?.termination || '');
+        const runtimeOutcome = (stats && typeof stats.runtime_outcome === 'object' && stats.runtime_outcome)
+            ? stats.runtime_outcome
+            : ((data && typeof data.runtime_outcome === 'object' && data.runtime_outcome) ? data.runtime_outcome : null);
+        const runtimeStatus = String(runtimeOutcome?.status || '').toLowerCase();
+        const runtimeBadgeClass = runtimeStatus === 'failed'
+            ? 'runtime-failed'
+            : (runtimeStatus === 'success' ? 'runtime-success' : 'runtime-unsure');
+        const statusHtml = `
+            <div class="reasoning-tree-header">
+                <span class="pill">status: ${esc(status)}</span>
+                ${termination ? `<span class="pill">termination: ${esc(termination)}</span>` : ''}
+                ${runtimeOutcome ? `<span class="pill ${runtimeBadgeClass}">runtime: ${esc(runtimeStatus || 'unknown')}</span>` : ''}
+            </div>
+        `;
+        let runtimeHtml = '';
+        if (runtimeOutcome) {
+            const oStatus = String(runtimeOutcome.status || '');
+            const oReason = String(runtimeOutcome.reason || '').replace(/\s+/g, ' ').trim();
+            const oConf = Number(runtimeOutcome.confidence || 0);
+            const suggestion = String(runtimeOutcome.suggestion || '').replace(/\s+/g, ' ').trim();
+            runtimeHtml = `
+                <details class="reasoning-group" open>
+                    <summary>Runtime Outcome</summary>
+                    <div class="reasoning-group-body">
+                        <div><strong>status</strong>: ${esc(oStatus || 'unknown')}</div>
+                        <div><strong>confidence</strong>: ${esc(oConf.toFixed(2))}</div>
+                        ${oReason ? `<div><strong>reason</strong>: ${esc(oReason)}</div>` : ''}
+                        ${suggestion ? `<div><strong>suggestion</strong>: ${esc(suggestion)}</div>` : ''}
+                    </div>
+                </details>
+            `;
+        }
+
+        const topLevelKnown = new Set([
+            'tree_id', 'session_id', 'user_id', 'root_goal', 'status',
+            'created_at', 'updated_at', 'stats', 'root_node_id', 'node_count',
+            'nodes', 'control', 'source',
+        ]);
+        const topLevelDynamic = {};
+        if (data && typeof data === 'object') {
+            for (const [k, v] of Object.entries(data)) {
+                if (!topLevelKnown.has(k)) topLevelDynamic[k] = v;
+            }
+        }
+        const treeDynamicHtml = Object.keys(topLevelDynamic).length > 0
+            ? `
+                <details class="reasoning-group">
+                    <summary>Dynamic Tree Fields</summary>
+                    <div class="reasoning-group-body">
+                        <pre>${prettyJson(topLevelDynamic)}</pre>
+                    </div>
+                </details>
+            `
+            : '';
+
+        const statsKnown = new Set([
+            'iterations', 'memory_calls', 'tool_calls', 'think_calls',
+            'tool_failures', 'termination', 'runtime_outcome', 'react_rounds',
+            'react_failed_observations',
+        ]);
+        const statsDynamic = {};
+        for (const [k, v] of Object.entries(stats || {})) {
+            if (!statsKnown.has(k)) statsDynamic[k] = v;
+        }
+        const statsDynamicHtml = Object.keys(statsDynamic).length > 0
+            ? `
+                <details class="reasoning-group">
+                    <summary>Dynamic Stats Fields</summary>
+                    <div class="reasoning-group-body">
+                        <pre>${prettyJson(statsDynamic)}</pre>
+                    </div>
+                </details>
+            `
+            : '';
+
+        const nodes = Array.isArray(data?.nodes) ? data.nodes.slice(0, 16) : [];
+        let nodesHtml = '';
+        if (!nodes.length) {
+            nodesHtml = `<div class="reasoning-empty">(empty)</div>`;
+        } else {
+            const nodeRows = [];
+            for (const node of nodes) {
+            const nid = String(node?.node_id || '').slice(0, 8);
+            const kind = String(node?.kind || '');
+            const nstatus = String(node?.status || '');
+            const title = String(node?.title || '').replace(/\s+/g, ' ').trim();
+                const observation = String(node?.observation || node?.summary || '').trim();
+
+                const nodeKnown = new Set([
+                    'node_id', 'parent_id', 'kind', 'title', 'status', 'observation',
+                    'summary', 'updated_at', 'prompt', 'children', 'created_at',
+                    'metadata', 'tool_calls', 'human_gate', 'verifier_state',
+                    'checkpoint', 'evidence', 'result',
+                ]);
+                const nodeDynamic = {};
+                if (node && typeof node === 'object') {
+                    for (const [k, v] of Object.entries(node)) {
+                        if (!nodeKnown.has(k)) nodeDynamic[k] = v;
+                    }
+                }
+                const compactMeta = {
+                    metadata: node?.metadata || {},
+                    verifier_state: node?.verifier_state || {},
+                    human_gate: node?.human_gate || {},
+                    checkpoint: node?.checkpoint || {},
+                    result: node?.result || {},
+                    ...nodeDynamic,
+                };
+                const hasMeta = Object.values(compactMeta).some((v) => {
+                    if (!v) return false;
+                    if (Array.isArray(v)) return v.length > 0;
+                    if (typeof v === 'object') return Object.keys(v).length > 0;
+                    return true;
+                });
+                nodeRows.push(`
+                    <details class="reasoning-node">
+                        <summary>
+                            <span class="pill">${esc(nstatus || 'unknown')}</span>
+                            <span>${esc(kind)}</span>
+                            <code>${esc(nid)}</code>
+                            <span>${esc(title)}</span>
+                        </summary>
+                        <div class="reasoning-group-body">
+                            ${observation ? `<div><strong>obs</strong>: ${esc(observation.replace(/\s+/g, ' ').slice(0, 360))}</div>` : ''}
+                            ${hasMeta ? `<details class="reasoning-subgroup"><summary>meta</summary><pre>${prettyJson(compactMeta)}</pre></details>` : ''}
+                        </div>
+                    </details>
+                `);
+            }
+            nodesHtml = nodeRows.join('');
+        }
+
+        return `
+            <div class="reasoning-tree-view">
+                ${statusHtml}
+                ${runtimeHtml}
+                ${treeDynamicHtml}
+                ${statsDynamicHtml}
+                <details class="reasoning-group" open>
+                    <summary>Nodes (${nodes.length})</summary>
+                    <div class="reasoning-group-body">${nodesHtml}</div>
+                </details>
+            </div>
+        `;
+    }
+
     async attachLatestReasoningForSession(sessionId) {
         if (!sessionId) return;
         try {
@@ -1173,18 +1338,17 @@ class TerminalChatApp {
             const stats = data?.stats || {};
             const iter = stats.iterations || 0;
             const nodes = data?.node_count || 0;
+            const toolCalls = stats.tool_calls || 0;
+            const thinkCalls = stats.think_calls || 0;
+            const memoryCalls = stats.memory_calls || 0;
+            const toolFailures = stats.tool_failures || 0;
+            const reactRounds = stats.react_rounds || 0;
             if (this.reasoningStatusEl) this.reasoningStatusEl.textContent = status;
-            if (this.reasoningStatsEl) this.reasoningStatsEl.textContent = `iter=${iter}, nodes=${nodes}, think=${stats.think_calls || 0}, tool=${stats.tool_calls || 0}`;
+            if (this.reasoningStatsEl) {
+                this.reasoningStatsEl.textContent = `iter=${iter}, nodes=${nodes}, think=${thinkCalls}, tool=${toolCalls}, mem=${memoryCalls}, fail=${toolFailures}, react=${reactRounds}`;
+            }
             if (this.reasoningNodesEl) {
-                const list = Array.isArray(data?.nodes) ? data.nodes.slice(0, 8) : [];
-                const lines = list.map(node => {
-                    const nid = String(node?.node_id || '').slice(0, 8);
-                    const kind = String(node?.kind || '');
-                    const nstatus = String(node?.status || '');
-                    const title = String(node?.title || '').replace(/\s+/g, ' ').trim();
-                    return `[${nstatus}] (${kind}) ${nid} ${title}`;
-                });
-                this.reasoningNodesEl.textContent = lines.join('\n');
+                this.reasoningNodesEl.innerHTML = this.formatReasoningPanelHtml(data);
             }
             if (["succeeded", "failed", "skipped"].includes(status.toLowerCase())) {
                 if (this.reasoningPollTimer) {
@@ -1267,7 +1431,9 @@ class TerminalChatApp {
                 this.showConfirmation(data);
             } else if (response.ok && (data.status === 'success' || data.success === true)) {
                 // 鏄剧ず缁撴灉
-                this.addMessage('assistant', data.response);
+                this.addMessage('assistant', data.response, {
+                    memoryVisibility: data.memory_write_summary || data.memory_visibility || null,
+                });
                 this.sendButton.disabled = false;
                 this.isTyping = false;
                 this.setAvatarStatus('idle');
@@ -1490,6 +1656,136 @@ class TerminalChatApp {
     addWelcomeMessage() {
         this.addMessage('assistant', t("app_welcome"));
     }
+
+    getMemoryUiText(key) {
+        const zh = {
+            hint: '记忆',
+            title: '本轮记忆',
+            open_workbench: '打开记忆工作台',
+            close: '关闭',
+            empty: '本轮没有可展示的记忆变更',
+            recall: '召回',
+            write: '写入',
+            review: '待确认',
+            feedback: '细节',
+        };
+        const en = {
+            hint: 'Memory',
+            title: 'Memory (This Turn)',
+            open_workbench: 'Open Workbench',
+            close: 'Close',
+            empty: 'No memory update available for this turn',
+            recall: 'Recalled',
+            write: 'Saved',
+            review: 'Needs review',
+            feedback: 'Details',
+        };
+        const langMap = getCurrentLang() === 'en' ? en : zh;
+        return langMap[key] || key;
+    }
+
+    normalizeMemorySummary(raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const notices = Array.isArray(raw.notices) ? raw.notices.filter((x) => String(x || '').trim()) : [];
+        const feedbackHints = Array.isArray(raw.feedback_hints) ? raw.feedback_hints : [];
+        const enabled = !!raw.enabled || notices.length > 0 || feedbackHints.length > 0;
+        if (!enabled) return null;
+        return {
+            enabled: true,
+            recalled: !!raw.recalled,
+            recall_notice: String(raw.recall_notice || ''),
+            write_notice: String(raw.write_notice || ''),
+            review_notice: String(raw.review_notice || ''),
+            notices,
+            feedback_hints: feedbackHints,
+        };
+    }
+
+    attachMemoryHint(messageDiv, rawSummary) {
+        const summary = this.normalizeMemorySummary(rawSummary);
+        if (!summary) return;
+        const esc = (value) => String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        messageDiv.classList.add('with-memory-hint');
+
+        const panel = document.createElement('details');
+        panel.className = 'memory-hint-panel';
+
+        const summaryEl = document.createElement('summary');
+        summaryEl.className = 'memory-hint-trigger';
+        summaryEl.textContent = this.getMemoryUiText('hint');
+        panel.appendChild(summaryEl);
+
+        const body = document.createElement('div');
+        body.className = 'memory-hint-body';
+
+        const title = document.createElement('div');
+        title.className = 'memory-hint-title';
+        title.textContent = this.getMemoryUiText('title');
+        body.appendChild(title);
+
+        const rows = [];
+        if (summary.recall_notice) rows.push([this.getMemoryUiText('recall'), summary.recall_notice]);
+        if (summary.write_notice) rows.push([this.getMemoryUiText('write'), summary.write_notice]);
+        if (summary.review_notice) rows.push([this.getMemoryUiText('review'), summary.review_notice]);
+        if (!rows.length && Array.isArray(summary.notices)) {
+            summary.notices.slice(0, 3).forEach((n) => rows.push([this.getMemoryUiText('feedback'), String(n)]));
+        }
+        if (!rows.length) {
+            rows.push([this.getMemoryUiText('feedback'), this.getMemoryUiText('empty')]);
+        }
+
+        rows.forEach(([label, text]) => {
+            const row = document.createElement('div');
+            row.className = 'memory-hint-row';
+            row.innerHTML = `<span class="label">${esc(label)}</span><span class="value">${esc(text)}</span>`;
+            body.appendChild(row);
+        });
+
+        if (Array.isArray(summary.feedback_hints) && summary.feedback_hints.length > 0) {
+            const details = document.createElement('div');
+            details.className = 'memory-hint-meta';
+            const mapped = summary.feedback_hints.slice(0, 3).map((item) => {
+                const type = String(item?.type || 'memory');
+                const memoryType = String(item?.memory_type || '');
+                const preview = String(item?.content_preview || '');
+                return `• ${type}${memoryType ? ` (${memoryType})` : ''}${preview ? `: ${preview}` : ''}`;
+            });
+            details.textContent = mapped.join('\n');
+            body.appendChild(details);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'memory-hint-actions';
+
+        const openBtn = document.createElement('button');
+        openBtn.type = 'button';
+        openBtn.className = 'memory-action primary';
+        openBtn.textContent = this.getMemoryUiText('open_workbench');
+        openBtn.addEventListener('click', () => {
+            const btn = document.getElementById('memoryGraphBtn');
+            if (btn) btn.click();
+        });
+
+        const closeBtn = document.createElement('button');
+        closeBtn.type = 'button';
+        closeBtn.className = 'memory-action';
+        closeBtn.textContent = this.getMemoryUiText('close');
+        closeBtn.addEventListener('click', () => {
+            panel.open = false;
+        });
+
+        actions.appendChild(openBtn);
+        actions.appendChild(closeBtn);
+        body.appendChild(actions);
+
+        panel.appendChild(body);
+        messageDiv.appendChild(panel);
+    }
     
     addMessage(role, content, options = {}) {
         const animate = options.animate !== false;
@@ -1505,6 +1801,9 @@ class TerminalChatApp {
         contentDiv.innerHTML = formattedContent;
         
         messageDiv.appendChild(contentDiv);
+        if (role === 'assistant') {
+            this.attachMemoryHint(messageDiv, options.memoryVisibility || null);
+        }
         this.chatMessages.appendChild(messageDiv);
         
         // 婊氬姩鍒板簳閮?
@@ -1736,6 +2035,10 @@ class TerminalChatApp {
                 const data = await response.json().catch(() => ({}));
                 const text = data?.response || data?.content || data?.message || '';
                 textArea.innerHTML = String(text).replace(/\n/g, '<br>');
+                this.attachMemoryHint(
+                    messageDiv,
+                    data?.memory_write_summary || data?.memory_visibility || null
+                );
                 this.setAvatarStatus('idle');
                 if (data?.session_id) {
                     this.currentSessionId = data.session_id;
@@ -1926,6 +2229,10 @@ class TerminalChatApp {
                         if (data.tree_id) {
                             this.attachReasoningTree(data.tree_id);
                         }
+                        this.attachMemoryHint(
+                            messageDiv,
+                            data.memory_write_summary || data.memory_visibility || null
+                        );
                         doneReceived = true;
                         break;
                     } else if (data.type === 'error') {
@@ -3041,9 +3348,15 @@ class SettingsManager {
         this.resetBtn.addEventListener('click', () => this.loadConfig());
         this.memoryStoreBackend = document.getElementById('memoryStoreBackend');
         this.memoryStoreBackend?.addEventListener('change', () => this.updateMemoryBackendFields());
+        this.orgBrainStatusBtn = document.getElementById('orgBrainStatusBtn');
+        this.orgBrainUploadBtn = document.getElementById('orgBrainUploadBtn');
+        this.orgBrainResult = document.getElementById('orgBrainResult');
+        this.orgBrainFileInput = document.getElementById('orgBrainFileInput');
         
         // 缁戝畾鎸夐挳浜嬩欢
         document.getElementById('bindBtn').addEventListener('click', () => this.handleBindChannel());
+        this.orgBrainStatusBtn?.addEventListener('click', () => this.fetchOrgBrainStatus());
+        this.orgBrainUploadBtn?.addEventListener('click', () => this.uploadOrgBrainFile());
     }
     
     async show() {
@@ -3069,8 +3382,12 @@ class SettingsManager {
             const data = await response.json();
             
             if (response.ok && (data.status === 'success' || data.success === true)) {
-                this.originalConfig = data.config;
-                this.populateForm(data.config);
+                const mergedConfig = { ...(data.config || {}) };
+                if (data.soul && typeof data.soul === 'object') {
+                    mergedConfig.soul = data.soul;
+                }
+                this.originalConfig = mergedConfig;
+                this.populateForm(mergedConfig);
             }
                 this.loadingEl.style.display = 'none';
                 this.form.style.display = 'block';
@@ -3163,10 +3480,20 @@ class SettingsManager {
         const warmLayerConfig = (memoryConfig && memoryConfig.warm_layer) || {};
         const coldLayerConfig = (memoryConfig && memoryConfig.cold_layer) || {};
         const migrationConfig = (memoryConfig && memoryConfig.migration) || {};
+        const personaConfig = (config && config.persona) || {};
+        const soulConfig = (personaConfig && personaConfig.soul) || (config && config.soul) || {};
+        const orgBrainConfig = (config && config.org_brain) || {};
 
         // personal settings
         this.setFieldValue('userAgentName', config.agent_name || '');
         this.setFieldValue('userSystemPrompt', config.system_prompt || '');
+        this.setFieldValue('soulPromptReadonly', soulConfig.content || '');
+        const soulMetaEl = document.getElementById('soulPromptMeta');
+        if (soulMetaEl) {
+            const ver = soulConfig.version || 1;
+            const updatedAt = soulConfig.updated_at || '';
+            soulMetaEl.textContent = updatedAt ? `v${ver} · updated ${updatedAt}` : `v${ver}`;
+        }
 
         const userApi = (config.user && config.user.api) || {};
         this.setFieldValue('userBaseUrl', userApi.base_url || '');
@@ -3207,6 +3534,11 @@ class SettingsManager {
         this.setFieldValue('minClusterSize', warmLayerConfig.min_cluster_size ?? '');
         this.setFieldValue('maxSummaryLength', coldLayerConfig.max_summary_length ?? '');
         this.setFieldValue('compressionThreshold', coldLayerConfig.compression_threshold ?? '');
+        this.setFieldValue('orgBrainEnabled', this.toBoolean(orgBrainConfig.enabled), 'checkbox');
+        this.setFieldValue('orgBrainOrgId', orgBrainConfig.org_id || '');
+        this.setFieldValue('orgBrainAudienceDefault', orgBrainConfig.audience_default || '');
+        this.setFieldValue('orgBrainRecallPriority', orgBrainConfig.recall_priority || 'blend');
+        this.setFieldValue('orgBrainConfirmationQueue', this.toBoolean(orgBrainConfig.confirmation_queue, true), 'checkbox');
         this.updateMemoryBackendFields();
     }
 
@@ -3339,6 +3671,67 @@ class SettingsManager {
         const neo4jUriRow = document.getElementById('basicNeo4jUriRow');
         if (neo4jUriRow) {
             neo4jUriRow.style.display = backend === 'neo4j' ? 'block' : 'none';
+        }
+    }
+
+    getAuthHeaders() {
+        const token = localStorage.getItem('auth_token');
+        return token ? { 'Authorization': `Bearer ${token}` } : {};
+    }
+
+    renderOrgBrainResult(payload) {
+        if (!this.orgBrainResult) return;
+        this.orgBrainResult.textContent = JSON.stringify(payload || {}, null, 2);
+    }
+
+    async fetchOrgBrainStatus() {
+        try {
+            this.renderOrgBrainResult({ status: 'loading' });
+            const response = await fetch(`${this.apiBaseUrl}/api/org-brain/status`, {
+                headers: this.getAuthHeaders(),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data?.detail || data?.message || 'status request failed');
+            }
+            this.renderOrgBrainResult(data);
+        } catch (error) {
+            this.renderOrgBrainResult({ status: 'error', error: error.message || String(error) });
+        }
+    }
+
+    async uploadOrgBrainFile() {
+        const file = this.orgBrainFileInput?.files?.[0];
+        if (!file) {
+            alert('Please choose a file first.');
+            return;
+        }
+        const form = new FormData();
+        form.append('file', file);
+        const sourceDocId = (document.getElementById('orgBrainSourceDocId')?.value || '').trim();
+        const orgId = (document.getElementById('orgBrainOrgId')?.value || '').trim();
+        const audience = (document.getElementById('orgBrainAudienceInput')?.value || '').trim();
+        const register = (document.getElementById('orgBrainRegisterInput')?.value || '').trim();
+        if (sourceDocId) form.append('source_doc_id', sourceDocId);
+        if (orgId) form.append('org_id', orgId);
+        if (audience) form.append('audience', audience);
+        if (register) form.append('register', register);
+        form.append('use_llm', 'true');
+
+        try {
+            this.renderOrgBrainResult({ status: 'uploading', filename: file.name, bytes: file.size });
+            const response = await fetch(`${this.apiBaseUrl}/api/org-brain/ingest-file`, {
+                method: 'POST',
+                headers: this.getAuthHeaders(),
+                body: form,
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data?.detail || data?.message || 'upload failed');
+            }
+            this.renderOrgBrainResult(data);
+        } catch (error) {
+            this.renderOrgBrainResult({ status: 'error', error: error.message || String(error) });
         }
     }
 }

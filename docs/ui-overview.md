@@ -14,6 +14,7 @@ UI entrypoint:
 - Open Settings:
   - Quick Setup shows only the key fields.
   - Advanced Settings contains the full configuration form.
+  - Personalization shows `Soul Prompt` as read-only (view-only in UI).
 - View metrics panel (token/cost/runtime counters).
 - Run doctor checks and basic diagnostics.
 
@@ -22,6 +23,8 @@ UI entrypoint:
 - The UI loads full config data from the backend.
 - It intentionally does not show all options at once.
 - Sensitive values are redacted in responses and env-only secret keys are ignored on save.
+- `persona.soul` is intentionally excluded from editable form submission.
+- The backend may evolve `persona.soul.content` automatically; UI only displays it.
 
 ## Memory-related behavior in UI
 

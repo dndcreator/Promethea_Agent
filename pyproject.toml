@@ -73,7 +73,8 @@ tmp_path_retention_count = 1
 markers = [
     "asyncio: async tests",
     "live: integration tests requiring running services",
-    "slow: slow tests"
+    "slow: slow tests",
+    "stress: stress/load tests (opt-in)"
 ]
 
 [tool.setuptools.packages.find]

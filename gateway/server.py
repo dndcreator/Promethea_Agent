@@ -33,9 +33,18 @@ from .workspace_service import WorkspaceService, WorkspaceSandboxError
 from .workflow_engine import WorkflowError
 from channels.adapter_registry import build_default_adapter_registry
 from memory.session_scope import ensure_session_owned
-from .models import RunContext, SessionState
+from .models import RunContext
 from skills import build_default_skill_registry
 from .config_protocol import normalize_config_update_params
+from .http_connection import HttpConnection
+from .request_validation import validate_gateway_request_params
+from .server_runtime_utils import (
+    build_run_context,
+    resolve_provider_id,
+    resolve_request_trace_id,
+    resolve_request_user_id,
+    resolve_tool_identity,
+)
 
 
 class GatewayServer:
@@ -91,6 +100,7 @@ class GatewayServer:
         self.reasoning_service: Optional[ReasoningService] = None
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
+        self.org_context_service: Optional[Any] = None
         self.workspace_service: Optional[WorkspaceService] = None
         self.workflow_engine: Optional[Any] = None
         
@@ -181,35 +191,7 @@ class GatewayServer:
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Validate request params with protocol-level schemas when available."""
-        from .protocol import (
-            FollowupParams,
-            ChatParams,
-            ChatConfirmParams,
-            MemoryClusterParams,
-            MemorySummarizeParams,
-            SessionParams,
-        )
-
-        validators = {
-            RequestType.SEND: SendMessageParams,
-            RequestType.AGENT: AgentCallParams,
-            RequestType.MEMORY_QUERY: MemoryQueryParams,
-            RequestType.FOLLOWUP: FollowupParams,
-            RequestType.CHAT: ChatParams,
-            RequestType.CHAT_CONFIRM: ChatConfirmParams,
-            RequestType.MEMORY_CLUSTER: MemoryClusterParams,
-            RequestType.MEMORY_SUMMARIZE: MemorySummarizeParams,
-            RequestType.SESSION_DETAIL: SessionParams,
-            RequestType.SESSION_DELETE: SessionParams,
-            RequestType.MEMORY_GRAPH: SessionParams,
-            RequestType.MEMORY_DECAY: SessionParams,
-            RequestType.MEMORY_CLEANUP: SessionParams,
-        }
-        model = validators.get(method)
-        if not model:
-            return params
-        obj = model(**params)
-        return obj.model_dump() if hasattr(obj, "model_dump") else obj.dict()
+        return validate_gateway_request_params(method, params)
 
     async def handle_http_request(
         self,
@@ -224,22 +206,6 @@ class GatewayServer:
         HTTP -> gateway protocol bridge.
         Keeps HTTP and WebSocket on the same request-handler table.
         """
-
-        class _HttpConnection:
-            def __init__(self, uid: str):
-                self.connection_id = f"http_{uuid.uuid4().hex}"
-                self.identity = SimpleNamespace(device_id=uid)
-                self.is_authenticated = True
-                self.metadata: Dict[str, Any] = {"transport": "http"}
-
-            async def send_event(self, *args, **kwargs):
-                return None
-
-            async def send_message(self, *args, **kwargs):
-                return None
-
-            async def send_response(self, *args, **kwargs):
-                return None
 
         request_id = str(uuid.uuid4())
         req_params = dict(params or {})
@@ -326,7 +292,7 @@ class GatewayServer:
             )
             return response
 
-        connection = _HttpConnection(user_id)
+        connection = HttpConnection(user_id)
         attempts = max(0, int(retries)) + 1
         timeout_s = (float(timeout_ms) / 1000.0) if timeout_ms else None
         last_error = None
@@ -463,6 +429,7 @@ class GatewayServer:
             "reasoning_service": bool(self.reasoning_service and self.reasoning_service.is_enabled()),
             "conversation_service": bool(self.conversation_service),
             "config_service": bool(self.config_service),
+            "org_context_service": bool(self.org_context_service),
             "workspace_service": bool(self.workspace_service),
             "workflow_engine": bool(self.workflow_engine),
             "message_manager": bool(self.message_manager),
@@ -937,18 +904,10 @@ class GatewayServer:
             return {"total_loaded": 0, "items": {}, "error": str(e)}
 
     def _resolve_request_user_id(self, connection: Connection, request: RequestMessage) -> str:
-        identity = getattr(connection, "identity", None)
-        device_id = getattr(identity, "device_id", None) if identity else None
-        if device_id:
-            return str(device_id)
-        user_id = request.params.get("user_id") if isinstance(request.params, dict) else None
-        if user_id:
-            return str(user_id)
-        return "default_user"
+        return resolve_request_user_id(connection, request)
 
     def _resolve_request_trace_id(self, request: RequestMessage) -> str:
-        params = request.params if isinstance(request.params, dict) else {}
-        return str(params.get("trace_id") or f"trace_{request.id}")
+        return resolve_request_trace_id(request)
 
     def _build_run_context(
         self,
@@ -959,42 +918,12 @@ class GatewayServer:
         channel_id: str,
         input_payload: Optional[Dict[str, Any]] = None,
     ) -> RunContext:
-        params = dict(input_payload or request.params or {})
-        trace_id = str(params.get("trace_id") or f"trace_{request.id}")
-        requested_mode = params.get("requested_mode")
-        requested_skill = params.get("requested_skill")
-        tenant_id = str(params.get("tenant_id") or "").strip() or None
-        environment = str(params.get("environment") or params.get("env") or "").strip() or None
-
-        session_state = SessionState(
-            session_id=str(session_id),
-            user_id=str(user_id),
-            tenant_id=tenant_id,
-            environment=environment,
-            channel_id=str(channel_id),
-            reasoning_mode=str(requested_mode) if requested_mode else None,
-            active_skill_id=str(requested_skill) if requested_skill else None,
-            trace_id=trace_id,
-            session_metadata={
-                "request_id": request.id,
-                "channel_id": channel_id,
-            },
-        )
-
-        return RunContext(
-            request_id=request.id,
-            trace_id=trace_id,
-            session_state=session_state,
-            user_identity={"user_id": str(user_id), "tenant_id": tenant_id, "environment": environment},
-            input_payload=params,
-            normalized_input={
-                "text": str(params.get("message") or params.get("query") or ""),
-                "attachments": params.get("attachments") or [],
-                "metadata": params.get("metadata") or {},
-            },
-            requested_mode=str(requested_mode) if requested_mode else None,
-            requested_skill=str(requested_skill) if requested_skill else None,
-            debug_flags=params.get("debug_flags") or {},
+        return build_run_context(
+            request=request,
+            session_id=session_id,
+            user_id=user_id,
+            channel_id=channel_id,
+            input_payload=input_payload,
         )
 
     def _apply_skill_runtime_context(
@@ -1107,38 +1036,10 @@ class GatewayServer:
         return self.message_manager.get_session(session_id, user_id=user_id) is not None
 
     def _resolve_tool_identity(self, entry_tool_name: str, params: Dict[str, Any]) -> tuple[str, str]:
-        explicit_service = params.get("service_name")
-        explicit_tool = params.get("tool_name") or params.get("command")
-        if explicit_service or explicit_tool:
-            service_name = str(explicit_service or entry_tool_name)
-            tool_name = str(explicit_tool or entry_tool_name)
-            return service_name, tool_name
-
-        # Keep local-tool ids like "utils.echo" compatible with policy names:
-        # when no explicit service/tool split is provided, use dotted identity once.
-        if "." in str(entry_tool_name):
-            service_name, tool_name = str(entry_tool_name).split(".", 1)
-            return service_name, tool_name
-
-        service_name = str(entry_tool_name)
-        tool_name = str(entry_tool_name)
-        return service_name, tool_name
+        return resolve_tool_identity(entry_tool_name, params)
 
     def _resolve_provider_id(self, user_config: Optional[Dict[str, Any]]) -> str:
-        if not isinstance(user_config, dict):
-            return "default"
-        api_cfg = user_config.get("api")
-        if not isinstance(api_cfg, dict):
-            return "default"
-        model = str(api_cfg.get("model") or "").strip().lower()
-        base_url = str(api_cfg.get("base_url") or "").strip().lower()
-        if model and "/" in model:
-            return model.split("/", 1)[0]
-        if "openrouter" in base_url:
-            return "openrouter"
-        if "openai" in base_url:
-            return "openai"
-        return "default"
+        return resolve_provider_id(user_config)
 
     def _enforce_tool_policy(self, *, entry_tool_name: str, params: Dict[str, Any], user_id: Optional[str]) -> None:
         if not self.tool_policy_engine:
@@ -2232,6 +2133,11 @@ class GatewayServer:
                 session_id=session_id,
                 user_id=user_id,
                 response_text=final_content,
+                memory_write_summary=(
+                    dict(tool_call_outcome.get("memory_visibility") or {})
+                    if isinstance(tool_call_outcome.get("memory_visibility"), dict)
+                    else {}
+                ),
                 status="success",
             )
             payload = adapter.emit_response(gateway_response)

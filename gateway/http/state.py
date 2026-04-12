@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agentkit.mcp.mcp_manager import MCPManager
 from .metrics import get_metrics_collector
 
 mcp_manager = MCPManager()
 metrics = get_metrics_collector()
+kernel_scheduler: Any = None
 startup_report = {
     "status": "unknown",
     "started_at": None,

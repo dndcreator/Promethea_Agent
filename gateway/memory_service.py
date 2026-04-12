@@ -20,6 +20,22 @@ from .memory_recall_schema import (
     MemoryRecallResult,
     RecalledMemoryItem,
 )
+from .memory_recall_utils import (
+    build_recall_reason,
+    format_recall_context,
+    normalize_query_text,
+    parse_candidate_datetime,
+    resolve_recall_policy,
+    source_layer_to_memory_type,
+    tokenize_text,
+)
+from .memory_text_utils import (
+    build_semantic_keys,
+    extract_json_object,
+    extract_tokens,
+    normalize_candidates,
+    normalize_content,
+)
 from .protocol import EventType
 from memory.session_scope import ensure_session_owned, scoped_session_id
 from memory.session_scope import user_node_id
@@ -79,6 +95,8 @@ class MemoryService:
         self._write_proposals: List[Dict[str, Any]] = []
         self._write_proposal_by_id: Dict[str, Dict[str, Any]] = {}
         self._write_proposal_limit = 300
+        self._visibility_hints_by_session: Dict[str, List[Dict[str, Any]]] = {}
+        self._visibility_hint_limit = 20
 
         if not self.memory_adapter:
             logger.warning(
@@ -129,9 +147,7 @@ class MemoryService:
             logger.error("MemoryService: Error handling config reload: {}", e)
 
     def _normalize_content(self, text: str) -> str:
-        content = (text or "").strip().lower()
-        content = re.sub(r"\s+", " ", content)
-        return content
+        return normalize_content(text)
 
     def _refresh_thresholds(self, user_id: Optional[str] = None) -> None:
         self._dedupe_min_candidate_chars = 8
@@ -242,77 +258,16 @@ class MemoryService:
         return True
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
-        if not text:
-            return None
-        match = re.search(r"\{[\s\S]*\}", text)
-        if not match:
-            return None
-        try:
-            return json.loads(match.group(0))
-        except Exception:
-            return None
+        return extract_json_object(text)
 
     def _extract_tokens(self, text: str) -> List[str]:
-        cleaned = self._normalize_content(text)
-        if not cleaned:
-            return []
-        # Keep CJK blocks and latin/digits as separate token groups.
-        chunks = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9_]+", cleaned)
-        tokens: List[str] = []
-        for chunk in chunks:
-            if re.match(r"^[a-z0-9_]+$", chunk):
-                tokens.extend([p for p in chunk.split("_") if p])
-            else:
-                tokens.append(chunk)
-        return tokens
+        return extract_tokens(text)
 
     def _build_semantic_keys(self, content: str, llm_keys: Optional[List[str]] = None) -> List[str]:
-        keys: set[str] = set()
-        if llm_keys:
-            for k in llm_keys:
-                norm = self._normalize_content(str(k))
-                if norm:
-                    keys.add(norm)
-
-        tokens = self._extract_tokens(content)
-        for token in tokens:
-            # Keep potentially meaningful token as semantic space.
-            if len(token) >= 2:
-                keys.add(token)
-
-        return sorted(keys)
+        return build_semantic_keys(content, llm_keys=llm_keys)
 
     def _normalize_candidates(self, candidates: Any) -> List[Dict[str, Any]]:
-        allowed_types = {
-            "goal",
-            "preference",
-            "constraint",
-            "identity",
-            "project_state",
-        }
-        result: List[Dict[str, Any]] = []
-        if not isinstance(candidates, list):
-            return result
-
-        for item in candidates:
-            if not isinstance(item, dict):
-                continue
-            raw_type = str(item.get("type", "")).strip().lower()
-            content = str(item.get("content", "")).strip()
-            if raw_type not in allowed_types or not content:
-                continue
-            semantic_keys = self._build_semantic_keys(
-                content=content,
-                llm_keys=item.get("semantic_keys"),
-            )
-            result.append(
-                {
-                    "type": raw_type,
-                    "content": content,
-                    "semantic_keys": semantic_keys,
-                }
-            )
-        return result
+        return normalize_candidates(candidates)
 
     def _verify_candidates_fallback(
         self,
@@ -773,12 +728,93 @@ class MemoryService:
         self._write_decisions.append(row)
         if len(self._write_decisions) > self._write_decision_limit:
             self._write_decisions = self._write_decisions[-self._write_decision_limit :]
+        self._record_visibility_hint(
+            session_id=session_id,
+            user_id=user_id,
+            memory_type=memory_type,
+            target_memory_layer=target_memory_layer,
+            decision=decision,
+            reason=reason,
+            persisted=bool(persisted),
+            requires_user_confirmation=bool(requires_user_confirmation),
+            content=content,
+            conflict_candidates=conflict_candidates or [],
+            proposal_id=proposal_id,
+        )
         if not self.event_emitter:
             return
         await self.event_emitter.emit(
             EventType.MEMORY_WRITE_DECIDED,
             row,
         )
+
+    @staticmethod
+    def _visibility_session_key(session_id: str, user_id: str) -> str:
+        return f"{str(user_id or 'default_user')}::{str(session_id or '')}"
+
+    def _record_visibility_hint(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        memory_type: str,
+        target_memory_layer: str,
+        decision: str,
+        reason: str,
+        persisted: bool,
+        requires_user_confirmation: bool,
+        content: str,
+        conflict_candidates: List[str],
+        proposal_id: Optional[str],
+    ) -> None:
+        key = self._visibility_session_key(session_id, user_id)
+        rows = self._visibility_hints_by_session.setdefault(key, [])
+
+        if persisted and str(decision) == "allow":
+            rows.append(
+                {
+                    "type": "memory_saved",
+                    "memory_type": str(memory_type or ""),
+                    "layer": str(target_memory_layer or ""),
+                    "reason": str(reason or ""),
+                    "content_preview": str(content or "")[:120],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        elif requires_user_confirmation and proposal_id:
+            rows.append(
+                {
+                    "type": "memory_review_needed",
+                    "memory_type": str(memory_type or ""),
+                    "layer": str(target_memory_layer or ""),
+                    "reason": str(reason or ""),
+                    "proposal_id": str(proposal_id),
+                    "conflicts": [str(x) for x in (conflict_candidates or [])[:2]],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        if len(rows) > self._visibility_hint_limit:
+            self._visibility_hints_by_session[key] = rows[-self._visibility_hint_limit :]
+
+    def drain_visibility_hints(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        limit: int = 3,
+    ) -> List[Dict[str, Any]]:
+        key = self._visibility_session_key(session_id, user_id)
+        rows = list(self._visibility_hints_by_session.get(key) or [])
+        if not rows:
+            return []
+        take = max(1, int(limit))
+        selected = rows[-take:]
+        remain = rows[:-take]
+        if remain:
+            self._visibility_hints_by_session[key] = remain
+        else:
+            self._visibility_hints_by_session.pop(key, None)
+        return selected
 
     def _create_write_proposal(
         self,
@@ -1198,18 +1234,10 @@ class MemoryService:
         return data
     @staticmethod
     def _normalize_query_text(text: str) -> str:
-        lowered = (text or "").strip().lower()
-        return re.sub(r"\s+", " ", lowered)
+        return normalize_query_text(text)
 
     def _tokenize_text(self, text: str) -> List[str]:
-        chunks = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9_]+", self._normalize_query_text(text))
-        tokens: List[str] = []
-        for chunk in chunks:
-            if re.match(r"^[a-z0-9_]+$", chunk):
-                tokens.extend([x for x in chunk.split("_") if x])
-            else:
-                tokens.append(chunk)
-        return tokens
+        return tokenize_text(text)
 
     def _resolve_recall_policy(
         self,
@@ -1218,50 +1246,12 @@ class MemoryService:
         user_id: str,
         request_top_k: int,
     ) -> Dict[str, Any]:
-        mode_normalized = str(mode or "fast").strip().lower()
-        if mode_normalized not in {"fast", "deep", "workflow"}:
-            mode_normalized = "fast"
-
-        defaults = {
-            "fast": {"top_k": 4, "allowed_layers": ["summary", "direct", "recent"], "max_age_days": 30},
-            "deep": {"top_k": 8, "allowed_layers": ["summary", "concept", "direct", "related", "salient", "recent"], "max_age_days": 90},
-            "workflow": {"top_k": 8, "allowed_layers": ["summary", "concept", "direct", "related"], "max_age_days": 45},
-        }
-        policy = dict(defaults[mode_normalized])
         cfg = self._get_merged_config(user_id=user_id) or {}
-        recall_cfg = cfg.get("memory", {}).get("recall_policy", {})
-        mode_cfg = recall_cfg.get(mode_normalized, {}) if isinstance(recall_cfg, dict) else {}
-        if isinstance(mode_cfg, dict):
-            if "top_k" in mode_cfg:
-                policy["top_k"] = int(mode_cfg.get("top_k") or policy["top_k"])
-            if "allowed_layers" in mode_cfg and isinstance(mode_cfg.get("allowed_layers"), list):
-                policy["allowed_layers"] = [str(x) for x in mode_cfg.get("allowed_layers") if str(x).strip()]
-            if "max_age_days" in mode_cfg:
-                policy["max_age_days"] = int(mode_cfg.get("max_age_days") or policy["max_age_days"])
-        profile = str(cfg.get("memory", {}).get("profile", "balanced") or "balanced").strip().lower()
-        if profile == "conservative":
-            policy["top_k"] = max(2, int(policy["top_k"]) - 2)
-            policy["max_age_days"] = max(7, int(policy["max_age_days"]) // 2)
-        elif profile == "aggressive":
-            policy["top_k"] = min(20, int(policy["top_k"]) + 2)
-            policy["max_age_days"] = min(365, int(policy["max_age_days"]) + 30)
-
-        policy["top_k"] = max(1, min(20, int(request_top_k or policy["top_k"] or 5)))
-        policy["max_age_days"] = max(1, min(365, int(policy["max_age_days"])))
-        policy["mode"] = mode_normalized
-        return policy
+        return resolve_recall_policy(mode=mode, cfg=cfg, request_top_k=request_top_k)
 
     @staticmethod
     def _source_layer_to_memory_type(layer: str) -> str:
-        mapping = {
-            "summary": "semantic",
-            "concept": "semantic",
-            "direct": "episodic",
-            "related": "episodic",
-            "salient": "episodic",
-            "recent": "working",
-        }
-        return mapping.get(str(layer or "").lower(), "episodic")
+        return source_layer_to_memory_type(layer)
 
     def _collect_recall_candidates(self, request: MemoryRecallRequest) -> List[Dict[str, Any]]:
         if not self.memory_adapter:
@@ -1329,46 +1319,13 @@ class MemoryService:
 
     @staticmethod
     def _parse_candidate_datetime(raw_value: Optional[str]) -> Optional[datetime]:
-        if not raw_value:
-            return None
-        text = str(raw_value).strip()
-        if not text:
-            return None
-        try:
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            return datetime.fromisoformat(text)
-        except Exception:
-            return None
+        return parse_candidate_datetime(raw_value)
 
     def _build_recall_reason(self, candidate: Dict[str, Any], request: MemoryRecallRequest) -> str:
-        layer = str(candidate.get("source_layer") or "")
-        if request.mode == "workflow" and candidate.get("source_session") == request.session_id:
-            return "active_workflow_context"
-        if layer == "summary":
-            return "project_memory_match"
-        if layer == "concept":
-            return "reasoning_template_match"
-        if layer == "recent":
-            return "recent_session_context"
-        if layer in {"direct", "related", "salient"}:
-            return "user_profile_match"
-        return "memory_layer_match"
+        return build_recall_reason(candidate, mode=request.mode, session_id=request.session_id)
 
     def _format_recall_context(self, records: List[RecalledMemoryItem]) -> str:
-        if not records:
-            return ""
-        lines: List[str] = []
-        current_layer = ""
-        for item in records:
-            if item.source_layer != current_layer:
-                current_layer = item.source_layer
-                lines.append(f"[{current_layer}]")
-            snippet = (item.content or "").strip().replace("\n", " ")
-            if len(snippet) > 140:
-                snippet = snippet[:137] + "..."
-            lines.append(f"- {snippet}")
-        return "\n".join(lines)
+        return format_recall_context(records)
 
     def _store_recall_run(self, result: MemoryRecallResult, *, query_text: str = "") -> None:
         row = result.model_dump()

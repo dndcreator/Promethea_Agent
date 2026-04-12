@@ -25,6 +25,7 @@ async def ops_capabilities() -> Dict[str, Any]:
     sandbox_cfg = (merged.get("sandbox") or {}) if isinstance(merged, dict) else {}
     reasoning_cfg = (merged.get("reasoning") or {}) if isinstance(merged, dict) else {}
     memory_cfg = (merged.get("memory") or {}) if isinstance(merged, dict) else {}
+    org_cfg = (merged.get("org_brain") or {}) if isinstance(merged, dict) else {}
 
     plugin_runtime = getattr(gateway_server, "plugin_runtime", None)
     plugin_count = len(getattr(plugin_runtime, "plugins", []) or []) if plugin_runtime else None
@@ -33,7 +34,14 @@ async def ops_capabilities() -> Dict[str, Any]:
         "status": "success",
         "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "capabilities": {
-            "automation_triggers": ["/api/automation/webhook", "/api/automation/cron/wakeup"],
+            "automation_triggers": [
+                "/api/automation/webhook",
+                "/api/automation/cron/wakeup",
+                "/api/automation/scheduler/status",
+                "/api/automation/scheduler/run-once",
+                "/api/automation/scheduler/pause",
+                "/api/automation/scheduler/resume",
+            ],
             "skills_catalog": "/api/skills/catalog",
             "skills_activate": "/api/skills/activate",
             "voice_turn": "/api/voice/turn",
@@ -41,6 +49,10 @@ async def ops_capabilities() -> Dict[str, Any]:
             "sandbox_enabled": bool(sandbox_cfg.get("enabled", False)),
             "reasoning_enabled": bool(reasoning_cfg.get("enabled", True)),
             "memory_enabled": bool(memory_cfg.get("enabled", True)),
+            "org_brain_enabled": bool(org_cfg.get("enabled", False)),
+            "org_brain_recall": "/api/org-brain/recall",
+            "org_brain_ingest": "/api/org-brain/ingest",
+            "org_brain_ingest_file": "/api/org-brain/ingest-file",
             "plugins_loaded": plugin_count,
             "reference_clients": ["web_ui", "cli", "http_api"],
             "product_shape": "local_assistant_plus_agent_runtime",

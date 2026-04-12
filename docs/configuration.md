@@ -252,3 +252,79 @@ It is loaded after code defaults but before `.env`.
 
 To override defaults without editing the file, use `.env` or environment variables.  
 Do not commit secrets to `config/default.json`.
+
+---
+
+## Section: `persona.soul` (view-only + auto-evolve)
+
+`persona.soul` is a style-only prompt block injected by the prompt assembler.
+
+Constraints:
+- UI is read-only for this block by default.
+- Runtime may evolve it automatically after turns.
+- It cannot override policy/safety/tool/reasoning constraints.
+
+Config shape:
+
+```json
+{
+  "persona": {
+    "soul": {
+      "enabled": true,
+      "read_only_in_ui": true,
+      "auto_evolve": true,
+      "content": "Soul Prompt (blank canvas)...",
+      "version": 1,
+      "updated_at": "",
+      "last_reason": "",
+      "evolve_every_turns": 6,
+      "min_interval_seconds": 900,
+      "max_chars": 1200
+    }
+  }
+}
+```
+
+APIs:
+- `GET /api/config/soul`
+- `GET /api/config` (response includes top-level `soul`)
+
+---
+
+## Section: `org_brain` (enterprise context module)
+
+`org_brain` enables B-side organization context recall without affecting personal mode.
+
+```json
+{
+  "org_brain": {
+    "enabled": false,
+    "org_id": "",
+    "recall_priority": "blend",
+    "confirmation_queue": true,
+    "audience_default": "业务部门"
+  }
+}
+```
+
+Fields:
+- `enabled`: master switch.
+- `org_id`: organization namespace id.
+- `recall_priority`: `blend` or `override_persona`.
+- `confirmation_queue`: reserve switch for human confirmation flow.
+- `audience_default`: default audience when turn metadata does not specify one.
+- `max_upload_bytes`: max file size accepted by `/api/org-brain/ingest-file`.
+- `allowed_suffixes`: accepted file suffix list for upload ingest.
+- `recall_top_k_default`: default `top_k` for recall API when omitted.
+- `recall_context_type_default`: default `context_type` for recall API when omitted.
+- `chat_top_k`: default top-k used by chat/runtime recall.
+- `chat_context_type`: default context type used by chat/runtime recall.
+- `summary_label` / `summary_max_items`: summary rendering behavior.
+- `extract_text_max_chars`: max chars sent into extraction prompt.
+- `heuristic_max_lines` / `heuristic_max_items`: fallback extraction limits.
+
+API:
+- `GET /api/org-brain/status`
+- `POST /api/org-brain/ingest`
+- `POST /api/org-brain/ingest-file` (upload file and auto-extract text before ingest)
+- `POST /api/org-brain/recall`

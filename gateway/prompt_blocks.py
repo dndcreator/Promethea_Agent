@@ -15,6 +15,8 @@ class PromptBlockType(str, Enum):
     WORKSPACE = "workspace_block"
     REASONING = "reasoning_block"
     RESPONSE_FORMAT = "response_format_block"
+    PERSONA = "persona_block"
+    ORG_CONTEXT = "org_context_block"
 
 
 class PromptBlock(BaseModel):

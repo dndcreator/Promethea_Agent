@@ -31,6 +31,7 @@ Recommended runtime toggles:
 
 - `MEMORY__ENABLED=true`
 - `REASONING__ENABLED=true`
+- `KERNEL_SCHEDULER__ENABLED=true`
 
 ## 4. Start Procedure
 
@@ -55,6 +56,7 @@ python start_gateway_service.py
 - `GET /api/health`
 - `GET /api/status`
 - `GET /api/ops/readiness`
+- `GET /api/automation/scheduler/status`
 
 ## 5. Production Checks
 
@@ -79,6 +81,14 @@ Before exposing service:
 ## 7. Operational Notes
 
 - Corrupt session snapshots are now quarantined by session storage loader.
+- Kernel scheduler (local recurring task loop) controls:
+  - `POST /api/automation/scheduler/run-once`
+  - `POST /api/automation/scheduler/pause`
+  - `POST /api/automation/scheduler/resume`
+  - Optional env:
+    - `KERNEL_SCHEDULER__TICK_SECONDS` (default `5.0`)
+    - `KERNEL_SCHEDULER__MAX_JOBS_PER_TICK` (default `10`)
+    - `KERNEL_SCHEDULER__START_PAUSED` (default `false`)
 - For incident triage, use:
   - `/api/ops/runbook`
   - `/api/ops/framework-check`

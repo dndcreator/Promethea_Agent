@@ -242,6 +242,65 @@ class ReasoningConfig(BaseSettings):
         return value
 
 
+class OrgBrainConfig(BaseSettings):
+    enabled: bool = Field(default=False)
+    org_id: str = Field(default="")
+    recall_priority: str = Field(default="blend")
+    confirmation_queue: bool = Field(default=True)
+    audience_default: str = Field(default="业务部门")
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=100 * 1024 * 1024)
+    allowed_suffixes: list[str] = Field(
+        default_factory=lambda: [".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"]
+    )
+    recall_top_k_default: int = Field(default=5, ge=1, le=50)
+    recall_context_type_default: str = Field(default="writing")
+    chat_top_k: int = Field(default=5, ge=1, le=50)
+    chat_context_type: str = Field(default="chat")
+    summary_label: str = Field(default="Organization context hints")
+    summary_max_items: int = Field(default=8, ge=1, le=50)
+    extract_text_max_chars: int = Field(default=5000, ge=500, le=200000)
+    heuristic_max_lines: int = Field(default=30, ge=1, le=1000)
+    heuristic_max_items: int = Field(default=15, ge=1, le=200)
+
+    @field_validator("recall_priority")
+    @classmethod
+    def validate_recall_priority(cls, v: str) -> str:
+        value = (v or "blend").strip().lower()
+        if value not in {"blend", "override_persona"}:
+            raise ValueError("org_brain.recall_priority must be one of: blend, override_persona")
+        return value
+
+    @field_validator("allowed_suffixes", mode="before")
+    @classmethod
+    def normalize_allowed_suffixes(cls, v: Any) -> list[str]:
+        if v is None:
+            return [".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"]
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return []
+            if raw.startswith("["):
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, list):
+                        v = parsed
+                except Exception:
+                    v = [part.strip() for part in raw.split(",") if part.strip()]
+            else:
+                v = [part.strip() for part in raw.split(",") if part.strip()]
+        if not isinstance(v, list):
+            return [".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"]
+        out: list[str] = []
+        for item in v:
+            s = str(item or "").strip().lower()
+            if not s:
+                continue
+            if not s.startswith("."):
+                s = "." + s
+            out.append(s)
+        return sorted(list(dict.fromkeys(out)))
+
+
 
 class SandboxConfig(BaseSettings):
     enabled: bool = Field(default=False)
@@ -321,6 +380,7 @@ class PrometheaConfig(BaseSettings):
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
+    org_brain: OrgBrainConfig = Field(default_factory=OrgBrainConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 
     model_config = SettingsConfigDict(

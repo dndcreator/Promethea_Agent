@@ -30,3 +30,4 @@ def test_basic_config_view_keeps_key_fields_and_redacted_secrets():
     assert view["memory"]["store_backend"] == "sqlite_graph"
     assert view["reasoning"]["enabled"] is False
     assert view["system"]["stream_mode"] is False
+    assert view["org_brain"]["enabled"] is False

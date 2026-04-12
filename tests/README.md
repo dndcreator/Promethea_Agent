@@ -35,6 +35,10 @@ python tests/run_all_tests.py --pattern "memory and not live"
 # 开启 live 测试
 python tests/run_all_tests.py --live
 
+# 开启压力测试（默认关闭）
+$env:RUN_STRESS_TESTS="1"
+pytest -q -m stress tests/test_memory_stress.py
+
 # 发布前业务回归（自动找解释器并写日志）
 powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite business
 ```
@@ -65,4 +69,5 @@ python tests/run_all_tests.py --coverage
 python tests/run_all_tests.py --file test_moirai_service.py
 python tests/run_all_tests.py --pattern "memory and not live"
 python tests/run_all_tests.py --live
+$env:RUN_STRESS_TESTS="1"; pytest -q -m stress tests/test_memory_stress.py
 ```
