@@ -1,93 +1,56 @@
 # UI Module
 
----
+## 中文
 
-## 中文文档
+### 模块定位
 
-### 1. 模块定位
+`UI` 是 Promethea 的 Web 产品界面，负责：
 
-`UI` 是项目的 Web 前端，负责：
 - 登录与用户状态展示
-- 会话列表与对话区渲染
-- 流式响应显示
+- 会话列表和聊天渲染
+- 流式响应（SSE）展示
 - 设置面板与配置保存
-- 记忆图可视化入口
+- 记忆工作台入口
+- 推理可视化（ToT/ReAct）与纠偏/中止控制
+- 开源发布展示面板（Showcase）
 
-### 2. 文件说明
+### 核心文件
 
-- `UI/index.html`：页面结构
-- `UI/style.css`：样式与布局
-- `UI/script.js`：交互逻辑（聊天、设置、SSE、i18n）
+- `UI/index.html`：页面结构与各类 modal
+- `UI/style.css`：布局和视觉样式
+- `UI/script.js`：交互逻辑（聊天、SSE、设置、i18n、展示面板）
 
-### 3. 页面工作流
+### 页面流程
 
-1. 页面加载 -> 检查登录态
-2. 初始化状态（用户、会话、配置按钮状态）
-3. 发送消息 -> 调 `/api/chat`
-4. 按流式或普通模式渲染回复
-5. 更新会话侧栏和当前会话内容
+1. 页面加载并检查认证状态
+2. 初始化用户、会话、状态轮询
+3. 发送消息到 `/api/chat`
+4. 根据流式或非流式结果更新聊天内容
+5. 若存在推理树，轮询 `/api/reasoning/tree/{tree_id}` 并展示状态
 
-### 4. 示例：设置保存
+## English
 
-1. 用户在设置面板修改参数
-2. 前端整理配置对象
-3. 调用统一接口 `POST /api/config/update`
-4. 保存成功后关闭设置面板并更新本地展示状态
+### Purpose
 
-### 5. 使用注意事项
+`UI` is the web product shell for Promethea. It provides:
 
-- 旧消息加载应一次性渲染，不要伪流式回放
-- 流式失败时要有 JSON fallback
-- 文案必须走 i18n，避免硬编码中英文
+- auth and user/session state
+- chat and streaming response rendering
+- settings and config update surface
+- memory workbench entry
+- reasoning visualization with steer/stop controls
+- launch-ready showcase panel for demos
 
-### 6. 修改注意事项
+### Key Files
 
-- 改 streaming 逻辑时同时测：正常 SSE / 网络抖动 / 非流式 fallback
-- 改设置表单时同步后端 schema
-- 改用户显示逻辑时验证登录、自动登录、退出三条路径
+- `UI/index.html`: main layout and modal structure
+- `UI/style.css`: styling and layout system
+- `UI/script.js`: behavior (chat, SSE, settings, i18n, showcase)
 
----
+### Main Flow
 
-## English Documentation
-
-### 1. Purpose
-
-`UI` is the web frontend for:
-- auth and user state display
-- session list and chat rendering
-- streaming response visualization
-- settings panel and config save
-- memory graph entrypoint
-
-### 2. Files
-
-- `UI/index.html`: structure
-- `UI/style.css`: styling/layout
-- `UI/script.js`: interactions (chat/settings/SSE/i18n)
-
-### 3. Page Flow
-
-1. page load -> auth check
-2. initialize user/session/UI state
-3. send message -> call `/api/chat`
-4. render response via streaming or non-stream fallback
-5. update session sidebar and active transcript
-
-### 4. Example: Settings Save
-
-1. user edits settings fields
-2. frontend builds normalized config payload
-3. calls `POST /api/config/update`
-4. closes modal and refreshes visible state on success
-
-### 5. Notes
-
-- historical messages should render directly (no fake stream replay)
-- maintain JSON fallback for streaming failures
-- all user-facing text should be i18n-driven
-
-### 6. Change Notes
-
-- test SSE, degraded network, and fallback paths when changing streaming code
-- sync backend schema when changing settings form fields
-- validate login/auto-login/logout flows when changing user-state UI
+1. load page and verify authentication
+2. initialize user/session/status polling
+3. send chat request to `/api/chat`
+4. render SSE or non-stream response
+5. if reasoning tree exists, poll `/api/reasoning/tree/{tree_id}` for live visualization

@@ -1,22 +1,112 @@
-# Promethea
+﻿# Promethea — A Memory-Native Agent Runtime for Long-Lived AI Systems
 
-**A memory-native, reasoning-aware, multi-user-safe Agent Runtime.**
+Promethea is a local-first agent runtime for long-lived AI systems that need memory, recovery, auditability, and multi-user isolation. It treats memory, workflow, policy, audit, and user boundaries as runtime primitives, not post-hoc plugins.
 
-> Not a chatbot wrapper. Not a prompt chain.  
-> A complete runtime for long-lived, multi-turn, multi-task AI agents —  
-> that can remember you, plan actions, execute tools safely, and deliver artifacts you can actually trust.
+## What Promethea Is
+
+Promethea is a runtime layer for building and operating AI assistants that must run beyond single-turn demos.
+
+It is designed for systems where you need to:
+
+- keep user-scoped memory over time
+- run tool and workflow actions with explicit policy checks
+- produce audit traces for important runtime events
+- recover and resume multi-step execution
+- support multiple interfaces (UI, API, CLI, channels) on one core runtime
+
+It is **not** just a prompt template repo and **not** only a chat wrapper.
+
+## What Works Today
+
+Already explorable in the current repository:
+
+- local-first runtime with Web UI, HTTP API, and CLI surfaces
+- pluggable memory backends (`flat_memory`, `sqlite_graph`, `neo4j`) with recall/write flows
+- resumable workflow engine with checkpoints and approval-style steps
+- structured runtime audit and trace events for security/operations visibility
+- explicit multi-user isolation model across sessions, memory, config, and workspace boundaries
+- tool/policy/sandbox-aware execution paths through gateway services
+- ToT/ReAct reasoning runtime hooks with steer/stop control surfaces
+
+## Why It Is Different
+
+1. Most agent projects stop at first-round tool calling; Promethea focuses on what happens after that: memory lifecycle, workflow continuity, policy, and audit.
+2. Many systems treat memory/audit/policy as optional integrations; Promethea puts them inside the runtime contract.
+3. Promethea is local-first and multi-surface by design, not tied to a single hosted GUI.
+
+## Quick Demo
+
+Recommended showcase chain for first-time visitors:
+
+`User Request → Plan → Tool Calls → Workspace Write → Audit Events → Memory Update → Resume`
+
+![Promethea Demo Flow](docs/assets/demo-flow.png)
+
+If you want to script this quickly, use:
+
+```bash
+promethea status base
+promethea doctor run
+promethea reasoning list
+promethea workflow list
+promethea security report --limit 20
+```
+
+## 3-Minute Quickstart
+
+```bash
+git clone https://github.com/dndcreator/Promethea_Agent.git
+cd Promethea_Agent
+python -m venv .venv
+# Windows: .\.venv\Scripts\Activate.ps1
+# macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+
+# copy env template then fill API__API_KEY / API__BASE_URL / API__MODEL
+# Windows: copy env.example .env
+# macOS/Linux: cp env.example .env
+
+python start_gateway_service.py
+```
+
+Open:
+
+- UI: `http://127.0.0.1:8000/UI/index.html`
+- API: `http://127.0.0.1:8000/api/status`
+
+Detailed setup:
+
+- [QUICK_START.md](QUICK_START.md)
+- [docs/getting-started/quickstart.md](docs/getting-started/quickstart.md)
+- [docs/getting-started/real-user-setup.md](docs/getting-started/real-user-setup.md)
+
+## Current Status
+
+**Stage: Public Preview / Active Development**
+
+What this means today:
+
+- Runtime core, memory/workflow/audit/policy foundations, CLI/API/UI surfaces are already usable and worth exploring.
+- Benchmark expansion, packaging polish, docs polish, and release-process hardening are still in progress.
+- This is a serious build with real capabilities, but not presented as a finalized commercial product release.
+
+## Where to Read Next
+
+Start from the path that matches your goal:
+
+- Start here navigator: [docs/GET_STARTED_HERE.md](docs/GET_STARTED_HERE.md)
+- Product overview: [PROJECT_OVERVIEW.md](PROJECT_OVERVIEW.md)
+- Runtime design: [docs/runtime-overview.md](docs/runtime-overview.md)
+- Docs hub: [docs/README.md](docs/README.md)
+- Roadmap: [ROADMAP.md](ROADMAP.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- Contribution path: [CONTRIBUTING.md](CONTRIBUTING.md)
 
 ---
 
-## Product Positioning
+## Architecture Contract Endpoints
 
-Promethea is a **local-first Agent Runtime infrastructure** with a built-in assistant experience.
-
-- The assistant UI is the default product shell for end users.
-- The runtime (API + workflow + memory + policy + audit) is the core product.
-- CLI and HTTP API are reference access surfaces for users, developers, and other agents.
-
-Architecture contract (machine-readable):
+Machine-readable contract/profile endpoints:
 
 - `/api/ops/capabilities`
 - `/api/ops/abstractions`
@@ -28,329 +118,88 @@ Architecture contract (machine-readable):
 - `/api/ops/readiness`
 - `/api/ops/runbook`
 
-See: [`docs/infrastructure-profile.md`](docs/infrastructure-profile.md)
-Docs hub: [`docs/README.md`](docs/README.md)
-Governance: [`GOVERNANCE.md`](GOVERNANCE.md)
-Maintainers: [`MAINTAINERS.md`](MAINTAINERS.md)
-Roadmap: [`ROADMAP.md`](ROADMAP.md)
-Deployment: [`docs/deployment.md`](docs/deployment.md)
-User setup (copy-and-run): [`docs/getting-started/real-user-setup.md`](docs/getting-started/real-user-setup.md)
-
-## Why Promethea?
-
-Most agent frameworks solve the "make an LLM call a tool" problem.  
-Promethea solves what comes after:
+Reference:
 
-| Problem | What Promethea does |
-|---|---|
-| Agent forgets who you are after 10 messages | Layered long-term memory: hot / warm / cold, graph-backed, per-user owned |
-| Tool calls are fire-and-forget black boxes | ToolSpec + ToolPolicy + full audit trace on every invocation |
-| Multi-user = data leaks between users | Four namespace layers, enforced at runtime, auditable |
-| Long tasks die mid-way | Resumable workflow engine with checkpoints and human-approval gates |
-| "What did the agent do?" is unanswerable | Structured trace + audit events on every memory write, tool call, and workspace write |
-| Config drifts, prod breaks silently | Versioned config schema with migration path and deprecation warnings |
+- [docs/infrastructure-profile.md](docs/infrastructure-profile.md)
 
----
+## Core Capability Areas
 
-## Feature Highlights
+### Memory Runtime
 
-### 🧠 Multi-Layer Memory System
-Three pluggable backends — no database required for basic use:
+- Layered memory model and recall/write pipeline
+- Backend options for different deployment constraints
+- Write/recall policy controls and inspection points
 
-- **`flat_memory`** — JSONL file, zero dependencies, works out of the box
-- **`sqlite_graph`** — SQLite with graph recall via recursive CTE; semantic + structural search
-- **`neo4j`** — Full hot/warm/cold/forgetting stack; production-grade multi-session memory
+References:
 
-Memory is **governed, not just stored**:
-- `MemoryWriteGate` decides allow / deny / defer before any long-term write
-- `MemoryRecallPolicy` controls fast / deep / workflow recall modes
-- MEF (Memory Exchange Format) enables lossless migration between backends
-
-### ⚙️ Workflow Engine
-Linear, resumable, human-in-the-loop workflows:
+- [docs/architecture/memory-model.md](docs/architecture/memory-model.md)
+- [memory/README.md](memory/README.md)
 
-- Step types: `reasoning_step`, `tool_step`, `artifact_step`, `approval_step`, `memory_step`, `summary_step`
-- Checkpoint capture at every step boundary
-- Pause / resume / retry / human approval gate
-- Artifacts written directly into workspace sandbox
-
-### 🔒 Security-First Runtime
-Four enforced namespace layers:
+### Workflow Runtime
 
-- **Config namespace** — user-scoped policies, no cross-user bleed
-- **Session namespace** — session ownership bound to user identity
-- **Memory namespace** — recall and write scoped to owning user
-- **Workspace namespace** — sandboxed file access, path-escape protection
+- Multi-step workflow definitions
+- Checkpoint/resume and approval-style flow control
+- Artifact writes through workspace boundaries
 
-Security audit is queryable in real time: `GET /api/security/audit/report`
+References:
 
-### 🛠️ Tool & Skill System
-- Unified `ToolRegistry` covers local tools, MCP services, and agent tools
-- `ToolSpec` carries capability type, side-effect level, permission scope, timeout hints
-- `ToolPolicy` enforces allow/deny at runtime, not just at prompt time
-- `Skills` bundle tool allowlists + system instructions + evaluation cases into deployable capability packs
+- [docs/architecture/workflow-model.md](docs/architecture/workflow-model.md)
+- [gateway/README.md](gateway/README.md)
 
-### 📡 Multi-Channel, One Runtime
-Channel adapters normalize every input source to the same gateway contract:
-- Web UI (built-in)
-- HTTP API
-- Telegram
-- Tauri desktop shell (Windows / macOS / Linux)
-- Extensible to any channel without touching the core pipeline
+### Policy, Sandbox, and Audit
 
-### 🔍 Observability Built In
-- Structured `TraceEvent` + `AuditEvent` on every significant operation
-- `SecurityAuditService` generates per-user audit reports
-- MCP service health snapshots (`online / offline / degraded`)
-- `MemoryRecallInspector` — see exactly what was recalled, dropped, and why
-
-### Prompt Runtime: Static + Dynamic Assembly
-- Prompt is assembled per turn from structured blocks, not one static template.
-- Stable blocks (identity/persona/soul) are placed before dynamic blocks for cache-friendly reuse.
-- Dynamic blocks include memory recall, reasoning notes, tool/policy/workspace context.
-- Prompt block usage and compaction results are exposed in response debug metadata.
-
-### Soul Prompt (User-Scoped, UI Read-Only, Auto-Evolving)
-- Each user has an isolated `persona.soul` profile.
-- Web UI shows soul prompt as read-only; users cannot directly edit it in settings.
-- Runtime may evolve soul content asynchronously after turns (rate-limited, style-only constraints).
-- Soul content cannot override safety/policy/tool/reasoning rules.
-
----
-
-## Quickstart
-
-### Requirements
-
-- Python ≥ 3.10
-- pip / venv
-
-### 1. Install
-
-```bash
-git clone https://github.com/dndcreator/Promethea_Agent.git
-cd Promethea_Agent
+- Runtime policy-aware tool execution
+- Workspace/sandbox boundary controls
+- Trace/audit events for operations and security analysis
 
-python -m venv .venv
+References:
 
-# Windows PowerShell
-.\.venv\Scripts\Activate.ps1
+- [docs/architecture/security-model.md](docs/architecture/security-model.md)
+- [SECURITY.md](SECURITY.md)
 
-# macOS / Linux
-source .venv/bin/activate
-
-pip install -U pip
-pip install -r requirements.txt
-```
+### Interfaces and Access Surfaces
 
-### 2. Configure
+- Web UI (`UI/`)
+- HTTP API (`gateway/http`)
+- CLI (`promethea_cli/`)
+- channel adapters (`channels/`)
 
-```bash
-# Windows
-copy env.example .env
+References:
 
-# macOS / Linux
-cp env.example .env
-```
-
-Open `.env` and set **at minimum these three fields** (they are coupled — all three must match your provider):
-
-```bash
-# Option A: OpenRouter (recommended for first-time users)
-API__API_KEY=sk-or-your-key-here
-API__BASE_URL=https://openrouter.ai/api/v1
-API__MODEL=openai/gpt-4.1-mini
-
-# Option B: OpenAI directly
-API__API_KEY=sk-your-openai-key
-API__BASE_URL=https://api.openai.com/v1
-API__MODEL=gpt-4.1-mini
-
-# Option C: Local model (any OpenAI-compatible server)
-API__API_KEY=dummy-local-key
-API__BASE_URL=http://127.0.0.1:8001/v1
-API__MODEL=your-local-model-id
-```
-
-> ⚠️ `API__BASE_URL` and `API__MODEL` must match. Changing only the key will not work.
-
-Non-sensitive runtime options (including memory backend, default `neo4j`) come from `config/default.json`.
-
-### 3. Run
-
-```bash
-python start_gateway_service.py
-```
-
-Visit `http://127.0.0.1:8000/UI/index.html` — it opens automatically.
-UI feature scope: [`docs/ui-overview.md`](docs/ui-overview.md)
-
----
-
-## Architecture in 90 Seconds
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Interface Layer                         │
-│          Web UI  │  HTTP API  │  Telegram  │  Tauri         │
-└────────────────────────┬────────────────────────────────────┘
-                         │ GatewayRequest
-┌────────────────────────▼────────────────────────────────────┐
-│                  Gateway Control Plane                      │
-│   Session ▸ RunContext ▸ Pipeline ▸ Audit ▸ EventBus        │
-└──┬──────────┬──────────┬──────────┬───────────┬────────────┘
-   │          │          │          │           │
-Memory    Tools/MCP   Skills    Workspace   Workflow
-Layer     Layer       Layer     Sandbox     Engine
-   │          │          │          │           │
-   └──────────┴──────────┴──────────┴───────────┘
-                         │
-         ┌───────────────▼──────────────┐
-         │   Security / Observability   │
-         │  Namespace  Trace  Audit     │
-         └──────────────────────────────┘
-```
-
-Six-stage pipeline per request:
-
-1. **Input Normalization** — user identity, trace_id, channel normalization
-2. **Mode Detection** — fast / deep / workflow
-3. **Memory Recall** — layered, policy-controlled, reason-tagged
-4. **Planning / Reasoning** — ReAct-Tree-of-Thought, resumable nodes
-5. **Tool Execution** — policy-checked, fully traced
-6. **Response Synthesis** — artifact write, memory write gate, audit flush
-
-Full design: [`docs/runtime-overview.md`](docs/runtime-overview.md)
-
----
-
-## Configuration Reference
-
-See [`docs/configuration.md`](docs/configuration.md) for the complete reference.
-
-Key sections:
-
-| Section | Key fields | Notes |
-|---|---|---|
-| `api` | `api_key`, `base_url`, `model` | All three must match your provider |
-| `memory` | `enabled`, `store_backend` | Start with `sqlite_graph` |
-| `memory.neo4j` | `uri`, `username`, `password` | Only needed for Neo4j backend |
-| `sandbox` | `enabled`, `profile` | Set `profile=strict` in production |
-| `reasoning` | `enabled`, `mode` | `react_tot` is the only supported mode |
-| `persona.soul` | `enabled`, `auto_evolve`, `content` | User-scoped style layer, UI read-only |
-
----
-
-## Docs
-
-| Document | What it covers |
-|---|---|
-| [`docs/runtime-overview.md`](docs/runtime-overview.md) | Full runtime design, pipeline stages, core objects |
-| [`docs/infrastructure-profile.md`](docs/infrastructure-profile.md) | Product identity: local assistant shell + runtime core |
-| [`docs/architecture/memory-model.md`](docs/architecture/memory-model.md) | Memory layers, write gate, recall policy |
-| [`docs/architecture/security-model.md`](docs/architecture/security-model.md) | Namespace layers, enforcement points, audit |
-| [`docs/architecture/workflow-model.md`](docs/architecture/workflow-model.md) | Workflow engine, step types, checkpoint policy |
-| [`docs/architecture/tool-runtime.md`](docs/architecture/tool-runtime.md) | ToolSpec, ToolRegistry, ToolPolicy |
-| [`docs/official-tools.md`](docs/official-tools.md) | Built-in official toolpack and runtime visibility |
-| [`docs/configuration.md`](docs/configuration.md) | Full configuration reference |
-| [`docs/ui-overview.md`](docs/ui-overview.md) | Current Web UI capabilities and limits |
-| [`docs/channels/telegram.md`](docs/channels/telegram.md) | Telegram adapter status and integration notes |
-| [`docs/quickstart-local-model.md`](docs/quickstart-local-model.md) | Using local models (vLLM, Ollama, etc.) |
-| [`docs/scenario-workflow-audit.md`](docs/scenario-workflow-audit.md) | End-to-end demo: workflow + workspace + audit |
-| [`docs/full-business-test-playbook.md`](docs/full-business-test-playbook.md) | Release-grade full business test checklist |
-| [`docs/deployment.md`](docs/deployment.md) | Deployment and production readiness baseline |
-| [`docs/opencloud-gap-analysis-2026-03-25.md`](docs/opencloud-gap-analysis-2026-03-25.md) | Key OSS gap analysis and closures |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute |
-| [`GOVERNANCE.md`](GOVERNANCE.md) | Project governance and decision model |
-| [`MAINTAINERS.md`](MAINTAINERS.md) | Maintainer responsibilities and ownership |
-| [`ROADMAP.md`](ROADMAP.md) | Product and engineering roadmap |
-
----
-
-## Scenarios
-
-### Run a workflow that saves an artifact
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/workflow/start \
-  -H "Content-Type: application/json" \
-  -d '{
-    "workflow_id": "wf.api",
-    "session_id": "s1",
-    "workspace_id": "myproject",
-    "user_id": "u1"
-  }'
-```
-
-If the selected workflow includes these steps, the agent will:
-1. Run a `reasoning_step` to generate the plan
-2. Write the artifact via `artifact_step` to `workspace/u1/myproject/outputs/plan.md`
-3. Emit a `workspace.artifact.written` audit event
-
-### Inspect the security audit log
-
-```bash
-curl "http://127.0.0.1:8000/api/security/audit/report?user_id=u1"
-```
-
-Returns a structured report with: namespace violations, workspace blocked events, side-effect tool calls, secret access attempts.
-
-### Switch memory backend without data loss
-
-```python
-from memory.adapter import MemoryAdapter
-
-adapter = MemoryAdapter()
-result = adapter.migrate_backend("flat_memory", mode="cutover")
-# {"ok": True, "mode": "cutover", "active_backend": "flat_memory", ...}
-```
-
----
-
-## Comparison
-
-| | Promethea | OpenClaw |
-|---|---|---|
-| Multi-layer memory (hot/warm/cold) | ✅ | ⚠️ varies |
-| Memory write governance (allow/deny/defer) | ✅ | ❌ |
-| Memory backend migration (MEF) | ✅ | ❌ |
-| Namespace isolation (4 layers) | ✅ | ⚠️ partial |
-| Resumable workflow + human approval | ✅ | ⚠️ varies |
-| Workspace sandbox + path escape protection | ✅ | ⚠️ varies |
-| Real-time security audit report | ✅ | ❌ |
-| ToolSpec + ToolPolicy at runtime | ✅ | ⚠️ varies |
-| MCP health panel | ✅ | ⚠️ varies |
-| Local model support (OpenAI-compatible) | ✅ | ✅ |
-| Channel adapter framework | ✅ | ✅ |
-| Tauri desktop shell | ✅ | ❌ |
-
----
-
-## Contributing
-
-Read [`CONTRIBUTING.md`](CONTRIBUTING.md).
-
-Quick start for contributors:
-
-```bash
-pip install -r requirements.txt
-pytest tests/test_reasoning_service.py tests/test_memory_regressions.py \
-       tests/test_tool_service.py tests/test_workspace_sandbox.py
-```
-
----
+- [docs/reference/http-api.md](docs/reference/http-api.md)
+- [docs/reference/cli.md](docs/reference/cli.md)
+- [UI/README.md](UI/README.md)
+
+## Benchmark and Validation (Current)
+
+Current repository validation assets include:
+
+- benchmark tasks: [benchmarks/general_capability_tasks.json](benchmarks/general_capability_tasks.json)
+- benchmark harness: [scripts/run_general_benchmark.py](scripts/run_general_benchmark.py)
+- benchmark-related tests: [tests/test_general_benchmark_harness.py](tests/test_general_benchmark_harness.py)
+- release/business playbooks: [docs/full-business-test-playbook.md](docs/full-business-test-playbook.md)
+
+This is a useful baseline for public preview, while broader public benchmark coverage is still being expanded.
+
+## Documentation Map
+
+- Docs hub: [docs/README.md](docs/README.md)
+- Showcase: [docs/SHOWCASE.md](docs/SHOWCASE.md)
+- Project status: [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)
+- Demo scenarios: [docs/DEMO_SCENARIOS.md](docs/DEMO_SCENARIOS.md)
+- Why Promethea: [docs/WHY_PROMETHEA.md](docs/WHY_PROMETHEA.md)
+- Demo production plan: [docs/DEMO_PLAN.md](docs/DEMO_PLAN.md)
+
+## Community and Governance
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [SECURITY.md](SECURITY.md)
+- [GOVERNANCE.md](GOVERNANCE.md)
+- [MAINTAINERS.md](MAINTAINERS.md)
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
-
----
-
-## Share
-
-If Promethea helps you build something real, tell someone.
-
-> A memory-native agent runtime for long-lived tasks — with governance, workspace, workflow, and multi-user safety built in.  
-> Zero cloud lock-in. Runs on your machine. Open source.
+MIT — see [LICENSE](LICENSE).
 
 [![GitHub Stars](https://img.shields.io/github/stars/dndcreator/Promethea_Agent?style=social)](https://github.com/dndcreator/Promethea_Agent)

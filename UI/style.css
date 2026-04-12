@@ -1112,6 +1112,50 @@ select {
     background: linear-gradient(180deg, rgba(244, 247, 251, 0) 0%, var(--bg-page) 28%);
 }
 
+.showcase-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.showcase-card {
+    border: 1px solid var(--border-default);
+    border-radius: 12px;
+    background: #fbfdff;
+    padding: 12px;
+    box-shadow: var(--shadow-sm);
+}
+
+.showcase-card h3 {
+    margin: 0 0 6px 0;
+    color: #1e3a8a;
+    font-size: 14px;
+}
+
+.showcase-card p {
+    margin: 0 0 8px 0;
+    color: var(--text-normal);
+    font-size: 12px;
+}
+
+.showcase-card pre {
+    margin: 0;
+    padding: 10px;
+    border-radius: 8px;
+    background: #0b1220;
+    color: #dbeafe;
+    font: 12px/1.45 var(--font-mono);
+    overflow: auto;
+}
+
+.showcase-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
 .terminal-input-line {
     margin: 0 auto;
     width: min(920px, 100%);

@@ -7,6 +7,7 @@ Promethea docs are organized for two audiences:
 ## Documentation Map
 
 ### Getting Started
+- [Start Here](./GET_STARTED_HERE.md)
 - [Getting Started Overview](./getting-started/README.md)
 - [Quickstart](./getting-started/quickstart.md)
 - [Real User Setup](./getting-started/real-user-setup.md)
@@ -14,6 +15,9 @@ Promethea docs are organized for two audiences:
 
 ### Concepts
 - [Concepts Overview](./concepts/README.md)
+- [Why Promethea](./WHY_PROMETHEA.md)
+- [Showcase](./SHOWCASE.md)
+- [Project Status](./PROJECT_STATUS.md)
 - [Runtime Model](./runtime-overview.md)
 - [Infrastructure Profile](./infrastructure-profile.md)
 - [Claude Code Comparative Deep Dive (2026-04)](./claude-code-open-source-comparative-deep-dive-2026-04.md)
@@ -29,6 +33,9 @@ Promethea docs are organized for two audiences:
 ### Guides
 - [Guides Overview](./guides/README.md)
 - [Business Test Playbook](./guides/business-test-playbook.md)
+- [Showcase Playbook](./guides/showcase-playbook.md)
+- [Demo Scenarios](./DEMO_SCENARIOS.md)
+- [Demo Plan](./DEMO_PLAN.md)
 - [Add a Tool](./playbooks/how-to-add-a-tool.md)
 - [Add a Skill](./playbooks/how-to-add-a-skill.md)
 - [Add a Channel](./playbooks/how-to-add-a-channel.md)
@@ -41,6 +48,9 @@ Promethea docs are organized for two audiences:
 
 ### Community
 - [Community Overview](./community/README.md)
+- [Open Source Launch Kit](./community/open-source-launch-kit.md)
+- [Outreach Copy](./OUTREACH_COPY.md)
+- [Presentation Layer Notes](./PRESENTATION_LAYER_NOTES.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Governance](../GOVERNANCE.md)
 - [Maintainers](../MAINTAINERS.md)

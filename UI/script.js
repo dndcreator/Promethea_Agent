@@ -486,6 +486,17 @@ Object.assign(I18N.zh, {
     ui_memory_backend_neo4j: "Neo4j（图数据库）",
     ui_memory_backend_sqlite_graph: "SQLite Graph（轻量）",
     ui_memory_backend_flat: "Flat Memory（兜底）",
+    ui_showcase: "展示",
+    ui_showcase_title: "开源展示",
+    ui_showcase_intro: "用于路演、上手与发布公告的产品演示场景。",
+    ui_showcase_card1_title: "运行健康演示",
+    ui_showcase_card1_desc: "一次性展示网关、记忆、工具与策略状态。",
+    ui_showcase_card2_title: "推理可视化闭环",
+    ui_showcase_card2_desc: "展示 ToT/ReAct 过程可见，以及纠偏与中止控制。",
+    ui_showcase_card3_title: "记忆与工作流可信性",
+    ui_showcase_card3_desc: "展示召回轨迹、写入决策与可恢复工作流。",
+    ui_showcase_copy: "复制演示命令",
+    ui_showcase_launch_doc: "发布文档",
     ui_reasoning_title: "推理可视化",
     ui_reasoning_steer_placeholder: "输入纠偏提示...",
     ui_reasoning_steer: "纠偏",
@@ -508,6 +519,17 @@ Object.assign(I18N.en, {
     ui_memory_backend_neo4j: "Neo4j (Graph)",
     ui_memory_backend_sqlite_graph: "SQLite Graph (Lightweight)",
     ui_memory_backend_flat: "Flat Memory (Fallback)",
+    ui_showcase: "Showcase",
+    ui_showcase_title: "Open Source Showcase",
+    ui_showcase_intro: "Product release scenarios for demos, onboarding, and launch announcements.",
+    ui_showcase_card1_title: "Runtime Health Demo",
+    ui_showcase_card1_desc: "Show gateway, memory, tools, and policy status in one pass.",
+    ui_showcase_card2_title: "Reasoning Visual Loop",
+    ui_showcase_card2_desc: "Demonstrate ToT/ReAct visibility, steer, and stop controls.",
+    ui_showcase_card3_title: "Memory + Workflow Trust",
+    ui_showcase_card3_desc: "Show recall traces, write decisions, and resumable workflow.",
+    ui_showcase_copy: "Copy Demo Commands",
+    ui_showcase_launch_doc: "Launch Doc",
     ui_reasoning_title: "Reasoning",
     ui_reasoning_steer_placeholder: "Enter steering note...",
     ui_reasoning_steer: "Steer",
@@ -590,6 +612,8 @@ class LanguageManager {
         if (logoutBtn) logoutBtn.title = t("ui_logout_title");
         const doctorBtn = document.getElementById("doctorBtn");
         if (doctorBtn) doctorBtn.title = t("ui_doctor_title");
+        const showcaseBtn = document.getElementById("showcaseBtn");
+        if (showcaseBtn) showcaseBtn.title = t("ui_showcase");
         const metricsBtn = document.getElementById("metricsBtn");
         if (metricsBtn) metricsBtn.title = t("ui_metrics_title");
         const settingsBtn = document.getElementById("settingsBtn");
@@ -597,6 +621,7 @@ class LanguageManager {
         const memoryGraphBtn = document.getElementById("memoryGraphBtn");
         if (memoryGraphBtn) memoryGraphBtn.title = t("ui_memory_graph_title");
         if (doctorBtn) doctorBtn.textContent = t("ui_doctor");
+        if (showcaseBtn) showcaseBtn.textContent = t("ui_showcase");
         if (metricsBtn) metricsBtn.textContent = t("ui_metrics");
         if (settingsBtn) settingsBtn.textContent = t("ui_settings");
         if (memoryGraphBtn) memoryGraphBtn.textContent = t("ui_memory_btn_short");
@@ -630,6 +655,26 @@ class LanguageManager {
         if (settingsTitle) settingsTitle.textContent = t("ui_settings");
         const memoryTitle = document.querySelector("#memoryGraphModal .modal-header h2");
         if (memoryTitle) memoryTitle.textContent = t("ui_memory");
+        const showcaseTitle = document.getElementById("showcaseTitle");
+        if (showcaseTitle) showcaseTitle.textContent = t("ui_showcase_title");
+        const showcaseIntro = document.getElementById("showcaseIntro");
+        if (showcaseIntro) showcaseIntro.textContent = t("ui_showcase_intro");
+        const showcaseCard1Title = document.getElementById("showcaseCard1Title");
+        if (showcaseCard1Title) showcaseCard1Title.textContent = t("ui_showcase_card1_title");
+        const showcaseCard1Desc = document.getElementById("showcaseCard1Desc");
+        if (showcaseCard1Desc) showcaseCard1Desc.textContent = t("ui_showcase_card1_desc");
+        const showcaseCard2Title = document.getElementById("showcaseCard2Title");
+        if (showcaseCard2Title) showcaseCard2Title.textContent = t("ui_showcase_card2_title");
+        const showcaseCard2Desc = document.getElementById("showcaseCard2Desc");
+        if (showcaseCard2Desc) showcaseCard2Desc.textContent = t("ui_showcase_card2_desc");
+        const showcaseCard3Title = document.getElementById("showcaseCard3Title");
+        if (showcaseCard3Title) showcaseCard3Title.textContent = t("ui_showcase_card3_title");
+        const showcaseCard3Desc = document.getElementById("showcaseCard3Desc");
+        if (showcaseCard3Desc) showcaseCard3Desc.textContent = t("ui_showcase_card3_desc");
+        const showcaseCopyBtn = document.getElementById("showcaseCopyBtn");
+        if (showcaseCopyBtn) showcaseCopyBtn.textContent = t("ui_showcase_copy");
+        const showcaseLaunchDocLink = document.getElementById("showcaseLaunchDocLink");
+        if (showcaseLaunchDocLink) showcaseLaunchDocLink.textContent = t("ui_showcase_launch_doc");
 
         const memorySearchInput = document.getElementById("memorySearchInput");
         if (memorySearchInput) memorySearchInput.placeholder = t("ui_memory_search_placeholder");
@@ -3802,6 +3847,48 @@ class MetricsManager {
     }
 }
 
+class ShowcaseManager {
+    constructor() {
+        this.modal = document.getElementById('showcaseModal');
+        this.btn = document.getElementById('showcaseBtn');
+        this.closeBtn = this.modal?.querySelector('.close-modal');
+        this.copyBtn = document.getElementById('showcaseCopyBtn');
+        this.bindEvents();
+    }
+
+    bindEvents() {
+        if (!this.btn || !this.modal) return;
+        this.btn.addEventListener('click', () => this.show());
+        this.closeBtn?.addEventListener('click', () => this.hide());
+        this.modal.addEventListener('click', (e) => {
+            if (e.target === this.modal) this.hide();
+        });
+        this.copyBtn?.addEventListener('click', () => this.copyDemoCommands());
+    }
+
+    show() {
+        this.modal.style.display = 'flex';
+    }
+
+    hide() {
+        this.modal.style.display = 'none';
+    }
+
+    async copyDemoCommands() {
+        const blocks = Array.from(this.modal?.querySelectorAll('.showcase-card pre') || []);
+        const text = blocks.map((node) => node.textContent || '').join('\n\n');
+        try {
+            await navigator.clipboard.writeText(text);
+            this.copyBtn.textContent = getCurrentLang() === 'en' ? 'Copied' : '已复制';
+            setTimeout(() => {
+                this.copyBtn.textContent = t("ui_showcase_copy");
+            }, 1200);
+        } catch (e) {
+            console.warn('copy demo commands failed:', e);
+        }
+    }
+}
+
 // 绯荤粺鑷锛圖octor锛夌鐞嗗櫒
 class DoctorManager {
     constructor(apiBaseUrl) {
@@ -4063,6 +4150,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const memoryViz = new MemoryGraphVisualization(app.apiBaseUrl);
         const memoryConsole = new MemoryConsoleManager(app.apiBaseUrl, memoryViz);
         const settingsManager = new SettingsManager(app.apiBaseUrl);
+        const showcaseManager = new ShowcaseManager();
         const metricsManager = new MetricsManager(app.apiBaseUrl);
         const doctorManager = new DoctorManager(app.apiBaseUrl);
         const avatarManager = new AvatarManager();
@@ -4089,6 +4177,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 settingsManager.show();
             });
         }
+        void showcaseManager;
         void metricsManager;
         void doctorManager;
         void avatarManager;

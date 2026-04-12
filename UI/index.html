@@ -81,6 +81,7 @@
                     </div>
                 </div>
                 <div class="terminal-controls">
+                    <button id="showcaseBtn" class="metrics-btn" title="Showcase">Showcase</button>
                     <button id="doctorBtn" class="doctor-btn" title="System doctor">Doctor</button>
                     <button id="metricsBtn" class="metrics-btn" title="Metrics">Metrics</button>
                     <button id="settingsBtn" class="settings-btn" title="Settings">Settings</button>
@@ -238,6 +239,47 @@
                         <div class="metric-value"><span id="sessionsCount">0</span>/<span id="messagesCount">0</span></div>
                         <div class="metric-sub">Uptime: <span id="uptime">0</span>s</div>
                     </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="showcaseModal" class="modal">
+        <div class="modal-content metrics-modal">
+            <div class="modal-header">
+                <h2 id="showcaseTitle">Open Source Showcase</h2>
+                <span class="close-modal">&times;</span>
+            </div>
+            <div class="modal-body">
+                <p id="showcaseIntro">
+                    Product release scenarios for demos, onboarding, and launch announcements.
+                </p>
+                <div class="showcase-grid" id="showcaseGrid">
+                    <div class="showcase-card">
+                        <h3 id="showcaseCard1Title">Runtime Health Demo</h3>
+                        <p id="showcaseCard1Desc">Show gateway, memory, tools, and policy status in one pass.</p>
+                        <pre>promethea status base
+promethea status services
+promethea doctor run</pre>
+                    </div>
+                    <div class="showcase-card">
+                        <h3 id="showcaseCard2Title">Reasoning Visual Loop</h3>
+                        <p id="showcaseCard2Desc">Demonstrate ToT/ReAct visibility, steer, and stop controls.</p>
+                        <pre>promethea reasoning list
+promethea reasoning watch &lt;tree_id&gt;
+promethea reasoning steer &lt;tree_id&gt; "focus constraints"</pre>
+                    </div>
+                    <div class="showcase-card">
+                        <h3 id="showcaseCard3Title">Memory + Workflow Trust</h3>
+                        <p id="showcaseCard3Desc">Show recall traces, write decisions, and resumable workflow.</p>
+                        <pre>promethea memory recall-runs --limit 10
+promethea workflow list
+promethea security report --limit 50</pre>
+                    </div>
+                </div>
+                <div class="showcase-actions">
+                    <button id="showcaseCopyBtn" class="btn-secondary" type="button">Copy Demo Commands</button>
+                    <a id="showcaseLaunchDocLink" class="btn-primary" target="_blank" href="https://github.com/dndcreator/Promethea_Agent/blob/main/docs/community/open-source-launch-kit.md">Launch Doc</a>
                 </div>
             </div>
         </div>
