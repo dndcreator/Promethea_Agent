@@ -1,13 +1,10 @@
 (function () {
     function getAuthHeaders(extra) {
-        const headers = extra ? { ...extra } : {};
-        const token = localStorage.getItem('auth_token');
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        return headers;
+        return window.AppHttp.buildAuthHeaders(extra);
     }
 
     function resolveApiBase() {
-        return 'http://127.0.0.1:8000';
+        return window.AppHttp.resolveApiBase();
     }
 
     function appendMessage(role, content) {
@@ -17,7 +14,7 @@
         messageDiv.className = `message ${role === 'user' ? 'user' : 'assistant'}`;
         const contentDiv = document.createElement('div');
         contentDiv.className = 'message-content';
-        contentDiv.innerHTML = String(content || '').replace(/\n/g, '<br>');
+        window.AppHttp.renderMultilineText(contentDiv, content || '');
         messageDiv.appendChild(contentDiv);
         chat.appendChild(messageDiv);
         chat.scrollTop = chat.scrollHeight;
@@ -168,7 +165,7 @@
                 if (style) form.append('tts_style', style);
                 if (speakerBoost) form.append('tts_use_speaker_boost', speakerBoost);
 
-                const res = await fetch(`${this.apiBase}/api/voice/ptt`, {
+                const res = await window.AppHttp.authFetch(`${this.apiBase}/api/voice/ptt`, {
                     method: 'POST',
                     headers: getAuthHeaders(),
                     body: form,

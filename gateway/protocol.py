@@ -6,8 +6,12 @@ Loosely inspired by the Clawdbot Gateway Protocol design.
 from enum import Enum
 from typing import Dict, Any, Optional, List, Union
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class MessageType(str, Enum):
@@ -201,7 +205,7 @@ class RequestMessage(BaseModel):
     method: RequestType
     params: Dict[str, Any] = Field(default_factory=dict)
     idempotency_key: Optional[str] = None  # Idempotency key
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=_utc_now)
     
 
 class ResponseMessage(BaseModel):
@@ -211,7 +215,7 @@ class ResponseMessage(BaseModel):
     ok: bool
     payload: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=_utc_now)
     
 
 class EventMessage(BaseModel):
@@ -220,7 +224,7 @@ class EventMessage(BaseModel):
     event: EventType
     payload: Dict[str, Any] = Field(default_factory=dict)
     seq: Optional[int] = None  # Event sequence number
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=_utc_now)
     
 
 # ============ Specific request payloads ============
@@ -381,7 +385,7 @@ class GatewayRequest(BaseModel):
     requested_skill: Optional[str] = None
     requested_workflow: Optional[str] = None
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=_utc_now)
 
     @classmethod
     def from_request(
@@ -472,7 +476,7 @@ class GatewayEvent(BaseModel):
     user_message: Optional[str] = None
     channel: str = "web"
     include_recent: bool = True
-    timestamp: datetime = Field(default_factory=datetime.now)
+    timestamp: datetime = Field(default_factory=_utc_now)
     source_module: str = "gateway"
     payload: Dict[str, Any] = Field(default_factory=dict)
     severity: str = "info"

@@ -62,15 +62,41 @@ async def get_status():
             "total_jobs_run": 0,
         }
     )
+    workflow_recovery = {"paused": 0, "failed": 0, "waiting_human": 0}
+    workflow_engine = getattr(gateway_server, "workflow_engine", None)
+    if workflow_engine is not None and hasattr(workflow_engine, "list_runs"):
+        try:
+            runs = workflow_engine.list_runs(limit=200)
+            if isinstance(runs, list):
+                for run in runs:
+                    if not isinstance(run, dict):
+                        continue
+                    status = str(run.get("status") or "").lower()
+                    if status == "paused":
+                        workflow_recovery["paused"] += 1
+                    elif status == "failed":
+                        workflow_recovery["failed"] += 1
+                    elif status == "waiting_human":
+                        workflow_recovery["waiting_human"] += 1
+        except Exception:
+            pass
     org_profile = {}
+    self_evolve_profile = {}
     config_service = getattr(gateway_server, "config_service", None)
     org_svc = getattr(gateway_server, "org_context_service", None)
+    self_evolve_svc = getattr(gateway_server, "self_evolve_module", None)
     if config_service and org_svc:
         try:
             merged = config_service.get_merged_config(None)
             org_profile = org_svc.resolve_org_profile(merged)
         except Exception:
             org_profile = {}
+    if config_service and self_evolve_svc:
+        try:
+            merged = config_service.get_merged_config(None)
+            self_evolve_profile = self_evolve_svc.resolve_profile(merged)
+        except Exception:
+            self_evolve_profile = {}
     return {
         "status": "running",
         "conversation_ready": conversation_ready,
@@ -82,7 +108,13 @@ async def get_status():
             "enabled_default": bool(org_profile.get("enabled", False)),
             "org_id_default": str(org_profile.get("org_id") or ""),
         },
+        "self_evolve": {
+            "service_ready": self_evolve_svc is not None,
+            "enabled_default": bool(self_evolve_profile.get("enabled", False)),
+            "core_capability": "controlled_code_evolution",
+        },
         "scheduler": scheduler_status,
+        "workflow_recovery": workflow_recovery,
         "startup": dict(state.startup_report or {}),
     }
 

@@ -174,6 +174,17 @@ class OrgContextService:
         connector = getattr(hot, "connector", None) if hot else None
         return connector
 
+    @staticmethod
+    def _backend_notice(backend: str) -> Dict[str, Any]:
+        backend_name = str(backend or "").strip().lower()
+        out = {"core_capability": "graph_structure", "backend": backend_name or "unknown"}
+        if backend_name != "neo4j":
+            out["notice"] = (
+                "Org brain is running in fallback mode. Core enterprise capability is graph-structured knowledge; "
+                "connect Neo4j for full graph recall and visualization fidelity."
+            )
+        return out
+
     async def ingest_document(
         self,
         *,
@@ -245,6 +256,7 @@ class OrgContextService:
             "accepted": accepted,
             "total_candidates": len(rows),
             "backend": "neo4j" if connector else "in_memory_fallback",
+            **self._backend_notice("neo4j" if connector else "in_memory_fallback"),
         }
 
     async def recall_for_turn(
@@ -329,9 +341,162 @@ class OrgContextService:
             label=_normalize_text(summary_label or "Organization context hints"),
             max_items=_as_int(summary_max_items, 8, minimum=1, maximum=50),
         )
+        payload.update(self._backend_notice(str(payload.get("backend") or "")))
 
         self._recall_cache[key] = {"_ts": now, "payload": payload}
         return payload
+
+    async def get_visual_graph(
+        self,
+        *,
+        org_id: str,
+        topic: str = "",
+        audience: str = "",
+        limit_nodes: int = 200,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        oid = _normalize_text(org_id)
+        q = _normalize_text(topic).lower()
+        aud = _normalize_text(audience)
+        lim = _as_int(limit_nodes, 200, minimum=1, maximum=500)
+
+        connector = self._resolve_connector()
+        if connector:
+            rows = connector.query(
+                """
+                MATCH (c:OrgConcept {org_id: $org_id})-[r:EXPRESSED_AS]->(e:OrgExpression {org_id: $org_id})
+                WHERE ($topic = ''
+                    OR toLower(c.name) CONTAINS $topic
+                    OR toLower(e.text) CONTAINS $topic)
+                  AND ($audience = '' OR e.audience = $audience)
+                RETURN c.id as concept_id,
+                       c.name as concept,
+                       e.id as expression_id,
+                       e.text as expression,
+                       e.audience as audience,
+                       e.register as register,
+                       coalesce(e.source_doc_id, c.last_source_doc_id, '') as source_doc_id,
+                       coalesce(e.confidence, r.confidence, 0.5) as confidence
+                ORDER BY confidence DESC
+                LIMIT $limit
+                """,
+                {
+                    "org_id": oid,
+                    "topic": q,
+                    "audience": aud,
+                    "limit": lim,
+                },
+            )
+            nodes: Dict[str, Dict[str, Any]] = {}
+            edges: List[Dict[str, Any]] = []
+            for row in rows or []:
+                concept_id = str(row.get("concept_id") or "")
+                expression_id = str(row.get("expression_id") or "")
+                if not concept_id or not expression_id:
+                    continue
+                concept_node_id = f"concept:{concept_id}"
+                expr_node_id = f"expression:{expression_id}"
+                if concept_node_id not in nodes:
+                    nodes[concept_node_id] = {
+                        "id": concept_node_id,
+                        "type": "concept",
+                        "label": str(row.get("concept") or concept_id),
+                        "org_id": oid,
+                    }
+                if expr_node_id not in nodes:
+                    nodes[expr_node_id] = {
+                        "id": expr_node_id,
+                        "type": "expression",
+                        "label": str(row.get("expression") or ""),
+                        "org_id": oid,
+                        "audience": str(row.get("audience") or ""),
+                        "register": str(row.get("register") or ""),
+                        "source_doc_id": str(row.get("source_doc_id") or ""),
+                    }
+                edges.append(
+                    {
+                        "id": f"edge:{concept_id}:{expression_id}",
+                        "type": "EXPRESSED_AS",
+                        "source": concept_node_id,
+                        "target": expr_node_id,
+                        "weight": _as_float(row.get("confidence", 0.5), 0.5),
+                    }
+                )
+            return {
+                "enabled": True,
+                "org_id": oid,
+                "topic": q,
+                "audience": aud,
+                "user_id": user_id,
+                "backend": "neo4j",
+                "nodes": list(nodes.values()),
+                "edges": edges,
+                "stats": {"nodes": len(nodes), "edges": len(edges)},
+                **self._backend_notice("neo4j"),
+            }
+
+        async with self._lock:
+            rows = list(self._fallback_by_org.get(oid) or [])
+        if q:
+            rows = [
+                row
+                for row in rows
+                if q in str(row.get("concept") or "").lower() or q in str(row.get("expression") or "").lower()
+            ]
+        if aud:
+            rows = [row for row in rows if str(row.get("audience") or "") == aud]
+        rows.sort(key=lambda row: -_as_float(row.get("confidence", 0.5), 0.5))
+        rows = rows[:lim]
+
+        nodes: Dict[str, Dict[str, Any]] = {}
+        edges: List[Dict[str, Any]] = []
+        for idx, row in enumerate(rows):
+            concept = _normalize_text(row.get("concept"))
+            expression = _normalize_text(row.get("expression"))
+            if not concept or not expression:
+                continue
+            concept_id = _hash_id("concept", f"{oid}|{concept}")
+            expression_id = _hash_id("expression", f"{oid}|{concept}|{expression}|{idx}")
+            concept_node_id = f"concept:{concept_id}"
+            expr_node_id = f"expression:{expression_id}"
+            if concept_node_id not in nodes:
+                nodes[concept_node_id] = {
+                    "id": concept_node_id,
+                    "type": "concept",
+                    "label": concept,
+                    "org_id": oid,
+                }
+            if expr_node_id not in nodes:
+                nodes[expr_node_id] = {
+                    "id": expr_node_id,
+                    "type": "expression",
+                    "label": expression,
+                    "org_id": oid,
+                    "audience": str(row.get("audience") or ""),
+                    "register": str(row.get("register") or ""),
+                    "source_doc_id": str(row.get("source_doc_id") or ""),
+                }
+            edges.append(
+                {
+                    "id": f"edge:{concept_id}:{expression_id}",
+                    "type": "EXPRESSED_AS",
+                    "source": concept_node_id,
+                    "target": expr_node_id,
+                    "weight": _as_float(row.get("confidence", 0.5), 0.5),
+                }
+            )
+        return {
+            "enabled": True,
+            "org_id": oid,
+            "topic": q,
+            "audience": aud,
+            "user_id": user_id,
+            "backend": "in_memory_fallback",
+            "nodes": list(nodes.values()),
+            "edges": edges,
+            "stats": {"nodes": len(nodes), "edges": len(edges)},
+            **self._backend_notice("in_memory_fallback"),
+        }
 
     async def _extract_context_items(
         self,

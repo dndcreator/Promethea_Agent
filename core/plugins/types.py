@@ -29,6 +29,8 @@ class PluginManifest(BaseModel):
 
     # Moltbot-style: require a config schema field even if we don't fully validate yet
     config_schema: Dict[str, Any] = Field(default_factory=dict, alias="configSchema")
+    ui_schema: Dict[str, Any] = Field(default_factory=dict, alias="uiSchema")
+    capabilities: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PluginCandidate(BaseModel):
@@ -64,6 +66,9 @@ class PluginRecord(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     version: Optional[str] = None
+    config_schema: Dict[str, Any] = Field(default_factory=dict)
+    ui_schema: Dict[str, Any] = Field(default_factory=dict)
+    capabilities: Dict[str, Any] = Field(default_factory=dict)
 
 
 class PluginRegistry(BaseModel):

@@ -166,8 +166,8 @@ References:
 
 References:
 
-- [docs/reference/http-api.md](docs/reference/http-api.md)
-- [docs/reference/cli.md](docs/reference/cli.md)
+- [docs/api-reference.md](docs/api-reference.md)
+- [docs/cli-reference.md](docs/cli-reference.md)
 - [UI/README.md](UI/README.md)
 
 ## Benchmark and Validation (Current)

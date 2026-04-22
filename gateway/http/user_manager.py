@@ -3,7 +3,7 @@ import os
 import uuid
 import shutil
 import tempfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -83,7 +83,7 @@ class UserManager:
                 "password_hash": password_hash,
                 "agent_name": agent_name,
                 "user_id": raw_uuid,
-                "created_at": datetime.now().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
             },
         )
 
@@ -192,7 +192,7 @@ class UserManager:
             # Auto-heal corrupted/truncated config files to avoid repeated runtime failures.
             try:
                 if config_path.exists():
-                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
                     backup_path = config_path.with_suffix(f".corrupt-{stamp}.json")
                     shutil.move(str(config_path), str(backup_path))
                     logger.warning(f"Corrupted user config moved to backup: {backup_path}")

@@ -14,6 +14,13 @@ from .conversation_pipeline import run_staged_pipeline
 
 
 class ConversationService:
+    _LANGUAGE_POLICY_BLOCK = (
+        "Language policy:\n"
+        "- Default to the same language as the user's latest message.\n"
+        "- If the user explicitly asks for a different language, follow that language.\n"
+        "- Do not use UI language as a response-language signal."
+    )
+
     """Gateway conversation orchestration service."""
 
     def __init__(
@@ -465,9 +472,19 @@ class ConversationService:
             logger.debug("ConversationService: Failed to get config: {}", e)
             from config import config
 
-            base_system_prompt = getattr(config.prompts, "Promethea_system_prompt", "")
+            prompts_cfg = getattr(config, "prompts", None)
+            base_system_prompt = getattr(prompts_cfg, "Promethea_system_prompt", "")
 
-        return base_system_prompt, user_config
+        return self._append_language_policy(base_system_prompt), user_config
+
+    def _append_language_policy(self, prompt: str) -> str:
+        text = str(prompt or "").strip()
+        marker = "Language policy:"
+        if marker.lower() in text.lower():
+            return text
+        if not text:
+            return self._LANGUAGE_POLICY_BLOCK
+        return f"{text}\n\n{self._LANGUAGE_POLICY_BLOCK}"
 
     async def prepare_chat_turn(
         self,

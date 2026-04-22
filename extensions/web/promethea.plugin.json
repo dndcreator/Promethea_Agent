@@ -11,5 +11,15 @@
       "channel_config": { "type": "object" }
     },
     "additionalProperties": true
+  },
+  "uiSchema": {
+    "fields": [
+      { "key": "enabled", "type": "boolean", "label": "Enable Web Channel" },
+      { "key": "channel_config", "type": "json", "label": "Channel Config (JSON)" }
+    ]
+  },
+  "capabilities": {
+    "surfaces": ["web_ui"],
+    "supports_hot_reload": true
   }
 }

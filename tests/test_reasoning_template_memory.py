@@ -33,9 +33,12 @@ def _sample_tree_payload():
             {
                 "kind": "tool",
                 "title": "tool: docs.search",
+                "status": "succeeded",
+                "verifier_state": {"ok": True, "confidence": 0.98, "reason": "matched"},
                 "metadata": {
                     "service_name": "docs",
                     "tool_name": "search",
+                    "args": {"q": "release checklist"},
                 },
             },
         ],
@@ -75,7 +78,7 @@ def test_reasoning_template_memory_record_and_match():
 
         assert (case_dir / "reasoning_templates" / "u1.templates.json").exists()
         assert (case_dir / "reasoning_templates" / "u1.paths.jsonl").exists()
-        assert (case_dir / "memory" / "moirai_runs" / "opro_profile_u1.json").exists()
+        assert (case_dir / "moirai_runs" / "opro_profile_u1.json").exists()
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
 
@@ -114,6 +117,40 @@ def test_reasoning_template_memory_hints_include_preferred_tools():
         shutil.rmtree(case_dir, ignore_errors=True)
 
 
+def test_reasoning_template_memory_matches_action_template():
+    case_dir = _make_case_dir()
+    try:
+        store = ReasoningTemplateMemory(base_dir=case_dir / "reasoning_templates")
+        store.record_success(
+            user_id="u1",
+            session_id="s1",
+            user_message="Build a release checklist for deployment",
+            assistant_output="ok",
+            gate={"needs_reasoning": True},
+            policy={},
+            tree_payload=_sample_tree_payload(),
+        )
+
+        matched = store.match_action_template(
+            user_id="u1",
+            task="create deployment checklist",
+            tool_intent="search release checklist",
+        )
+        assert matched["matched"] is True
+        assert isinstance(matched["actions"], list)
+        assert matched["actions"]
+        first = matched["actions"][0]
+        assert first["service_name"] == "docs"
+        assert first["tool_name"] == "search"
+        assert isinstance(first["args"], dict)
+        assert isinstance(first.get("action_intent"), str)
+        assert isinstance(first.get("capability"), str)
+        assert isinstance(matched.get("mind_graph"), dict)
+        assert isinstance(matched["mind_graph"].get("nodes"), list)
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
 def test_reasoning_template_memory_records_opro_episode_run():
     case_dir = _make_case_dir()
     try:
@@ -138,7 +175,7 @@ def test_reasoning_template_memory_records_opro_episode_run():
             tree_payload=_sample_tree_payload(),
         )
 
-        episode_path = case_dir / "memory" / "moirai_runs" / "opro_episode_u1.json"
+        episode_path = case_dir / "moirai_runs" / "opro_episode_u1.json"
         assert episode_path.exists()
         payload = json.loads(episode_path.read_text(encoding="utf-8"))
         assert payload["metadata"]["trial_count"] >= 2

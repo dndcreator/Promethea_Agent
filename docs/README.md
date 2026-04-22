@@ -24,10 +24,10 @@ Promethea docs are organized for two audiences:
 
 ### Reference
 - [Reference Overview](./reference/README.md)
-- [HTTP API](./reference/http-api.md)
-- [CLI](./reference/cli.md)
+- [HTTP API](./api-reference.md)
+- [CLI](./cli-reference.md)
 - [Protocol Surface](./reference/protocol-surface.md)
-- [Official Tools](./reference/official-tools.md)
+- [Official Tools](./official-tools.md)
 - [Configuration Contract](./reference/config-contract.md)
 
 ### Guides
@@ -42,7 +42,7 @@ Promethea docs are organized for two audiences:
 
 ### Operations
 - [Operations Overview](./operations/README.md)
-- [Deployment](./operations/deployment.md)
+- [Deployment](./deployment.md)
 - [Release Readiness](./operations/release-readiness.md)
 - [Testing Strategy](./testing-strategy.md)
 

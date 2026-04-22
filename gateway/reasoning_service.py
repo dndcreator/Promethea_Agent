@@ -1820,6 +1820,31 @@ class ReasoningService:
         catalog = await self.tool_service.get_tool_catalog()
         if not catalog:
             return ""
+        replay_failure_observation = ""
+        replay_selected = await self._select_replay_tool(
+            user_id=user_id,
+            user_message=user_message,
+            step=step,
+            catalog=catalog,
+            user_config=user_config,
+        )
+        if replay_selected.get("use_tool"):
+            replay_payload = await self._execute_selected_tool(
+                tree=tree,
+                node=node,
+                session_id=session_id,
+                user_id=user_id,
+                selected=replay_selected,
+                step=step,
+                context_fields=context_fields,
+                user_config=user_config,
+                run_context=run_context,
+                policy=policy,
+            )
+            if replay_payload.get("ok"):
+                return str(replay_payload.get("observation", "") or "")
+            replay_failure_observation = str(replay_payload.get("observation", "") or "").strip()
+
         selected = await self._select_tool(
             step=step,
             user_message=user_message,
@@ -1829,8 +1854,175 @@ class ReasoningService:
             user_id=user_id,
         )
         if not selected.get("use_tool"):
-            return ""
+            return replay_failure_observation
 
+        selected_payload = await self._execute_selected_tool(
+            tree=tree,
+            node=node,
+            session_id=session_id,
+            user_id=user_id,
+            selected=selected,
+            step=step,
+            context_fields=context_fields,
+            user_config=user_config,
+            run_context=run_context,
+            policy=policy,
+        )
+        selected_observation = str(selected_payload.get("observation", "") or "").strip()
+        if selected_payload.get("ok"):
+            return selected_observation
+        if replay_failure_observation:
+            if selected_observation:
+                return f"{replay_failure_observation}\n\n{selected_observation}".strip()
+            return replay_failure_observation
+        return selected_observation
+
+    async def _select_replay_tool(
+        self,
+        *,
+        user_id: str,
+        user_message: str,
+        step: Dict[str, Any],
+        catalog: List[Dict[str, Any]],
+        user_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if not self.template_memory:
+            return {"use_tool": False}
+        try:
+            matched = self.template_memory.match_action_template(
+                user_id=user_id,
+                task=user_message,
+                tool_intent=str(step.get("tool_intent") or step.get("goal") or "").strip(),
+            )
+        except Exception:
+            return {"use_tool": False}
+        actions = matched.get("actions", []) if isinstance(matched, dict) else []
+        mind_graph = matched.get("mind_graph") if isinstance(matched, dict) else None
+        if not isinstance(actions, list) or not actions:
+            return {"use_tool": False}
+        action = actions[0] if isinstance(actions[0], dict) else {}
+        if isinstance(mind_graph, dict) and mind_graph:
+            llm_compiled = await self._llm_compile_replay_tool(
+                user_message=user_message,
+                step=step,
+                mind_graph=mind_graph,
+                catalog=catalog,
+                user_config=user_config,
+                user_id=user_id,
+                fallback_args=action.get("args") if isinstance(action.get("args"), dict) else {},
+            )
+            normalized_llm = self._normalize_selected_tool(llm_compiled, catalog)
+            if normalized_llm.get("use_tool"):
+                normalized_llm["why"] = "template_mind_graph_llm_compile"
+                return normalized_llm
+        replay_step = {
+            "title": "replay action by intent",
+            "goal": str(action.get("action_intent") or step.get("goal") or "").strip(),
+            "tool_intent": (
+                f"{str(action.get('action_intent') or '').strip()} "
+                f"{str(action.get('capability') or '').strip()} "
+                f"{str(step.get('tool_intent') or '').strip()}"
+            ).strip(),
+            "requires_tools": True,
+        }
+        strategy_pick = self.tool_strategy.recommend(
+            step=replay_step,
+            user_message=user_message,
+            observations=[],
+            catalog=catalog,
+            strategy_hints={},
+        )
+        normalized_strategy = self._normalize_selected_tool(
+            strategy_pick if isinstance(strategy_pick, dict) else {},
+            catalog,
+        )
+        if normalized_strategy.get("use_tool"):
+            merged_args = action.get("args") if isinstance(action.get("args"), dict) else {}
+            strategy_args = normalized_strategy.get("args") if isinstance(normalized_strategy.get("args"), dict) else {}
+            normalized_strategy["args"] = strategy_args if strategy_args else merged_args
+            normalized_strategy["why"] = "template_semantic_replay"
+            return normalized_strategy
+
+        selected = {
+            "use_tool": True,
+            "tool_type": "mcp",
+            "service_name": str(action.get("service_name", "")).strip(),
+            "tool_name": str(action.get("tool_name", "")).strip(),
+            "args": action.get("args") if isinstance(action.get("args"), dict) else {},
+            "why": "template_exact_replay",
+        }
+        normalized = self._normalize_selected_tool(selected, catalog)
+        if normalized.get("use_tool"):
+            return normalized
+        return {"use_tool": False}
+
+    async def _llm_compile_replay_tool(
+        self,
+        *,
+        user_message: str,
+        step: Dict[str, Any],
+        mind_graph: Dict[str, Any],
+        catalog: List[Dict[str, Any]],
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+        fallback_args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        prompt = (
+            "Compile one executable tool call for the current step from an execution mind graph.\n"
+            "Prefer capability/intent alignment over historical exact tool binding.\n"
+            "Return strict JSON: "
+            "{\"use_tool\":bool,\"tool_type\":string,\"service_name\":string,\"tool_name\":string,"
+            "\"args\":object,\"why\":string}."
+        )
+        catalog_rows = [
+            {
+                "tool_type": str(item.get("tool_type", "mcp")),
+                "service_name": str(item.get("service_name", "") or ""),
+                "tool_name": str(item.get("tool_name", "") or ""),
+                "description": str(item.get("description", "") or ""),
+            }
+            for item in (catalog or [])[:40]
+            if isinstance(item, dict)
+        ]
+        payload = {
+            "task": user_message,
+            "current_step": {
+                "title": str(step.get("title", "") or ""),
+                "goal": str(step.get("goal", "") or ""),
+                "tool_intent": str(step.get("tool_intent", "") or ""),
+            },
+            "mind_graph": {
+                "goal": str(mind_graph.get("goal", "") or ""),
+                "nodes": mind_graph.get("nodes", [])[:12] if isinstance(mind_graph.get("nodes"), list) else [],
+                "edges": mind_graph.get("edges", [])[:18] if isinstance(mind_graph.get("edges"), list) else [],
+            },
+            "available_tools": catalog_rows,
+            "fallback_args": dict(fallback_args or {}),
+        }
+        result = await self._call_json(
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            user_config=user_config,
+            user_id=user_id,
+        )
+        return result if isinstance(result, dict) else {"use_tool": False}
+
+    async def _execute_selected_tool(
+        self,
+        *,
+        tree: ReasoningTree,
+        node: ReasoningNode,
+        session_id: str,
+        user_id: str,
+        selected: Dict[str, Any],
+        step: Dict[str, Any],
+        context_fields: Dict[str, Any],
+        user_config: Optional[Dict[str, Any]],
+        run_context: Optional[Any],
+        policy: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
         tool_type = selected.get("tool_type") or "mcp"
         service_name = selected.get("service_name") or selected.get("tool_name")
         tool_name = selected.get("tool_name") or service_name
@@ -2025,9 +2217,13 @@ class ReasoningService:
         )
 
         if verify_ok:
-            return child.observation
+            return {"ok": True, "observation": child.observation}
         reason = str(verify.get("reason", "") or "").strip()
-        return f"[tool verification failed] {reason}\n{child.observation}"
+        return {
+            "ok": False,
+            "observation": f"[tool verification failed] {reason}\n{child.observation}",
+            "reason": reason,
+        }
 
     async def _select_tool(
         self,

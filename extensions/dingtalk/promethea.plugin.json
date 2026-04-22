@@ -1,4 +1,4 @@
-{
+﻿{
   "id": "dingtalk",
   "kind": "channel",
   "name": "DingTalk Channel",
@@ -11,6 +11,15 @@
       "channel_config": { "type": "object" }
     },
     "additionalProperties": true
+  },
+  "uiSchema": {
+    "fields": [
+      { "key": "enabled", "type": "boolean", "label": "Enable DingTalk Channel" },
+      { "key": "channel_config", "type": "json", "label": "Channel Config (JSON)" }
+    ]
+  },
+  "capabilities": {
+    "surfaces": ["dingtalk"],
+    "supports_hot_reload": true
   }
 }
-

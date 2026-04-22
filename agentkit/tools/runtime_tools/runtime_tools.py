@@ -168,9 +168,18 @@ class RuntimeToolsService:
         raise ValueError(f"unsupported message action: {action}")
 
     async def plugins_action(self, action: str = "list") -> Dict[str, Any]:
+        integration = get_gateway_integration()
+        if integration and hasattr(integration, "maybe_refresh_plugins"):
+            try:
+                await integration.maybe_refresh_plugins(force=(action == "refresh"))
+            except Exception:
+                pass
         registry = get_active_plugin_registry()
         if not registry:
             return {"ok": True, "total": 0, "plugins": []}
+
+        if action == "refresh":
+            return {"ok": True, "reloaded": True, "total": len(registry.plugins)}
 
         if action == "list":
             plugins: List[Dict[str, Any]] = []

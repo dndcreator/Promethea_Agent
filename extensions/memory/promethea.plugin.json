@@ -1,4 +1,4 @@
-{
+﻿{
   "id": "memory",
   "kind": "memory",
   "name": "Neo4j Memory",
@@ -10,6 +10,14 @@
       "enabled": { "type": "boolean" }
     },
     "additionalProperties": true
+  },
+  "uiSchema": {
+    "fields": [
+      { "key": "enabled", "type": "boolean", "label": "Enable Memory Plugin" }
+    ]
+  },
+  "capabilities": {
+    "surfaces": ["memory_runtime"],
+    "supports_hot_reload": true
   }
 }
-

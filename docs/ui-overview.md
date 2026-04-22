@@ -25,6 +25,7 @@ UI entrypoint:
 - Sensitive values are redacted in responses and env-only secret keys are ignored on save.
 - `persona.soul` is intentionally excluded from editable form submission.
 - The backend may evolve `persona.soul.content` automatically; UI only displays it.
+- This keeps soul evolution isolated from manual prompt edits while still giving visibility.
 
 ## Memory-related behavior in UI
 
@@ -43,6 +44,7 @@ curl "http://127.0.0.1:8000/api/health/memory"
 - No full parity with all low-level API and internal debug endpoints.
 - Telegram bot runtime setup is not managed through this UI.
 - Some operational tasks (bulk export/migration scripts) are playbook/API driven.
+- Procedural memory internals (ExecutionMindGraph / basal_ganglia templates) are currently backend-visible but not fully first-class in UI editing.
 
 ## Related docs
 

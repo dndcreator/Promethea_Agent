@@ -1,5 +1,5 @@
 ﻿import pytest
-
+from unittest.mock import AsyncMock
 from gateway.reasoning_service import ReasoningService
 
 
@@ -20,6 +20,9 @@ class DummyTemplateMemory:
 
     def get_strategy_hints(self, *, user_id):
         return {}
+
+    def match_action_template(self, *, user_id, task, tool_intent=""):
+        return {"matched": False, "score": 0.0, "actions": []}
 
 
 @pytest.mark.asyncio
@@ -247,6 +250,18 @@ class DummyToolService:
         return {"run_id": "wf_test"}
 
 
+class DummyToolCatalogService(DummyToolService):
+    async def get_tool_catalog(self):
+        return [
+            {
+                "tool_type": "mcp",
+                "service_name": "computer_control",
+                "tool_name": "browser_action",
+                "description": "browser actions",
+            }
+        ]
+
+
 @pytest.mark.asyncio
 async def test_resolve_policy_normalizes_moirai_flags():
     svc = ReasoningService(conversation_core=DummyConversationCore())
@@ -463,5 +478,129 @@ async def test_decide_runtime_outcome_hard_block_fails_without_progress(monkeypa
     )
 
     assert result["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_step_replays_template_action_then_falls_back(monkeypatch):
+    svc = ReasoningService(
+        conversation_core=DummyConversationCore(),
+        tool_service=DummyToolCatalogService(),
+        template_memory=DummyTemplateMemory(),
+    )
+    tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="task")
+    node = svc._add_node(tree, parent_id=tree.root_node_id, kind="thought", title="step")
+    step = {"goal": "open page", "tool_intent": "click login", "requires_tools": True}
+
+    monkeypatch.setattr(
+        svc,
+        "_select_replay_tool",
+        AsyncMock(
+            return_value={
+                "use_tool": True,
+                "tool_type": "mcp",
+                "service_name": "computer_control",
+                "tool_name": "browser_action",
+                "args": {"action": "click", "selector": "#login"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        svc,
+        "_select_tool",
+        AsyncMock(
+            return_value={
+                "use_tool": True,
+                "tool_type": "mcp",
+                "service_name": "computer_control",
+                "tool_name": "browser_action",
+                "args": {"action": "click", "selector": "#login2"},
+            }
+        ),
+    )
+    calls = {"n": 0}
+
+    async def fake_execute_selected_tool(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"ok": False, "observation": "[tool verification failed] first"}
+        return {"ok": True, "observation": "ok after fallback"}
+
+    monkeypatch.setattr(svc, "_execute_selected_tool", fake_execute_selected_tool)
+    result = await svc._run_tool_step(
+        tree=tree,
+        node=node,
+        session_id="s1",
+        user_id="u1",
+        step=step,
+        user_message="open the dashboard",
+        observations=[],
+        user_config={},
+        policy={"workflow_tool_bridge": False},
+        run_context=None,
+    )
+    assert result == "ok after fallback"
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_select_replay_tool_prefers_semantic_mapping_over_exact_tool(monkeypatch):
+    svc = ReasoningService(
+        conversation_core=DummyConversationCore(),
+        template_memory=DummyTemplateMemory(),
+    )
+    monkeypatch.setattr(
+        svc.template_memory,
+        "match_action_template",
+        lambda **kwargs: {
+            "matched": True,
+            "score": 0.82,
+            "actions": [
+                {
+                    "service_name": "legacy_web",
+                    "tool_name": "legacy_click",
+                    "args": {"action": "click", "selector": "#login"},
+                    "action_intent": "open website and click login button",
+                    "capability": "ui_interaction",
+                }
+            ],
+            "mind_graph": {
+                "goal": "open dashboard",
+                "nodes": [{"id": "n1", "intent": "click login", "capability": "ui_interaction"}],
+                "edges": [],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        svc,
+        "_llm_compile_replay_tool",
+        AsyncMock(
+            return_value={
+                "use_tool": True,
+                "tool_type": "mcp",
+                "service_name": "computer_control",
+                "tool_name": "browser_action",
+                "args": {"action": "click", "selector": "#login"},
+            }
+        ),
+    )
+    catalog = [
+        {
+            "tool_type": "mcp",
+            "service_name": "computer_control",
+            "tool_name": "browser_action",
+            "description": "browser goto click type",
+        }
+    ]
+    selected = await svc._select_replay_tool(
+        user_id="u1",
+        user_message="open dashboard and click login",
+        step={"goal": "login", "tool_intent": "click login"},
+        catalog=catalog,
+        user_config={},
+    )
+    assert selected["use_tool"] is True
+    assert selected["service_name"] == "computer_control"
+    assert selected["tool_name"] == "browser_action"
+    assert selected["why"] == "template_mind_graph_llm_compile"
 
 

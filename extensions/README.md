@@ -25,6 +25,21 @@ extensions/<plugin_name>/
 3. `plugin.py` registration entry is loaded.
 4. Capability is registered to plugin runtime registry.
 
+## Drop-In Trial (No Restart)
+
+- Put a new plugin folder under `extensions/<your_plugin>/` with:
+  - `promethea.plugin.json`
+  - `plugin.py` (or `__init__.py`)
+- On the next API request, runtime performs a throttled plugin refresh check.
+- If changed, the new plugin is auto-registered into the active registry.
+- For channel plugins, newly discovered channels are hot-registered and auto-started when allowed by gateway config.
+
+Plugin ops endpoints:
+
+- `GET /api/plugins/catalog`
+- `POST /api/plugins/validate`
+- `POST /api/plugins/apply`
+
 ## Engineering Rules
 
 - Plugin init failures should degrade gracefully and not crash the full runtime.

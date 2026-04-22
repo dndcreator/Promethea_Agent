@@ -28,14 +28,47 @@ class PluginLoadOptions:
 _registry_cache: Dict[str, PluginRegistry] = {}
 
 
-def _build_cache_key(workspace_dir: str, cfg: Dict[str, Any]) -> str:
-    raw = f"{os.path.abspath(workspace_dir)}::{cfg}"
+def _build_extensions_signature(workspace_dir: str, extensions_dir: str) -> str:
+    root = os.path.join(os.path.abspath(workspace_dir), extensions_dir)
+    if not os.path.isdir(root):
+        return "no-extensions-dir"
+
+    rows: list[str] = []
+    try:
+        for name in sorted(os.listdir(root)):
+            plugin_root = os.path.join(root, name)
+            if not os.path.isdir(plugin_root):
+                continue
+
+            marker_parts = [name]
+            for rel in ("promethea.plugin.json", "plugin.py", "__init__.py"):
+                fp = os.path.join(plugin_root, rel)
+                if os.path.exists(fp):
+                    try:
+                        st = os.stat(fp)
+                        marker_parts.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
+                    except OSError:
+                        marker_parts.append(f"{rel}:stat-error")
+                else:
+                    marker_parts.append(f"{rel}:missing")
+            rows.append("|".join(marker_parts))
+    except OSError:
+        return "extensions-scan-error"
+
+    if not rows:
+        return "no-plugins"
+    return hashlib.sha256("||".join(rows).encode("utf-8")).hexdigest()
+
+
+def _build_cache_key(workspace_dir: str, cfg: Dict[str, Any], extensions_dir: str = "extensions") -> str:
+    ext_sig = _build_extensions_signature(workspace_dir, extensions_dir)
+    raw = f"{os.path.abspath(workspace_dir)}::{extensions_dir}::{cfg}::{ext_sig}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def load_promethea_plugins(options: PluginLoadOptions) -> PluginRegistry:
     cfg = options.config or {}
-    cache_key = _build_cache_key(options.workspace_dir, cfg)
+    cache_key = _build_cache_key(options.workspace_dir, cfg, options.extensions_dir)
     if options.cache and cache_key in _registry_cache:
         reg = _registry_cache[cache_key]
         set_active_plugin_registry(reg, cache_key)
@@ -69,6 +102,9 @@ def load_promethea_plugins(options: PluginLoadOptions) -> PluginRegistry:
                     name=manifest.name,
                     description=manifest.description,
                     version=manifest.version,
+                    config_schema=dict(manifest.config_schema or {}),
+                    ui_schema=dict(manifest.ui_schema or {}),
+                    capabilities=dict(manifest.capabilities or {}),
                 )
             )
             continue
@@ -89,6 +125,9 @@ def load_promethea_plugins(options: PluginLoadOptions) -> PluginRegistry:
             name=manifest.name,
             description=manifest.description,
             version=manifest.version,
+            config_schema=dict(manifest.config_schema or {}),
+            ui_schema=dict(manifest.ui_schema or {}),
+            capabilities=dict(manifest.capabilities or {}),
         )
         registry.plugins.append(record)
 

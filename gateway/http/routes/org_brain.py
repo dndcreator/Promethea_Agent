@@ -35,6 +35,13 @@ class OrgRecallRequest(BaseModel):
     top_k: Optional[int] = Field(default=None, ge=1, le=50)
 
 
+class OrgGraphRequest(BaseModel):
+    org_id: Optional[str] = None
+    topic: Optional[str] = None
+    audience: Optional[str] = None
+    limit_nodes: int = Field(default=200, ge=1, le=500)
+
+
 def _decode_upload_to_text(filename: str, content: bytes, *, allowed_suffixes: Optional[set[str]] = None) -> str:
     suffix = Path(str(filename or "")).suffix.lower()
     allowed = set(allowed_suffixes or {".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"})
@@ -127,6 +134,13 @@ async def org_brain_status(current_user_id: str = Depends(get_current_user_id)) 
     svc, config_service = _get_org_service()
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
+    connector = svc._resolve_connector() if hasattr(svc, "_resolve_connector") else None
+    backend = "neo4j" if connector else "in_memory_fallback"
+    notice = (
+        None
+        if backend == "neo4j"
+        else "Org brain is in fallback mode; core enterprise capability is graph-structured knowledge on Neo4j."
+    )
     return {
         "status": "success",
         "user_id": current_user_id,
@@ -136,6 +150,9 @@ async def org_brain_status(current_user_id: str = Depends(get_current_user_id)) 
             "recall_priority": str(profile.get("recall_priority") or "blend"),
             "confirmation_queue": bool(profile.get("confirmation_queue")),
             "audience_default": str(profile.get("audience_default") or ""),
+            "core_capability": "graph_structure",
+            "backend": backend,
+            "notice": notice,
         },
     }
 
@@ -242,5 +259,28 @@ async def org_brain_recall(
         recall_priority=str(profile.get("recall_priority") or "blend"),
         summary_label=str(profile.get("summary_label") or "Organization context hints"),
         summary_max_items=int(profile.get("summary_max_items") or 8),
+    )
+    return {"status": "success", "user_id": current_user_id, **payload}
+
+
+@router.post("/graph")
+async def org_brain_graph(
+    request: OrgGraphRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    profile = svc.resolve_org_profile(merged)
+    org_id = _resolve_org_id(request_org_id=request.org_id, merged_config=merged)
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
+    if not org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    payload = await svc.get_visual_graph(
+        org_id=org_id,
+        topic=str(request.topic or ""),
+        audience=str(request.audience or ""),
+        limit_nodes=int(request.limit_nodes or 200),
+        user_id=current_user_id,
     )
     return {"status": "success", "user_id": current_user_id, **payload}

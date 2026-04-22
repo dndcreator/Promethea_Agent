@@ -21,7 +21,8 @@ def load_plugin_manifest(root_dir: str) -> Tuple[bool, str, PluginManifest | str
     if not os.path.exists(manifest_path):
         return False, manifest_path, f"plugin manifest not found: {manifest_path}"
     try:
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        # Accept UTF-8 with or without BOM from user-authored plugin manifests.
+        with open(manifest_path, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
     except Exception as e:
         return False, manifest_path, f"failed to parse plugin manifest: {e}"

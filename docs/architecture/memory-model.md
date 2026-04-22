@@ -103,3 +103,33 @@ Operational rules:
 - hot writes can be deferred and replayed from raw log
 - idle/background consolidation improves warm/cold quality
 - replay checkpoint (`memory/raw_log.state.json`) supports crash recovery and abrupt-exit continuity
+
+## Procedural Memory (Basal Ganglia)
+
+In addition to user memory layers above, runtime now persists procedural reasoning/action assets under:
+
+- `brain/basal_ganglia/reasoning_templates/*.templates.json`
+- `brain/basal_ganglia/reasoning_templates/*.paths.jsonl`
+- `brain/basal_ganglia/moirai_runs/*.json`
+
+These artifacts are not generic chat memory. They are "how to do this class of task" assets:
+
+- successful reasoning templates
+- action templates
+- execution mind graph snapshots
+- optimization profile episodes
+
+## ExecutionMindGraph (LLM-facing procedural graph)
+
+Each successful reasoning template may include `execution_mind_graph`:
+
+- `goal`
+- `nodes` (intent/capability-oriented action nodes)
+- `edges` (normal/fallback transitions)
+- `fallback_policies`
+
+Design intent:
+
+- store intent/capability, not hard-bind to one specific tool
+- replay should prefer semantic capability match, then exact historical tool as fallback
+- failed replay should re-enter reasoning and re-plan dynamically

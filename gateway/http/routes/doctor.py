@@ -10,6 +10,7 @@ from typing import Any, Dict
 from fastapi import APIRouter
 
 import config as config_module
+from gateway.config_migrations import collect_deprecation_warnings, migrate_config as migrate_config_schema
 from .. import state
 from ..dispatcher import get_gateway_server
 
@@ -226,6 +227,11 @@ async def migrate_config() -> Dict[str, Any]:
     if data.get("memory", {}).get("api", {}).get("api_key"):
         data["memory"]["api"]["api_key"] = ""
 
+    migrated, migration_report = migrate_config_schema(data)
+    migration_warnings = sorted(
+        set(list(migration_report.get("warnings") or []) + collect_deprecation_warnings(migrated))
+    )
+
     config_path = Path("config/default.json")
     if not config_path.exists():
         config_path = Path("config.json")
@@ -240,15 +246,25 @@ async def migrate_config() -> Dict[str, Any]:
             backup_path = None
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     try:
-        with config_path.open("w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+        with temp_path.open("w", encoding="utf-8") as f:
+            json.dump(migrated, f, ensure_ascii=False, indent=4)
+            f.flush()
+        temp_path.replace(config_path)
     except Exception as e:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass
         return {
             "status": "error",
             "message": f"failed to write config: {e}",
             "config_path": str(config_path),
             "backup": str(backup_path) if backup_path else None,
+            "migration": migration_report,
+            "warnings": migration_warnings,
         }
 
     try:
@@ -260,6 +276,8 @@ async def migrate_config() -> Dict[str, Any]:
             "message": f"config written but reload failed: {e}",
             "config_path": str(config_path),
             "backup": str(backup_path) if backup_path else None,
+            "migration": migration_report,
+            "warnings": migration_warnings,
         }
 
     return {
@@ -267,4 +285,6 @@ async def migrate_config() -> Dict[str, Any]:
         "message": f"config migrated to {config_path}; secrets were cleared",
         "config_path": str(config_path),
         "backup": str(backup_path) if backup_path else None,
+        "migration": migration_report,
+        "warnings": migration_warnings,
     }

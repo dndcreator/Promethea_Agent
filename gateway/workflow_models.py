@@ -1,9 +1,13 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 WORKFLOW_STATUS_DRAFT = "draft"
@@ -51,8 +55,8 @@ class WorkflowDefinition(BaseModel):
     steps: List[WorkflowStep] = Field(default_factory=list)
     policy: Dict[str, Any] = Field(default_factory=dict)
     status: str = WORKFLOW_STATUS_ACTIVE
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
+    updated_at: datetime = Field(default_factory=_utc_now)
 
 
 class Checkpoint(BaseModel):
@@ -63,7 +67,7 @@ class Checkpoint(BaseModel):
     reasoning_state_snapshot: Dict[str, Any] = Field(default_factory=dict)
     memory_summary_snapshot: Dict[str, Any] = Field(default_factory=dict)
     workspace_artifact_refs: List[Dict[str, Any]] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
 
 
 class WorkflowRun(BaseModel):
@@ -76,7 +80,7 @@ class WorkflowRun(BaseModel):
     current_step_id: Optional[str] = None
     checkpoint_id: Optional[str] = None
     steps: List[WorkflowStep] = Field(default_factory=list)
-    started_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    started_at: datetime = Field(default_factory=_utc_now)
+    updated_at: datetime = Field(default_factory=_utc_now)
     completed_at: Optional[datetime] = None
     run_metadata: Dict[str, Any] = Field(default_factory=dict)

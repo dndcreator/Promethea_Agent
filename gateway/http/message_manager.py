@@ -1,6 +1,6 @@
 ﻿from pydantic import BaseModel, Field
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import logging
 import uuid
 import re
@@ -43,6 +43,7 @@ class Session(BaseModel):
     pending_confirmation: Optional[Dict] = None
     pending_turns: Dict[str, Dict] = Field(default_factory=dict)
     completed_turn_ids: List[str] = Field(default_factory=list)
+    pinned: bool = False
 
     if field_validator:
 
@@ -84,9 +85,11 @@ class MessageManager:
         try:
             from config import config
 
-            self.max_history_rounds = config.api.max_history_rounds
+            api_cfg = getattr(config, "api", None)
+            rounds = getattr(api_cfg, "max_history_rounds", 10)
+            self.max_history_rounds = max(1, int(rounds))
             self.max_messages_per_session = self.max_history_rounds * 2
-        except ImportError:
+        except Exception:
             self.max_history_rounds = 10
             self.max_messages_per_session = 20
             logger.warning("Failed to load config, using default history limits")
@@ -517,8 +520,9 @@ class MessageManager:
             "agent_type": session.agent_type,
             "max_history_rounds": self.max_history_rounds,
             "last_message": last_msg_preview,
+            "pinned": bool(getattr(session, "pinned", False)),
         }
-    
+
     def get_all_sessions_info(self, user_id: Optional[str] = None) -> Dict[str, Dict]:
         """Get info for all sessions, optionally filtered by user."""
         sessions_info: Dict[str, Dict] = {}
@@ -534,6 +538,153 @@ class MessageManager:
                 user_id=owner_user_id if owner_user_id is not None else "default_user",
             )
         return sessions_info
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str,
+        query: str = "",
+        pinned_only: bool = False,
+        limit: int = 200,
+    ) -> List[Dict]:
+        """List user sessions with optional query filter and stable ordering."""
+        q = str(query or "").strip().lower()
+        rows = []
+        for info in self.get_all_sessions_info(user_id=user_id).values():
+            if not info:
+                continue
+            if pinned_only and not bool(info.get("pinned")):
+                continue
+            if q:
+                title = str(info.get("title") or "").lower()
+                last_message = str(info.get("last_message") or "").lower()
+                if q not in title and q not in last_message:
+                    sid = str(info.get("session_id") or "")
+                    messages = self.get_messages(sid, user_id=user_id)
+                    hit = next(
+                        (
+                            m
+                            for m in messages
+                            if q in str(m.get("content") or "").lower()
+                        ),
+                        None,
+                    )
+                    if not hit:
+                        continue
+                    text = str(hit.get("content") or "").strip()
+                    info = dict(info)
+                    info["search_hit"] = {
+                        "role": str(hit.get("role") or ""),
+                        "snippet": text[:200] + ("..." if len(text) > 200 else ""),
+                    }
+            rows.append(info)
+        rows.sort(
+            key=lambda x: (1 if bool(x.get("pinned")) else 0, float(x.get("last_activity") or 0.0)),
+            reverse=True,
+        )
+        return rows[: max(1, int(limit))]
+
+    def set_session_pinned(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        pinned: bool,
+    ) -> bool:
+        """Set pinned state for one session."""
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key or key not in self.session:
+            return False
+        self.session[key].pinned = bool(pinned)
+        self.session_store.save_all(self.session)
+        return True
+
+    def count_pinned_sessions(self, *, user_id: str) -> int:
+        infos = self.get_all_sessions_info(user_id=user_id).values()
+        return sum(1 for item in infos if item and bool(item.get("pinned")))
+
+    def export_user_sessions(self, *, user_id: str, include_messages: bool = True) -> List[Dict]:
+        rows: List[Dict] = []
+        infos = self.list_sessions(user_id=user_id, query="", pinned_only=False, limit=10000)
+        for info in infos:
+            sid = str(info.get("session_id") or "")
+            if not sid:
+                continue
+            item = {
+                "session_id": sid,
+                "created_at": float(info.get("created_at") or 0.0),
+                "last_activity": float(info.get("last_activity") or 0.0),
+                "title": str(info.get("title") or "New Chat"),
+                "agent_type": str(info.get("agent_type") or "default"),
+                "pinned": bool(info.get("pinned", False)),
+            }
+            if include_messages:
+                item["messages"] = self.get_messages(sid, user_id=user_id)
+            rows.append(item)
+        return rows
+
+    def import_user_sessions(
+        self,
+        *,
+        user_id: str,
+        sessions: List[Dict],
+        merge: bool = True,
+    ) -> Dict[str, Any]:
+        imported = 0
+        skipped = 0
+        remapped = 0
+        restored_ids: List[str] = []
+
+        def _next_id(base_sid: str) -> str:
+            candidate = base_sid or self.generate_session_id()
+            idx = 2
+            while self._resolve_session_key(candidate, user_id=user_id):
+                candidate = f"{base_sid}_{idx}" if base_sid else self.generate_session_id()
+                idx += 1
+            return candidate
+
+        for row in sessions or []:
+            if not isinstance(row, dict):
+                continue
+            src_sid = str(row.get("session_id") or "").strip()
+            src_messages = row.get("messages") if isinstance(row.get("messages"), list) else []
+            if not src_sid:
+                skipped += 1
+                continue
+            exists = bool(self._resolve_session_key(src_sid, user_id=user_id))
+            if exists and merge:
+                skipped += 1
+                continue
+            target_sid = _next_id(src_sid) if exists and not merge else src_sid
+            if target_sid != src_sid:
+                remapped += 1
+
+            key = self._make_session_key(target_sid, user_id)
+            session = Session()
+            session.created_at = float(row.get("created_at") or time.time())
+            session.last_activity = float(row.get("last_activity") or session.created_at)
+            session.title = str(row.get("title") or "New Chat")
+            session.agent_type = str(row.get("agent_type") or "default")
+            session.pinned = bool(row.get("pinned", False))
+            session.messages = []
+            for msg in src_messages:
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role") or "").strip() or "user"
+                content = str(msg.get("content") or "")
+                session.messages.append(Message(role=role, content=content))
+            self.session[key] = session
+            imported += 1
+            restored_ids.append(target_sid)
+
+        if imported:
+            self.session_store.save_all(self.session)
+        return {
+            "imported_sessions": imported,
+            "skipped_sessions": skipped,
+            "remapped_sessions": remapped,
+            "session_ids": restored_ids,
+        }
 
     def delete_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
         """Delete a session."""

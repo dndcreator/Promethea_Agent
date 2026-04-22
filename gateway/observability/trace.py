@@ -1,9 +1,13 @@
 ﻿from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class TraceEvent(BaseModel):
@@ -13,7 +17,7 @@ class TraceEvent(BaseModel):
     user_id: Optional[str] = None
     agent_id: Optional[str] = None
     event_type: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=_utc_now)
     source_module: str = "gateway"
     severity: str = "info"
     payload: Dict[str, Any] = Field(default_factory=dict)

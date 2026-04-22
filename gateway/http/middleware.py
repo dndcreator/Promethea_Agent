@@ -44,6 +44,7 @@ class InMemoryRateLimiter:
 
 
 def register_http_middlewares(app: FastAPI) -> None:
+    auth_cookie_name = os.getenv("AUTH__COOKIE_NAME", "promethea_auth")
     integration = get_gateway_integration()
     rate_cfg = {}
     try:
@@ -87,23 +88,34 @@ def register_http_middlewares(app: FastAPI) -> None:
         request.state.request_id = request_id
         request.state.user_id = None
 
+        if request.url.path.startswith("/api"):
+            live_integration = get_gateway_integration()
+            if live_integration and hasattr(live_integration, "maybe_refresh_plugins"):
+                try:
+                    await live_integration.maybe_refresh_plugins()
+                except Exception as plugin_refresh_err:
+                    logger.warning("Plugin auto-refresh check failed: {}", plugin_refresh_err)
+
         auth = request.headers.get("Authorization", "")
+        token = ""
         if auth.startswith("Bearer "):
             token = auth[7:].strip()
-            if token:
-                try:
-                    payload = decode_access_token(token)
-                    request.state.user_id = payload.get("sub")
-                except JWTError:
-                    if request.url.path.startswith("/api") and request.url.path not in public_paths:
-                        return JSONResponse(
-                            status_code=401,
-                            content={
-                                "status": "error",
-                                "error": {"code": "unauthorized", "message": "Invalid token"},
-                                "request_id": request_id,
-                            },
-                        )
+        if not token:
+            token = request.cookies.get(auth_cookie_name, "")
+        if token:
+            try:
+                payload = decode_access_token(token)
+                request.state.user_id = payload.get("sub")
+            except JWTError:
+                if request.url.path.startswith("/api") and request.url.path not in public_paths:
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "status": "error",
+                            "error": {"code": "unauthorized", "message": "Invalid token"},
+                            "request_id": request_id,
+                        },
+                    )
 
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id

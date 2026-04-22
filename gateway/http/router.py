@@ -19,6 +19,11 @@ from .routes.workflow import router as workflow_router
 from .routes.reasoning import router as reasoning_router
 from .routes.security import router as security_router
 from .routes.org_brain import router as org_brain_router
+from .routes.files import router as files_router
+from .routes.search import router as search_router
+from .routes.personal import router as personal_router
+from .routes.plugins import router as plugins_router
+from .routes.self_evolve import router as self_evolve_router
 
 router = APIRouter()
 
@@ -39,6 +44,11 @@ router.include_router(workflow_router)
 router.include_router(reasoning_router)
 router.include_router(security_router)
 router.include_router(org_brain_router)
+router.include_router(files_router)
+router.include_router(search_router)
+router.include_router(personal_router)
+router.include_router(plugins_router)
+router.include_router(self_evolve_router)
 
 
 

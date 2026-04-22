@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class MemoryRecallRequest(BaseModel):
@@ -22,7 +26,7 @@ class MemoryRecallRequest(BaseModel):
     allowed_memory_types: List[str] = Field(default_factory=list)
     filters: Dict[str, Any] = Field(default_factory=dict)
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
 
 
 class RecalledMemoryItem(BaseModel):
@@ -64,4 +68,4 @@ class MemoryRecallResult(BaseModel):
     applied_filters: List[str] = Field(default_factory=list)
     dropped_candidates: List[DroppedRecallCandidate] = Field(default_factory=list)
     metrics: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)

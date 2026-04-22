@@ -2,7 +2,7 @@
 
 import time
 from typing import Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class MetricsCollector:
@@ -23,7 +23,7 @@ class MetricsCollector:
             'http_errors_total': 0,
             'http_latency_ms_total': 0.0,
             'http_latency_ms_count': 0,
-            'start_time': datetime.now()
+            'start_time': datetime.now(timezone.utc)
         }
         self.http_by_path: Dict[str, Dict[str, float]] = {}
     
@@ -58,7 +58,7 @@ class MetricsCollector:
             self.stats['completion_tokens'] / 1000 * 0.06
         )
         
-        uptime = (datetime.now() - self.stats['start_time']).total_seconds()
+        uptime = (datetime.now(timezone.utc) - self.stats['start_time']).total_seconds()
         
         return {
             'llm': {

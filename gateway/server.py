@@ -8,7 +8,7 @@ import time
 import uuid
 from types import SimpleNamespace
 from typing import Dict, Any, Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from loguru import logger
 
 from .protocol import (
@@ -101,6 +101,7 @@ class GatewayServer:
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
         self.org_context_service: Optional[Any] = None
+        self.self_evolve_module: Optional[Any] = None
         self.workspace_service: Optional[WorkspaceService] = None
         self.workflow_engine: Optional[Any] = None
         
@@ -430,6 +431,7 @@ class GatewayServer:
             "conversation_service": bool(self.conversation_service),
             "config_service": bool(self.config_service),
             "org_context_service": bool(self.org_context_service),
+            "self_evolve_module": bool(self.self_evolve_module),
             "workspace_service": bool(self.workspace_service),
             "workflow_engine": bool(self.workflow_engine),
             "message_manager": bool(self.message_manager),
@@ -507,7 +509,7 @@ class GatewayServer:
     
     async def start(self):
         """Start the gateway server and background tasks."""
-        self.started_at = datetime.now()
+        self.started_at = datetime.now(timezone.utc)
         self.is_running = True
         
         # Start periodic background tasks.
@@ -848,7 +850,7 @@ class GatewayServer:
         """Handle gateway status query."""
         status_info = {
             "gateway_status": "running" if self.is_running else "stopped",
-            "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
+            "uptime": (datetime.now(timezone.utc) - self.started_at).total_seconds() if self.started_at else 0,
             "connections": self.connection_manager.get_active_count(),
             "channels": {name: {"status": "active"} for name in self.channels.keys()},
             "agents": self._get_agents_runtime_state(),
@@ -1241,7 +1243,7 @@ class GatewayServer:
         """Handle system-info query."""
         system_info = {
             "version": "1.0.0",
-            "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
+            "uptime": (datetime.now(timezone.utc) - self.started_at).total_seconds() if self.started_at else 0,
             "connections": self.connection_manager.get_active_count(),
             "channels": list(self.channels.keys()),
             "features": ["agent", "memory", "mcp", "channels", "nodes"],
@@ -1766,12 +1768,27 @@ class GatewayServer:
                 )
             
             user_id = self._resolve_request_user_id(connection, request)
-            sessions_info = self.message_manager.get_all_sessions_info(user_id=user_id)
-            sessions = []
-            for sid, info in sessions_info.items():
-                if info:
-                    sessions.append(info)
-            sessions.sort(key=lambda x: x.get("last_activity", 0), reverse=True)
+            q = str(request.params.get("q") or "").strip()
+            pinned_only = bool(request.params.get("pinned_only", False))
+            try:
+                limit = int(request.params.get("limit") or 200)
+            except Exception:
+                limit = 200
+
+            if hasattr(self.message_manager, "list_sessions"):
+                sessions = self.message_manager.list_sessions(
+                    user_id=user_id,
+                    query=q,
+                    pinned_only=pinned_only,
+                    limit=max(1, min(limit, 1000)),
+                )
+            else:
+                sessions_info = self.message_manager.get_all_sessions_info(user_id=user_id)
+                sessions = []
+                for _, info in sessions_info.items():
+                    if info:
+                        sessions.append(info)
+                sessions.sort(key=lambda x: x.get("last_activity", 0), reverse=True)
             
             return GatewayProtocol.create_response(request.id, True, {
                 "sessions": sessions,
@@ -3023,7 +3040,7 @@ class GatewayServer:
         """Collect current health information for the gateway."""
         return {
             "status": "healthy" if self.is_running else "unhealthy",
-            "uptime": (datetime.now() - self.started_at).total_seconds() if self.started_at else 0,
+            "uptime": (datetime.now(timezone.utc) - self.started_at).total_seconds() if self.started_at else 0,
             "active_connections": self.connection_manager.get_active_count(),
             "channels": {
                 name: {"status": "active"}
@@ -3148,7 +3165,7 @@ class GatewayServer:
         while self.is_running:
             await asyncio.sleep(30)  # broadcast every 30 seconds
             health_payload = {
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "services": self.get_services_health(),
             }
             await self.event_emitter.emit(EventType.HEALTH_UPDATE, health_payload)

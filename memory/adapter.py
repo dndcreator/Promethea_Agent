@@ -998,6 +998,16 @@ class MemoryAdapter:
             return {"ok": False, "reason": f"target backend not available: {target_backend}"}
         snapshot = self.export_mef()
         imported = target.import_mef(snapshot, merge=merge)
+        imported_ok = bool(imported.get("ok", True)) if isinstance(imported, dict) else True
+        imported_reason = str((imported or {}).get("reason") or "").strip().lower() if isinstance(imported, dict) else ""
+        # Allow empty-source migrations, but block cutover on real import errors.
+        if not imported_ok and imported_reason not in {"", "none", "no_importable_memory_items"}:
+            return {
+                "ok": False,
+                "reason": f"import failed: {imported_reason}",
+                "imported": imported,
+                "active_backend": self.store_backend,
+            }
         mode_norm = str(mode or "cutover").strip().lower()
         if mode_norm == "dual_write":
             self._dual_write_store = target

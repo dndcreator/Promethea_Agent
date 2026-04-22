@@ -444,7 +444,7 @@ async def get_gateway_status():
     return {
         "status": "running" if gateway_server.is_running else "stopped",
         "uptime": (
-            (datetime.now() - gateway_server.started_at).total_seconds()
+            (datetime.now(timezone.utc) - gateway_server.started_at).total_seconds()
             if gateway_server.started_at
             else 0
         ),

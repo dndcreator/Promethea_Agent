@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from loguru import logger
@@ -22,6 +22,8 @@ router = APIRouter()
 SECRET_KEY = os.getenv("AUTH__SECRET_KEY", "change-me-in-env")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
+AUTH_COOKIE_NAME = os.getenv("AUTH__COOKIE_NAME", "promethea_auth")
+AUTH_COOKIE_SECURE = str(os.getenv("AUTH__COOKIE_SECURE", "false")).lower() in {"1", "true", "yes", "on"}
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
 
@@ -49,6 +51,9 @@ async def get_current_user_id(request: Request, token: str | None = Depends(oaut
         headers={"WWW-Authenticate": "Bearer"},
     )
     if not token:
+        cookies = getattr(request, "cookies", {}) or {}
+        token = cookies.get(AUTH_COOKIE_NAME)
+    if not token:
         raise credentials_exception
 
     try:
@@ -70,7 +75,7 @@ async def register(user: UserRegister):
 
 
 @router.post("/auth/login")
-async def login(user: UserLogin):
+async def login(user: UserLogin, response: Response):
     db_user = user_manager.verify_user(user.username, user.password)
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -87,6 +92,16 @@ async def login(user: UserLogin):
         config.api.api_key and config.api.api_key != "placeholder-key-not-set"
     )
 
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=access_token,
+        httponly=True,
+        secure=AUTH_COOKIE_SECURE,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -97,6 +112,12 @@ async def login(user: UserLogin):
         "api_key_configured": api_key_configured,
         "warning": None if api_key_configured else "Please set API__API_KEY in .env first",
     }
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    response.delete_cookie(key=AUTH_COOKIE_NAME, path="/")
+    return {"status": "success"}
 
 
 @router.get("/user/profile")

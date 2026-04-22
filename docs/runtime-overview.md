@@ -68,6 +68,11 @@ Loop intent:
 - consume observations
 - replan if needed
 
+Procedural replay behavior:
+- on similar tasks, runtime can try procedural action replay first
+- replay is intent/capability driven (semantic), not strictly tool-name bound
+- if replay fails, runtime falls back to explicit re-planning
+
 ### Stage 4: Tool Execution via Workflow Bridge
 
 When reasoning decides to act, tool action is executed through workflow-compatible path (Moirai/workflow engine bridge when enabled).
@@ -76,6 +81,7 @@ Execution guarantees:
 - policy checks
 - traceability
 - recoverable run metadata
+- runtime can compile one step from ExecutionMindGraph to currently available tools
 
 ### Stage 5: Observation Feedback
 
@@ -122,6 +128,7 @@ This side loop does not block current turn latency.
 - hot/warm/cold style recall and storage behavior
 - recall policy by mode
 - write gating before persistence
+- procedural memory assets (reasoning templates, action templates, mind graphs) are persisted under `brain/basal_ganglia`
 
 ### Enterprise Context (Org Brain)
 

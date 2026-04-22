@@ -41,8 +41,11 @@ class AgentManager:
 
         try:
             from config import config, AI_NAME
-            self.max_history_rounds = config.api.max_history_rounds
-        except ImportError:
+            _ = AI_NAME
+            api_cfg = getattr(config, "api", None)
+            rounds = getattr(api_cfg, "max_history_rounds", 10)
+            self.max_history_rounds = max(1, int(rounds))
+        except Exception:
             self.max_history_rounds = 10
             logger.warning("Failed to import config, using default history settings")
         self.context_ttl_hours = 24

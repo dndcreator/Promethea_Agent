@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -79,3 +80,34 @@ async def test_doctor_sessions_inventory_supports_sessions_attr(monkeypatch):
     out = await doctor.run_doctor()
     assert out["checks"]["sessions"]["status"] == "ok"
     assert out["checks"]["sessions"]["sessions_in_memory"] == 2
+
+
+@pytest.mark.asyncio
+async def test_doctor_migrate_config_applies_schema_and_clears_secrets(monkeypatch, tmp_path):
+    class _Cfg:
+        def model_dump(self):
+            return {
+                "system": {"version": "1.0", "stream_mode": "false"},
+                "api": {"api_key": "secret", "model": "gpt-4o-mini"},
+                "memory": {
+                    "neo4j": {"password": "neo-secret"},
+                    "api": {"api_key": "mem-secret"},
+                },
+            }
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "config" / "default.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(doctor.config_module, "load_config", lambda: _Cfg(), raising=False)
+
+    out = await doctor.migrate_config()
+    assert out["status"] == "success"
+    assert out["migration"]["to_version"] == "1"
+    assert "0->1" in out["migration"]["applied_steps"]
+    assert isinstance(out.get("warnings"), list)
+
+    saved = json.loads((tmp_path / "config" / "default.json").read_text(encoding="utf-8"))
+    assert saved.get("config_version") == "1"
+    assert saved.get("api", {}).get("api_key") == "placeholder-key-not-set"
+    assert saved.get("memory", {}).get("neo4j", {}).get("password") == ""
+    assert saved.get("memory", {}).get("api", {}).get("api_key") == ""

@@ -45,3 +45,21 @@ def test_backend_switch_sqlite_to_flat_with_mef(tmp_path):
     context = adapter.get_context(query="tokio", session_id="s2", user_id="u1")
     assert "tokio" in context.lower()
 
+
+def test_backend_switch_does_not_cutover_when_import_fails(monkeypatch):
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter.store_backend = "sqlite_graph"
+    adapter._dual_write_store = None
+    adapter._migration_state = {"mode": "off"}
+    adapter.store = object()
+    adapter._build_store = lambda _backend: SimpleNamespace(
+        import_mef=lambda payload, merge=True: {"ok": False, "reason": "write_error", "imported": {"memory_items": 0}}
+    )
+    adapter.export_mef = lambda: {"source_backend": "sqlite_graph", "memory_items": [{"id": "m1"}]}
+
+    out = adapter.migrate_backend("flat_memory", mode="cutover")
+    assert out.get("ok") is False
+    assert "import failed" in str(out.get("reason") or "")
+    assert out.get("active_backend") == "sqlite_graph"
+    assert adapter.store_backend == "sqlite_graph"
+

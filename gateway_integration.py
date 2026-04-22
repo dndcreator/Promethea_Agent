@@ -6,8 +6,10 @@ Wires gateway runtime, services, channels, and plugin system.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -28,6 +30,7 @@ from gateway.conversation_service import ConversationService
 from gateway.memory_service import MemoryService
 from gateway.org_context_service import OrgContextService
 from gateway.reasoning_service import ReasoningService
+from gateway.self_evolve_module import SelfEvolveModule
 from gateway.workspace_service import WorkspaceService
 from gateway.workflow_engine import WorkflowEngine
 
@@ -57,6 +60,12 @@ class GatewayIntegration:
         self.conversation_core = None
         self.message_manager = None
         self.mcp_manager = None
+        self._plugin_refresh_lock = asyncio.Lock()
+        self._plugin_refresh_interval_seconds = max(
+            0.2,
+            float(os.getenv("PLUGINS__AUTO_RELOAD_INTERVAL_SECONDS", "2.0")),
+        )
+        self._plugin_refresh_last_ts = 0.0
 
     def _load_config(self) -> Dict[str, Any]:
         """Load gateway runtime config."""
@@ -115,6 +124,7 @@ class GatewayIntegration:
         """Hot-reload gateway runtime config."""
         old_config = self.config
         self.config = self._load_config()
+        await self.maybe_refresh_plugins(force=True)
         if self.gateway_server and self.gateway_server.event_emitter:
             await self.gateway_server.event_emitter.emit(
                 EventType.CONFIG_RELOADED,
@@ -125,6 +135,113 @@ class GatewayIntegration:
                 },
             )
         return {"success": True, "config": self.config}
+
+    def _build_plugins_config(self) -> Dict[str, Any]:
+        plugins_config = {"plugins": {}}
+        channels_cfg = self.config.get("channels", {}) or {}
+        for channel_id, ch_cfg in channels_cfg.items():
+            plugins_config["plugins"][channel_id] = {
+                "enabled": bool(ch_cfg.get("enabled", False)),
+                "config": {"channel_config": ch_cfg},
+            }
+
+        try:
+            from config import config as global_config
+
+            mem_enabled = bool(getattr(global_config.memory, "enabled", False))
+        except Exception:
+            mem_enabled = False
+
+        plugins_config["plugins"]["memory"] = {
+            "enabled": mem_enabled,
+            "config": {},
+        }
+        return plugins_config
+
+    def _load_plugin_registry(self) -> Any:
+        return load_promethea_plugins(
+            PluginLoadOptions(
+                workspace_dir=str(Path(__file__).resolve().parent),
+                extensions_dir="extensions",
+                config=self._build_plugins_config(),
+                cache=True,
+                mode="full",
+                allow=None,
+            )
+        )
+
+    async def _sync_channels_from_registry(self) -> int:
+        if not self.channel_registry or not self.gateway_server:
+            return 0
+        registry = get_active_plugin_registry()
+        if not registry or not registry.channels:
+            return 0
+
+        added = 0
+        auto_start = bool(self.config.get("gateway", {}).get("auto_start_channels", True))
+        for entry in registry.channels:
+            channel_id = entry.channel_id
+            if channel_id in self.gateway_server.channels:
+                continue
+            try:
+                channel = entry.channel
+                self.channel_registry.register(channel)
+                self.gateway_server.channels[channel_id] = channel
+                if self.message_router:
+                    channel.on_message(self.message_router.route_message)
+                if auto_start:
+                    await channel.start()
+                added += 1
+                logger.info(
+                    "Hot-registered channel from extension: {} (source={})",
+                    channel_id,
+                    entry.source,
+                )
+            except Exception as e:
+                logger.error("Failed hot-registering channel {}: {}", channel_id, e)
+        return added
+
+    async def maybe_refresh_plugins(self, *, force: bool = False) -> Dict[str, Any]:
+        now = time.monotonic()
+        if not force and (now - self._plugin_refresh_last_ts) < self._plugin_refresh_interval_seconds:
+            reg = get_active_plugin_registry()
+            return {
+                "ok": True,
+                "changed": False,
+                "plugins_total": len(reg.plugins) if reg else 0,
+                "throttled": True,
+            }
+
+        async with self._plugin_refresh_lock:
+            now = time.monotonic()
+            if not force and (now - self._plugin_refresh_last_ts) < self._plugin_refresh_interval_seconds:
+                reg = get_active_plugin_registry()
+                return {
+                    "ok": True,
+                    "changed": False,
+                    "plugins_total": len(reg.plugins) if reg else 0,
+                    "throttled": True,
+                }
+
+            previous = get_active_plugin_registry()
+            previous_obj_id = id(previous) if previous else 0
+            registry = self._load_plugin_registry()
+            self._plugin_refresh_last_ts = time.monotonic()
+            changed = previous is None or id(registry) != previous_obj_id
+
+            if self.gateway_server:
+                self.gateway_server.plugin_runtime = registry
+
+            added_channels = await self._sync_channels_from_registry()
+            if added_channels:
+                changed = True
+
+            return {
+                "ok": True,
+                "changed": changed,
+                "plugins_total": len(registry.plugins),
+                "channels_added": added_channels,
+            }
 
     def inject_dependencies(
         self,
@@ -181,6 +298,10 @@ class GatewayIntegration:
             memory_service=self.gateway_server.memory_service,
             llm_client=conversation_core,
         )
+        self.gateway_server.self_evolve_module = SelfEvolveModule(
+            config_service=self.gateway_server.config_service,
+            workspace_root=str(Path(__file__).resolve().parent),
+        )
 
         self.gateway_server.workflow_engine = WorkflowEngine(
             event_emitter=event_emitter,
@@ -222,38 +343,10 @@ class GatewayIntegration:
         try:
             logger.info("Initializing gateway system...")
 
-            plugins_config = {"plugins": {}}
-            channels_cfg = self.config.get("channels", {}) or {}
-            for channel_id, ch_cfg in channels_cfg.items():
-                plugins_config["plugins"][channel_id] = {
-                    "enabled": bool(ch_cfg.get("enabled", False)),
-                    "config": {"channel_config": ch_cfg},
-                }
-
-            try:
-                from config import config as global_config
-
-                mem_enabled = bool(getattr(global_config.memory, "enabled", False))
-            except Exception:
-                mem_enabled = False
-
-            plugins_config["plugins"]["memory"] = {
-                "enabled": mem_enabled,
-                "config": {},
-            }
-
-            load_promethea_plugins(
-                PluginLoadOptions(
-                    workspace_dir=str(Path(__file__).resolve().parent),
-                    extensions_dir="extensions",
-                    config=plugins_config,
-                    cache=True,
-                    mode="full",
-                    allow=None,
-                )
-            )
+            plugin_runtime = self._load_plugin_registry()
 
             self.gateway_server = GatewayServer()
+            self.gateway_server.plugin_runtime = plugin_runtime
             self.inject_dependencies(
                 agent_manager=self.agent_manager,
                 memory_system=self.memory_system,

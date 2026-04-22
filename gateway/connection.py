@@ -2,7 +2,7 @@
 """
 import asyncio
 from typing import Dict, Set, Optional, Any
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import WebSocket, WebSocketDisconnect
 import json
 from loguru import logger
@@ -25,8 +25,8 @@ class Connection:
         self.websocket = websocket
         self.connection_id = connection_id
         self.identity = identity
-        self.connected_at = datetime.now()
-        self.last_heartbeat = datetime.now()
+        self.connected_at = datetime.now(timezone.utc)
+        self.last_heartbeat = datetime.now(timezone.utc)
         self.is_authenticated = False
         self.metadata: Dict[str, Any] = {}
         
@@ -78,7 +78,7 @@ class ConnectionManager:
         
         async with self._lock:
             self._connection_counter += 1
-            connection_id = f"conn_{self._connection_counter}_{datetime.now().timestamp()}"
+            connection_id = f"conn_{self._connection_counter}_{datetime.now(timezone.utc).timestamp()}"
             
             connection = Connection(websocket, connection_id, identity)
             self.connections[connection_id] = connection
@@ -173,10 +173,10 @@ class ConnectionManager:
     async def heartbeat(self, connection_id: str) -> None:
         connection = self.get_connection(connection_id)
         if connection:
-            connection.last_heartbeat = datetime.now()
+            connection.last_heartbeat = datetime.now(timezone.utc)
     
     async def cleanup_stale_connections(self, timeout_seconds: int = 300) -> None:
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         stale_connections = []
         
         for conn_id, connection in self.connections.items():

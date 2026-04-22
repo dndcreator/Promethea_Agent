@@ -22,15 +22,19 @@ class ReasoningTemplateMemory:
     """
 
     def __init__(self, base_dir: Optional[Path] = None, max_templates_per_user: int = 200) -> None:
-        root = base_dir or (Path(global_config.system.log_dir) / "reasoning_templates")
-        self.base_dir = Path(root)
+        if base_dir is not None:
+            self.base_dir = Path(base_dir)
+            self.basal_ganglia_dir = self.base_dir.parent
+            self.moirai_store_dir = self.basal_ganglia_dir / "moirai_runs"
+        else:
+            project_root = Path(global_config.system.log_dir).parent
+            self.basal_ganglia_dir = project_root / "brain" / "basal_ganglia"
+            self.base_dir = self.basal_ganglia_dir / "reasoning_templates"
+            self.moirai_store_dir = self.basal_ganglia_dir / "moirai_runs"
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.max_templates_per_user = max(20, int(max_templates_per_user))
-
-        # Persist OPRO profile state through Moirai run docs (state machine store).
-        workspace_root = self.base_dir.parent if base_dir is not None else Path.cwd()
-        self.moirai_store_dir = Path(workspace_root) / "memory" / "moirai_runs"
+        self.basal_ganglia_dir.mkdir(parents=True, exist_ok=True)
         self.moirai_store_dir.mkdir(parents=True, exist_ok=True)
+        self.max_templates_per_user = max(20, int(max_templates_per_user))
 
     def match_template(self, *, user_id: str, task: str) -> Dict[str, Any]:
         templates = self._load_templates(user_id)
@@ -50,6 +54,53 @@ class ReasoningTemplateMemory:
         if not best or best_score < 0.32:
             return {"matched": False, "score": best_score, "template": None}
         return {"matched": True, "score": best_score, "template": best}
+
+    def match_action_template(
+        self,
+        *,
+        user_id: str,
+        task: str,
+        tool_intent: str = "",
+    ) -> Dict[str, Any]:
+        matched = self.match_template(user_id=user_id, task=task)
+        if not matched.get("matched"):
+            return {"matched": False, "score": float(matched.get("score", 0.0) or 0.0), "actions": []}
+
+        template = matched.get("template") if isinstance(matched.get("template"), dict) else {}
+        actions = template.get("actions", []) if isinstance(template, dict) else []
+        if not isinstance(actions, list) or not actions:
+            return {
+                "matched": False,
+                "score": float(matched.get("score", 0.0) or 0.0),
+                "template_id": template.get("template_id"),
+                "actions": [],
+            }
+
+        intent_tokens = self._tokenize(tool_intent)
+        if intent_tokens:
+            filtered: List[Dict[str, Any]] = []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                haystack = (
+                    f"{action.get('action_intent', '')} "
+                    f"{action.get('capability', '')} "
+                    f"{action.get('service_name', '')} "
+                    f"{action.get('tool_name', '')} "
+                    f"{json.dumps(action.get('args', {}), ensure_ascii=False)}"
+                )
+                if self._similarity(intent_tokens, self._tokenize(haystack)) >= 0.08:
+                    filtered.append(action)
+            if filtered:
+                actions = filtered
+
+        return {
+            "matched": True,
+            "score": float(matched.get("score", 0.0) or 0.0),
+            "template_id": template.get("template_id"),
+            "actions": actions[:10],
+            "mind_graph": template.get("execution_mind_graph") if isinstance(template, dict) else None,
+        }
 
     def get_strategy_hints(self, *, user_id: str) -> Dict[str, Any]:
         profile = self._load_profile(user_id)
@@ -110,6 +161,7 @@ class ReasoningTemplateMemory:
         nodes = tree_payload.get("nodes", []) if isinstance(tree_payload, dict) else []
         steps: List[Dict[str, Any]] = []
         tools: List[Dict[str, str]] = []
+        actions: List[Dict[str, Any]] = []
         for node in nodes:
             kind = str(node.get("kind", "")).strip().lower()
             if kind == "thought":
@@ -134,6 +186,7 @@ class ReasoningTemplateMemory:
                 if isinstance(md, dict):
                     service_name = str(md.get("service_name", "")).strip()
                     tool_name = str(md.get("tool_name", "")).strip()
+                    args = md.get("args") if isinstance(md.get("args"), dict) else {}
                     if service_name or tool_name:
                         tools.append(
                             {
@@ -141,6 +194,31 @@ class ReasoningTemplateMemory:
                                 "tool_name": tool_name,
                             }
                         )
+                    if service_name and tool_name:
+                        status = str(node.get("status", "")).strip().lower()
+                        verifier = node.get("verifier_state") if isinstance(node.get("verifier_state"), dict) else {}
+                        action = {
+                            "service_name": service_name,
+                            "tool_name": tool_name,
+                            "args": args,
+                            "action_intent": self._infer_action_intent(
+                                service_name=service_name,
+                                tool_name=tool_name,
+                                args=args,
+                            ),
+                            "capability": self._infer_capability(
+                                service_name=service_name,
+                                tool_name=tool_name,
+                                args=args,
+                            ),
+                            "status": status,
+                            "verification": {
+                                "ok": self._to_bool(verifier.get("ok"), default=status == "succeeded"),
+                                "confidence": self._to_float(verifier.get("confidence"), default=0.0),
+                                "reason": str(verifier.get("reason", "") or "").strip(),
+                            },
+                        }
+                        actions.append(action)
 
         deduped_steps: List[Dict[str, Any]] = []
         seen_step_keys = set()
@@ -152,6 +230,11 @@ class ReasoningTemplateMemory:
             deduped_steps.append(step)
 
         stats = tree_payload.get("stats", {}) if isinstance(tree_payload, dict) else {}
+        execution_mind_graph = self._build_execution_mind_graph(
+            task=user_message,
+            steps=deduped_steps,
+            actions=actions,
+        )
         return {
             "template_id": uuid.uuid4().hex,
             "user_id": user_id,
@@ -166,6 +249,8 @@ class ReasoningTemplateMemory:
             "policy_snapshot": policy if isinstance(policy, dict) else {},
             "steps": deduped_steps[:20],
             "tools": tools[:20],
+            "actions": actions[:30],
+            "execution_mind_graph": execution_mind_graph,
             "stats": {
                 "iterations": int(stats.get("iterations", 0) or 0),
                 "memory_calls": int(stats.get("memory_calls", 0) or 0),
@@ -187,6 +272,10 @@ class ReasoningTemplateMemory:
                     item["steps"] = template.get("steps", [])
                 if template.get("tools"):
                     item["tools"] = template.get("tools", [])
+                if len(template.get("actions", [])) >= len(item.get("actions", [])):
+                    item["actions"] = template.get("actions", [])
+                if template.get("execution_mind_graph"):
+                    item["execution_mind_graph"] = template.get("execution_mind_graph", {})
                 item["assistant_preview"] = template.get("assistant_preview", "")
                 item["policy_snapshot"] = template.get("policy_snapshot", {})
                 item["stats"] = template.get("stats", {})
@@ -565,6 +654,121 @@ class ReasoningTemplateMemory:
         if union == 0:
             return 0.0
         return inter / union
+
+    @staticmethod
+    def _to_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _build_execution_mind_graph(
+        self,
+        *,
+        task: str,
+        steps: List[Dict[str, Any]],
+        actions: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        node_idx = 1
+        prev_node_id = ""
+        for step in (steps or [])[:12]:
+            if not isinstance(step, dict):
+                continue
+            node_id = f"n{node_idx}"
+            node_idx += 1
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": "action",
+                    "title": str(step.get("title", "") or "step").strip(),
+                    "intent": str(step.get("tool_intent") or step.get("goal") or "").strip(),
+                    "capability": "generic_tool_use",
+                }
+            )
+            if prev_node_id:
+                edges.append({"from": prev_node_id, "to": node_id, "when": "ok"})
+            prev_node_id = node_id
+
+        for action in (actions or [])[:8]:
+            if not isinstance(action, dict):
+                continue
+            node_id = f"n{node_idx}"
+            node_idx += 1
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": "action",
+                    "title": str(action.get("action_intent") or "tool action").strip(),
+                    "intent": str(action.get("action_intent") or "").strip(),
+                    "capability": str(action.get("capability") or "generic_tool_use"),
+                    "tool_binding": {
+                        "service_name": str(action.get("service_name", "") or ""),
+                        "tool_name": str(action.get("tool_name", "") or ""),
+                    },
+                }
+            )
+            if prev_node_id:
+                edges.append({"from": prev_node_id, "to": node_id, "when": "ok"})
+            prev_node_id = node_id
+
+        return {
+            "graph_id": uuid.uuid4().hex,
+            "version": 1,
+            "goal": str(task or "").strip(),
+            "nodes": nodes[:20],
+            "edges": edges[:32],
+            "fallback_policies": {
+                "tool_fail": "rebind_by_capability",
+                "verify_fail": "llm_patch_subgraph",
+            },
+        }
+
+    @staticmethod
+    def _infer_action_intent(*, service_name: str, tool_name: str, args: Dict[str, Any]) -> str:
+        service = str(service_name or "").strip().lower()
+        tool = str(tool_name or "").strip().lower()
+        args_text = json.dumps(args or {}, ensure_ascii=False).lower()
+        if service == "computer_control" and tool == "browser_action":
+            action = str((args or {}).get("action", "")).strip().lower()
+            if action:
+                return f"browser {action}"
+            return "browser interaction"
+        if service == "computer_control" and tool == "perception_action":
+            mode = str((args or {}).get("mode", "")).strip().lower()
+            if mode:
+                return f"visual perception {mode}"
+            return "visual perception"
+        if service == "computer_control" and tool in {"fs_action", "read_file", "write_file", "list_files"}:
+            return "filesystem operation"
+        if service == "computer_control" and tool in {"process_action", "execute_command"}:
+            return "process or command execution"
+        if service == "moirai":
+            return "workflow orchestration"
+        if "url" in args_text or "selector" in args_text:
+            return "web navigation and ui interaction"
+        return f"{service}.{tool}".strip(".")
+
+    @staticmethod
+    def _infer_capability(*, service_name: str, tool_name: str, args: Dict[str, Any]) -> str:
+        service = str(service_name or "").strip().lower()
+        tool = str(tool_name or "").strip().lower()
+        action = str((args or {}).get("action", "")).strip().lower()
+        mode = str((args or {}).get("mode", "")).strip().lower()
+        if service == "computer_control" and tool in {"browser_action", "perception_action"}:
+            if action in {"goto", "open"}:
+                return "web_navigation"
+            if action in {"click", "type", "press"} or "click" in mode:
+                return "ui_interaction"
+            return "web_or_ui_interaction"
+        if service == "computer_control" and tool in {"fs_action", "read_file", "write_file", "list_files"}:
+            return "filesystem"
+        if service == "computer_control" and tool in {"process_action", "execute_command"}:
+            return "process_execution"
+        if service == "moirai":
+            return "workflow_orchestration"
+        return "generic_tool_use"
 
     @staticmethod
     def _safe_user_segment(user_id: Optional[str]) -> str:

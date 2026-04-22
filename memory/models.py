@@ -1,10 +1,14 @@
 """Memory graph data models."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 class NodeType(str, Enum):
@@ -34,6 +38,8 @@ class RelationType(str, Enum):
 
 
 class FactTuple(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     subject: str
     predicate: str
     object_: str = Field(default="", alias="object")
@@ -42,11 +48,10 @@ class FactTuple(BaseModel):
     confidence: float = 0.8
     source_text: Optional[str] = None
 
-    class Config:
-        populate_by_name = True
-
 
 class Neo4jNode(BaseModel):
+    model_config = ConfigDict()
+
     id: Optional[str] = None
     type: NodeType
     content: str
@@ -54,13 +59,12 @@ class Neo4jNode(BaseModel):
     importance: float = 0.5
     access_count: int = 1
     properties: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.now)
-
-    class Config:
-        json_encoders = {datetime: lambda v: v.isoformat()}
+    created_at: datetime = Field(default_factory=_utc_now)
 
 
 class Neo4jRelation(BaseModel):
+    model_config = ConfigDict()
+
     id: Optional[str] = None
     type: RelationType
     source_id: str
@@ -68,10 +72,7 @@ class Neo4jRelation(BaseModel):
     weight: float = 1.0
     edge_key: Optional[str] = None
     properties: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=datetime.now)
-
-    class Config:
-        json_encoders = {datetime: lambda v: v.isoformat()}
+    created_at: datetime = Field(default_factory=_utc_now)
 
 
 class ExtractionResult(BaseModel):
