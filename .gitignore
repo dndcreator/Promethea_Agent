@@ -76,6 +76,7 @@ src-tauri/Cargo.lock
 # Node.js (Tauri dependencies)
 node_modules/
 package-lock.json
+!UI/package-lock.json
 yarn.lock
 
 # Build outputs
