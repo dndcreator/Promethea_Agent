@@ -201,9 +201,17 @@ Content: {content}
         return results
 
 
-def create_extractor_from_config(config) -> LLMExtractor:
+def create_extractor_from_config(config, user_id: Optional[str] = None) -> LLMExtractor:
     """Factory: create LLMExtractor from project config."""
-    memory_api = resolve_memory_api(config)
+    if user_id:
+        try:
+            from gateway.user_secrets import resolve_memory_runtime_settings
+
+            memory_api = resolve_memory_runtime_settings(user_id, behavior_config=config.model_dump())
+        except Exception:
+            memory_api = resolve_memory_api(config)
+    else:
+        memory_api = resolve_memory_api(config)
     return LLMExtractor(
         api_key=memory_api["api_key"],
         base_url=memory_api["base_url"],

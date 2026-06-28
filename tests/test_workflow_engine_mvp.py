@@ -241,6 +241,63 @@ def test_artifact_written_to_workspace(tmp_path: Path):
     assert target.exists()
 
 
+def test_workflow_state_persists_across_engine_restart(tmp_path: Path):
+    state_path = tmp_path / "workflow_state.json"
+    engine = WorkflowEngine(storage_path=str(state_path))
+    engine.define_workflow(_artifact_definition(path="outputs/persist.md"))
+
+    run = engine.start_workflow(workflow_id="wf.artifact", session_id="s1", user_id="u1", workspace_id="w1")
+
+    restored = WorkflowEngine(storage_path=str(state_path))
+    assert restored.get_workflow("wf.artifact") is not None
+    assert restored.get_run(run.workflow_run_id) is not None
+    assert restored.list_checkpoints(run.workflow_run_id)
+
+
+def test_successful_workflow_can_be_retained_as_template(tmp_path: Path):
+    state_path = tmp_path / "workflow_state.json"
+    engine = WorkflowEngine(storage_path=str(state_path))
+    definition = _artifact_definition(path="outputs/template.md")
+    definition.policy["retain_as_template"] = True
+    definition.policy["retain_reason"] = "test_success"
+    engine.define_workflow(definition)
+
+    run = engine.start_workflow(workflow_id="wf.artifact", session_id="s1", user_id="u1", workspace_id="w1")
+
+    restored = WorkflowEngine(storage_path=str(state_path))
+    retained = [
+        item
+        for item in restored.list_workflows(owner_user_id="u1")
+        if str(item["workflow_id"]).startswith("tpl.workflow.")
+    ]
+    assert retained
+    restored_run = restored.get_run(run.workflow_run_id)
+    assert restored_run is not None
+    assert restored_run.run_metadata["retained_template_id"] == retained[0]["workflow_id"]
+
+
+def test_purge_user_state_removes_owned_workflows_runs_and_checkpoints(tmp_path: Path):
+    state_path = tmp_path / "workflow_state.json"
+    engine = WorkflowEngine(storage_path=str(state_path))
+    engine.define_workflow(_artifact_definition(workflow_id="wf.owned", path="outputs/owned.md"))
+    other = _artifact_definition(workflow_id="wf.other", path="outputs/other.md")
+    other.owner_user_id = "u2"
+    engine.define_workflow(other)
+
+    owned_run = engine.start_workflow(workflow_id="wf.owned", session_id="s1", user_id="u1", workspace_id="w1")
+    other_run = engine.start_workflow(workflow_id="wf.other", session_id="s2", user_id="u2", workspace_id="w2")
+
+    removed = engine.purge_user_state("u1")
+    restored = WorkflowEngine(storage_path=str(state_path))
+
+    assert removed["definitions"] == 1
+    assert removed["runs"] == 1
+    assert restored.get_workflow("wf.owned") is None
+    assert restored.get_run(owned_run.workflow_run_id) is None
+    assert restored.get_workflow("wf.other") is not None
+    assert restored.get_run(other_run.workflow_run_id) is not None
+
+
 def test_dag_workflow_runs_with_dependency_order(tmp_path: Path):
     engine, ws = _engine(tmp_path)
     engine.define_workflow(_dag_artifact_definition())

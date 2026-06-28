@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
@@ -48,15 +53,19 @@ class WorkflowEngine:
         reasoning_service: Optional[Any] = None,
         memory_service: Optional[Any] = None,
         tool_service: Optional[Any] = None,
+        storage_path: Optional[str] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.workspace_service = workspace_service
         self.reasoning_service = reasoning_service
         self.memory_service = memory_service
         self.tool_service = tool_service
+        default_storage_path = Path(__file__).resolve().parent / "workflow_state.json"
+        self.storage_path = Path(storage_path) if storage_path else default_storage_path
         self._definitions: Dict[str, WorkflowDefinition] = {}
         self._runs: Dict[str, WorkflowRun] = {}
         self._checkpoints: Dict[str, List[Checkpoint]] = {}
+        self._load_state()
 
     def define_workflow(self, definition: WorkflowDefinition) -> WorkflowDefinition:
         if not definition.steps:
@@ -68,6 +77,7 @@ class WorkflowEngine:
         if not definition.created_at:
             definition.created_at = now
         self._definitions[definition.workflow_id] = definition
+        self._persist_state()
         return definition
 
     def _normalize_definition(self, definition: WorkflowDefinition) -> None:
@@ -139,6 +149,7 @@ class WorkflowEngine:
         )
         self._runs[run.workflow_run_id] = run
         self._checkpoints.setdefault(run.workflow_run_id, [])
+        self._persist_state()
 
         self._emit(
             EventType.CONVERSATION_STAGE_STARTED,
@@ -187,6 +198,7 @@ class WorkflowEngine:
         )
         self._runs[run.workflow_run_id] = run
         self._checkpoints.setdefault(run.workflow_run_id, [])
+        self._persist_state()
         self._emit(
             EventType.CONVERSATION_STAGE_STARTED,
             {
@@ -222,12 +234,47 @@ class WorkflowEngine:
         rows = sorted(rows, key=lambda r: r["updated_at"], reverse=True)
         return rows[: max(1, int(limit or 20))]
 
+    def purge_user_state(self, user_id: str) -> Dict[str, int]:
+        """
+        Remove persisted workflow definitions, runs, and checkpoints owned by a user.
+        This is used by account deletion/reset paths and intentionally does not
+        affect shared system templates owned by other users.
+        """
+        raw_user_id = str(user_id or "").strip()
+        graph_user_id = raw_user_id if raw_user_id.startswith("user_") else f"user_{raw_user_id}"
+        user_ids = {raw_user_id, graph_user_id, graph_user_id.replace("user_", "", 1)}
+
+        removed_runs = [
+            run_id
+            for run_id, run in self._runs.items()
+            if str(run.user_id or "") in user_ids
+        ]
+        removed_workflows = [
+            workflow_id
+            for workflow_id, definition in self._definitions.items()
+            if str(definition.owner_user_id or "") in user_ids
+        ]
+
+        for run_id in removed_runs:
+            self._runs.pop(run_id, None)
+            self._checkpoints.pop(run_id, None)
+        for workflow_id in removed_workflows:
+            self._definitions.pop(workflow_id, None)
+
+        self._persist_state()
+        return {
+            "definitions": len(removed_workflows),
+            "runs": len(removed_runs),
+            "checkpoints": len(removed_runs),
+        }
+
     def pause_workflow(self, workflow_run_id: str) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
         if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED}:
             return run
         run.status = RUN_STATUS_PAUSED
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         self._emit(
             EventType.CONVERSATION_STAGE_FINISHED,
             {
@@ -246,6 +293,7 @@ class WorkflowEngine:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return self.advance_to_next_step(workflow_run_id, run_context=run_context)
 
     async def resume_workflow_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -254,6 +302,7 @@ class WorkflowEngine:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
 
     def retry_step(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -269,6 +318,7 @@ class WorkflowEngine:
         run.status = RUN_STATUS_RUNNING
         run.current_step_id = step.step_id
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return self.advance_to_next_step(workflow_run_id, run_context=run_context)
 
     async def retry_step_async(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -284,6 +334,7 @@ class WorkflowEngine:
         run.status = RUN_STATUS_RUNNING
         run.current_step_id = step.step_id
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
 
     def approve_step(self, workflow_run_id: str, step_id: str, approved_by: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
@@ -303,7 +354,9 @@ class WorkflowEngine:
             if run.status == RUN_STATUS_WAITING_HUMAN:
                 run.status = RUN_STATUS_RUNNING
                 run.updated_at = datetime.now(timezone.utc)
+                self._persist_state()
                 return self.advance_to_next_step(workflow_run_id, run_context=run_context)
+        self._persist_state()
         return run
 
     async def approve_step_async(
@@ -330,7 +383,9 @@ class WorkflowEngine:
             if run.status == RUN_STATUS_WAITING_HUMAN:
                 run.status = RUN_STATUS_RUNNING
                 run.updated_at = datetime.now(timezone.utc)
+                self._persist_state()
                 return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._persist_state()
         return run
 
     def create_checkpoint(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any], artifact_refs: Optional[List[Dict[str, Any]]] = None) -> Checkpoint:
@@ -347,6 +402,7 @@ class WorkflowEngine:
         self._checkpoints.setdefault(run.workflow_run_id, []).append(checkpoint)
         run.checkpoint_id = checkpoint.checkpoint_id
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return checkpoint
 
     def list_checkpoints(self, workflow_run_id: str) -> List[Checkpoint]:
@@ -363,7 +419,23 @@ class WorkflowEngine:
         if len(observations) > 200:
             run.run_metadata["observations"] = observations[-200:]
         run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
         return run
+
+    def retain_successful_run_as_template(
+        self,
+        workflow_run_id: str,
+        *,
+        reason: str = "",
+        force: bool = False,
+    ) -> Optional[WorkflowDefinition]:
+        run = self._require_run(workflow_run_id)
+        if run.status != RUN_STATUS_COMPLETED and not force:
+            return None
+        definition = self.get_workflow(run.workflow_id)
+        if not definition:
+            return None
+        return self._retain_run_definition_as_template(run, definition, reason=reason or "explicit_retain")
 
     async def run_tool_action(
         self,
@@ -443,10 +515,13 @@ class WorkflowEngine:
                     run.updated_at = datetime.now(timezone.utc)
                     run.run_metadata["workflow_error"] = "workflow blocked by unresolved dependencies"
                     run.run_metadata["failure"] = {"code": "workflow_blocked", "message": "workflow blocked by unresolved dependencies"}
+                    self._persist_state()
                     return run
                 run.status = RUN_STATUS_COMPLETED
                 run.completed_at = datetime.now(timezone.utc)
                 run.updated_at = run.completed_at
+                self._maybe_retain_completed_run(run)
+                self._persist_state()
                 self._emit(
                     EventType.CONVERSATION_COMPLETE,
                     {
@@ -480,6 +555,7 @@ class WorkflowEngine:
                 run.current_step_id = step.step_id
                 run.updated_at = datetime.now(timezone.utc)
                 self.create_checkpoint(run.workflow_run_id, step.step_id, run_context=run_context)
+                self._persist_state()
                 return run
 
             failed_steps = [step for step, status in execution_pairs if status == "failed"]
@@ -489,6 +565,7 @@ class WorkflowEngine:
                 run.current_step_id = step.step_id
                 run.updated_at = datetime.now(timezone.utc)
                 self.create_checkpoint(run.workflow_run_id, step.step_id, run_context=run_context)
+                self._persist_state()
                 return run
 
             for step, _status in execution_pairs:
@@ -499,6 +576,7 @@ class WorkflowEngine:
                     artifact_refs=step.outputs.get("artifact_refs") if isinstance(step.outputs, dict) else None,
                 )
             self._refresh_run_cursor(run, workflow_type=workflow_type)
+            self._persist_state()
 
     def _execute_step(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> str:
         return self._run_async_blocking(self._execute_step_async(run, step, run_context=run_context))
@@ -706,6 +784,8 @@ class WorkflowEngine:
         run.updated_at = datetime.now(timezone.utc)
         if run.current_step_id is None:
             run.completed_at = run.updated_at
+            self._maybe_retain_completed_run(run)
+        self._persist_state()
 
     def _current_step(self, run: WorkflowRun) -> Optional[WorkflowStep]:
         if run.current_step_id:
@@ -754,6 +834,113 @@ class WorkflowEngine:
         if not run:
             raise WorkflowError(f"workflow run not found: {workflow_run_id}")
         return run
+
+    def _maybe_retain_completed_run(self, run: WorkflowRun) -> None:
+        if run.status != RUN_STATUS_COMPLETED:
+            return
+        if run.run_metadata.get("retained_template_id"):
+            return
+        definition = self.get_workflow(run.workflow_id)
+        if not definition:
+            return
+        gate = self._retention_gate(run, definition)
+        if not gate.get("retain"):
+            return
+        retained = self._retain_run_definition_as_template(
+            run,
+            definition,
+            reason=str(gate.get("reason") or "workflow_success_retained"),
+        )
+        if retained:
+            run.run_metadata["retained_template_id"] = retained.workflow_id
+            run.run_metadata["retained_template_reason"] = str(gate.get("reason") or "")
+
+    def _retention_gate(self, run: WorkflowRun, definition: WorkflowDefinition) -> Dict[str, Any]:
+        policy = definition.policy if isinstance(definition.policy, dict) else {}
+        metadata = run.run_metadata if isinstance(run.run_metadata, dict) else {}
+        for source in (metadata, policy):
+            if self._to_bool(source.get("retain_as_template"), default=False):
+                return {"retain": True, "reason": str(source.get("retain_reason") or "retain_as_template")}
+            if self._to_bool(source.get("template_candidate"), default=False) and self._to_bool(
+                source.get("template_approved"),
+                default=False,
+            ):
+                return {"retain": True, "reason": str(source.get("retain_reason") or "template_candidate_approved")}
+        return {"retain": False, "reason": "retention_gate_not_met"}
+
+    def _retain_run_definition_as_template(
+        self,
+        run: WorkflowRun,
+        definition: WorkflowDefinition,
+        *,
+        reason: str,
+    ) -> WorkflowDefinition:
+        template_id = self._template_workflow_id(run, definition)
+        existing = self._definitions.get(template_id)
+        if existing:
+            existing.updated_at = datetime.now(timezone.utc)
+            existing.policy["success_count"] = int(existing.policy.get("success_count", 1) or 1) + 1
+            existing.policy["last_retained_run_id"] = run.workflow_run_id
+            self._persist_state()
+            return existing
+
+        steps: List[WorkflowStep] = []
+        for step in definition.steps:
+            clean = WorkflowStep(**step.model_dump())
+            clean.status = STEP_STATUS_PENDING
+            clean.outputs = {}
+            steps.append(clean)
+        now = datetime.now(timezone.utc)
+        template_policy = dict(definition.policy or {})
+        template_policy.update(
+            {
+                "source": "successful_workflow_template",
+                "template": True,
+                "template_of": definition.workflow_id,
+                "retained_from_run_id": run.workflow_run_id,
+                "retained_at": now.isoformat().replace("+00:00", "Z"),
+                "retain_reason": reason,
+                "success_count": 1,
+            }
+        )
+        template = WorkflowDefinition(
+            workflow_id=template_id,
+            workflow_type=definition.workflow_type,
+            name=str(template_policy.get("template_name") or f"Template: {definition.name}"),
+            description=definition.description or f"Reusable template retained from workflow run {run.workflow_run_id}.",
+            owner_user_id=definition.owner_user_id or run.user_id,
+            agent_id=definition.agent_id,
+            skill_id=definition.skill_id,
+            steps=steps,
+            policy=template_policy,
+            status=definition.status,
+            created_at=now,
+            updated_at=now,
+        )
+        self._definitions[template.workflow_id] = template
+        self._persist_state()
+        return template
+
+    @staticmethod
+    def _template_workflow_id(run: WorkflowRun, definition: WorkflowDefinition) -> str:
+        base = str(definition.workflow_id or "workflow").strip().replace(":", "_").replace("/", "_")
+        return f"tpl.workflow.{base}.{run.workflow_run_id[-8:]}"
+
+    @staticmethod
+    def _to_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "y", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "n", "off", ""}:
+                return False
+        return bool(value)
 
     def _validate_definition(self, definition: WorkflowDefinition) -> None:
         allowed_types = {"linear", "dag", "graph", "parallel"}
@@ -880,14 +1067,40 @@ class WorkflowEngine:
         if value is None:
             return {}
         if isinstance(value, dict):
-            return deepcopy(value)
+            safe_value = WorkflowEngine._json_safe(deepcopy(value))
+            return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
         if hasattr(value, "model_dump"):
             try:
                 dumped = value.model_dump()
-                return dumped if isinstance(dumped, dict) else {"value": dumped}
+                safe_value = WorkflowEngine._json_safe(dumped)
+                return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
             except Exception:
                 return {}
-        return {"value": value}
+        if hasattr(value, "__dict__"):
+            safe_value = WorkflowEngine._json_safe(vars(value))
+            return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
+        return {"value": WorkflowEngine._json_safe(value)}
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, datetime):
+            return value.isoformat().replace("+00:00", "Z")
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(k): WorkflowEngine._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [WorkflowEngine._json_safe(item) for item in value]
+        if hasattr(value, "model_dump"):
+            try:
+                return WorkflowEngine._json_safe(value.model_dump(mode="python"))
+            except Exception:
+                return str(value)
+        if hasattr(value, "__dict__"):
+            return WorkflowEngine._json_safe(vars(value))
+        return str(value)
 
     def _emit(self, event_type: EventType, payload: Dict[str, Any]) -> None:
         if not self.event_emitter:
@@ -903,3 +1116,86 @@ class WorkflowEngine:
             loop.create_task(_emit_event())
         except Exception:
             pass
+
+    def _load_state(self) -> None:
+        path = self.storage_path
+        if not path.exists():
+            return
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        definitions = payload.get("definitions") if isinstance(payload.get("definitions"), dict) else {}
+        runs = payload.get("runs") if isinstance(payload.get("runs"), dict) else {}
+        checkpoints = payload.get("checkpoints") if isinstance(payload.get("checkpoints"), dict) else {}
+        loaded_definitions: Dict[str, WorkflowDefinition] = {}
+        for workflow_id, raw in definitions.items():
+            try:
+                loaded_definitions[str(workflow_id)] = WorkflowDefinition(**raw)
+            except Exception:
+                continue
+        loaded_runs: Dict[str, WorkflowRun] = {}
+        for run_id, raw in runs.items():
+            try:
+                loaded_runs[str(run_id)] = WorkflowRun(**raw)
+            except Exception:
+                continue
+        loaded_checkpoints: Dict[str, List[Checkpoint]] = {}
+        for run_id, rows in checkpoints.items():
+            if not isinstance(rows, list):
+                continue
+            parsed: List[Checkpoint] = []
+            for raw in rows:
+                try:
+                    parsed.append(Checkpoint(**raw))
+                except Exception:
+                    continue
+            loaded_checkpoints[str(run_id)] = parsed
+        self._definitions.update(loaded_definitions)
+        self._runs.update(loaded_runs)
+        self._checkpoints.update(loaded_checkpoints)
+
+    def _persist_state(self) -> None:
+        path = self.storage_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "definitions": {k: self._json_safe(v.model_dump(mode="python")) for k, v in self._definitions.items()},
+            "runs": {k: self._json_safe(v.model_dump(mode="python")) for k, v in self._runs.items()},
+            "checkpoints": {
+                k: [self._json_safe(item.model_dump(mode="python")) for item in rows]
+                for k, rows in self._checkpoints.items()
+            },
+        }
+        fd, tmp_file = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        tmp_path = Path(tmp_file)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            self._replace_state_file(tmp_path, path)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
+            raise
+
+    @staticmethod
+    def _replace_state_file(tmp_path: Path, path: Path) -> None:
+        last_error: Optional[PermissionError] = None
+        for _ in range(5):
+            try:
+                os.replace(tmp_path, path)
+                return
+            except PermissionError as exc:
+                last_error = exc
+                time.sleep(0.05)
+        if last_error is not None:
+            raise last_error

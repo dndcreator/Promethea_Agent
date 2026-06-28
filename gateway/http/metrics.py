@@ -63,19 +63,30 @@ class MetricsCollector:
         return {
             'llm': {
                 'calls': self.stats['llm_calls'],
+                'total_calls': self.stats['llm_calls'],
                 'avg_time_ms': round(self.stats['llm_total_time'] * 1000 / max(1, self.stats['llm_calls'])),
+                'average_latency_ms': round(self.stats['llm_total_time'] * 1000 / max(1, self.stats['llm_calls'])),
                 'total_tokens': total_tokens,
                 'prompt_tokens': self.stats['prompt_tokens'],
-                'completion_tokens': self.stats['completion_tokens']
+                'completion_tokens': self.stats['completion_tokens'],
+                'estimated_cost': round(estimated_cost, 4),
             },
             'memory': {
                 'recalls': self.stats['memory_recalls'],
+                'total_recalls': self.stats['memory_recalls'],
                 'avg_time_ms': round(self.stats['memory_total_time'] * 1000 / max(1, self.stats['memory_recalls'])),
+                'average_recall_time_ms': round(self.stats['memory_total_time'] * 1000 / max(1, self.stats['memory_recalls'])),
                 'items_recalled': self.stats['memory_items_recalled']
             },
             'sessions': {
                 'created': self.stats['sessions_created'],
                 'messages': self.stats['messages_total']
+            },
+            'chat': {
+                'messages_total': self.stats['messages_total']
+            },
+            'system': {
+                'uptime_seconds': round(uptime)
             },
             'http': {
                 'requests_total': self.stats['http_requests_total'],

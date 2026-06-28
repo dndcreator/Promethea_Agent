@@ -1,23 +1,23 @@
-# business_plus
+# Business Plus Tests
 
-`business_plus` 放轻量“贴近业务”的场景测试，原则是：
+`business_plus` stores higher-level business scenario tests. The goal is to keep realistic product flows separate from low-level unit tests.
 
-- 覆盖真实链路：`chat -> tool confirm -> execute`、`workflow pause/approve/resume`、`batch` 组合调用。
-- 保持可维护：单文件内场景数量控制在 3-6 个，避免过度 mock 和超长 fixture。
-- 不引入外部依赖：默认可在本地离线运行，便于上线前快速回归。
+- Cover real user paths such as `chat -> tool confirm -> execute`, `workflow pause/approve/resume`, and batch orchestration.
+- Keep scenarios maintainable: each file should focus on a small number of journeys with clear mocks and shared fixtures.
+- Avoid external network dependencies by default so the suite can run locally before release.
 
-## 命名约定
+## Naming Rules
 
-- 文件：`test_business_plus_*.py`
-- 用例：`test_business_plus_<scenario>_<expected_result>`
+- File name: `test_business_plus_*.py`
+- Test name: `test_business_plus_<scenario>_<expected_result>`
 
-## 何时新增到这里
+## Temporary Scope
 
-- 用例跨越 2 个以上子系统（例如 `gateway + tool_service + workflow_engine`）。
-- 目标是验证“业务链路完整性”，而不是单函数边界。
+- A single test may cross 2 or more runtime modules, such as `gateway + tool_service + workflow_engine`.
+- The target is to validate business path reliability, not every internal boundary.
 
-## 运行
+## Run
 
-```powershell
-python tests/run_all_tests.py --suite business_plus
+```bash
+python -m pytest tests/business_plus -q
 ```

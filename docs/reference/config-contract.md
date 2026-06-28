@@ -16,7 +16,7 @@ Key principles:
 - secrets remain env-managed
 
 Additional memory keys:
-- memory.raw_log (append-only write-ahead log and replay)
+- memory.raw_log (L0 memory layer: append-only write-ahead log and replay; runtime memory data, not a cleanup target)
 - memory.hippocampus (idle/background consolidation cadence for warm/cold layers)
 
 Procedural-memory runtime note:

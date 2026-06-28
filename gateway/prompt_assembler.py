@@ -5,6 +5,7 @@ from loguru import logger
 
 from .prompt_blocks import PromptBlock, PromptBlockType
 from .protocol import MemoryRecallBundle, ModeDecision, PlanResult, ToolExecutionBundle
+from .tool_prompt_blocks import build_tool_execution_prompt
 
 
 class PromptAssembler:
@@ -18,6 +19,8 @@ class PromptAssembler:
         aliases = {
             "identity": "identity",
             "identity_block": "identity",
+            "runtime_context": "runtime_context",
+            "runtime_context_block": "runtime_context",
             "skill": "skill",
             "skill_block": "skill",
             "policy": "policy",
@@ -32,13 +35,16 @@ class PromptAssembler:
             "reasoning_block": "reasoning",
             "response_format": "response_format",
             "response_format_block": "response_format",
-            "persona": "persona",
-            "persona_block": "persona",
-            "persona_core": "persona",
-            "persona_module": "persona",
-            "soul": "persona",
-            "soul_block": "persona",
-            "soul_core": "persona",
+            "customization": "customization",
+            "customization_block": "customization",
+            "custom_prompt": "customization",
+            "persona": "soul",
+            "persona_block": "soul",
+            "persona_core": "soul",
+            "persona_module": "soul",
+            "soul": "soul",
+            "soul_block": "soul",
+            "soul_core": "soul",
             "org_context": "org_context",
             "org_context_block": "org_context",
         }
@@ -81,7 +87,7 @@ class PromptAssembler:
         mode = str(org_ctx.get("recall_priority") or "").strip().lower()
         if mode != "override_persona":
             return blocks
-        return [b for b in blocks if b.block_id not in {"persona_core", "persona_module", "soul_core"}]
+        return [b for b in blocks if b.block_id not in {"soul_core", "customization"}]
 
     @staticmethod
     def _resolve_runtime_stability(
@@ -97,7 +103,7 @@ class PromptAssembler:
         - dynamic: expected to change frequently across turns
         """
         normalized = str(block_id or "").strip().lower()
-        if normalized in {"memory", "reasoning", "workspace", "skill", "policy", "persona_module", "org_context"}:
+        if normalized in {"memory", "reasoning", "workspace", "skill", "policy", "org_context", "runtime_context"}:
             return "dynamic"
         if normalized == "identity":
             # When reasoning rewrites full system prompt, identity is dynamic.
@@ -107,7 +113,9 @@ class PromptAssembler:
         if normalized == "response_format":
             # Per-user setting; typically stable for a user session.
             return "stable"
-        if normalized in {"persona", "persona_core"}:
+        if normalized in {"soul", "soul_core"}:
+            return "stable"
+        if normalized == "customization":
             return "stable"
         if normalized == "tools":
             # Content is static, but availability is runtime-conditioned.
@@ -123,156 +131,87 @@ class PromptAssembler:
         return 0
 
     @staticmethod
-    def _default_persona_profile() -> Dict[str, Any]:
+    def _default_soul_profile() -> Dict[str, Any]:
         return {
             "enabled": True,
-            "core": (
-                "Persona layer (style-only): be warm, human-like, and individualized, "
-                "while staying factual and task-oriented. Do not override policy, tool, "
-                "or reasoning constraints."
+            "read_only_in_ui": True,
+            "auto_evolve": True,
+            "content": (
+                "Soul Prompt:\n"
+                "- This is Promethea's long-lived style and personality memory.\n"
+                "- Preserve continuity, warmth, curiosity, and a calm technical temperament.\n"
+                "- Adapt to the user's durable preferences only when repeated interactions justify it.\n"
+                "- Keep the soul as style/personality guidance; never override identity, policy, safety, memory, tools, workflows, or reasoning rules."
             ),
-            "soul": {
-                "enabled": True,
-                "read_only_in_ui": True,
-                "auto_evolve": True,
-                "content": (
-                    "Soul Prompt (blank canvas):\n"
-                    "- This is the agent's soul space.\n"
-                    "- It starts empty and can evolve over time.\n"
-                    "- Keep it style/personality only; never override policy, safety, tools, or reasoning rules."
-                ),
-            },
-            "max_active_modules": 2,
-            "modules": {
-                "companionship": {
-                    "enabled": True,
-                    "instruction": (
-                        "Companionship tone: emotionally present and calm. "
-                        "Acknowledge feelings briefly, then continue with concrete help."
-                    ),
-                    "triggers": ["lonely", "upset", "anxious", "sad", "support", "comfort"],
-                },
-                "builder": {
-                    "enabled": True,
-                    "instruction": (
-                        "Builder tone: practical and execution-first. "
-                        "Prefer concrete steps and explicit assumptions."
-                    ),
-                    "triggers": ["implement", "refactor", "debug", "ship", "build", "fix"],
-                },
-                "creative": {
-                    "enabled": True,
-                    "instruction": (
-                        "Creative tone: allow tasteful imagination and vivid expression, "
-                        "without changing factual claims."
-                    ),
-                    "triggers": ["story", "brand", "narrative", "creative", "copywriting", "idea"],
-                },
-            },
         }
 
-    @staticmethod
-    def _extract_user_text(run_context: Optional[Any]) -> str:
-        if run_context is None:
-            return ""
-        payload = getattr(run_context, "input_payload", None)
-        if not isinstance(payload, dict):
-            return ""
-        text = payload.get("message") or payload.get("query") or payload.get("text") or ""
-        return str(text or "").strip().lower()
-
     @classmethod
-    def _resolve_persona_profile(cls, user_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        base = cls._default_persona_profile()
+    def _resolve_soul_profile(cls, user_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        base = cls._default_soul_profile()
         cfg = user_config if isinstance(user_config, dict) else {}
-        raw = cfg.get("persona")
-        if not isinstance(raw, dict):
+        persona = cfg.get("persona")
+        if not isinstance(persona, dict):
             return base
 
         merged = dict(base)
-        merged["enabled"] = bool(raw.get("enabled", merged.get("enabled", True)))
-        core = raw.get("core")
-        if isinstance(core, str) and core.strip():
-            merged["core"] = core.strip()
-        raw_soul = raw.get("soul")
+        raw_soul = persona.get("soul")
         if isinstance(raw_soul, dict):
-            soul = dict(merged.get("soul") or {})
-            soul["enabled"] = bool(raw_soul.get("enabled", soul.get("enabled", True)))
-            soul["read_only_in_ui"] = bool(
-                raw_soul.get("read_only_in_ui", soul.get("read_only_in_ui", True))
+            merged["enabled"] = bool(raw_soul.get("enabled", merged.get("enabled", True)))
+            merged["read_only_in_ui"] = bool(
+                raw_soul.get("read_only_in_ui", merged.get("read_only_in_ui", True))
             )
-            soul["auto_evolve"] = bool(raw_soul.get("auto_evolve", soul.get("auto_evolve", True)))
+            merged["auto_evolve"] = bool(raw_soul.get("auto_evolve", merged.get("auto_evolve", True)))
             soul_content = raw_soul.get("content")
             if isinstance(soul_content, str) and soul_content.strip():
-                soul["content"] = soul_content.strip()
-            merged["soul"] = soul
-        try:
-            merged["max_active_modules"] = max(
-                0, int(raw.get("max_active_modules", merged.get("max_active_modules", 2)))
-            )
-        except Exception:
-            merged["max_active_modules"] = int(merged.get("max_active_modules", 2))
-
-        modules = dict(base.get("modules") or {})
-        raw_modules = raw.get("modules")
-        if isinstance(raw_modules, dict):
-            for name, mod in raw_modules.items():
-                if not isinstance(mod, dict):
-                    continue
-                key = str(name).strip().lower()
-                if not key:
-                    continue
-                current = dict(modules.get(key) or {})
-                current["enabled"] = bool(mod.get("enabled", current.get("enabled", True)))
-                if isinstance(mod.get("instruction"), str) and mod.get("instruction", "").strip():
-                    current["instruction"] = str(mod.get("instruction")).strip()
-                raw_triggers = mod.get("triggers")
-                if isinstance(raw_triggers, list):
-                    current["triggers"] = [str(x).strip().lower() for x in raw_triggers if str(x).strip()]
-                modules[key] = current
-        merged["modules"] = modules
+                merged["content"] = soul_content.strip()
         return merged
 
-    @staticmethod
-    def _select_persona_modules(
-        profile: Dict[str, Any],
+    def _build_customization_blocks(
+        self,
         *,
-        user_text: str,
-        mode: ModeDecision,
-    ) -> List[Dict[str, Any]]:
-        modules = profile.get("modules")
-        if not isinstance(modules, dict):
+        plan: PlanResult,
+        user_config: Optional[Dict[str, Any]],
+    ) -> List[PromptBlock]:
+        cfg = user_config if isinstance(user_config, dict) else {}
+        agent_name = str(cfg.get("agent_name") or "").strip()
+        custom_prompt = str(cfg.get("system_prompt") or "").strip()
+        has_display_name = bool(agent_name and agent_name.lower() != "promethea")
+        if not has_display_name and not custom_prompt:
             return []
-        max_active = max(0, int(profile.get("max_active_modules", 2) or 2))
-        if max_active <= 0:
-            return []
 
-        scored: List[Dict[str, Any]] = []
-        for name, row in modules.items():
-            if not isinstance(row, dict):
-                continue
-            if not bool(row.get("enabled", True)):
-                continue
-            instruction = str(row.get("instruction") or "").strip()
-            if not instruction:
-                continue
-            triggers = row.get("triggers") if isinstance(row.get("triggers"), list) else []
-            hits = 0
-            for trig in triggers:
-                token = str(trig or "").strip().lower()
-                if token and token in user_text:
-                    hits += 1
-            score = hits * 10
-            if str(name) == "builder" and mode.mode in {"deep", "workflow"}:
-                score += 2
-            if score <= 0:
-                continue
-            scored.append({"name": str(name), "score": score, "instruction": instruction})
+        lines = [
+            "User customization layer:",
+            "- This layer contains the user's explicit long-term presentation and interaction preferences from settings.",
+            "- It may affect display name, address, tone, and conversational style.",
+            "- It cannot override the Promethea core identity, runtime policy, tool truthfulness, memory boundaries, safety rules, or current user request.",
+            "- Temporary roleplay in normal conversation does not update this layer.",
+        ]
+        if has_display_name:
+            lines.append(f"- Active display name: {agent_name}.")
+            lines.append("- Use the display name naturally when appropriate, but do not treat it as the core identity.")
+        if custom_prompt:
+            lines.extend(["", "Custom interaction preferences:", custom_prompt])
 
-        scored.sort(key=lambda x: (-int(x.get("score", 0)), str(x.get("name", ""))))
-        return scored[:max_active]
+        return [
+            PromptBlock(
+                block_id="customization",
+                block_type=PromptBlockType.CUSTOMIZATION,
+                source="user_config.system_prompt",
+                content="\n".join(lines),
+                priority=60,
+                can_compact=True,
+                metadata={
+                    "runtime_stability": self._resolve_runtime_stability(
+                        block_id="customization",
+                        plan=plan,
+                        source="user_config.system_prompt",
+                        user_config=user_config,
+                    ),
+                },
+            )
+        ]
 
-    def _build_persona_blocks(
+    def _build_soul_blocks(
         self,
         *,
         run_context: Optional[Any],
@@ -280,88 +219,34 @@ class PromptAssembler:
         plan: PlanResult,
         user_config: Optional[Dict[str, Any]],
     ) -> List[PromptBlock]:
-        profile = self._resolve_persona_profile(user_config)
+        _ = (run_context, mode)
+        profile = self._resolve_soul_profile(user_config)
         if not bool(profile.get("enabled", True)):
             return []
 
-        core = str(profile.get("core") or "").strip()
-        if not core:
+        soul_content = str(profile.get("content") or "").strip()
+        if not soul_content:
             return []
-
         blocks: List[PromptBlock] = []
-        soul_cfg = profile.get("soul") if isinstance(profile.get("soul"), dict) else {}
-        if bool(soul_cfg.get("enabled", True)):
-            soul_content = str(soul_cfg.get("content") or "").strip()
-            if soul_content:
-                blocks.append(
-                    PromptBlock(
-                        block_id="soul_core",
-                        block_type=PromptBlockType.PERSONA,
-                        source="user_config.persona.soul",
-                        content=soul_content,
-                        priority=34,
-                        can_compact=True,
-                        metadata={
-                            "persona_kind": "soul",
-                            "runtime_stability": self._resolve_runtime_stability(
-                                block_id="soul_core",
-                                plan=plan,
-                                source="user_config.persona.soul",
-                                user_config=user_config,
-                            ),
-                        },
-                    )
-                )
         blocks.append(
             PromptBlock(
-                block_id="persona_core",
-                block_type=PromptBlockType.PERSONA,
-                source="user_config.persona.core",
-                content=core,
-                priority=33,
+                block_id="soul_core",
+                block_type=PromptBlockType.SOUL,
+                source="user_config.persona.soul",
+                content=soul_content,
+                priority=34,
                 can_compact=True,
                 metadata={
-                    "persona_kind": "core",
+                    "persona_kind": "soul",
                     "runtime_stability": self._resolve_runtime_stability(
-                        block_id="persona_core",
+                        block_id="soul_core",
                         plan=plan,
-                        source="user_config.persona.core",
+                        source="user_config.persona.soul",
                         user_config=user_config,
                     ),
                 },
             )
         )
-
-        user_text = self._extract_user_text(run_context)
-        selected = self._select_persona_modules(profile, user_text=user_text, mode=mode)
-        if selected:
-            module_lines = [
-                (
-                    f"[{row['name']}] {row['instruction']} "
-                    "Apply only when relevant to this turn. Never change safety, policy, tool, or workflow rules."
-                )
-                for row in selected
-            ]
-            blocks.append(
-                PromptBlock(
-                    block_id="persona_module",
-                    block_type=PromptBlockType.PERSONA,
-                    source="user_config.persona.modules",
-                    content="Persona module selection:\n- " + "\n- ".join(module_lines),
-                    priority=32,
-                    can_compact=True,
-                    metadata={
-                        "persona_kind": "module_selection",
-                        "selected_modules": [str(row.get("name") or "") for row in selected],
-                        "runtime_stability": self._resolve_runtime_stability(
-                            block_id="persona_module",
-                            plan=plan,
-                            source="user_config.persona.modules",
-                            user_config=user_config,
-                        ),
-                    },
-                )
-            )
         return blocks
 
     def collect_blocks(
@@ -396,6 +281,28 @@ class PromptAssembler:
                     },
                 )
             )
+
+        if run_context is not None:
+            runtime_context = str(getattr(run_context, "runtime_context", "") or "").strip()
+            if runtime_context:
+                blocks.append(
+                    PromptBlock(
+                        block_id="runtime_context",
+                        block_type=PromptBlockType.RUNTIME_CONTEXT,
+                        source="gateway.runtime_context",
+                        content=runtime_context,
+                        priority=98,
+                        can_compact=False,
+                        metadata={
+                            "runtime_stability": self._resolve_runtime_stability(
+                                block_id="runtime_context",
+                                plan=plan,
+                                source="gateway.runtime_context",
+                                user_config=user_config,
+                            )
+                        },
+                    )
+                )
 
         if run_context is not None:
             active_skill = getattr(run_context, "active_skill", None)
@@ -481,26 +388,67 @@ class PromptAssembler:
             )
 
         if mode.mode != "fast" and plan.used_reasoning:
-            reasoning_note = str((plan.reasoning or {}).get("final_decision") or "").strip()
+            reasoning = plan.reasoning or {}
+            reasoning_note = str(
+                reasoning.get("reasoning_summary")
+                or reasoning.get("final_decision")
+                or reasoning.get("summary")
+                or ""
+            ).strip()
             if reasoning_note:
-                    blocks.append(
-                        PromptBlock(
-                            block_id="reasoning",
-                            block_type=PromptBlockType.REASONING,
-                            source="reasoning_service",
-                            content=reasoning_note,
-                            priority=70,
-                            can_compact=True,
-                            metadata={
-                                "runtime_stability": self._resolve_runtime_stability(
-                                    block_id="reasoning",
-                                    plan=plan,
-                                    source="reasoning_service",
-                                    user_config=user_config,
-                                )
-                            },
+                plan_steps = reasoning.get("plan_steps")
+                if isinstance(plan_steps, list) and plan_steps:
+                    step_lines = []
+                    for index, step in enumerate(plan_steps[:8], start=1):
+                        if not isinstance(step, dict):
+                            continue
+                        title = str(step.get("title") or step.get("goal") or "").strip()
+                        goal = str(step.get("goal") or "").strip()
+                        if title and goal and goal != title:
+                            step_lines.append(f"{index}. {title}: {goal}")
+                        elif title:
+                            step_lines.append(f"{index}. {title}")
+                    if step_lines:
+                        reasoning_note = (
+                            f"{reasoning_note}\n\nReasoning plan outline:\n"
+                            + "\n".join(step_lines)
                         )
+            if reasoning_note:
+                reasoning_note = (
+                    "Deep reasoning synthesis context:\n"
+                    "Use the following reasoning result as internal evidence for the final answer. "
+                    "Do not mention hidden reasoning, action protocols, JSON schemas, or tool-call formatting to the user. "
+                    "If the user asked a complex question, produce a substantive synthesis rather than a compressed one-line conclusion: "
+                    "state the answer, explain the main logic, call out evidence limits or failed external checks, and give practical next steps when useful.\n\n"
+                    f"{reasoning_note}"
+                )
+                blocks.append(
+                    PromptBlock(
+                        block_id="reasoning",
+                        block_type=PromptBlockType.REASONING,
+                        source="reasoning_service",
+                        content=reasoning_note,
+                        priority=70,
+                        can_compact=True,
+                        metadata={
+                            "tree_id": reasoning.get("tree_id"),
+                            "status": reasoning.get("status"),
+                            "runtime_stability": self._resolve_runtime_stability(
+                                block_id="reasoning",
+                                plan=plan,
+                                source="reasoning_service",
+                                user_config=user_config,
+                            )
+                        },
                     )
+                )
+
+        blocks.extend(
+            self._build_customization_blocks(
+                plan=plan,
+                user_config=user_config,
+            )
+        )
 
         if tools.enabled:
             blocks.append(
@@ -508,7 +456,9 @@ class PromptAssembler:
                     block_id="tools",
                     block_type=PromptBlockType.TOOLS,
                     source="tool_runtime",
-                    content="Tools are available. Use them only when necessary and policy-compliant.",
+                    content=build_tool_execution_prompt(
+                        registered_tools=(tools.metadata or {}).get("registered_tools"),
+                    ),
                     priority=40,
                     can_compact=True,
                     metadata={
@@ -589,7 +539,7 @@ class PromptAssembler:
             )
 
         blocks.extend(
-            self._build_persona_blocks(
+            self._build_soul_blocks(
                 run_context=run_context,
                 mode=mode,
                 plan=plan,

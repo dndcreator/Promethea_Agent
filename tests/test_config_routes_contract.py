@@ -31,3 +31,23 @@ def test_basic_config_view_keeps_key_fields_and_redacted_secrets():
     assert view["reasoning"]["enabled"] is False
     assert view["system"]["stream_mode"] is False
     assert view["org_brain"]["enabled"] is False
+
+
+def test_basic_config_view_preserves_enterprise_switch_and_org_id():
+    raw = {
+        "org_brain": {
+            "enabled": "true",
+            "org_id": "acme",
+            "recall_priority": "override_persona",
+            "confirmation_queue": "false",
+            "audience_default": "sales",
+        }
+    }
+
+    view = _build_basic_config_view(raw)
+
+    assert view["org_brain"]["enabled"] is True
+    assert view["org_brain"]["org_id"] == "acme"
+    assert view["org_brain"]["recall_priority"] == "override_persona"
+    assert view["org_brain"]["confirmation_queue"] is False
+    assert view["org_brain"]["audience_default"] == "sales"

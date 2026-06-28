@@ -1,6 +1,9 @@
 ﻿import pytest
 from unittest.mock import AsyncMock
+from gateway.reasoning_budget import ReasoningBudgetLedger
 from gateway.reasoning_service import ReasoningService
+from gateway.reasoning_tree_store import ReasoningTreeHistoryStore
+from gateway.reasoning_tool_runtime import ReasoningToolCatalogResolver, ReasoningToolQualityTracker
 
 
 class DummyConversationCore:
@@ -287,6 +290,168 @@ async def test_resolve_policy_defaults_to_enabled_when_key_missing():
     svc = ReasoningService(conversation_core=DummyConversationCore())
     policy = svc._resolve_policy(user_id="u1", user_config={"reasoning": {}})
     assert policy["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_replan_step_prompts_for_strategy_reflection(monkeypatch):
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+    tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="research task")
+    node = svc._add_node(tree, parent_id=tree.root_node_id, kind="thought", title="search evidence")
+    captured = {}
+
+    async def fake_call_json(messages, user_config=None, user_id=None):
+        captured["system"] = messages[0]["content"]
+        captured["user"] = messages[1]["content"]
+        return {
+            "next_action": "think",
+            "memory_query": "",
+            "tool_intent": "",
+            "additional_steps": [],
+            "strategy_reflection": "Further search has low marginal value.",
+        }
+
+    monkeypatch.setattr(svc, "_call_json", fake_call_json)
+
+    out = await svc._replan_step(
+        tree=tree,
+        node=node,
+        user_message="find the trend",
+        observations=["tool failed with 403", "search returned no usable result"],
+        user_config={"reasoning": {"enabled": True}},
+        user_id="u1",
+    )
+
+    assert out["next_action"] == "think"
+    assert "strategy reflection" in captured["system"].lower()
+    assert "marginal value" in captured["system"]
+    assert "Global budget ledger" in captured["user"]
+    assert "runtime_over_target" in captured["user"]
+    assert "strategy_reflection" in captured["system"]
+    assert "tool failed with 403" in captured["user"]
+
+
+def test_budget_ledger_tracks_runtime_react_and_low_yield_tools():
+    svc = ReasoningService(conversation_core=DummyConversationCore())
+    budget = ReasoningBudgetLedger()
+    tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="research task")
+    tree.created_at -= 500
+    tree.stats["react_rounds"] = 14
+    tree.stats["tool_calls"] = 6
+    tree.stats["tool_failures"] = 4
+    tree.stats["react_failed_observations"] = 4
+
+    ledger = budget.build(
+        tree,
+        {
+            "target_runtime_seconds": 240,
+            "max_runtime_seconds": 480,
+            "max_react_rounds_total": 14,
+            "max_tool_calls": 8,
+            "max_low_yield_tool_failures": 4,
+        },
+    )
+
+    assert ledger["runtime_over_target"] is True
+    assert ledger["runtime_exhausted"] is True
+    assert ledger["react_rounds_exhausted"] is True
+    assert ledger["low_yield_tools"] is True
+    assert budget.should_stop_reasoning(ledger) is True
+    assert budget.should_avoid_external_actions(ledger) is True
+
+
+def test_reasoning_tree_history_store_roundtrips_completed_tree(tmp_path):
+    store = ReasoningTreeHistoryStore(base_dir=tmp_path)
+    cache = {}
+    payload = {
+        "tree_id": "tree-1",
+        "session_id": "session-1",
+        "user_id": "user-1",
+        "status": "succeeded",
+        "nodes": [{"node_id": "root", "title": "goal"}],
+    }
+
+    store.remember(payload, cache)
+
+    assert cache["tree-1"]["status"] == "succeeded"
+    loaded = store.load(tree_id="tree-1", user_id="user-1")
+    assert loaded["tree_id"] == "tree-1"
+    assert loaded["nodes"][0]["title"] == "goal"
+    listed = store.list(user_id="user-1", session_id="session-1")
+    assert [row["tree_id"] for row in listed] == ["tree-1"]
+
+
+def test_reasoning_tree_history_store_lists_latest_per_tree(tmp_path):
+    store = ReasoningTreeHistoryStore(base_dir=tmp_path)
+    store.persist(
+        {
+            "tree_id": "tree-1",
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "root_goal": "old",
+            "updated_at": 10,
+        }
+    )
+    store.persist(
+        {
+            "tree_id": "tree-1",
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "root_goal": "new",
+            "updated_at": 20,
+        }
+    )
+    store.persist(
+        {
+            "tree_id": "tree-2",
+            "session_id": "session-2",
+            "user_id": "user-1",
+            "root_goal": "other",
+            "updated_at": 30,
+        }
+    )
+
+    listed = store.list(user_id="user-1", session_id="session-1")
+    assert len(listed) == 1
+    assert listed[0]["tree_id"] == "tree-1"
+    assert listed[0]["root_goal"] == "new"
+
+
+def test_tool_quality_tracker_returns_ranked_hints():
+    tracker = ReasoningToolQualityTracker()
+    tracker.record(service_name="web", tool_name="search", ok=True, latency_ms=100)
+    tracker.record(service_name="web", tool_name="search", ok=False, latency_ms=300)
+    tracker.record(service_name="math", tool_name="calculate", ok=True, latency_ms=20)
+
+    hints = tracker.hints(limit=2)
+
+    assert hints[0]["service_name"] == "web"
+    assert hints[0]["tool_name"] == "search"
+    assert hints[0]["runs"] == 2
+    assert hints[0]["success_rate"] == 0.5
+
+
+def test_tool_catalog_resolver_normalizes_llm_selected_tool():
+    resolver = ReasoningToolCatalogResolver()
+    catalog = [
+        {"service_name": "content_tools", "tool_name": "web_fetch", "tool_type": "mcp"},
+        {"service_name": "math", "tool_name": "calculate", "tool_type": "official"},
+    ]
+
+    selected = resolver.normalize_selected_tool(
+        {
+            "use_tool": True,
+            "service_name": "content tools",
+            "tool_name": "web fetch",
+            "args": {"url": "https://example.com"},
+            "why": "need source",
+        },
+        catalog,
+    )
+
+    assert selected["use_tool"] is True
+    assert selected["service_name"] == "content_tools"
+    assert selected["tool_name"] == "web_fetch"
+    assert selected["args"]["url"] == "https://example.com"
 
 
 @pytest.mark.asyncio
@@ -602,5 +767,3 @@ async def test_select_replay_tool_prefers_semantic_mapping_over_exact_tool(monke
     assert selected["service_name"] == "computer_control"
     assert selected["tool_name"] == "browser_action"
     assert selected["why"] == "template_mind_graph_llm_compile"
-
-

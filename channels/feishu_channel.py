@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Feishu channel adapter."""
 import hmac
 import hashlib
 import time
@@ -13,7 +12,7 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class FeishuChannel(BaseChannel):
-    """TODO: add docstring."""
+    """Feishu adapter supporting bot webhook and OpenAPI sends."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("feishu", ChannelType.FEISHU, config)
@@ -31,7 +30,7 @@ class FeishuChannel(BaseChannel):
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def connect(self) -> bool:
-        """TODO: add docstring."""
+        """Create the HTTP session and optionally fetch tenant access token."""
         try:
             self.session = aiohttp.ClientSession()
             
@@ -47,7 +46,7 @@ class FeishuChannel(BaseChannel):
             return False
     
     async def disconnect(self) -> bool:
-        """TODO: add docstring."""
+        """Close the HTTP session and mark Feishu disconnected."""
         if self.session:
             await self.session.close()
             self.session = None
@@ -57,7 +56,7 @@ class FeishuChannel(BaseChannel):
         return True
     
     async def _refresh_access_token(self):
-        """TODO: add docstring."""
+        """Refresh Feishu tenant access token when API mode is used."""
         url = f"{self.api_base}/auth/v3/tenant_access_token/internal"
         payload = {
             "app_id": self.app_id,
@@ -74,12 +73,12 @@ class FeishuChannel(BaseChannel):
                 raise Exception(f"Failed to get access token: {data}")
     
     async def _ensure_token(self):
-        """TODO: add docstring."""
+        """Refresh the tenant token when missing or near expiry."""
         if not self.tenant_access_token or time.time() >= self.token_expires_at:
             await self._refresh_access_token()
     
     def _generate_signature(self, timestamp: str, secret: str) -> str:
-        """TODO: add docstring."""
+        """Generate Feishu webhook signature material."""
         string_to_sign = f"{timestamp}\n{secret}"
         hmac_code = hmac.new(
             string_to_sign.encode("utf-8"),
@@ -113,7 +112,7 @@ class FeishuChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         if not self.webhook_url:
             return {"success": False, "error": "Webhook URL not configured"}
         
@@ -209,7 +208,7 @@ class FeishuChannel(BaseChannel):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         try:
             if self.webhook_url and kwargs.get("use_webhook", True):
                 payload = {

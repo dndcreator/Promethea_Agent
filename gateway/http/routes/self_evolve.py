@@ -23,6 +23,10 @@ class SelfEvolveContextRequest(BaseModel):
     max_chars_per_file: Optional[int] = Field(default=None, ge=200, le=20000)
 
 
+class SelfEvolveSelfModelRequest(BaseModel):
+    max_chars_per_file: Optional[int] = Field(default=None, ge=500, le=20000)
+
+
 class SelfEvolvePatchRequest(BaseModel):
     path: str = Field(min_length=1)
     old: str = Field(min_length=1)
@@ -151,6 +155,34 @@ async def self_evolve_collect_context(
     max_chars = int(request.max_chars_per_file or profile.get("max_context_chars_per_file") or 4000)
     try:
         out = await svc.collect_context(task_id=task_id, max_chars_per_file=max_chars)
+        return {"status": "success", "user_id": current_user_id, **out}
+    except Exception as exc:
+        raise _http_error_from_exception(exc) from exc
+
+
+@router.get("/self-model")
+async def self_evolve_get_self_model(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    svc, config_service = _get_self_evolve_service()
+    merged = _merged_user_config(config_service, current_user_id)
+    _ensure_enabled(svc, merged)
+    try:
+        out = await svc.get_self_model()
+        return {"status": "success", "user_id": current_user_id, **out}
+    except Exception as exc:
+        raise _http_error_from_exception(exc) from exc
+
+
+@router.post("/self-model/refresh")
+async def self_evolve_refresh_self_model(
+    request: SelfEvolveSelfModelRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_self_evolve_service()
+    merged = _merged_user_config(config_service, current_user_id)
+    profile = _ensure_enabled(svc, merged)
+    max_chars = int(request.max_chars_per_file or profile.get("max_context_chars_per_file") or 5000)
+    try:
+        out = await svc.build_self_model(max_chars_per_file=max_chars)
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
         raise _http_error_from_exception(exc) from exc

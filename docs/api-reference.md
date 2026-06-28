@@ -33,6 +33,8 @@ This avoids hardcoding stale assumptions.
 
 - `GET /api/tools`
 - `POST /api/tools/call`
+- `GET /api/extensions/catalog`
+- `POST /api/extensions/reload`
 - `GET /api/mcp/services`
 - `GET /api/mcp/services/{name}/health`
 - `GET /api/mcp/services/{name}/tools`
@@ -47,30 +49,51 @@ This avoids hardcoding stale assumptions.
 
 ### Memory
 
-- `POST /api/memory/query`
-- `POST /api/memory/cluster`
-- `POST /api/memory/summarize`
+- `POST /api/memory/cluster/{session_id}`
+- `GET /api/memory/concepts/{session_id}`
+- `POST /api/memory/summarize/{session_id}`
+- `GET /api/memory/summaries/{session_id}`
+- `GET /api/memory/summary/{summary_id}`
 - `GET /api/memory/graph`
-- `POST /api/memory/decay`
-- `POST /api/memory/cleanup`
+- `GET /api/memory/graph/{session_id}`
+- `GET /api/memory/capabilities`
+- `GET /api/memory/entries`
+- `POST /api/memory/entries`
+- `PATCH /api/memory/entries/{memory_id}`
+- `DELETE /api/memory/entries/{memory_id}`
+- `GET /api/memory/write-decisions`
+- `GET /api/memory/write-proposals`
+- `POST /api/memory/write-proposals/{proposal_id}/decision`
+- `GET /api/memory/dev/dashboard`
+- `POST /api/memory/decay/{session_id}`
+- `POST /api/memory/cleanup/{session_id}`
+- `GET /api/memory/forgetting/stats/{session_id}`
 - `GET /api/memory/recall/runs`
-- `GET /api/memory/recall/inspect`
+- `GET /api/memory/recall/{target_request_id}`
 
 ### Workflow and Workspace
 
 - `POST /api/workflow/define`
 - `GET /api/workflow/list`
 - `POST /api/workflow/start`
-- `GET /api/workflow/status`
-- `POST /api/workflow/pause`
-- `POST /api/workflow/resume`
-- `POST /api/workflow/retry-step`
-- `POST /api/workflow/approve-step`
-- `GET /api/workflow/checkpoints`
+- `GET /api/workflow/run/{workflow_run_id}`
+- `POST /api/workflow/pause/{workflow_run_id}`
+- `POST /api/workflow/resume/{workflow_run_id}`
+- `POST /api/workflow/retry`
+- `POST /api/workflow/approve`
+- `GET /api/workflow/checkpoints/{workflow_run_id}`
 - `POST /api/workspace/create-document`
 - `POST /api/workspace/update-document`
 - `GET /api/workspace/list-artifacts`
 - `POST /api/workspace/snapshot-artifact`
+
+### Files and Search
+
+- `POST /api/files/upload`
+- `GET /api/files`
+- `GET /api/search`
+
+Uploaded files are persisted per user. Text-like files are extracted for search and chat attachment context. Image uploads are accepted for storage and optional OCR extraction. During chat, attachments are passed to `ConversationService` as structured runtime input: text/document files become labeled text context, while image files are sent as native image blocks when the active model is vision-capable. Text-only models receive OCR/text fallback or an explicit unavailable-attachment notice.
 
 ### Config and Runtime Preferences
 
@@ -94,6 +117,8 @@ This avoids hardcoding stale assumptions.
 
 ### Voice
 
+Voice routes are experimental/provider-dependent in the current preview. They are listed for contract discovery, but voice input is not a supported release feature. A DeepSeek-only chat configuration does not provide STT/audio transcription; `/api/voice/stt` and `/api/voice/ptt` require an OpenAI-compatible audio transcription provider.
+
 - `GET /api/voice/capabilities`
 - `POST /api/voice/stt`
 - `POST /api/voice/tts`
@@ -103,6 +128,7 @@ This avoids hardcoding stale assumptions.
 ### Ops and Discovery
 
 - `GET /api/status`
+- `GET /api/bootstrap` - public first-run UI status, including configured backend, Neo4j availability, registration availability, and restart requirement for backend changes.
 - `GET /api/health`
 - `GET /api/ops/capabilities`
 - `GET /api/ops/abstractions`

@@ -10,10 +10,11 @@ from loguru import logger
 
 
 DEFAULT_SOUL_CONTENT = (
-    "Soul Prompt (blank canvas):\n"
-    "- This is the agent's soul space.\n"
-    "- It starts empty and can evolve over time.\n"
-    "- Keep it style/personality only; never override policy, safety, tools, or reasoning rules."
+    "Soul Prompt:\n"
+    "- This is Promethea's long-lived style and personality memory.\n"
+    "- Preserve continuity, warmth, curiosity, and a calm technical temperament.\n"
+    "- Adapt to the user's durable preferences only when repeated interactions justify it.\n"
+    "- Keep the soul as style/personality guidance; never override identity, policy, safety, memory, tools, workflows, or reasoning rules."
 )
 
 
@@ -162,10 +163,13 @@ async def _evolve_soul_task(
         current = profile["content"]
         max_chars = int(profile["max_chars"])
         prompt_system = (
-            "You decide whether to evolve an agent soul prompt (style/personality only).\n"
+            "You decide whether to evolve Promethea's soul prompt (style/personality only).\n"
             "Strict rules:\n"
-            "- Never add policy/safety/tool/workflow constraints.\n"
-            "- Keep it concise, stable, and human-readable.\n"
+            "- Update only when the latest interaction reveals a durable preference, relationship pattern, or stable communication style.\n"
+            "- Do not update for one-off requests, transient emotions, task-specific instructions, facts that belong in memory, or tool/workflow rules.\n"
+            "- Preserve the existing soul unless the candidate is clearly better for future interactions.\n"
+            "- Never add identity, policy, safety, memory, tool, reasoning, workflow, or business-domain constraints.\n"
+            "- Keep it concise, stable, human-readable, and suitable as a prompt block.\n"
             "- Output strict JSON only: "
             "{\"should_update\": true|false, \"next_soul\": \"...\", \"reason\": \"...\"}."
         )
@@ -173,7 +177,7 @@ async def _evolve_soul_task(
             f"Current soul:\n{current}\n\n"
             f"Latest user message:\n{str(user_message or '')[:1200]}\n\n"
             f"Latest assistant message:\n{str(assistant_message or '')[:1200]}\n\n"
-            "Decide if the soul should evolve for better personalization over future turns."
+            "Decide if the soul should evolve for better long-term style/personality over future turns."
         )
 
         llm_out = await service.call_llm(

@@ -14,6 +14,7 @@ from passlib.exc import MissingBackendError
 from config import load_config
 from memory.models import Neo4jNode, NodeType
 from memory.neo4j_connector import Neo4jConnectionPool
+from gateway.user_secrets import ensure_user_secrets
 
 # Prefer bcrypt, with PBKDF2 fallback when bcrypt backend is unavailable.
 pwd_context = CryptContext(
@@ -26,6 +27,7 @@ pwd_context = CryptContext(
 class UserManager:
     def __init__(self):
         cfg = load_config()
+        self.store_backend = str(getattr(cfg.memory, "store_backend", "neo4j") or "neo4j").strip().lower()
         self.connector = Neo4jConnectionPool.get_connector(cfg.memory.neo4j)
         if not self.connector:
             logger.warning("Neo4j is unavailable, user graph operations are disabled")
@@ -33,8 +35,48 @@ class UserManager:
         self.users_dir = Path(__file__).resolve().parents[2] / "config" / "users"
         self.users_dir.mkdir(parents=True, exist_ok=True)
 
+    def _use_graph_users(self) -> bool:
+        return self.store_backend == "neo4j" and self.connector is not None
+
+    def _use_local_users(self) -> bool:
+        return self.store_backend in {"sqlite_graph", "flat_memory"}
+
+    def can_register(self) -> tuple[bool, str]:
+        if self._use_graph_users() or self._use_local_users():
+            return True, ""
+        if self.store_backend == "neo4j":
+            neo4j_error = Neo4jConnectionPool.get_last_error()
+            reason = neo4j_error.get("code") or "neo4j_user_backend_unavailable"
+            return False, reason
+        return False, "user_backend_unavailable"
+
+    def _local_users_path(self) -> Path:
+        return self.users_dir / "_local_users.json"
+
+    def _load_local_users(self) -> Dict[str, Any]:
+        path = self._local_users_path()
+        if not path.exists():
+            return {"users": []}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {"users": []}
+        except Exception as e:
+            logger.error(f"Read local users failed: {e}")
+            return {"users": []}
+
+    def _save_local_users(self, data: Dict[str, Any]) -> None:
+        self._write_json_atomic(self._local_users_path(), data)
+
     def get_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        if not self.connector:
+        if self._use_local_users():
+            data = self._load_local_users()
+            for user in data.get("users") or []:
+                if isinstance(user, dict) and user.get("username") == username:
+                    return user
+            return None
+
+        if not self._use_graph_users():
             return None
 
         query = "MATCH (u:User {username: $username}) RETURN u"
@@ -42,7 +84,15 @@ class UserManager:
         return results[0]["u"] if results else None
 
     def get_user_by_id(self, user_id: str) -> Optional[Dict[str, Any]]:
-        if not self.connector:
+        if self._use_local_users():
+            raw_user_id = user_id.replace("user_", "", 1) if user_id.startswith("user_") else user_id
+            data = self._load_local_users()
+            for user in data.get("users") or []:
+                if isinstance(user, dict) and user.get("user_id") == raw_user_id:
+                    return user
+            return None
+
+        if not self._use_graph_users():
             return None
 
         if not user_id.startswith("user_"):
@@ -53,16 +103,67 @@ class UserManager:
         return results[0]["u"] if results else None
 
     def create_user(self, username: str, password: str, agent_name: str = "Promethea") -> Optional[str]:
-        if not self.connector:
-            logger.error("Neo4j is unavailable, cannot create user")
+        can_register, reason = self.can_register()
+        if not can_register:
+            logger.error(f"Cannot create user: {reason}")
             return None
 
         if self.get_user_by_username(username):
             logger.warning(f"User already exists: {username}")
             return None
 
+        password_hash = self._hash_password(password)
+        raw_uuid = str(uuid.uuid4())
+
+        if self._use_local_users():
+            data = self._load_local_users()
+            users = list(data.get("users") or [])
+            users.append(
+                {
+                    "id": f"user_{raw_uuid}",
+                    "username": username,
+                    "password_hash": password_hash,
+                    "agent_name": agent_name,
+                    "user_id": raw_uuid,
+                    "auth_backend": "local_file",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            data["users"] = users
+            try:
+                self._save_local_users(data)
+                self.create_user_config(raw_uuid, agent_name)
+                logger.info(f"Local user created: user_{raw_uuid}")
+                return raw_uuid
+            except Exception as e:
+                logger.error(f"Create local user failed: {e}")
+                return None
+
         try:
-            password_hash = pwd_context.hash(password)
+            user_node = Neo4jNode(
+                id=f"user_{raw_uuid}",
+                type=NodeType.USER,
+                content=f"user {username}",
+                properties={
+                    "username": username,
+                    "password_hash": password_hash,
+                    "agent_name": agent_name,
+                    "user_id": raw_uuid,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            self.connector.create_node(user_node)
+            self.create_user_config(raw_uuid, agent_name)
+            logger.info(f"User created: user_{raw_uuid}")
+            return raw_uuid
+        except Exception as e:
+            logger.error(f"Create user failed: {e}")
+            return None
+
+    @staticmethod
+    def _hash_password(password: str) -> str:
+        try:
+            return pwd_context.hash(password)
         except (MissingBackendError, ValueError):
             # Fallback when bcrypt backend is missing or runtime-incompatible.
             fallback_ctx = CryptContext(
@@ -70,31 +171,7 @@ class UserManager:
                 default="pbkdf2_sha256",
                 deprecated="auto",
             )
-            password_hash = fallback_ctx.hash(password)
-        raw_uuid = str(uuid.uuid4())
-        user_id = f"user_{raw_uuid}"
-
-        user_node = Neo4jNode(
-            id=user_id,
-            type=NodeType.USER,
-            content=f"user {username}",
-            properties={
-                "username": username,
-                "password_hash": password_hash,
-                "agent_name": agent_name,
-                "user_id": raw_uuid,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
-
-        try:
-            self.connector.create_node(user_node)
-            self.create_user_config(raw_uuid, agent_name)
-            logger.info(f"User created: {user_id}")
-            return raw_uuid
-        except Exception as e:
-            logger.error(f"Create user failed: {e}")
-            return None
+            return fallback_ctx.hash(password)
 
     def create_user_config(self, user_uuid: str, agent_name: str):
         user_dir = self.users_dir / user_uuid
@@ -105,6 +182,9 @@ class UserManager:
 
         try:
             self._write_json_atomic(config_path, default_config)
+            # Create a user-scoped sensitive config copy only when absent.
+            # Existing user env files are never overwritten.
+            ensure_user_secrets(user_uuid)
         except Exception as e:
             logger.error(f"Create user config failed: {e}")
 
@@ -148,21 +228,32 @@ class UserManager:
         cfg["agent_name"] = agent_name
         cfg.setdefault("system_prompt", "")
 
-        # Never persist env-only secrets in per-user config files.
+        # Never persist deployment-specific model routing or secrets in
+        # per-user config files. Users inherit runtime provider settings from
+        # env/default config unless they are explicitly supported as user scope.
         if isinstance(cfg.get("api"), dict):
             api_cfg = dict(cfg.get("api") or {})
             api_cfg.pop("api_key", None)
+            api_cfg.pop("base_url", None)
+            api_cfg.pop("model", None)
+            api_cfg.pop("failover_models", None)
             cfg["api"] = api_cfg
         if isinstance(cfg.get("memory"), dict):
             mem_cfg = dict(cfg.get("memory") or {})
             if isinstance(mem_cfg.get("api"), dict):
                 mem_api = dict(mem_cfg.get("api") or {})
                 mem_api.pop("api_key", None)
+                mem_api.pop("base_url", None)
+                mem_api.pop("model", None)
                 mem_cfg["api"] = mem_api
             if isinstance(mem_cfg.get("neo4j"), dict):
                 neo_cfg = dict(mem_cfg.get("neo4j") or {})
                 neo_cfg.pop("password", None)
                 mem_cfg["neo4j"] = neo_cfg
+            if isinstance(mem_cfg.get("cold_layer"), dict):
+                cold_cfg = dict(mem_cfg.get("cold_layer") or {})
+                cold_cfg.pop("summary_model", None)
+                mem_cfg["cold_layer"] = cold_cfg
             cfg["memory"] = mem_cfg
 
         return cfg
@@ -374,25 +465,38 @@ class UserManager:
 
     def delete_user(self, user_id: str) -> bool:
         """
-        Delete a user account and related local config files.
+        Delete a user account and related local state owned by that user.
         """
-        if not self.connector:
-            logger.error("Neo4j is unavailable, cannot delete user")
-            return False
-
         graph_user_id = user_id if user_id.startswith("user_") else f"user_{user_id}"
         raw_user_id = graph_user_id.replace("user_", "", 1)
-        try:
-            self.connector.query(
-                """
-                MATCH (u:User {id: $user_id})
-                OPTIONAL MATCH (s:Session)-[:OWNED_BY]->(u)
-                DETACH DELETE s, u
-                """,
-                {"user_id": graph_user_id},
-            )
-        except Exception as e:
-            logger.error(f"Delete user graph data failed: {e}")
+
+        if self._use_local_users():
+            data = self._load_local_users()
+            users = list(data.get("users") or [])
+            kept = [
+                user
+                for user in users
+                if not (
+                    isinstance(user, dict)
+                    and str(user.get("user_id") or "") == raw_user_id
+                )
+            ]
+            if len(kept) == len(users):
+                logger.warning(f"Local user not found during delete: {raw_user_id}")
+            data["users"] = kept
+            try:
+                self._save_local_users(data)
+            except Exception as e:
+                logger.error(f"Delete local user failed: {e}")
+                return False
+        elif self._use_graph_users():
+            try:
+                self._delete_graph_user_subgraph(graph_user_id)
+            except Exception as e:
+                logger.error(f"Delete user graph data failed: {e}")
+                return False
+        else:
+            logger.error("User backend unavailable, cannot delete user")
             return False
 
         try:
@@ -402,11 +506,84 @@ class UserManager:
             legacy_path = self._legacy_config_path(raw_user_id)
             if legacy_path.exists():
                 legacy_path.unlink(missing_ok=True)
+            self._cleanup_user_local_state(raw_user_id=raw_user_id, graph_user_id=graph_user_id)
         except Exception as e:
-            logger.warning(f"Delete user local config cleanup failed: {e}")
+            logger.warning(f"Delete user local state cleanup failed: {e}")
 
         logger.info(f"User deleted: {graph_user_id}")
         return True
+
+    def _delete_graph_user_subgraph(self, graph_user_id: str) -> None:
+        """
+        Delete the user and the memory/session subgraph exclusively reachable
+        through sessions owned by that user.
+        """
+        self.connector.query(
+            """
+            MATCH (u:User {id: $user_id})
+            OPTIONAL MATCH (s:Session)-[:OWNED_BY]->(u)
+            OPTIONAL MATCH (n)-[:PART_OF_SESSION]->(s)
+            OPTIONAL MATCH (x)-[:FROM_MESSAGE]->(n)
+            OPTIONAL MATCH (sum:Summary)-[:SUMMARIZES]->(s)
+            WITH collect(DISTINCT u) + collect(DISTINCT s) + collect(DISTINCT n)
+               + collect(DISTINCT x) + collect(DISTINCT sum) AS nodes
+            UNWIND nodes AS node
+            WITH DISTINCT node
+            WHERE node IS NOT NULL
+            DETACH DELETE node
+            """,
+            {"user_id": graph_user_id},
+        )
+
+    def _cleanup_user_local_state(self, *, raw_user_id: str, graph_user_id: str) -> None:
+        project_root = self._cleanup_project_root()
+        candidates = [
+            project_root / "logs" / raw_user_id,
+            project_root / "logs" / graph_user_id,
+            project_root / "workspace" / raw_user_id,
+            project_root / "workspace" / graph_user_id,
+        ]
+        for target in candidates:
+            try:
+                resolved = target.resolve()
+                allowed_roots = [
+                    (project_root / "logs").resolve(),
+                    (project_root / "workspace").resolve(),
+                ]
+                if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+                    continue
+                if resolved.exists() and resolved.is_dir():
+                    shutil.rmtree(resolved, ignore_errors=True)
+            except Exception as e:
+                logger.warning(f"Delete user cleanup skipped {target}: {e}")
+
+        template_dir = project_root / "brain" / "basal_ganglia" / "reasoning_templates"
+        for suffix in ("templates.json", "paths.jsonl", "opro.json"):
+            for user_key in (raw_user_id, graph_user_id):
+                target = template_dir / f"{self._safe_file_segment(user_key)}.{suffix}"
+                try:
+                    if target.exists() and target.is_file():
+                        target.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"Delete user template cleanup skipped {target}: {e}")
+
+        moirai_dir = project_root / "brain" / "basal_ganglia" / "moirai_runs"
+        for prefix in ("opro_episode", "opro_profile"):
+            for user_key in (raw_user_id, graph_user_id):
+                target = moirai_dir / f"{prefix}_{self._safe_file_segment(user_key)}.json"
+                try:
+                    if target.exists() and target.is_file():
+                        target.unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"Delete user moirai cleanup skipped {target}: {e}")
+
+    @staticmethod
+    def _cleanup_project_root() -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    @staticmethod
+    def _safe_file_segment(value: str) -> str:
+        return "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in str(value or ""))
 
 
 user_manager = UserManager()

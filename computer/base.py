@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Base contracts for computer-control capabilities."""
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Dict, Any, Optional, List
@@ -10,19 +9,19 @@ logger = logging.getLogger("Computer.Base")
 
 
 class ComputerCapability(str, Enum):
-    """TODO: add docstring."""
+    """Capabilities exposed by computer-control backends."""
     BROWSER = "browser"          # Browser control
     SCREEN = "screen"
-    KEYBOARD = "keyboard"        # TODO: comment cleaned
+    KEYBOARD = "keyboard"
     MOUSE = "mouse"              # Mouse control
-    FILESYSTEM = "filesystem"    # TODO: comment cleaned
+    FILESYSTEM = "filesystem"
     PROCESS = "process"
     CLIPBOARD = "clipboard"      # Clipboard access
-    SCREENSHOT = "screenshot"    # TODO: comment cleaned
+    SCREENSHOT = "screenshot"
 
 
 class ComputerAction(BaseModel):
-    """TODO: add docstring."""
+    """Normalized request for a computer-control action."""
     capability: ComputerCapability
     action: str
     params: Dict[str, Any] = Field(default_factory=dict)
@@ -30,7 +29,7 @@ class ComputerAction(BaseModel):
 
 
 class ComputerResult(BaseModel):
-    """TODO: add docstring."""
+    """Result envelope returned by computer-control backends."""
     success: bool
     result: Optional[Any] = None
     error: Optional[str] = None
@@ -39,7 +38,7 @@ class ComputerResult(BaseModel):
 
 
 class ComputerController(ABC):
-    """TODO: add docstring."""
+    """Abstract controller for one class of computer-control capability."""
     
     def __init__(self, name: str, capability: ComputerCapability):
         self.name = name

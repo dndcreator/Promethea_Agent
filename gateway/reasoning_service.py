@@ -1,21 +1,23 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
-import re
 import time
 import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from config import config as global_config
-
 from .events import EventEmitter
 from .protocol import EventType
+from .reasoning_budget import ReasoningBudgetLedger
+from .reasoning_debug import ReasoningDebugSnapshotWriter
+from .reasoning_policy import ReasoningPolicyResolver
 from .reasoning_template_memory import ReasoningTemplateMemory
+from .reasoning_tree_store import ReasoningTreeHistoryStore
+from .reasoning_tree_runtime import ReasoningTreeRuntime
+from .reasoning_tool_runtime import ReasoningToolCatalogResolver, ReasoningToolQualityTracker
 from .tool_service import ToolInvocationContext
 from .tool_strategy import ToolStrategyEngine
 from .reasoning_models import ReasoningNode, ReasoningTree
@@ -38,7 +40,6 @@ from .reasoning_state_machine import (
     WAITING_HUMAN,
     WAITING_TOOL,
     TERMINAL_STATES,
-    can_transition,
 )
 
 
@@ -71,11 +72,19 @@ class ReasoningService:
                 self.template_memory = None
         self._active_trees: Dict[str, ReasoningTree] = {}
         self._pending_outcomes: Dict[str, Dict[str, Any]] = {}
+        self._completed_trees: Dict[str, Dict[str, Any]] = {}
         self._pending_human_reviews: Dict[str, Dict[str, Any]] = {}
         self._runtime_controls: Dict[str, Dict[str, Any]] = {}
         self._completed_runs = 0
         self._failed_runs = 0
         self.tool_strategy = ToolStrategyEngine()
+        self.budget_ledger = ReasoningBudgetLedger()
+        self.tree_history = ReasoningTreeHistoryStore()
+        self.policy_resolver = ReasoningPolicyResolver()
+        self.tree_runtime = ReasoningTreeRuntime()
+        self.debug_snapshot_writer = ReasoningDebugSnapshotWriter()
+        self.tool_quality = ReasoningToolQualityTracker()
+        self.tool_catalog = ReasoningToolCatalogResolver()
         self._tool_selection_stats: Dict[str, Any] = {
             "total": 0,
             "llm_selected": 0,
@@ -84,7 +93,6 @@ class ReasoningService:
             "tool_observation_ok": 0,
             "tool_observation_failed": 0,
         }
-        self._tool_quality_stats: Dict[str, Dict[str, Any]] = {}
 
     def is_enabled(self, user_id: Optional[str] = None) -> bool:
         policy = self._resolve_policy(user_id=user_id, user_config=None)
@@ -100,6 +108,7 @@ class ReasoningService:
             "enabled": enabled,
             "active_trees": len(self._active_trees),
             "pending_outcomes": len(self._pending_outcomes),
+            "completed_trees": len(self._completed_trees),
             "pending_human_reviews": len(self._pending_human_reviews),
             "controlled_trees": len(self._runtime_controls),
             "completed_runs": self._completed_runs,
@@ -117,12 +126,22 @@ class ReasoningService:
         limit: int = 20,
     ) -> Dict[str, Any]:
         rows: List[Dict[str, Any]] = []
+        seen_tree_ids: set[str] = set()
+
+        def add_row(row: Dict[str, Any]) -> None:
+            tree_id = str(row.get("tree_id", "") or "")
+            if tree_id and tree_id in seen_tree_ids:
+                return
+            if tree_id:
+                seen_tree_ids.add(tree_id)
+            rows.append(row)
+
         for tree in self._active_trees.values():
             if user_id and tree.user_id != user_id:
                 continue
             if session_id and tree.session_id != session_id:
                 continue
-            rows.append(self._serialize_tree(tree, include_nodes=False))
+            add_row(self._serialize_tree(tree, include_nodes=False))
         if include_pending:
             for item in self._pending_outcomes.values():
                 payload = item.get("tree", {}) if isinstance(item, dict) else {}
@@ -132,7 +151,26 @@ class ReasoningService:
                     continue
                 if session_id and str(payload.get("session_id", "")) != str(session_id):
                     continue
-                rows.append(self._serialize_tree_payload(payload, include_nodes=False))
+                add_row(self._serialize_tree_payload(payload, include_nodes=False))
+            for payload in self._completed_trees.values():
+                if not isinstance(payload, dict):
+                    continue
+                if user_id and str(payload.get("user_id", "")) != str(user_id):
+                    continue
+                if session_id and str(payload.get("session_id", "")) != str(session_id):
+                    continue
+                add_row(self._serialize_tree_payload(payload, include_nodes=False))
+            persisted_limit = max(max(1, int(limit)) * 3, 50)
+            for payload in self.tree_history.list(
+                user_id=user_id,
+                session_id=session_id,
+                limit=persisted_limit,
+            ):
+                if not isinstance(payload, dict):
+                    continue
+                if user_id and str(payload.get("user_id", "")) != str(user_id):
+                    continue
+                add_row(self._serialize_tree_payload(payload, include_nodes=False))
         rows.sort(key=lambda it: float(it.get("updated_at") or 0.0), reverse=True)
         return {"items": rows[: max(1, int(limit))], "total": len(rows)}
 
@@ -149,9 +187,14 @@ class ReasoningService:
                 return None
             return self._serialize_tree(tree, include_nodes=include_nodes)
         outcome = self._pending_outcomes.get(tree_id)
-        if not outcome:
-            return None
-        payload = outcome.get("tree", {}) if isinstance(outcome, dict) else {}
+        if outcome:
+            payload = outcome.get("tree", {}) if isinstance(outcome, dict) else {}
+        else:
+            payload = self._completed_trees.get(tree_id, {})
+            if not payload:
+                payload = self.tree_history.load(tree_id=tree_id, user_id=user_id)
+                if payload:
+                    self._completed_trees[str(tree_id)] = dict(payload)
         if not isinstance(payload, dict):
             return None
         if user_id and str(payload.get("user_id", "")) != str(user_id):
@@ -224,83 +267,18 @@ class ReasoningService:
         include_nodes: bool,
     ) -> Dict[str, Any]:
         tree_id = str(payload.get("tree_id", "") or "")
-        control = self._runtime_controls.get(tree_id, {})
-        nodes = payload.get("nodes", [])
-        if include_nodes and isinstance(nodes, list):
-            node_rows = [
-                {
-                    "node_id": str(node.get("node_id", "")),
-                    "parent_id": node.get("parent_id"),
-                    "kind": str(node.get("kind", "")),
-                    "title": str(node.get("title", "")),
-                    "status": str(node.get("status", "")),
-                    "observation": str(node.get("observation", "") or ""),
-                    "summary": str(node.get("summary", "") or ""),
-                    "updated_at": float(node.get("updated_at") or 0.0),
-                }
-                for node in nodes
-                if isinstance(node, dict)
-            ]
-        else:
-            node_rows = []
-        return {
-            "tree_id": tree_id,
-            "session_id": str(payload.get("session_id", "") or ""),
-            "user_id": str(payload.get("user_id", "") or ""),
-            "root_goal": str(payload.get("root_goal", "") or ""),
-            "status": str(payload.get("status", "") or ""),
-            "created_at": float(payload.get("created_at") or 0.0),
-            "updated_at": float(payload.get("updated_at") or 0.0),
-            "stats": dict(payload.get("stats", {}) or {}),
-            "root_node_id": payload.get("root_node_id"),
-            "node_count": len(nodes) if isinstance(nodes, list) else 0,
-            "nodes": node_rows,
-            "control": {
-                "stop_requested": bool(control.get("stop_requested")),
-                "stop_reason": str(control.get("stop_reason", "") or ""),
-                "pending_steering_notes": len(control.get("steering_notes", []) or []),
-            },
-            "source": "pending_outcome",
-        }
+        return self.tree_runtime.serialize_tree_payload(
+            payload,
+            include_nodes=include_nodes,
+            control=self._runtime_controls.get(tree_id, {}),
+        )
 
     def _serialize_tree(self, tree: ReasoningTree, *, include_nodes: bool) -> Dict[str, Any]:
-        control = self._runtime_controls.get(tree.tree_id, {})
-        if include_nodes:
-            node_rows = [
-                {
-                    "node_id": node.node_id,
-                    "parent_id": node.parent_id,
-                    "kind": node.kind,
-                    "title": node.title,
-                    "status": node.status,
-                    "observation": node.observation,
-                    "summary": node.summary,
-                    "updated_at": node.updated_at,
-                }
-                for node in tree.nodes.values()
-            ]
-            node_rows.sort(key=lambda it: float(it.get("updated_at") or 0.0), reverse=True)
-        else:
-            node_rows = []
-        return {
-            "tree_id": tree.tree_id,
-            "session_id": tree.session_id,
-            "user_id": tree.user_id,
-            "root_goal": tree.root_goal,
-            "status": tree.status,
-            "created_at": tree.created_at,
-            "updated_at": tree.updated_at,
-            "stats": dict(tree.stats),
-            "root_node_id": tree.root_node_id,
-            "node_count": len(tree.nodes),
-            "nodes": node_rows,
-            "control": {
-                "stop_requested": bool(control.get("stop_requested")),
-                "stop_reason": str(control.get("stop_reason", "") or ""),
-                "pending_steering_notes": len(control.get("steering_notes", []) or []),
-            },
-            "source": "active",
-        }
+        return self.tree_runtime.serialize_tree(
+            tree,
+            include_nodes=include_nodes,
+            control=self._runtime_controls.get(tree.tree_id, {}),
+        )
 
     def record_outcome(
         self,
@@ -315,6 +293,7 @@ class ReasoningService:
         data = self._pending_outcomes.pop(tree_id, None)
         if not data or not success:
             return False
+        self._remember_completed_tree(data)
         if not self.template_memory:
             return False
         try:
@@ -346,6 +325,7 @@ class ReasoningService:
         data = self._pending_outcomes.pop(tree_id, None)
         if not data:
             return {"status": "ignored", "reason": "missing_pending_outcome"}
+        self._remember_completed_tree(data)
 
         verdict = await self._judge_task_success(
             user_message=str(data.get("user_message", "") or ""),
@@ -419,6 +399,7 @@ class ReasoningService:
         data = self._pending_human_reviews.pop(review_id, None)
         if not data:
             return False
+        self._remember_completed_tree(data)
         if not approve:
             return True
         if not self.template_memory:
@@ -438,115 +419,29 @@ class ReasoningService:
             logger.debug("ReasoningService: confirm_outcome failed: {}", e)
             return False
 
+    def _remember_completed_tree(self, data: Dict[str, Any]) -> None:
+        payload = data.get("tree", {}) if isinstance(data, dict) else {}
+        if not isinstance(payload, dict):
+            return
+        self.tree_history.remember(payload, self._completed_trees)
+
     def _resolve_policy(
         self,
         *,
         user_id: Optional[str],
         user_config: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        global_reasoning = {}
-        try:
-            if hasattr(global_config, "reasoning"):
-                global_reasoning = global_config.reasoning.model_dump()
-        except Exception:
-            global_reasoning = {}
-        policy: Dict[str, Any] = {
-            # Runtime baseline is full-capability on; users can explicitly disable.
-            "enabled": bool(global_reasoning.get("enabled", True)),
-            "mode": str(global_reasoning.get("mode", "react_tot")),
-            "max_depth": int(global_reasoning.get("max_depth", 4)),
-            "max_nodes": int(global_reasoning.get("max_nodes", 24)),
-            "max_iterations": int(global_reasoning.get("max_iterations", 16)),
-            "max_memory_calls": int(global_reasoning.get("max_memory_calls", 6)),
-            "max_tool_calls": int(global_reasoning.get("max_tool_calls", 8)),
-            "max_replan_rounds": int(global_reasoning.get("max_replan_rounds", 6)),
-            "plan_max_steps": int(global_reasoning.get("plan_max_steps", 8)),
-            "beam_width": int(global_reasoning.get("beam_width", 3)),
-            "branch_factor": int(global_reasoning.get("branch_factor", 3)),
-            "candidate_votes": int(global_reasoning.get("candidate_votes", 3)),
-            "min_branch_score": float(global_reasoning.get("min_branch_score", 0.0)),
-            "moirai_export_plan": bool(global_reasoning.get("moirai_export_plan", False)),
-            "moirai_auto_start": bool(global_reasoning.get("moirai_auto_start", True)),
-            "workflow_tool_bridge": bool(global_reasoning.get("workflow_tool_bridge", True)),
-            "failure_confidence_threshold": float(global_reasoning.get("failure_confidence_threshold", 0.55)),
-            "debug_log": bool(
-                global_reasoning.get(
-                    "debug_log",
-                    bool(getattr(global_config.system, "debug", False)),
-                )
-            ),
-        }
-        cfg = user_config
-        if cfg is None and self.config_service and user_id:
-            try:
-                cfg = self.config_service.get_merged_config(user_id)
-            except Exception:
-                cfg = None
-        if isinstance(cfg, dict):
-            reasoning_cfg = cfg.get("reasoning", {})
-            for key in (
-                "enabled",
-                "mode",
-                "max_depth",
-                "max_nodes",
-                "max_iterations",
-                "max_memory_calls",
-                "max_tool_calls",
-                "max_replan_rounds",
-                "plan_max_steps",
-                "beam_width",
-                "branch_factor",
-                "candidate_votes",
-                "min_branch_score",
-                "moirai_export_plan",
-                "moirai_auto_start",
-                "workflow_tool_bridge",
-                "failure_confidence_threshold",
-                "debug_log",
-            ):
-                if key in reasoning_cfg:
-                    policy[key] = reasoning_cfg[key]
-        policy["max_depth"] = max(1, int(policy["max_depth"]))
-        policy["max_nodes"] = max(4, int(policy["max_nodes"]))
-        policy["max_iterations"] = max(1, int(policy["max_iterations"]))
-        policy["max_memory_calls"] = max(0, int(policy["max_memory_calls"]))
-        policy["max_tool_calls"] = max(0, int(policy["max_tool_calls"]))
-        policy["max_replan_rounds"] = max(0, int(policy["max_replan_rounds"]))
-        policy["plan_max_steps"] = max(1, int(policy["plan_max_steps"]))
-        policy["beam_width"] = max(1, int(policy["beam_width"]))
-        policy["branch_factor"] = max(1, int(policy["branch_factor"]))
-        policy["candidate_votes"] = max(1, int(policy["candidate_votes"]))
-        policy["min_branch_score"] = min(1.0, max(0.0, float(policy["min_branch_score"])))
-        policy["moirai_export_plan"] = self._to_bool(
-            policy.get("moirai_export_plan"),
-            default=False,
+        loader = None
+        if self.config_service:
+            loader = self.config_service.get_merged_config
+        return self.policy_resolver.resolve(
+            user_id=user_id,
+            user_config=user_config,
+            config_loader=loader,
         )
-        policy["moirai_auto_start"] = self._to_bool(
-            policy.get("moirai_auto_start"),
-            default=True,
-        )
-        policy["workflow_tool_bridge"] = self._to_bool(
-            policy.get("workflow_tool_bridge"),
-            default=True,
-        )
-        policy["failure_confidence_threshold"] = min(
-            1.0,
-            max(0.0, float(policy.get("failure_confidence_threshold", 0.55))),
-        )
-        policy["debug_log"] = self._to_bool(policy.get("debug_log"), default=False)
-        policy["mode"] = str(policy.get("mode", "react_tot")).strip().lower() or "react_tot"
-        return policy
 
     def _create_tree(self, *, session_id: str, user_id: str, root_goal: str) -> ReasoningTree:
-        tree = ReasoningTree(
-            tree_id=uuid.uuid4().hex,
-            session_id=session_id,
-            user_id=user_id,
-            root_goal=root_goal,
-        )
-        root = self._add_node(tree, parent_id=None, kind="root", title=root_goal)
-        tree.root_node_id = root.node_id
-        return tree
+        return self.tree_runtime.create_tree(session_id=session_id, user_id=user_id, root_goal=root_goal)
 
     def _add_node(
         self,
@@ -558,20 +453,14 @@ class ReasoningService:
         prompt: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> ReasoningNode:
-        node = ReasoningNode(
-            node_id=uuid.uuid4().hex,
+        return self.tree_runtime.add_node(
+            tree,
             parent_id=parent_id,
             kind=kind,
             title=title,
             prompt=prompt,
-            metadata=metadata or {},
+            metadata=metadata,
         )
-        tree.nodes[node.node_id] = node
-        tree.updated_at = time.time()
-        if parent_id and parent_id in tree.nodes:
-            tree.nodes[parent_id].children.append(node.node_id)
-            tree.nodes[parent_id].updated_at = time.time()
-        return node
 
     def _transition_node_status(
         self,
@@ -582,19 +471,13 @@ class ReasoningService:
         reason: str = "",
         checkpoint: Optional[Dict[str, Any]] = None,
     ) -> None:
-        current = str(node.status or "").strip()
-        target_status = str(target or "").strip()
-        if current == target_status:
-            return
-        if not can_transition(current, target_status):
-            raise ValueError(f"invalid node status transition: {current} -> {target_status}")
-        node.status = target_status
-        node.updated_at = time.time()
-        if checkpoint:
-            node.checkpoint = dict(checkpoint)
-        if reason:
-            node.metadata["status_reason"] = reason
-        tree.updated_at = time.time()
+        self.tree_runtime.transition_node_status(
+            tree=tree,
+            node=node,
+            target=target,
+            reason=reason,
+            checkpoint=checkpoint,
+        )
 
     def _mark_node_succeeded(
         self,
@@ -605,16 +488,13 @@ class ReasoningService:
         evidence: Optional[List[str]] = None,
         result: Optional[Dict[str, Any]] = None,
     ) -> None:
-        self._transition_node_status(
+        self.tree_runtime.mark_node_succeeded(
             tree=tree,
             node=node,
-            target=SUCCEEDED,
-            reason="step_completed",
+            observation=observation,
+            evidence=evidence,
+            result=result,
         )
-        node.observation = observation
-        node.summary = observation
-        node.evidence = list(evidence or [])
-        node.result = dict(result or {})
 
     def _resume_node_from_waiting_tool(
         self,
@@ -623,12 +503,7 @@ class ReasoningService:
         node: ReasoningNode,
         note: str = "tool_observation_ready",
     ) -> None:
-        self._transition_node_status(
-            tree=tree,
-            node=node,
-            target=RUNNING,
-            reason=note,
-        )
+        self.tree_runtime.resume_node_from_waiting_tool(tree=tree, node=node, note=note)
 
     def _resume_node_from_waiting_human(
         self,
@@ -637,37 +512,13 @@ class ReasoningService:
         node: ReasoningNode,
         approved: bool,
     ) -> None:
-        if approved:
-            self._transition_node_status(
-                tree=tree,
-                node=node,
-                target=RUNNING,
-                reason="human_approved",
-            )
-            return
-        self._transition_node_status(
-            tree=tree,
-            node=node,
-            target=SKIPPED,
-            reason="human_rejected",
-        )
+        self.tree_runtime.resume_node_from_waiting_human(tree=tree, node=node, approved=approved)
 
     def _snapshot_node(self, node: ReasoningNode) -> Dict[str, Any]:
-        return {
-            "node_id": node.node_id,
-            "status": node.status,
-            "checkpoint": dict(node.checkpoint or {}),
-            "tool_calls": list(node.tool_calls or []),
-            "human_gate": dict(node.human_gate or {}),
-            "verifier_state": dict(node.verifier_state or {}),
-        }
+        return self.tree_runtime.snapshot_node(node)
+
     def _node_depth(self, tree: ReasoningTree, node_id: Optional[str]) -> int:
-        depth = 0
-        current = tree.nodes.get(node_id) if node_id else None
-        while current and current.parent_id:
-            depth += 1
-            current = tree.nodes.get(current.parent_id)
-        return depth
+        return self.tree_runtime.node_depth(tree, node_id)
 
     async def _emit(self, event: EventType, payload: Dict[str, Any]) -> None:
         if not self.event_emitter:
@@ -735,6 +586,7 @@ class ReasoningService:
         base_system_prompt: str,
         user_config: Optional[Dict[str, Any]] = None,
         run_context: Optional[Any] = None,
+        force_reasoning: bool = False,
     ) -> Dict[str, Any]:
         policy = self._resolve_policy(user_id=user_id, user_config=user_config)
         if (
@@ -763,6 +615,12 @@ class ReasoningService:
                 logger.debug("ReasoningService: template memory unavailable: {}", e)
 
         is_complex = self._to_bool(gate.get("needs_reasoning", False), default=False)
+        if force_reasoning and not is_complex:
+            gate = dict(gate)
+            gate["needs_reasoning"] = True
+            gate["reason"] = str(gate.get("reason") or "prompt_policy_requested_reasoning")
+            gate["source"] = "prompt_policy"
+            is_complex = True
         needs_memory = self._to_bool(gate.get("needs_memory", False), default=False)
         needs_tools = self._to_bool(gate.get("needs_tools", False), default=False)
         merged_hints = dict(strategy_hints or {})
@@ -900,10 +758,16 @@ class ReasoningService:
                 if self._is_stop_requested(tree.tree_id):
                     stopped_by_user = True
                     break
+                if self.budget_ledger.should_stop_reasoning(self.budget_ledger.build(tree, policy)):
+                    tree.stats["termination"] = "budget_exhausted"
+                    break
                 next_candidates: List[str] = []
                 for node_id in frontier:
                     if self._is_stop_requested(tree.tree_id):
                         stopped_by_user = True
+                        break
+                    if self.budget_ledger.should_stop_reasoning(self.budget_ledger.build(tree, policy)):
+                        tree.stats["termination"] = "budget_exhausted"
                         break
                     tree.stats["iterations"] += 1
                     extra_steps = await self._execute_step(
@@ -918,6 +782,8 @@ class ReasoningService:
                         run_context=run_context,
                     )
                     for step in extra_steps:
+                        if self.budget_ledger.should_avoid_external_actions(self.budget_ledger.build(tree, policy)):
+                            break
                         if self._node_depth(tree, node_id) >= policy["max_depth"]:
                             break
                         if len(tree.nodes) >= policy["max_nodes"]:
@@ -973,11 +839,12 @@ class ReasoningService:
                     tree.stats["termination"] = "runtime_failed"
                 else:
                     tree.status = SUCCEEDED
-                    tree.stats["termination"] = (
-                        "max_iterations"
-                        if tree.stats["iterations"] >= iteration_budget
-                        else "completed"
-                    )
+                    if tree.stats.get("termination") != "budget_exhausted":
+                        tree.stats["termination"] = (
+                            "max_iterations"
+                            if tree.stats["iterations"] >= iteration_budget
+                            else "completed"
+                        )
                 tree.stats["runtime_outcome"] = {
                     "status": outcome_status,
                     "reason": str(runtime_outcome.get("reason", "") or ""),
@@ -993,8 +860,12 @@ class ReasoningService:
             final_prompt = base_system_prompt.strip()
             if reasoning_summary:
                 extra = (
-                    "Internal reasoning context. Use it to improve the answer. "
-                    "Do not mention this reasoning process explicitly.\n"
+                    "Internal reasoning context for answer synthesis. Use it to improve the answer, "
+                    "but do not mention this reasoning process, hidden protocols, JSON schemas, or tool-call formatting explicitly.\n"
+                    "When deep reasoning was used, the final answer should preserve the value of that work: "
+                    "give a clear conclusion, the main supporting logic, important evidence or uncertainty limits, "
+                    "tradeoffs/risks where relevant, and practical next steps. Do not collapse a complex reasoning result "
+                    "into a one-line answer unless the user explicitly asked for brevity.\n"
                     f"{reasoning_summary}"
                 )
                 final_prompt = f"{final_prompt}\n\n{extra}" if final_prompt else extra
@@ -1349,12 +1220,20 @@ class ReasoningService:
             for _ in range(react_rounds):
                 if self._is_stop_requested(tree.tree_id):
                     break
+                budget_ledger = self.budget_ledger.build(tree, policy)
+                if self.budget_ledger.should_stop_reasoning(budget_ledger):
+                    observations.append(
+                        "Budget:\nReasoning budget exhausted; stop expanding this step and synthesize from current findings."
+                    )
+                    break
                 tree.stats["react_rounds"] = int(tree.stats.get("react_rounds", 0) or 0) + 1
+                budget_ledger = self.budget_ledger.build(tree, policy)
                 decision = await self._replan_step(
                     tree=tree,
                     node=node,
                     user_message=user_message,
                     observations=observations,
+                    budget_ledger=budget_ledger,
                     user_config=user_config,
                     user_id=user_id,
                 )
@@ -1378,7 +1257,11 @@ class ReasoningService:
                         observations.append(f"Memory:\n{memory_observation}")
                     continue
 
-                if next_action == "tool" and tree.stats["tool_calls"] < policy["max_tool_calls"]:
+                if (
+                    next_action == "tool"
+                    and tree.stats["tool_calls"] < policy["max_tool_calls"]
+                    and not self.budget_ledger.should_avoid_external_actions(budget_ledger)
+                ):
                     self._transition_node_status(
                         tree=tree,
                         node=node,
@@ -1415,6 +1298,23 @@ class ReasoningService:
                             ) + 1
                     continue
 
+                if next_action == "tool" and self.budget_ledger.should_avoid_external_actions(budget_ledger):
+                    think_observation = await self._run_think_step(
+                        tree=tree,
+                        node=node,
+                        user_message=user_message,
+                        recent_messages=recent_messages,
+                        observations=observations
+                        + [
+                            "Budget:\nExternal action budget is constrained by elapsed runtime, repeated low-yield tool failures, or global ReAct round usage. Synthesize from current findings instead of starting another external lookup."
+                        ],
+                        user_config=user_config,
+                        user_id=user_id,
+                    )
+                    if think_observation:
+                        observations.append(f"Think:\n{think_observation}")
+                    break
+
                 if next_action == "think":
                     think_observation = await self._run_think_step(
                         tree=tree,
@@ -1449,6 +1349,7 @@ class ReasoningService:
                 and not extra_steps
                 and observations
                 and self._node_depth(tree, node_id) < policy["max_depth"]
+                and not self.budget_ledger.should_avoid_external_actions(self.budget_ledger.build(tree, policy))
             ):
                 expanded = await self._plan_steps(
                     tree=tree,
@@ -2386,140 +2287,34 @@ class ReasoningService:
         ok: bool,
         latency_ms: float,
     ) -> None:
-        key = f"{service_name}:{tool_name}"
-        row = self._tool_quality_stats.get(key)
-        if not isinstance(row, dict):
-            row = {
-                "service_name": service_name,
-                "tool_name": tool_name,
-                "runs": 0,
-                "ok": 0,
-                "fail": 0,
-                "avg_latency_ms": 0.0,
-            }
-            self._tool_quality_stats[key] = row
-
-        row["runs"] = int(row.get("runs", 0)) + 1
-        if ok:
-            row["ok"] = int(row.get("ok", 0)) + 1
-        else:
-            row["fail"] = int(row.get("fail", 0)) + 1
-
-        prev_avg = float(row.get("avg_latency_ms", 0.0) or 0.0)
-        n = float(row["runs"])
-        row["avg_latency_ms"] = max(0.0, ((prev_avg * (n - 1.0)) + max(0.0, float(latency_ms))) / n)
+        self.tool_quality.record(
+            service_name=service_name,
+            tool_name=tool_name,
+            ok=ok,
+            latency_ms=latency_ms,
+        )
 
     def _runtime_tool_quality_hints(self, *, limit: int = 20) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        for item in self._tool_quality_stats.values():
-            if not isinstance(item, dict):
-                continue
-            runs = max(1, int(item.get("runs", 0) or 0))
-            ok = int(item.get("ok", 0) or 0)
-            avg_latency = float(item.get("avg_latency_ms", 0.0) or 0.0)
-            rows.append(
-                {
-                    "service_name": str(item.get("service_name", "") or ""),
-                    "tool_name": str(item.get("tool_name", "") or ""),
-                    "runs": runs,
-                    "success_rate": ok / float(runs),
-                    "avg_latency_ms": avg_latency,
-                }
-            )
-        rows.sort(key=lambda x: (int(x.get("runs", 0)), float(x.get("success_rate", 0.0))), reverse=True)
-        return rows[: max(1, int(limit))]
+        return self.tool_quality.hints(limit=limit)
+
     def _normalize_selected_tool(
         self,
         selected: Dict[str, Any],
         catalog: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        if not isinstance(selected, dict):
-            return {"use_tool": False}
-        use_tool = self._to_bool(selected.get("use_tool"), default=False)
-        service_name = str(selected.get("service_name") or "").strip()
-        tool_name = str(selected.get("tool_name") or "").strip()
-        if not use_tool or not tool_name:
-            return {"use_tool": False}
+        return self.tool_catalog.normalize_selected_tool(selected, catalog)
 
-        match = self._resolve_catalog_entry(catalog, service_name, tool_name)
-        if not match:
-            return {"use_tool": False}
-
-        args = selected.get("args")
-        if not isinstance(args, dict):
-            args = {}
-        return {
-            "use_tool": True,
-            "tool_type": match.get("tool_type") or selected.get("tool_type") or "mcp",
-            "service_name": match.get("service_name") or service_name,
-            "tool_name": match.get("tool_name") or tool_name,
-            "args": args,
-            "why": str(selected.get("why") or ""),
-        }
-
-    @classmethod
+    @staticmethod
     def _resolve_catalog_entry(
-        cls,
         catalog: List[Dict[str, Any]],
         service_name: str,
         tool_name: str,
     ) -> Optional[Dict[str, Any]]:
-        # Prefer exact match first, then tolerant matching to keep generalization.
-        service = str(service_name or "").strip()
-        tool = str(tool_name or "").strip()
-        if not tool:
-            return None
-
-        exact = cls._find_catalog_entry(catalog, service, tool)
-        if exact:
-            return exact
-
-        normalized_service = cls._normalize_tool_id(service)
-        normalized_tool = cls._normalize_tool_id(tool)
-        candidates: List[tuple[float, Dict[str, Any]]] = []
-        for item in catalog:
-            item_service = str(item.get("service_name", "") or "").strip()
-            item_tool = str(item.get("tool_name", "") or "").strip()
-            if not item_tool:
-                continue
-
-            score = 0.0
-            item_service_norm = cls._normalize_tool_id(item_service)
-            item_tool_norm = cls._normalize_tool_id(item_tool)
-
-            if tool and item_tool == tool:
-                score += 10.0
-            elif normalized_tool and item_tool_norm == normalized_tool:
-                score += 8.0
-            elif normalized_tool and normalized_tool in item_tool_norm:
-                score += 4.0
-            elif normalized_tool and item_tool_norm in normalized_tool:
-                score += 2.0
-
-            if service:
-                if item_service == service:
-                    score += 6.0
-                elif normalized_service and item_service_norm == normalized_service:
-                    score += 4.0
-                elif normalized_service and normalized_service in item_service_norm:
-                    score += 1.5
-
-            if score > 0.0:
-                candidates.append((score, item))
-
-        if not candidates:
-            return None
-        candidates.sort(key=lambda row: row[0], reverse=True)
-        best_score, best_item = candidates[0]
-
-        # Keep minimum confidence to avoid random tool jumps.
-        if best_score < 7.0:
-            return None
-        return best_item
+        return ReasoningToolCatalogResolver().resolve_catalog_entry(catalog, service_name, tool_name)
 
     @staticmethod
     def _normalize_tool_id(value: str) -> str:
-        return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+        return ReasoningToolCatalogResolver.normalize_tool_id(value)
 
     @staticmethod
     def _find_catalog_entry(
@@ -2527,17 +2322,7 @@ class ReasoningService:
         service_name: str,
         tool_name: str,
     ) -> Optional[Dict[str, Any]]:
-        if not tool_name:
-            return None
-        for item in catalog:
-            item_service = str(item.get("service_name", "") or "")
-            item_tool = str(item.get("tool_name", "") or "")
-            if item_tool != tool_name:
-                continue
-            if service_name and item_service != service_name:
-                continue
-            return item
-        return None
+        return ReasoningToolCatalogResolver.find_catalog_entry(catalog, service_name, tool_name)
 
     async def _run_think_step(
         self,
@@ -2611,13 +2396,22 @@ class ReasoningService:
         observations: List[str],
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
+        budget_ledger: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        ledger = budget_ledger or self.budget_ledger.build(tree, {})
         prompt = (
-            "Review the current reasoning step and decide the next action. Return strict JSON: "
+            "Review the current reasoning step and decide the next action. "
+            "Use lightweight strategy reflection before choosing: decide whether another tool call is likely to add useful evidence, "
+            "whether recent failures indicate a source/tool/channel limitation, whether a think step can synthesize enough from current findings, "
+            "or whether the step is already done. Avoid blind tool retries; choose tool only when the next external action has a clear marginal value. "
+            "Respect the global budget ledger. If runtime is over target, ReAct rounds are near/exhausted, or tools are low-yield, prefer think/done and synthesize with uncertainty instead of starting more external lookups. "
+            "Choose think when the useful move is synthesis, reframing, or extracting a conclusion from partial observations. "
+            "Choose done when current findings are sufficient for this step or further action would mostly repeat failed paths. "
+            "Return strict JSON: "
             "{\"next_action\":\"done|memory|tool|think\",\"memory_query\":string,"
             "\"tool_intent\":string,\"additional_steps\":[{\"title\":string,\"goal\":string,"
             "\"requires_memory\":bool,\"memory_query\":string,\"requires_tools\":bool,"
-            "\"tool_intent\":string,\"notes\":string}]}"
+            "\"tool_intent\":string,\"notes\":string}],\"strategy_reflection\":string}"
         )
         result = await self._call_json(
             [
@@ -2627,6 +2421,7 @@ class ReasoningService:
                     "content": (
                         f"Task:\n{user_message}\n\n"
                         f"Current step:\n{node.title}\n\n"
+                        f"Global budget ledger:\n{json.dumps(ledger, ensure_ascii=False)}\n\n"
                         f"Current findings:\n{self._truncate_text(chr(10).join(observations), 3000)}"
                     ),
                 },
@@ -2661,8 +2456,10 @@ class ReasoningService:
         if not traces:
             return ""
         prompt = (
-            "Summarize the reasoning results into concise internal context for the final assistant answer. "
-            "Return plain text only. Include relevant memory/tool findings, constraints, and conclusions."
+            "Summarize the reasoning results into internal context for the final assistant answer. "
+            "Return plain text only. Preserve enough substance for a high-quality user-facing synthesis: "
+            "core conclusion, strongest supporting points, relevant memory/tool findings, failed or blocked evidence paths, "
+            "uncertainty limits, tradeoffs, and practical recommendations. Do not expose hidden chain-of-thought or runtime protocol details."
         )
         return await self._call_text(
             [
@@ -3038,32 +2835,7 @@ class ReasoningService:
         user_id: str,
         policy: Dict[str, Any],
     ) -> None:
-        if not policy.get("debug_log"):
-            return
-        try:
-            user_dir = Path(global_config.system.log_dir) / self._safe_user_segment(user_id)
-            user_dir.mkdir(parents=True, exist_ok=True)
-            day = time.strftime("%Y-%m-%d")
-            path = user_dir / f"{day}.reasoning.jsonl"
-            payload = {
-                "timestamp": time.time(),
-                "tree": {
-                    "tree_id": tree.tree_id,
-                    "session_id": tree.session_id,
-                    "user_id": tree.user_id,
-                    "root_goal": tree.root_goal,
-                    "status": tree.status,
-                    "created_at": tree.created_at,
-                    "updated_at": tree.updated_at,
-                    "stats": tree.stats,
-                    "root_node_id": tree.root_node_id,
-                    "nodes": [asdict(node) for node in tree.nodes.values()],
-                },
-            }
-            with path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.debug("ReasoningService debug snapshot failed: {}", e)
+        await self.debug_snapshot_writer.write(tree, user_id=user_id, policy=policy)
 
     @staticmethod
     def _safe_user_segment(user_id: Optional[str]) -> str:

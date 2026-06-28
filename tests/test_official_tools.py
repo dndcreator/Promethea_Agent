@@ -87,6 +87,12 @@ async def test_official_tools_registered(tmp_path: Path):
     assert any(row.get("tool_name") == "workspace.tail_file" for row in catalog)
     assert any(row.get("tool_name") == "workspace.replace_text" for row in catalog)
     assert any(row.get("tool_name") == "workspace.glob_files" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.diff_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.apply_patch" for row in catalog)
+    assert any(row.get("tool_name") == "code.run_python" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_create" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_list" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_extract" for row in catalog)
     assert any(row.get("tool_name") == "text.word_stats" for row in catalog)
     assert any(row.get("tool_name") == "text.find_matches" for row in catalog)
     assert any(row.get("tool_name") == "text.normalize_json" for row in catalog)
@@ -183,6 +189,43 @@ async def test_official_tools_workspace_roundtrip(tmp_path: Path):
     assert reads["count"] == 2
     globs = await tool_service.call_tool("workspace.glob_files", {"pattern": "logs/**/*.log"}, ctx=ctx)
     assert globs["count"] >= 1
+
+    diff = await tool_service.call_tool(
+        "workspace.diff_file",
+        {"path": "logs/archive/run.log", "content": "l1\nL2\nl3\nl4"},
+        ctx=ctx,
+    )
+    assert diff["changed"] is True
+    assert "+l4" in diff["diff"]
+    patched = await tool_service.call_tool(
+        "workspace.apply_patch",
+        {"path": "logs/archive/run.log", "old_text": "l3", "new_text": "L3"},
+        ctx=ctx,
+    )
+    assert patched["patched"] is True
+
+    py = await tool_service.call_tool(
+        "code.run_python",
+        {"code": "print(2 + 3)"},
+        ctx=ctx,
+    )
+    assert py["ok"] is True
+    assert "5" in py["stdout"]
+
+    archive = await tool_service.call_tool(
+        "archive.zip_create",
+        {"output_path": "bundle.zip", "paths": ["logs"]},
+        ctx=ctx,
+    )
+    assert archive["count"] >= 1
+    listed = await tool_service.call_tool("archive.zip_list", {"path": "bundle.zip"}, ctx=ctx)
+    assert listed["count"] >= 1
+    extracted = await tool_service.call_tool(
+        "archive.zip_extract",
+        {"path": "bundle.zip", "dest_dir": "unpacked"},
+        ctx=ctx,
+    )
+    assert extracted["count"] >= 1
 
 
 @pytest.mark.asyncio
@@ -342,6 +385,27 @@ async def test_web_fetch_text_rejects_non_http_scheme(tmp_path: Path):
         await tool_service.call_tool(
             "web.fetch_text",
             {"url": "file:///tmp/a.txt"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_text_respects_sandbox_url_policy(tmp_path: Path, monkeypatch):
+    tool_service, _ = _build_services(tmp_path)
+
+    class _Decision:
+        allowed = False
+        reason = "network disabled"
+
+    class _Policy:
+        def check_url(self, _url):
+            return _Decision()
+
+    monkeypatch.setattr("gateway.official_tools.web_tools.get_sandbox_policy", lambda: _Policy())
+
+    with pytest.raises(PermissionError, match="sandbox blocked url"):
+        await tool_service.call_tool(
+            "web.fetch_text",
+            {"url": "https://example.com"},
         )
 
 @pytest.mark.asyncio

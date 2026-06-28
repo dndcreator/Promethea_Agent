@@ -23,8 +23,8 @@ def create_hot_layer_manager(session_id: str, user_id: str = "default_user") -> 
     if not connector:
         return None
         
-    extractor = create_extractor_from_config(config)
-    return HotLayerManager(extractor, connector, session_id, user_id)
+    extractor = create_extractor_from_config(config, user_id=user_id)
+    return HotLayerManager(extractor, connector, session_id, user_id, config=config)
 
 def create_warm_layer_manager(connector) -> Optional[WarmLayerManager]:
     """Create warm-layer manager (clustering / embeddings)."""

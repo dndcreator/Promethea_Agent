@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 
 class ChatRequest(BaseModel):
@@ -10,6 +10,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     requested_mode: Optional[str] = None
     requested_skill: Optional[str] = None
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -33,6 +34,7 @@ class FollowUpRequest(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+    remember_me: Optional[bool] = True
 
 
 class UserRegister(BaseModel):

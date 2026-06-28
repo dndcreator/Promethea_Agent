@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Web UI channel adapter."""
 from typing import Dict, Any, Optional
 from datetime import datetime
 import uuid
@@ -8,7 +7,7 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class WebChannel(BaseChannel):
-    """TODO: add docstring."""
+    """Lightweight adapter for browser/UI-originated messages."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("web", ChannelType.WEB, config)
@@ -16,13 +15,13 @@ class WebChannel(BaseChannel):
         self.websocket_connections: Dict[str, Any] = {}
     
     async def connect(self) -> bool:
-        """TODO: add docstring."""
+        """Mark the local web channel as available."""
         self.is_connected = True
         self.logger.info("Web channel connected")
         return True
     
     async def disconnect(self) -> bool:
-        """TODO: add docstring."""
+        """Clear web connection bookkeeping and mark the channel disconnected."""
         self.is_connected = False
         self.websocket_connections.clear()
         self.logger.info("Web channel disconnected")
@@ -35,7 +34,7 @@ class WebChannel(BaseChannel):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Return a normalized send receipt for a web client message."""
         try:
             message_id = f"web_msg_{uuid.uuid4().hex[:8]}"
             
@@ -71,7 +70,7 @@ class WebChannel(BaseChannel):
         )
     
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """TODO: add docstring."""
+        """Return local web-client metadata for the supplied user id."""
         return {
             "user_id": user_id,
             "channel": "web",

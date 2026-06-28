@@ -119,3 +119,38 @@ def test_memory_write_decision_reason_serialization():
     assert dumped["decision"] == "deny"
     assert dumped["reason"] == "speculative_content"
     assert dumped["reasons"] == ["speculative_content"]
+
+
+@pytest.mark.asyncio
+async def test_memory_write_proposal_can_confirm_without_superseding_conflicts():
+    emitter = EventEmitter()
+    memory_adapter = MagicMock()
+    memory_adapter.add_message.return_value = True
+
+    service = MemoryService(event_emitter=emitter, memory_adapter=memory_adapter)
+    proposal_id = service._create_write_proposal(
+        session_id="s1",
+        user_id="u1",
+        memory_type="preference",
+        target_memory_layer="profile_memory",
+        content="User prefers short direct answers.",
+        semantic_keys=["answers"],
+        conflict_candidates=["User prefers detailed answers."],
+    )
+
+    result = await service.resolve_write_proposal(
+        proposal_id=proposal_id,
+        user_id="u1",
+        action="confirm_write_keep_existing",
+    )
+
+    assert result["ok"] is True
+    proposal = result["proposal"]
+    assert proposal["status"] == "confirmed"
+    assert proposal["resolved_action"] == "confirm_write_keep_existing"
+    memory_adapter.add_message.assert_called_once()
+    memory_adapter.list_memory_entries.assert_not_called()
+    memory_adapter.update_memory_entry.assert_not_called()
+    payload = emitter.get_history(event=EventType.MEMORY_WRITE_DECIDED)[-1].payload
+    assert payload["reason"] == "user_confirmed_write_keep_existing"
+    assert payload["persisted"] is True

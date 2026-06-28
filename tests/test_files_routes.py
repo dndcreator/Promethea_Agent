@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from gateway.http.routes import files
+from gateway.http.user_file_store import UserFileStore
 
 
 class _FakeUpload:
@@ -47,3 +48,46 @@ async def test_list_user_files_supports_search(monkeypatch):
     assert out["status"] == "success"
     assert out["total"] == 1
     assert out["files"][0]["file_id"] == "f_2"
+
+
+def test_user_file_store_builds_chat_attachment_context(tmp_path):
+    store = UserFileStore(root_dir=str(tmp_path))
+    entry = store.save_upload(
+        user_id="u1",
+        filename="notes.txt",
+        content=b"launch checklist and enterprise graph notes",
+        content_type="text/plain",
+        session_id="s1",
+    )
+
+    context = store.build_chat_attachment_context(
+        user_id="u1",
+        attachments=[{"file_id": entry["file_id"]}],
+    )
+
+    assert context["unsupported"] == []
+    assert context["items"][0]["filename"] == "notes.txt"
+    assert "enterprise graph notes" in context["context_text"]
+
+
+def test_user_file_store_image_without_ocr_is_stored_only(tmp_path):
+    store = UserFileStore(root_dir=str(tmp_path))
+    entry = store.save_upload(
+        user_id="u1",
+        filename="diagram.png",
+        content=b"not a real image but still stored as upload bytes",
+        content_type="image/png",
+        session_id="s1",
+    )
+
+    assert entry["modality"] == "image"
+    assert entry["text_extraction_status"] == "empty_or_unsupported"
+
+    context = store.build_chat_attachment_context(
+        user_id="u1",
+        attachments=[{"file_id": entry["file_id"]}],
+    )
+
+    assert context["items"] == []
+    assert context["unsupported"][0]["reason"] == "no_extracted_text"
+    assert "unavailable to model" in context["context_text"]

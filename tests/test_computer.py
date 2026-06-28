@@ -20,7 +20,7 @@ class TestComputerControllers(unittest.IsolatedAsyncioTestCase):
         fs = FileSystemController()
         await fs.initialize()
 
-        local_tmp = Path("tmp_fs_tests")
+        local_tmp = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "tmp_fs_tests"
         local_tmp.mkdir(parents=True, exist_ok=True)
         case_dir = local_tmp / "case"
         case_dir.mkdir(parents=True, exist_ok=True)

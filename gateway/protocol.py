@@ -497,6 +497,8 @@ class ConversationRunInput(BaseModel):
     include_recent: bool = True
     run_context: Optional[Any] = None
     tool_executor: Optional[Any] = None
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    runtime_blocks: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ConversationRunOutput(BaseModel):
@@ -516,6 +518,7 @@ class NormalizedInput(BaseModel):
     channel: str = "web"
     input_payload: Dict[str, Any] = Field(default_factory=dict)
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    runtime_blocks: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     recent_messages: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -553,6 +556,7 @@ class ResponseDraft(BaseModel):
     content: str = ""
     messages: List[Dict[str, Any]] = Field(default_factory=list)
     response_data: Dict[str, Any] = Field(default_factory=dict)
+    runtime_blocks: List[Dict[str, Any]] = Field(default_factory=list)
 
 class GatewayProtocol:
     """Helper utilities for building/parsing gateway protocol messages."""

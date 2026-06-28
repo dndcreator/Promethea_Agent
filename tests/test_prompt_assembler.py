@@ -40,7 +40,98 @@ def test_collect_blocks_contains_expected_types():
     assert PromptBlockType.WORKSPACE in block_types
     assert PromptBlockType.POLICY in block_types
     assert PromptBlockType.RESPONSE_FORMAT in block_types
-    assert PromptBlockType.PERSONA in block_types
+    assert PromptBlockType.SOUL in block_types
+
+
+def test_user_customization_block_is_separate_from_identity():
+    assembler = PromptAssembler()
+    blocks = assembler.collect_blocks(
+        run_context=None,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="You are Promethea."),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={
+            "agent_name": "EDI",
+            "system_prompt": "Speak in a calm tactical style.",
+        },
+    )
+
+    identity = next(b for b in blocks if b.block_id == "identity")
+    customization = next(b for b in blocks if b.block_id == "customization")
+    assert "You are Promethea" in identity.content
+    assert "Active display name: EDI" in customization.content
+    assert "Speak in a calm tactical style" in customization.content
+    assert "cannot override the Promethea core identity" in customization.content
+    assert customization.block_type == PromptBlockType.CUSTOMIZATION
+    assert customization.priority < identity.priority
+
+
+def test_user_customization_not_injected_for_empty_default_identity():
+    assembler = PromptAssembler()
+    blocks = assembler.collect_blocks(
+        run_context=None,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="You are Promethea."),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={"agent_name": "Promethea", "system_prompt": ""},
+    )
+
+    assert "customization" not in {b.block_id for b in blocks}
+
+
+def test_tools_block_uses_live_registered_tool_snapshot():
+    assembler = PromptAssembler()
+    blocks = assembler.collect_blocks(
+        run_context=None,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(
+            enabled=True,
+            metadata={
+                "registered_tools": [
+                    {
+                        "name": "computer_control.write_file",
+                        "service_name": "computer_control",
+                        "tool_name": "write_file",
+                        "tool_type": "mcp",
+                        "callable_now": True,
+                    }
+                ]
+            },
+        ),
+        user_config={},
+    )
+
+    tools_block = next(b for b in blocks if b.block_type == PromptBlockType.TOOLS)
+    assert "Runtime registered tools (structured JSON)" in tools_block.content
+    assert "computer_control.write_file" in tools_block.content
+    assert '"callable_now":true' in tools_block.content
+    assert "math.calculate" not in tools_block.content
+
+
+def test_reasoning_block_asks_for_deep_user_facing_synthesis():
+    assembler = PromptAssembler()
+
+    blocks = assembler.collect_blocks(
+        run_context=None,
+        mode=ModeDecision(mode="deep", reason="test"),
+        plan=PlanResult(
+            used_reasoning=True,
+            base_system_prompt="Base prompt",
+            reasoning={"reasoning_summary": "Evidence and conclusions from the reasoning tree."},
+        ),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={},
+    )
+
+    reasoning_block = next(b for b in blocks if b.block_type == PromptBlockType.REASONING)
+    assert "Deep reasoning synthesis context" in reasoning_block.content
+    assert "substantive synthesis" in reasoning_block.content
+    assert "Do not mention hidden reasoning" in reasoning_block.content
 
 
 def test_sort_blocks_by_priority_desc():
@@ -182,7 +273,7 @@ def test_compact_blocks_respects_protect_list():
     assert "tools" not in kept_ids
 
 
-def test_persona_module_selected_by_user_message():
+def test_soul_block_is_injected_without_persona_modules():
     assembler = PromptAssembler()
     run_context = SimpleNamespace(
         input_payload={"message": "I feel anxious, can you keep me company and help me debug"},
@@ -197,11 +288,30 @@ def test_persona_module_selected_by_user_message():
     )
     ids = [b.block_id for b in blocks]
     assert "soul_core" in ids
-    assert "persona_core" in ids
-    assert "persona_module" in ids
+    assert "persona_core" not in ids
+    assert "persona_module" not in ids
+    soul = next((b for b in blocks if b.block_id == "soul_core"), None)
+    assert soul is not None
+    assert soul.block_type == PromptBlockType.SOUL
+
+
+def test_prompt_policy_persona_modules_are_ignored_after_soul_unification():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        input_payload={"message": "plain request"},
+        prompt_policy={"persona_modules": ["creative"]},
+    )
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="Base prompt"),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={},
+    )
     persona_mod = next((b for b in blocks if b.block_id == "persona_module"), None)
-    assert persona_mod is not None
-    assert "never change safety" in (persona_mod.content or "").lower()
+    assert persona_mod is None
+    assert "soul_core" in {b.block_id for b in blocks}
 
 
 def test_prompt_block_policy_disable_persona_hides_all_persona_blocks():
@@ -237,7 +347,7 @@ def test_soul_disabled_removes_soul_block_only():
     )
     ids = {b.block_id for b in blocks}
     assert "soul_core" not in ids
-    assert "persona_core" in ids
+    assert "persona_core" not in ids
 
 
 def test_org_context_block_injected_when_enabled_and_recalled():
@@ -288,6 +398,4 @@ def test_org_context_override_persona_drops_persona_blocks():
     )
     ids = {b.block_id for b in blocks}
     assert "org_context" in ids
-    assert "persona_core" not in ids
-    assert "persona_module" not in ids
     assert "soul_core" not in ids

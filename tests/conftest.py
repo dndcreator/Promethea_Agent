@@ -14,8 +14,14 @@ from unittest.mock import MagicMock
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PYTEST_SESSION_TMP = PROJECT_ROOT / "_pytest_session_tmp"
-PYTEST_CASE_TMP = PROJECT_ROOT / "_pytest_case_tmp"
+_requested_tmp_root = Path(
+    os.environ.get("PROMETHEA_TEST_TMP_ROOT", str(PROJECT_ROOT / ".tmp" / "pytest-runtime"))
+)
+if PROJECT_ROOT.resolve() not in _requested_tmp_root.resolve().parents:
+    _requested_tmp_root = PROJECT_ROOT / ".tmp" / "pytest-runtime"
+PYTEST_RUNTIME_TMP = _requested_tmp_root
+PYTEST_SESSION_TMP = PYTEST_RUNTIME_TMP / "session"
+PYTEST_CASE_TMP = PYTEST_RUNTIME_TMP / "cases"
 
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -23,11 +29,33 @@ sys.path.insert(0, str(PROJECT_ROOT))
 def _force_repo_local_temp_dirs() -> None:
     """Force all temp artifacts to stay inside repository workspace."""
     PYTEST_SESSION_TMP.mkdir(parents=True, exist_ok=True)
+    PYTEST_CASE_TMP.mkdir(parents=True, exist_ok=True)
+    os.environ["PROMETHEA_TEST_TMP_ROOT"] = str(PYTEST_RUNTIME_TMP)
     os.environ["TEMP"] = str(PYTEST_SESSION_TMP)
     os.environ["TMP"] = str(PYTEST_SESSION_TMP)
     os.environ["TMPDIR"] = str(PYTEST_SESSION_TMP)
     os.environ["PYTEST_DEBUG_TEMPROOT"] = str(PYTEST_SESSION_TMP)
     tempfile.tempdir = str(PYTEST_SESSION_TMP)
+
+
+def _safe_rmtree_pytest_runtime(path: Path) -> None:
+    """Delete only the single repo-local pytest runtime temp directory."""
+    try:
+        resolved = path.resolve()
+        root = PROJECT_ROOT.resolve()
+        allowed = PYTEST_RUNTIME_TMP.resolve()
+        if resolved != allowed:
+            return
+        if resolved == root or root not in resolved.parents:
+            return
+        shutil.rmtree(resolved, ignore_errors=True)
+    except Exception:
+        return
+
+
+def _cleanup_pytest_temp_roots() -> None:
+    """Remove stale repo-local pytest artifacts left by interrupted runs."""
+    _safe_rmtree_pytest_runtime(PYTEST_RUNTIME_TMP)
 
 
 def _patch_pytest_cleanup_guard() -> None:
@@ -52,9 +80,15 @@ _force_repo_local_temp_dirs()
 _patch_pytest_cleanup_guard()
 
 
+def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
+    """Best-effort cleanup so successful test runs do not leave many case dirs."""
+    _ = (session, exitstatus)
+    _cleanup_pytest_temp_roots()
+
+
 @pytest.fixture
 def tmp_path() -> Generator[Path, None, None]:
-    """Provide per-test temp path under repository-local `_pytest_case_tmp/`."""
+    """Provide per-test temp path under repository-local `.tmp/pytest-runtime/`."""
     PYTEST_CASE_TMP.mkdir(parents=True, exist_ok=True)
     case_dir = PYTEST_CASE_TMP / f"case-{uuid.uuid4().hex}"
     case_dir.mkdir(parents=True, exist_ok=True)

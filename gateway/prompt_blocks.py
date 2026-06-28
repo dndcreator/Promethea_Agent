@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 class PromptBlockType(str, Enum):
     IDENTITY = "identity_block"
+    RUNTIME_CONTEXT = "runtime_context_block"
     SKILL = "skill_block"
     POLICY = "policy_block"
     MEMORY = "memory_block"
@@ -15,6 +16,8 @@ class PromptBlockType(str, Enum):
     WORKSPACE = "workspace_block"
     REASONING = "reasoning_block"
     RESPONSE_FORMAT = "response_format_block"
+    CUSTOMIZATION = "customization_block"
+    SOUL = "soul_block"
     PERSONA = "persona_block"
     ORG_CONTEXT = "org_context_block"
 

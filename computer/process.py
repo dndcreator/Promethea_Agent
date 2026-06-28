@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Process-control implementation for the computer-control layer."""
 import subprocess
 import signal
 from typing import Dict, Any, List, Optional
@@ -11,7 +10,7 @@ logger = logging.getLogger("Computer.Process")
 
 
 class ProcessController(ComputerController):
-    """TODO: add docstring."""
+    """Run, inspect, and stop local processes through the sandbox policy."""
     
     def __init__(self):
         super().__init__("Process", ComputerCapability.PROCESS)
@@ -35,12 +34,12 @@ class ProcessController(ComputerController):
             return False
     
     async def cleanup(self) -> bool:
-        """TODO: add docstring."""
+        """Terminate tracked child processes and reset controller state."""
         try:
             for pid, proc in list(self.active_processes.items()):
                 try:
-                        proc.terminate()
-                        proc.wait(timeout=3)
+                    proc.terminate()
+                    proc.wait(timeout=3)
                 except Exception as e:
                     logger.warning(f"Failed to terminate process {pid}: {e}")
             
@@ -351,7 +350,4 @@ class ProcessController(ComputerController):
             },
             "boot_time": self.psutil.boot_time()
         }
-
-
-
 

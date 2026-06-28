@@ -32,8 +32,21 @@ from .config_protocol import to_bool
 
 ENV_ONLY_SECRET_PATHS = (
     ("api", "api_key"),
+    ("api", "base_url"),
+    ("api", "model"),
+    ("api", "failover_models"),
     ("memory", "api", "api_key"),
+    ("memory", "api", "base_url"),
+    ("memory", "api", "model"),
+    ("memory", "api", "use_main_api"),
+    ("memory", "neo4j", "enabled"),
+    ("memory", "neo4j", "uri"),
+    ("memory", "neo4j", "username"),
     ("memory", "neo4j", "password"),
+    ("memory", "neo4j", "database"),
+    ("memory", "store_backend"),
+    ("memory", "sqlite_graph_path"),
+    ("memory", "flat_memory_path"),
 )
 
 
@@ -493,11 +506,11 @@ class ConfigService:
             dep_warnings = sorted(
                 set(self.get_deprecation_warnings(user_id) + list(migration_report.get("warnings") or []))
             )
-            dep_warnings.extend([f"env-only secret ignored: {field}" for field in blocked_secret_fields])
+            dep_warnings.extend([f"sensitive env field ignored: {field}" for field in blocked_secret_fields])
             dep_warnings = sorted(set(dep_warnings))
             message = "Configuration updated successfully"
             if blocked_secret_fields:
-                message = "Configuration updated; env-only secret fields were ignored"
+                message = "Configuration updated; sensitive env fields were ignored"
             return {
                 "success": True,
                 "message": message,
@@ -668,35 +681,20 @@ class ConfigService:
         if not model:
             return {"success": False, "message": "model is required", "config": {}}
 
-        if api_key:
-            if self.event_emitter:
-                await self.event_emitter.emit(
-                    EventType.SECURITY_SECRET_ACCESS,
-                    {
-                        "user_id": user_id,
-                        "request_id": kwargs.get("request_id"),
-                        "namespace": "config",
-                        "secret_field": "api.api_key",
-                        "reason": "env_only_secret",
-                        "outcome": "blocked",
-                    },
-                )
-            return {
-                "success": False,
-                "message": "api_key is env-only; set API__API_KEY in .env",
-                "config": {},
-            }
+        from gateway.user_secrets import update_user_secrets
 
-        updates = {
-            "api": {
-                "model": model
-            }
-        }
-        
+        secret_updates = {"API__MODEL": model}
+        if api_key:
+            secret_updates["API__API_KEY"] = api_key
         if base_url:
-            updates["api"]["base_url"] = base_url
-        
-        return await self.update_user_config(user_id, updates, validate=True)
+            secret_updates["API__BASE_URL"] = base_url
+        status = update_user_secrets(user_id, secret_updates)
+        return {
+            "success": True,
+            "message": "Model routing saved to user secrets.env",
+            "config": self.get_merged_config(user_id),
+            "secrets": status,
+        }
     
     async def update_system_prompt(
         self,
@@ -781,13 +779,19 @@ class ConfigService:
         # Get merged configuration
         config = self.get_merged_config(user_id)
         
-        # Check API configuration
-        api_config = config.get("api", {})
-        if not api_config.get("api_key") or api_config.get("api_key") == "placeholder-key-not-set":
-            issues.append("API key is not configured")
-        
-        if not api_config.get("model"):
-            issues.append("Model is not configured")
+        # Check user-scoped runtime secrets, not normal JSON config.
+        try:
+            from gateway.user_secrets import resolve_llm_runtime_settings, resolve_memory_runtime_settings
+
+            llm_runtime = resolve_llm_runtime_settings(user_id, behavior_config=config) if user_id else {}
+            if not llm_runtime.get("api_key") or llm_runtime.get("api_key") == "placeholder-key-not-set":
+                issues.append("API key is not configured")
+            if not llm_runtime.get("model"):
+                issues.append("Model is not configured")
+            memory_runtime = resolve_memory_runtime_settings(user_id, behavior_config=config) if user_id else {}
+        except Exception:
+            llm_runtime = {}
+            memory_runtime = {}
         
         # Check memory system configuration
         memory_config = config.get("memory", {})
@@ -795,12 +799,12 @@ class ConfigService:
             warnings.append("Memory system is enabled but Neo4j is not enabled")
         memory_api = memory_config.get("api", {})
         if memory_config.get("enabled") and not memory_api.get("use_main_api", True):
-            if not memory_api.get("api_key"):
-                warnings.append("Memory API is configured as dedicated, but memory.api.api_key is empty")
-            if not memory_api.get("base_url"):
-                warnings.append("Memory API is configured as dedicated, but memory.api.base_url is empty")
-            if not memory_api.get("model"):
-                warnings.append("Memory API is configured as dedicated, but memory.api.model is empty")
+            if not memory_runtime.get("api_key"):
+                warnings.append("Memory API is configured as dedicated, but MEMORY__API__API_KEY is empty")
+            if not memory_runtime.get("base_url"):
+                warnings.append("Memory API is configured as dedicated, but MEMORY__API__BASE_URL is empty")
+            if not memory_runtime.get("model"):
+                warnings.append("Memory API is configured as dedicated, but MEMORY__API__MODEL is empty")
         
         warnings.extend(self.get_deprecation_warnings(user_id))
         return {

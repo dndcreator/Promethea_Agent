@@ -73,10 +73,32 @@ class SelfEvolveModule:
             if profile.get("enabled")
             else "Self-evolve module is disabled; enable self_evolve.enabled to use controlled code evolution endpoints."
         )
+        self_model = {"exists": False, "path": str(getattr(self.service, "self_model_path", ""))}
+        try:
+            if getattr(self.service, "self_model_path", None) is not None and self.service.self_model_path.exists():
+                import json
+
+                data = json.loads(self.service.self_model_path.read_text(encoding="utf-8"))
+                self_model = {
+                    "exists": True,
+                    "path": str(self.service.self_model_path),
+                    "generated_at": data.get("generated_at"),
+                    "version": data.get("version"),
+                    "freshness": self.service._self_model_freshness(data),
+                    "capability_areas": sorted((data.get("capability_inventory") or {}).keys()),
+                    "backlog_count": len(data.get("improvement_backlog") or []),
+                }
+        except Exception:
+            self_model = {
+                "exists": True,
+                "path": str(getattr(self.service, "self_model_path", "")),
+                "error": "failed_to_read_self_model",
+            }
         return {
             "enabled": bool(profile.get("enabled")),
             "profile": profile,
             "store_path": str(self.service.store_path),
+            "self_model": self_model,
             "task_stats": {"total": len(tasks), "by_status": status_counts},
             "notice": notice,
         }
@@ -105,6 +127,12 @@ class SelfEvolveModule:
             task_id=task_id,
             max_chars_per_file=max_chars_per_file,
         )
+
+    async def build_self_model(self, *, max_chars_per_file: int) -> Dict[str, Any]:
+        return await self.service.evolve_build_self_model(max_chars_per_file=max_chars_per_file)
+
+    async def get_self_model(self) -> Dict[str, Any]:
+        return await self.service.evolve_get_self_model()
 
     async def apply_patch(
         self,

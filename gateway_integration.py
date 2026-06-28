@@ -25,6 +25,7 @@ from computer import (
 from core.plugins.loader import PluginLoadOptions, load_promethea_plugins
 from core.plugins.runtime import get_active_plugin_registry
 from gateway import EventType, GatewayServer
+from gateway.action import ActionService
 from gateway.config_service import ConfigService
 from gateway.conversation_service import ConversationService
 from gateway.memory_service import MemoryService
@@ -232,6 +233,15 @@ class GatewayIntegration:
             if self.gateway_server:
                 self.gateway_server.plugin_runtime = registry
 
+            try:
+                from gateway.extension_catalog import reload_extensions
+
+                extension_refresh = reload_extensions()
+                if extension_refresh.get("registered"):
+                    changed = True
+            except Exception as e:
+                logger.warning("Failed refreshing MCP extensions during plugin reload: {}", e)
+
             added_channels = await self._sync_channels_from_registry()
             if added_channels:
                 changed = True
@@ -311,16 +321,22 @@ class GatewayIntegration:
             tool_service=self.gateway_server.tool_service,
         )
         self.gateway_server.reasoning_service.workflow_engine = self.gateway_server.workflow_engine
+        self.gateway_server.action_service = ActionService(
+            event_emitter=event_emitter,
+            conversation_core=conversation_core,
+        )
 
         self.gateway_server.conversation_service = ConversationService(
             event_emitter=event_emitter,
             conversation_core=conversation_core,
             memory_service=self.gateway_server.memory_service,
             reasoning_service=self.gateway_server.reasoning_service,
+            action_service=self.gateway_server.action_service,
             workflow_engine=self.gateway_server.workflow_engine,
             message_manager=message_manager,
             config_service=self.gateway_server.config_service,
             org_context_service=self.gateway_server.org_context_service,
+            tool_service=self.gateway_server.tool_service,
         )
         self.gateway_server.conversation_core = conversation_core
 

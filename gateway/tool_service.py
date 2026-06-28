@@ -386,6 +386,8 @@ class ToolService:
         run_context: Optional[Any] = None,
         user_config: Optional[Dict[str, Any]] = None,
     ) -> Any:
+        self._sync_registry_from_mcp()
+        tool_name, params = self.tool_registry.normalize_call(tool_name=tool_name, params=params)
         context_fields = self._build_context_fields(ctx=ctx, run_context=run_context)
         auth = await self._authorize_tool_call(
             tool_name=tool_name,
@@ -567,6 +569,10 @@ class ToolService:
                 tool_name=actual_tool_name,
                 args=args,
             )
+            if result is None:
+                raise RuntimeError(
+                    f"MCP tool returned no result: {service_name}.{actual_tool_name}"
+                )
             await self._emit_event(
                 EventType.TOOL_CALL_RESULT,
                 {

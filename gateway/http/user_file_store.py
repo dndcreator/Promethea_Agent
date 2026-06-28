@@ -33,7 +33,20 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
 class UserFileStore:
     def __init__(self, root_dir: str = "config/users") -> None:
         self.root_dir = Path(root_dir)
-        self.allowed_suffixes = {".txt", ".md", ".markdown", ".csv", ".json", ".docx", ".pdf"}
+        self.allowed_suffixes = {
+            ".txt",
+            ".md",
+            ".markdown",
+            ".csv",
+            ".json",
+            ".docx",
+            ".pdf",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+        }
         self.max_upload_bytes = 15 * 1024 * 1024
 
     def _user_root(self, user_id: str) -> Path:
@@ -92,7 +105,22 @@ class UserFileStore:
                 except Exception:
                     continue
             return "\n".join([ln for ln in lines if ln]).strip()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            try:
+                from PIL import Image  # type: ignore
+                import pytesseract  # type: ignore
+            except Exception:
+                return ""
+            try:
+                return str(pytesseract.image_to_string(Image.open(io.BytesIO(content))) or "").strip()
+            except Exception:
+                return ""
         raise HTTPException(status_code=400, detail=f"unsupported file type: {suffix or 'unknown'}")
+
+    def _modality_for_suffix(self, suffix: str) -> str:
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            return "image"
+        return "document"
 
     def _load_index(self, user_id: str) -> Dict[str, Any]:
         path = self._index_path(user_id)
@@ -149,6 +177,8 @@ class UserFileStore:
             "uploaded_at": ts,
             "session_id": str(session_id or ""),
             "text_chars": len(text),
+            "modality": self._modality_for_suffix(suffix),
+            "text_extraction_status": "ok" if text else "empty_or_unsupported",
         }
         index = self._load_index(user_id)
         items = [entry] + [item for item in index.get("items", []) if isinstance(item, dict)]
@@ -158,7 +188,18 @@ class UserFileStore:
     def list_files(self, *, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         index = self._load_index(user_id)
         items = [item for item in index.get("items", []) if isinstance(item, dict)]
-        return items[: max(1, int(limit))]
+        out: List[Dict[str, Any]] = []
+        for item in items[: max(1, int(limit))]:
+            payload = dict(item)
+            text = self.read_extracted_text(
+                user_id=user_id,
+                file_id=str(payload.get("file_id") or ""),
+                max_chars=260,
+            ).strip()
+            if text:
+                payload["preview"] = text.replace("\n", " ")[:260]
+            out.append(payload)
+        return out
 
     def search_files(self, *, user_id: str, query: str, limit: int = 20) -> List[Dict[str, Any]]:
         q = str(query or "").strip().lower()
@@ -192,6 +233,104 @@ class UserFileStore:
             if len(rows) >= max(1, int(limit)):
                 break
         return rows
+
+    def get_file(self, *, user_id: str, file_id: str) -> Optional[Dict[str, Any]]:
+        target = str(file_id or "").strip()
+        if not target:
+            return None
+        for item in self._load_index(user_id).get("items", []):
+            if isinstance(item, dict) and str(item.get("file_id") or "") == target:
+                return dict(item)
+        return None
+
+    def read_extracted_text(self, *, user_id: str, file_id: str, max_chars: int = 12000) -> str:
+        target = str(file_id or "").strip()
+        if not target:
+            return ""
+        text_path = self._text_dir(user_id) / f"{target}.txt"
+        if not text_path.exists():
+            return ""
+        try:
+            return text_path.read_text(encoding="utf-8")[: max(1, int(max_chars))]
+        except Exception:
+            return ""
+
+    def read_blob_b64(self, *, user_id: str, file_id: str) -> Optional[Dict[str, str]]:
+        entry = self.get_file(user_id=user_id, file_id=file_id)
+        if not entry:
+            return None
+        stored_name = str(entry.get("stored_name") or "")
+        if not stored_name:
+            return None
+        blob_path = self._blob_dir(user_id) / stored_name
+        if not blob_path.exists():
+            return None
+        try:
+            return {
+                "base64": base64.b64encode(blob_path.read_bytes()).decode("ascii"),
+                "content_type": str(entry.get("content_type") or "application/octet-stream"),
+                "filename": str(entry.get("filename") or ""),
+                "file_id": str(entry.get("file_id") or ""),
+            }
+        except Exception:
+            return None
+
+    def build_chat_attachment_context(
+        self,
+        *,
+        user_id: str,
+        attachments: List[Dict[str, Any]],
+        max_files: int = 5,
+        max_chars_per_file: int = 12000,
+    ) -> Dict[str, Any]:
+        rows: List[Dict[str, Any]] = []
+        unsupported: List[Dict[str, Any]] = []
+        for raw in list(attachments or [])[: max(1, int(max_files))]:
+            if not isinstance(raw, dict):
+                continue
+            file_id = str(raw.get("file_id") or "").strip()
+            entry = self.get_file(user_id=user_id, file_id=file_id)
+            if not entry:
+                unsupported.append({"file_id": file_id, "reason": "not_found"})
+                continue
+            text = self.read_extracted_text(
+                user_id=user_id,
+                file_id=file_id,
+                max_chars=max_chars_per_file,
+            ).strip()
+            if not text:
+                unsupported.append(
+                    {
+                        "file_id": file_id,
+                        "filename": entry.get("filename"),
+                        "modality": entry.get("modality") or "file",
+                        "reason": "no_extracted_text",
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "file_id": file_id,
+                    "filename": entry.get("filename"),
+                    "modality": entry.get("modality") or "document",
+                    "text": text,
+                }
+            )
+        parts = []
+        for row in rows:
+            parts.append(
+                f"[Attachment: {row.get('filename') or row.get('file_id')}]\n{row.get('text')}"
+            )
+        for row in unsupported:
+            parts.append(
+                f"[Attachment unavailable to model: {row.get('filename') or row.get('file_id')}] "
+                f"{row.get('reason')}. Upload is stored, but no extracted text is available."
+            )
+        return {
+            "items": rows,
+            "unsupported": unsupported,
+            "context_text": "\n\n".join(parts).strip(),
+        }
 
     def get_stats(self, *, user_id: str) -> Dict[str, Any]:
         items = self._load_index(user_id).get("items", [])

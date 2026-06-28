@@ -104,6 +104,11 @@ Operational rules:
 - idle/background consolidation improves warm/cold quality
 - replay checkpoint (`memory/raw_log.state.json`) supports crash recovery and abrupt-exit continuity
 
+`L0 raw_log` is the first memory persistence layer, not a temporary log and not a test
+artifact. Treat `memory/raw_log.jsonl` and `memory/raw_log.state.json` as runtime
+memory state. Cleanup scripts and test teardown must not remove them; tests that need
+disposable raw-log data should redirect the raw-log paths into their own temp directory.
+
 ## Procedural Memory (Basal Ganglia)
 
 In addition to user memory layers above, runtime now persists procedural reasoning/action assets under:

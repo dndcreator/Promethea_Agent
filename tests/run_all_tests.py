@@ -69,7 +69,7 @@ def _build_pytest_args(args: argparse.Namespace, root: Path) -> list[str]:
         raw_targets = SUITE_FILES.get(args.suite, SUITE_FILES["full"])
         targets = [str((root / rel).resolve()) for rel in raw_targets]
 
-    tmp_root = root / ".tmp" / "pytest"
+    tmp_root = root / ".tmp" / "pytest-runtime" / "runner"
     tmp_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_tmp = tmp_root / f"run-{stamp}-{os.getpid()}"
@@ -80,6 +80,7 @@ def _build_pytest_args(args: argparse.Namespace, root: Path) -> list[str]:
     os.environ["TMP"] = str(run_tmp)
     os.environ["TMPDIR"] = str(run_tmp)
     os.environ["PYTEST_DEBUG_TEMPROOT"] = str(run_tmp)
+    os.environ["PROMETHEA_TEST_TMP_ROOT"] = str(root / ".tmp" / "pytest-runtime")
 
     cmd = [sys.executable, "-m", "pytest", "--basetemp", str(run_tmp / "base"), *targets]
 

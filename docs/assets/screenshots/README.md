@@ -1,12 +1,12 @@
-﻿# Screenshots Placeholder
+﻿# Screenshots
 
-Put demo screenshots here.
+Put curated demo screenshots here when preparing public-facing materials.
 
 Recommended filenames:
 
 - `01-ui-overview.png`
-- `02-reasoning-control.png`
-- `03-cli-health.png`
-- `04-workflow-checkpoint.png`
-- `05-audit-report.png`
-- `06-memory-evidence.png`
+- `02-agent-workbench.png`
+- `03-memory-atlas.png`
+- `04-memory-write-audit.png`
+
+Keep raw full-screen captures in ignored local history, not in release-facing docs.

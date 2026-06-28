@@ -24,7 +24,7 @@ Governance applies to:
 - Default model: maintainer consensus.
 - Escalation model: project owner decision when consensus cannot be reached.
 - All non-trivial architecture changes require:
-  - updated docs in `docs/architecture/` or ADR in `docs/adr/`
+  - updated docs in `docs/architecture/` or `docs/reference/`
   - explicit compatibility notes if behavior changes.
 
 ## Change Classes

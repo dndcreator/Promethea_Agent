@@ -94,7 +94,7 @@ python start_gateway_service.py
 ```
 
 Open:
-- UI: `http://127.0.0.1:8000/UI/index.html`
+- UI: `http://127.0.0.1:5173`
 - health: `http://127.0.0.1:8000/api/health`
 
 ## 6. First-run verification checklist

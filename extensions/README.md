@@ -2,6 +2,16 @@
 
 This directory contains Promethea plugin extensions.
 
+## Boundary
+
+| Type | Purpose | Where it lives |
+| --- | --- | --- |
+| Extension | Drop-in package that registers tools, channels, or services. | `extensions/*`, `extensions/community/*` |
+| Tool | Callable action exposed through `ToolService` and policy. | `gateway/official_tools/*`, `agentkit/tools/*`, or an extension |
+| Skill | Reusable task instruction and metadata, expanded on demand. | `skills/packs/official/*` |
+
+Extensions can contribute tools or channels, but they are not the same thing as skills. Use a skill for reusable guidance; use an extension when you need to add executable capabilities or integration surfaces.
+
 ## Layout
 
 ```text

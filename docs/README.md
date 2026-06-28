@@ -1,66 +1,44 @@
 # Promethea Documentation
 
-Promethea docs are organized for two audiences:
-- Users running the local assistant.
-- Developers integrating the runtime as infrastructure.
+Promethea's public docs are intentionally small. Start with the release-facing files, then use the architecture and reference docs only when you need implementation detail.
 
-## Documentation Map
+## Start Here
+- [Quick Start](../QUICK_START.md)
+- [Release Notes](../RELEASE_NOTES.md)
+- [Getting Started](./getting-started/README.md)
+- [Configuration](./configuration.md)
+- [Runtime Overview](./runtime-overview.md)
+- [UI Overview](./ui-overview.md)
 
-### Getting Started
-- [Start Here](./GET_STARTED_HERE.md)
-- [Getting Started Overview](./getting-started/README.md)
-- [Quickstart](./getting-started/quickstart.md)
-- [Real User Setup](./getting-started/real-user-setup.md)
-- [Local Assistant Basics](./getting-started/local-assistant.md)
+## Build And Operate
+- [Deployment](./deployment.md)
+- [Release Checklist](./release-checklist.md)
+- [Release Readiness](./operations/release-readiness.md)
+- [Testing Strategy](./testing-strategy.md)
+- [Local Model Quickstart](./quickstart-local-model.md)
 
-### Concepts
-- [Concepts Overview](./concepts/README.md)
-- [Why Promethea](./WHY_PROMETHEA.md)
-- [Showcase](./SHOWCASE.md)
-- [Project Status](./PROJECT_STATUS.md)
-- [Runtime Model](./runtime-overview.md)
-- [Infrastructure Profile](./infrastructure-profile.md)
-- [Claude Code Comparative Deep Dive (2026-04)](./claude-code-open-source-comparative-deep-dive-2026-04.md)
-
-### Reference
-- [Reference Overview](./reference/README.md)
+## Developer Reference
 - [HTTP API](./api-reference.md)
 - [CLI](./cli-reference.md)
 - [Protocol Surface](./reference/protocol-surface.md)
-- [Official Tools](./official-tools.md)
 - [Configuration Contract](./reference/config-contract.md)
+- [Official Tools](./official-tools.md)
+- [Extensions](./extensions.md)
 
-### Guides
-- [Guides Overview](./guides/README.md)
-- [Business Test Playbook](./guides/business-test-playbook.md)
-- [Showcase Playbook](./guides/showcase-playbook.md)
-- [Demo Scenarios](./DEMO_SCENARIOS.md)
-- [Demo Plan](./DEMO_PLAN.md)
+## Architecture
+- [Conversation Pipeline](./architecture/conversation-pipeline.md)
+- [Memory Model](./architecture/memory-model.md)
+- [Tool Runtime](./architecture/tool-runtime.md)
+- [Skill Layer](./architecture/skill-layer.md)
+- [Runtime IO](./architecture/runtime-io.md)
+- [Workflow Model](./architecture/workflow-model.md)
+- [Prompt Assembly](./architecture/prompt-assembly.md)
+
+## Playbooks
 - [Add a Tool](./playbooks/how-to-add-a-tool.md)
 - [Add a Skill](./playbooks/how-to-add-a-skill.md)
 - [Add a Channel](./playbooks/how-to-add-a-channel.md)
+- [Change Memory Backend](./playbooks/how-to-change-memory-backend.md)
+- [Debug a Session](./playbooks/how-to-debug-a-session.md)
 
-### Operations
-- [Operations Overview](./operations/README.md)
-- [Deployment](./deployment.md)
-- [Release Readiness](./operations/release-readiness.md)
-- [Testing Strategy](./testing-strategy.md)
-
-### Community
-- [Community Overview](./community/README.md)
-- [Open Source Launch Kit](./community/open-source-launch-kit.md)
-- [Outreach Copy](./OUTREACH_COPY.md)
-- [Presentation Layer Notes](./PRESENTATION_LAYER_NOTES.md)
-- [Contributing](../CONTRIBUTING.md)
-- [Governance](../GOVERNANCE.md)
-- [Maintainers](../MAINTAINERS.md)
-- [Roadmap](../ROADMAP.md)
-
-## Legacy and Historical Notes
-
-Historical engineering artifacts are still available for traceability:
-- `docs/adr/`
-- `docs/backlogs/`
-- dated audit and alignment reports in `docs/*.md`
-
-These are valuable context, but not the primary onboarding path.
+Historical audits, demos, backlogs, ADRs, placeholder assets, and local root-level side notes are kept under `docs/_local_history/`, which is ignored by git and excluded from the release surface.

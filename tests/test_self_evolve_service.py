@@ -1,4 +1,5 @@
-﻿import shutil
+﻿import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,7 @@ def test_parse_tool_calls_supports_nested_args_and_service_name():
 
 
 def _make_workspace() -> Path:
-    base = Path(".pytest-self-evolve-work")
+    base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "self-evolve-work"
     if base.exists():
         shutil.rmtree(base, ignore_errors=True)
     base.mkdir(parents=True, exist_ok=True)
@@ -81,6 +82,43 @@ async def test_self_evolve_task_patch_and_validate(monkeypatch):
         assert task["ok"] is True
         assert task["task"]["changes"]
         assert task["task"]["validations"]
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_self_model_becomes_task_baseline():
+    ws = _make_workspace()
+    try:
+        docs = ws / "docs" / "architecture"
+        docs.mkdir(parents=True, exist_ok=True)
+        (ws / "docs" / "runtime-overview.md").write_text("# Runtime\n- memory\n- tools\n", encoding="utf-8")
+        (docs / "runtime-io.md").write_text("# Runtime I/O\n- RuntimeBlock\n", encoding="utf-8")
+        (docs / "tool-runtime.md").write_text("# Tool Runtime\n- ToolRegistry\n", encoding="utf-8")
+        (docs / "memory-model.md").write_text("# Memory Model\n- recall\n", encoding="utf-8")
+        (docs / "conversation-pipeline.md").write_text("# Pipeline\n- route\n", encoding="utf-8")
+        (ws / "docs" / "ui-overview.md").write_text("# UI\n- trace\n", encoding="utf-8")
+        (ws / "target.py").write_text("print('x')\n", encoding="utf-8")
+
+        svc = SelfEvolveService(workspace_root=str(ws))
+        built = await svc.evolve_build_self_model(max_chars_per_file=1000)
+        assert built["ok"] is True
+        assert built["self_model"]["capability_inventory"]["self_evolve"]["status"] == "active"
+        assert built["self_model"]["improvement_backlog"]
+
+        created = await svc.evolve_create_task(goal="improve runtime", target_files=["target.py"])
+        task = created["task"]
+        assert task["self_model_snapshot"]["exists"] is True
+        assert "memory" in task["self_model_snapshot"]["capability_areas"]
+
+        ctx = await svc.evolve_collect_context(task_id=task["task_id"], max_chars_per_file=8000)
+        assert ctx["context"][0]["role"] == "self_evolution_baseline"
+        assert "capability_inventory" in ctx["context"][0]["content"]
+
+        (docs / "tool-runtime.md").write_text("# Tool Runtime\n- ToolRegistry\n- ToolPolicy\n", encoding="utf-8")
+        model = await svc.evolve_get_self_model()
+        assert model["self_model"]["freshness"]["stale"] is True
+        assert "docs/architecture/tool-runtime.md" in model["self_model"]["freshness"]["changed_sources"]
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 

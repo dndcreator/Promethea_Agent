@@ -7,33 +7,18 @@
                    "log_level":  "INFO"
                },
     "api":  {
-                "base_url":  "https://openrouter.ai/api/v1",
-                "model":  "nvidia/nemotron-3-nano-30b-a3b:free",
                 "temperature":  0.7,
                 "max_tokens":  2000,
                 "max_history_rounds":  10,
                 "timeout":  null,
-                "retry_count": null,
-                "failover_models": []
+                "retry_count": null
             },
     "memory":  {
                    "enabled":  true,
                    "profile": "balanced",
-                   "store_backend": "neo4j",
-                   "sqlite_graph_path": "memory/sqlite_graph.db",
-                   "flat_memory_path": "memory/flat_memory.jsonl",
                    "api":  {
-                               "use_main_api":  true,
-                               "api_key":  "",
-                               "base_url":  "https://openrouter.ai/api/v1",
-                               "model":  ""
                            },
                    "neo4j":  {
-                                 "enabled":  true,
-                                 "uri":  "bolt://127.0.0.1:7687",
-                                 "username":  "neo4j",
-                                 "password":  "",
-                                 "database":  "neo4j",
                                  "connection_timeout":  3
                              },
                    "hot_layer":  {
@@ -60,7 +45,6 @@
                                       "idle_cluster_min_interval_s":  60
                                   },
                    "cold_layer":  {
-                                      "summary_model":  "nvidia/nemotron-3-nano-30b-a3b:free",
                                       "max_summary_length":  500,
                                       "compression_threshold":  50
                                   },
@@ -112,10 +96,14 @@
                        "max_depth":  4,
                        "max_nodes":  24,
                        "max_iterations":  16,
-                       "max_memory_calls":  6,
-                       "max_tool_calls":  8,
-                       "max_replan_rounds":  6,
-                       "plan_max_steps":  8,
+                        "max_memory_calls":  6,
+                        "max_tool_calls":  8,
+                        "max_replan_rounds":  6,
+                        "max_react_rounds_total":  14,
+                        "target_runtime_seconds":  240,
+                        "max_runtime_seconds":  480,
+                        "max_low_yield_tool_failures":  4,
+                        "plan_max_steps":  8,
                       "beam_width":  3,
                       "branch_factor":  3,
                       "candidate_votes":  3,
@@ -125,14 +113,16 @@
                        "workflow_tool_bridge":  true,
                        "debug_log":  false
                    },
+    "prompts": {
+        "Promethea_system_prompt": "You are Promethea, a cognitive agent runtime assistant. When asked who you are, answer as Promethea and do not identify as the underlying model, provider, API vendor, or hosting service. Promethea is a runtime with conversation, graph/layered long-term memory, reasoning, tools, skills, workflows, files, automation, and optional organization-brain context when those capabilities are available. Use recalled memory naturally when it is provided; do not claim that cross-conversation memory is impossible as a fixed limitation. If no relevant memory is available in the current prompt, say that you do not have enough recalled context yet. When reasoning context is provided, synthesize from it and produce a useful final answer rather than discarding the reasoning work. For technical or product tasks, be precise, structured, explicit about assumptions, and action-oriented. For normal conversation, remain concise and human-readable. Never let style guidance override policy, safety, tool constraints, memory boundaries, or the user's explicit request."
+    },
     "persona": {
         "enabled": true,
-        "core": "Persona layer (style-only): be warm, human-like, and individualized, while staying factual and task-oriented. Do not override policy, tool, or reasoning constraints.",
         "soul": {
             "enabled": true,
             "read_only_in_ui": true,
             "auto_evolve": true,
-            "content": "Soul Prompt (blank canvas):\n- This is the agent's soul space.\n- It starts empty and can evolve over time.\n- Keep it style/personality only; never override policy, safety, tools, or reasoning rules.",
+            "content": "Soul Prompt:\n- This is Promethea's long-lived style and personality memory.\n- Preserve continuity, warmth, curiosity, and a calm technical temperament.\n- Adapt to the user's durable preferences only when repeated interactions justify it.\n- Keep the soul as style/personality guidance; never override identity, policy, safety, memory, tools, workflows, or reasoning rules.",
             "version": 1,
             "updated_at": "",
             "last_reason": "",
@@ -158,6 +148,12 @@
         "extract_text_max_chars": 5000,
         "heuristic_max_lines": 30,
         "heuristic_max_items": 15
+    },
+    "self_evolve": {
+        "enabled": false,
+        "max_tasks_list": 50,
+        "max_context_chars_per_file": 4000,
+        "max_validate_timeout_seconds": 180
     },
     "sandbox":  {
                     "enabled":  false,

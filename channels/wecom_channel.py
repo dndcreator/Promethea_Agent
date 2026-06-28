@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""WeCom channel adapter."""
 import time
 from typing import Dict, Any, Optional
 from datetime import datetime
@@ -11,7 +10,7 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class WeComChannel(BaseChannel):
-    """TODO: add docstring."""
+    """WeCom adapter supporting group robot and application API sends."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("wecom", ChannelType.WECOM, config)
@@ -29,7 +28,7 @@ class WeComChannel(BaseChannel):
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def connect(self) -> bool:
-        """TODO: add docstring."""
+        """Create the HTTP session and optionally fetch an access token."""
         try:
             self.session = aiohttp.ClientSession()
             
@@ -45,7 +44,7 @@ class WeComChannel(BaseChannel):
             return False
     
     async def disconnect(self) -> bool:
-        """TODO: add docstring."""
+        """Close the HTTP session and mark WeCom disconnected."""
         if self.session:
             await self.session.close()
             self.session = None
@@ -55,7 +54,7 @@ class WeComChannel(BaseChannel):
         return True
     
     async def _refresh_access_token(self):
-        """TODO: add docstring."""
+        """Refresh WeCom API access token when API mode is used."""
         url = f"{self.api_base}/gettoken"
         params = {
             "corpid": self.corpid,
@@ -72,7 +71,7 @@ class WeComChannel(BaseChannel):
                 raise Exception(f"Failed to get access token: {data}")
     
     async def _ensure_token(self):
-        """TODO: add docstring."""
+        """Refresh the API token when missing or near expiry."""
         if not self.access_token or time.time() >= self.token_expires_at:
             await self._refresh_access_token()
     
@@ -83,7 +82,7 @@ class WeComChannel(BaseChannel):
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         try:
             if self.webhook_url and kwargs.get("use_webhook", True):
                 return await self._send_webhook_message(content, message_type, **kwargs)
@@ -148,7 +147,7 @@ class WeComChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         url = f"{self.api_base}/message/send"
         params = {"access_token": self.access_token}
         
@@ -227,7 +226,7 @@ class WeComChannel(BaseChannel):
             return {"success": False, "error": str(e)}
     
     async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         try:
             await self._ensure_token()
             
@@ -251,7 +250,7 @@ class WeComChannel(BaseChannel):
             return None
     
     async def validate_config(self) -> bool:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         if not self.config.enabled:
             return True
         

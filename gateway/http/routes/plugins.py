@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from core.plugins.runtime import get_active_plugin_registry
 from gateway_integration import get_gateway_integration
+from gateway.extension_catalog import build_extension_catalog, reload_extensions
 
 from .auth import get_current_user_id
 from ..dispatcher import get_gateway_server
@@ -188,3 +189,18 @@ async def apply_plugin_config(
         "enabled": bool(request.enabled),
         "config": config_payload,
     }
+
+
+@router.get("/extensions/catalog")
+async def get_extensions_catalog(user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    gateway_server = get_gateway_server()
+    return await build_extension_catalog(gateway_server=gateway_server, user_id=user_id)
+
+
+@router.post("/extensions/reload")
+async def reload_extension_catalog(user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    _ = user_id
+    result = reload_extensions()
+    gateway_server = get_gateway_server()
+    await build_extension_catalog(gateway_server=gateway_server, user_id=user_id, include_tools=False)
+    return result

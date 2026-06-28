@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import os
 import shutil
 
 import pytest
@@ -43,7 +44,7 @@ async def test_web_fetch_extracts_title_and_text(monkeypatch):
 def _make_workspace():
     from pathlib import Path
 
-    base = Path(".pytest-content-tools")
+    base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "content-tools"
     if base.exists():
         shutil.rmtree(base, ignore_errors=True)
     base.mkdir(parents=True, exist_ok=True)

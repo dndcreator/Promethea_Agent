@@ -5,6 +5,13 @@ from loguru import logger
 import asyncio
 import uuid
 from agentkit.security.policy import global_policy
+from agentkit.mcp.action_protocol import (
+    ACTION_MODE_CONTRACT_MARKER,
+    build_observation_gate,
+    build_protocol_correction,
+    iter_json_objects,
+    parse_action_envelope,
+)
 
 class ToolConfirmationRequired(Exception):
     def __init__(self, tool_call_id: str, tool_name: str, args: dict, all_tool_calls: list):
@@ -15,52 +22,85 @@ class ToolConfirmationRequired(Exception):
         self.tool_args = args
         self.all_tool_calls = all_tool_calls
 
+
+def _tool_blocks_failed(blocks: List[Dict[str, Any]]) -> bool:
+    text = "\n".join(
+        str(block.get("text") or "")
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+    if not text.strip():
+        return False
+    markers = [
+        "[Error]",
+        "Error executing tool",
+        "Call failed:",
+        "HTTP Error",
+        "Forbidden",
+        "Tool call returned HTTP",
+        "tool verification failed",
+    ]
+    return any(marker in text for marker in markers)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        try:
+            return isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
+def _build_lightweight_react_gate(
+    *,
+    tool_result_blocks: List[Dict[str, Any]],
+    remaining_steps: int,
+) -> str:
+    failed = _tool_blocks_failed(tool_result_blocks)
+    return build_observation_gate(failed=failed, remaining_steps=remaining_steps)
+
+
+def _is_action_mode(messages: List[Dict]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "system":
+            continue
+        if ACTION_MODE_CONTRACT_MARKER in str(message.get("content") or ""):
+            return True
+    return False
+
+
+def _extract_action_answer(content: str) -> Optional[str]:
+    envelope = parse_action_envelope(content or "")
+    if envelope and envelope.action == "answer":
+        return str(envelope.content or "")
+    return None
+
+
 def parse_tool_calls(content: str) -> list:
     tool_calls = []
-    decoder = json.JSONDecoder()
-    pos = 0
-    
-    while True:
-        # Find the next potential JSON object start '{'
-        # Also tolerate full-width brace variants.
-        start_idx = -1
-        idx1 = content.find('{', pos)
-        idx2 = content.find("\uFF5B", pos)
-        
-        if idx1 != -1 and idx2 != -1:
-            start_idx = min(idx1, idx2)
-        elif idx1 != -1:
-            start_idx = idx1
-        elif idx2 != -1:
-            start_idx = idx2
-            
-        if start_idx == -1:
-            break
-            
-        try:
-            # If it's a full-width brace, skip/normalize so we can parse
-            if content[start_idx] == "\uFF5B":
-                pos = start_idx + 1
-                continue
-
-            # Try to decode a JSON object starting at this position
-            tool_args, end_idx = decoder.raw_decode(content, start_idx)
-            pos = start_idx + end_idx  # Advance parser position.
-            
-            # Validate whether the parsed object looks like a tool call
-            if isinstance(tool_args, dict):
-                _process_single_tool_call(tool_args, tool_calls)
-            else:
-                pos = start_idx + 1
-                
-        except json.JSONDecodeError:
-            pos = start_idx + 1
-            
+    for obj in iter_json_objects(content or ""):
+        # Validate whether the parsed object looks like a tool call
+        if isinstance(obj, dict):
+            _process_single_tool_call(obj, tool_calls)
     return tool_calls
 
 def _process_single_tool_call(tool_args: dict, tool_calls: list):
     """Process a single tool-call dictionary and append to the list if valid."""
     try:
+        action = str(tool_args.get("action") or "").lower()
+        if action and action != "tool_call":
+            return
+
         agent_type = str(tool_args.get("agentType", "mcp")).lower()
         if agent_type == "agent":
             agent_name = tool_args.get("agent_name")
@@ -86,11 +126,17 @@ def _process_single_tool_call(tool_args: dict, tool_calls: list):
         if isinstance(nested_args, dict):
             effective_args.update(nested_args)
         for k, v in tool_args.items():
-            if k != "args":
-                effective_args[k] = v
+            if k in {"args", "action"}:
+                continue
+            # Preserve nested call semantics. The outer tool_name may be a
+            # service id such as content_tools while args.tool_name is the
+            # concrete action such as web_fetch.
+            if k in {"tool_name", "service_name"} and k in effective_args:
+                continue
+            effective_args[k] = v
 
         if "service_name" not in effective_args:
-            effective_args["service_name"] = tool_name
+            effective_args["service_name"] = str(tool_name).split(".", 1)[0]
         if "agentType" not in effective_args:
             effective_args["agentType"] = "mcp"
 
@@ -242,7 +288,7 @@ async def _execute_single_tool(
                     result_data['base64'] = "<image_base64_hidden>"
                 
                 # Convert remaining structure to pretty-printed JSON text.
-                text_output = json.dumps(result_data, ensure_ascii=False, indent=2)
+                text_output = json.dumps(_json_safe(result_data), ensure_ascii=False, indent=2)
             else:
                 text_output = str(result_data)
             
@@ -282,6 +328,8 @@ async def tool_call_loop(
     current_messages = messages.copy()
     current_ai_content = ''
     final_usage = {'prompt_tokens': 0, 'completion_tokens': 0}
+    action_mode = _is_action_mode(current_messages)
+    action_protocol_retry_used = False
 
     while recursion_depth < max_recursion:
         try:
@@ -296,9 +344,27 @@ async def tool_call_loop(
 
             logger.debug(f"LLM turn {recursion_depth + 1}: {current_ai_content[:100]}...")
 
+            action_answer = _extract_action_answer(current_ai_content) if action_mode else None
+            if action_answer is not None:
+                current_ai_content = action_answer
+                logger.debug("Action loop received structured answer action, exiting loop")
+                break
+
             tool_calls = parse_tool_calls(current_ai_content)
             
             if not tool_calls:
+                if action_mode and recursion_depth == 0 and not action_protocol_retry_used:
+                    logger.warning("Action loop received invalid first action response; requesting structured action object")
+                    current_messages.append({'role': 'assistant', 'content': current_ai_content})
+                    current_messages.append({'role': 'user', 'content': build_protocol_correction()})
+                    action_protocol_retry_used = True
+                    continue
+                if action_mode and recursion_depth == 0 and action_protocol_retry_used:
+                    logger.warning("Action loop failed closed after invalid structured action retry")
+                    current_ai_content = (
+                        "I could not start a verified tool-backed action because the model did not return "
+                        "a valid action object after correction. Please retry the request."
+                    )
                 logger.debug("No tool call detected, exiting loop")
                 break
             
@@ -336,10 +402,16 @@ async def tool_call_loop(
                 'content': tool_result_blocks
             }
             
-            # Append a prompt to guide the model to continue
+            # Append a prompt to guide the model through the lightweight ReAct
+            # verification step without starting the full reasoning tree.
+            remaining_steps = max(0, int(max_recursion) - recursion_depth - 1)
+            continuation_text = _build_lightweight_react_gate(
+                tool_result_blocks=tool_result_blocks,
+                remaining_steps=remaining_steps,
+            )
             tool_result_blocks.append({
-                "type": "text", 
-                "text": "\nPlease continue based on the tool results above (may include screenshot data).",
+                "type": "text",
+                "text": continuation_text,
             })
 
             current_messages.append(observation_message)
@@ -355,11 +427,50 @@ async def tool_call_loop(
     if recursion_depth >= max_recursion:
         try:
             logger.warning(f"Reached max recursion depth {max_recursion}, forcing final answer")
-            current_messages.append({"role": "system", "content": "System: step limit reached. Ignore unfinished internal steps and provide a final answer now."})
+            if action_mode:
+                current_messages.append({"role": "system", "content": build_protocol_correction(final_answer=True)})
+            else:
+                current_messages.append({"role": "system", "content": "System: step limit reached. Ignore unfinished internal steps and provide a final answer now."})
             
             resp = await llm_caller(current_messages)
             final_answer = resp.get('content', '')
-            
+
+            if action_mode:
+                action_answer = _extract_action_answer(final_answer)
+                if action_answer is not None:
+                    final_answer = action_answer
+                elif parse_tool_calls(final_answer):
+                    logger.warning("Final action answer attempted another tool call after step limit")
+                    final_answer = (
+                        "I could not complete this as a verified tool-backed action within the current tool budget. "
+                        "The available observations did not satisfy the request, and the model attempted another tool call "
+                        "after the runtime step limit was reached. Please retry or allow a larger tool budget if you want "
+                        "the runtime to continue with an alternative source."
+                    )
+                else:
+                    logger.warning("Final action answer was not a structured answer envelope")
+                    current_messages.append({'role': 'assistant', 'content': final_answer})
+                    current_messages.append({'role': 'user', 'content': build_protocol_correction(final_answer=True)})
+                    retry_resp = await llm_caller(current_messages)
+                    retry_content = retry_resp.get('content', '')
+                    retry_usage = retry_resp.get('usage', {})
+                    if retry_usage:
+                        final_usage['prompt_tokens'] += retry_usage.get('prompt_tokens', 0)
+                        final_usage['completion_tokens'] += retry_usage.get('completion_tokens', 0)
+                    retry_answer = _extract_action_answer(retry_content)
+                    final_answer = retry_answer if retry_answer is not None else (
+                        "I could not produce a verified final answer because the model did not return "
+                        "a valid action answer object after the tool budget was exhausted."
+                    )
+            elif parse_tool_calls(final_answer):
+                logger.warning("Final answer contained unexecuted tool JSON after step limit; suppressing protocol text")
+                final_answer = (
+                    "I could not complete this as a verified tool-backed action within the current tool budget. "
+                    "The available observations did not satisfy the request, and the model attempted another tool call "
+                    "after the runtime step limit was reached. Please retry or allow a larger tool budget if you want "
+                    "the runtime to continue with an alternative source."
+                )
+
             if final_answer:
                 current_ai_content = final_answer
                 current_messages.append({'role': 'assistant', 'content': final_answer})

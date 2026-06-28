@@ -2,6 +2,8 @@
 Browser controller - based on Playwright.
 """
 import asyncio
+import os
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
@@ -26,9 +28,22 @@ class BrowserController(ComputerController):
             from playwright.async_api import async_playwright
             
             self.playwright = await async_playwright().start()
+
+            executable_path = Path(self.playwright.chromium.executable_path)
+            if not executable_path.exists():
+                logger.warning(
+                    "Playwright Chromium is not installed; skipping browser controller. "
+                    "Run: playwright install chromium"
+                )
+                await self.playwright.stop()
+                self.playwright = None
+                return False
+
+            launch_timeout_ms = int(os.getenv("COMPUTER_BROWSER_LAUNCH_TIMEOUT_MS", "5000"))
             
             self.browser = await self.playwright.chromium.launch(
                 headless=False,
+                timeout=launch_timeout_ms,
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',

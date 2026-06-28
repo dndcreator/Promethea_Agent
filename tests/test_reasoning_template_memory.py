@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+﻿import os
+from pathlib import Path
 import json
 import shutil
 import uuid
@@ -46,7 +47,7 @@ def _sample_tree_payload():
 
 
 def _make_case_dir() -> Path:
-    base_root = Path("tmp_reasoning_template")
+    base_root = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "reasoning-template"
     base_root.mkdir(parents=True, exist_ok=True)
     case_dir = (base_root / f"case_{uuid.uuid4().hex}").resolve()
     case_dir.mkdir(parents=True, exist_ok=True)

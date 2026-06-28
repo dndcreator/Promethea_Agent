@@ -255,10 +255,34 @@ class MemoryAdapter:
             "last_entry_id": str(self._raw_log_state.get("last_entry_id", "") or ""),
             "updated_at": float(time.time()),
         }
-        tmp_path = f"{self._raw_log_state_path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp_path, self._raw_log_state_path)
+        state_path = Path(self._raw_log_state_path)
+        last_error = None
+        for attempt in range(4):
+            tmp_path = state_path.with_name(
+                f"{state_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, state_path)
+                return
+            except PermissionError as e:
+                last_error = e
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                time.sleep(0.02 * (attempt + 1))
+            except Exception:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        if last_error is not None:
+            raise last_error
 
     def _append_raw_log_event(
         self,

@@ -9,7 +9,7 @@ from fastapi import Response
 from jose import JWTError
 
 from gateway.http.routes import auth
-from gateway.http.schemas import APIConfigUpdate, UserConfigUpdate, UserDeleteRequest, UserLogin
+from gateway.http.schemas import APIConfigUpdate, UserConfigUpdate, UserDeleteRequest, UserLogin, UserRegister
 
 
 @pytest.mark.asyncio
@@ -57,7 +57,9 @@ async def test_get_current_user_id_accepts_cookie_token(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_login_exposes_api_key_warning_when_global_key_missing(monkeypatch):
+async def test_login_exposes_api_key_warning_when_global_key_missing(monkeypatch, tmp_path):
+    from gateway import user_secrets
+
     monkeypatch.setattr(
         auth.user_manager,
         "verify_user",
@@ -70,6 +72,9 @@ async def test_login_exposes_api_key_warning_when_global_key_missing(monkeypatch
     )
     monkeypatch.setattr(auth.user_manager, "get_user_config", lambda _uid: {})
     monkeypatch.setattr(auth.config.api, "api_key", "placeholder-key-not-set", raising=False)
+    monkeypatch.setattr(user_secrets, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(user_secrets, "USER_SECRETS_DIR", tmp_path / "users")
+    monkeypatch.delenv("API__API_KEY", raising=False)
 
     response = Response()
     out = await auth.login(UserLogin(username="neo", password="pw"), response)
@@ -79,6 +84,18 @@ async def test_login_exposes_api_key_warning_when_global_key_missing(monkeypatch
     assert "Please set API__API_KEY" in out["warning"]
     assert out["access_token"]
     assert auth.AUTH_COOKIE_NAME in response.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_register_reports_neo4j_backend_unavailable(monkeypatch):
+    monkeypatch.setattr(auth.user_manager, "create_user", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(auth.user_manager, "can_register", lambda: (False, "neo4j_user_backend_unavailable"))
+
+    with pytest.raises(HTTPException) as ei:
+        await auth.register(UserRegister(username="neo", password="pw", agent_name="Promethea"))
+
+    assert ei.value.status_code == 503
+    assert ei.value.detail["code"] == "neo4j_user_backend_unavailable"
 
 
 @pytest.mark.asyncio
@@ -113,7 +130,8 @@ async def test_update_config_uses_config_service_and_scrubs_api_key(monkeypatch)
     )
     assert out["status"] == "success"
     assert out["canonical_endpoint"] == "/api/config/update"
-    assert out["config"]["api"]["api_key"] == ""
+    assert "api_key" not in out["config"]["api"]
+    assert "model" not in out["config"]["api"]
     config_service.update_user_config.assert_awaited_once()
 
 
@@ -154,9 +172,15 @@ async def test_delete_user_account_clears_user_sessions_and_deletes_user(monkeyp
     fake_manager = MagicMock()
     fake_manager.get_all_sessions_info.return_value = {"u1::sA": {}, "sB": {}}
     monkeypatch.setattr(mm, "message_manager", fake_manager)
+    workflow_engine = MagicMock()
+    config_service = SimpleNamespace(_user_config_cache={"u1": {"x": 1}})
+    gateway = SimpleNamespace(workflow_engine=workflow_engine, config_service=config_service)
+    monkeypatch.setattr(auth, "get_gateway_integration", lambda: SimpleNamespace(gateway_server=gateway))
     monkeypatch.setattr(auth.user_manager, "delete_user", lambda _uid: True)
 
     out = await auth.delete_user_account(req=UserDeleteRequest(confirm=True), user_id="u1")
     assert out["status"] == "success"
     fake_manager.delete_session.assert_any_call("sA", user_id="u1")
     fake_manager.delete_session.assert_any_call("sB", user_id="u1")
+    workflow_engine.purge_user_state.assert_called_once_with("u1")
+    assert "u1" not in config_service._user_config_cache

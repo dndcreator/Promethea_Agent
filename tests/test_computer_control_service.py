@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import pytest
 from agentkit.tools.computer.computer_control import ComputerControlService
@@ -124,7 +125,7 @@ async def test_browser_wait_download_detects_new_file():
     import shutil
 
     svc = ComputerControlService()
-    download_dir = Path(".pytest-download-wait")
+    download_dir = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "download-wait"
     if download_dir.exists():
         shutil.rmtree(download_dir, ignore_errors=True)
 

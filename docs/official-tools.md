@@ -27,6 +27,13 @@ The official pack should cover common agent tasks without requiring custom plugi
 - `utils.uuid`
 - `utils.hash_text`
 
+### Code and Archive
+
+- `code.run_python`
+- `archive.zip_create`
+- `archive.zip_list`
+- `archive.zip_extract`
+
 ### Web
 
 - `web.fetch_text`
@@ -34,6 +41,22 @@ The official pack should cover common agent tasks without requiring custom plugi
 - `web.search`
 - `web.extract_links`
 - `web.download_to_workspace`
+
+`web.search` is provider-backed. The tool name stays stable while
+`SEARCH__PROVIDER` selects the runtime backend (`auto`, `brave`, `tavily`,
+`serpapi`, `searxng`, or `duckduckgo`). In `auto`, configured API-backed or
+endpoint-backed providers are tried first, and DuckDuckGo is used as the
+key-free fallback. Provider keys and URLs live in `.env` or the current user's
+`config/users/<user_id>/secrets.env`.
+
+This is intentionally a two-layer design:
+
+- `ToolService` registers and audits one official tool: `web.search`.
+- `WebSearchRuntime` selects the provider inside that tool.
+
+The router should not need to know whether Brave, Tavily, SerpAPI, SearXNG, or
+DuckDuckGo will serve the request. Provider choice is runtime configuration, not
+prompt policy.
 
 ### Runtime and Session
 
@@ -57,6 +80,8 @@ The official pack should cover common agent tasks without requiring custom plugi
 - `workspace.move_file`
 - `workspace.read_file`
 - `workspace.read_files`
+- `workspace.diff_file`
+- `workspace.apply_patch`
 - `workspace.replace_text`
 - `workspace.search_text`
 - `workspace.tail_file`

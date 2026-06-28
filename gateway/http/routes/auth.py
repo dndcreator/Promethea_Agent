@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from loguru import logger
+from neo4j.exceptions import AuthError, ServiceUnavailable
 
 from ..schemas import (
     ChannelBindRequest,
@@ -15,6 +16,7 @@ from ..schemas import (
 from ..user_manager import user_manager
 from ..config_compat import build_user_config_payload
 from config import config
+from gateway.user_secrets import get_user_secrets_status
 from gateway_integration import get_gateway_integration
 
 router = APIRouter()
@@ -22,15 +24,16 @@ router = APIRouter()
 SECRET_KEY = os.getenv("AUTH__SECRET_KEY", "change-me-in-env")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30
+SESSION_TOKEN_EXPIRE_MINUTES = 60 * 12
 AUTH_COOKIE_NAME = os.getenv("AUTH__COOKIE_NAME", "promethea_auth")
 AUTH_COOKIE_SECURE = str(os.getenv("AUTH__COOKIE_SECURE", "false")).lower() in {"1", "true", "yes", "on"}
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/auth/login", auto_error=False)
 
 
-def create_access_token(data: dict):
+def create_access_token(data: dict, *, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES):
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -70,27 +73,70 @@ async def get_current_user_id(request: Request, token: str | None = Depends(oaut
 async def register(user: UserRegister):
     user_id = user_manager.create_user(user.username, user.password, user.agent_name)
     if not user_id:
-        raise HTTPException(status_code=400, detail="Username exists or system error")
+        can_register, reason = user_manager.can_register()
+        if not can_register and reason in {
+            "neo4j_user_backend_unavailable",
+            "neo4j_unavailable",
+            "neo4j_authentication_failed",
+        }:
+            messages = {
+                "neo4j_authentication_failed": "Neo4j is reachable, but username/password authentication failed",
+                "neo4j_unavailable": "Neo4j is configured as the user backend but is unavailable",
+                "neo4j_user_backend_unavailable": "Neo4j is configured as the user backend but is unavailable",
+            }
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": reason,
+                    "message": messages.get(reason, "Neo4j user backend is unavailable"),
+                },
+            )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "username_exists_or_system_error",
+                "message": "Username exists or system error",
+            },
+        )
     return {"status": "success", "user_id": user_id, "message": "Register success"}
 
 
 @router.post("/auth/login")
 async def login(user: UserLogin, response: Response):
-    db_user = user_manager.verify_user(user.username, user.password)
+    try:
+        db_user = user_manager.verify_user(user.username, user.password)
+    except AuthError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "neo4j_authentication_failed",
+                "message": "Neo4j is reachable, but username/password authentication failed",
+            },
+        )
+    except ServiceUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "neo4j_unavailable",
+                "message": "Neo4j is configured as the user backend but is unavailable",
+            },
+        )
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     user_id = db_user.get("user_id")
+    remember_me = bool(getattr(user, "remember_me", True))
+    token_minutes = ACCESS_TOKEN_EXPIRE_MINUTES if remember_me else SESSION_TOKEN_EXPIRE_MINUTES
     access_token = create_access_token(
-        data={"sub": user_id, "username": db_user.get("username")}
+        data={"sub": user_id, "username": db_user.get("username")},
+        expires_minutes=token_minutes,
     )
 
     user_config = user_manager.get_user_config(user_id)
     agent_name = user_config.get("agent_name", db_user.get("agent_name", "Promethea"))
     system_prompt = user_config.get("system_prompt", db_user.get("system_prompt"))
-    api_key_configured = bool(
-        config.api.api_key and config.api.api_key != "placeholder-key-not-set"
-    )
+    secrets_status = get_user_secrets_status(user_id)
+    api_key_configured = bool((secrets_status.get("api") or {}).get("api_key_configured"))
 
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
@@ -98,7 +144,7 @@ async def login(user: UserLogin, response: Response):
         httponly=True,
         secure=AUTH_COOKIE_SECURE,
         samesite="lax",
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        max_age=token_minutes * 60 if remember_me else None,
         path="/",
     )
 
@@ -110,7 +156,7 @@ async def login(user: UserLogin, response: Response):
         "agent_name": agent_name,
         "system_prompt": system_prompt,
         "api_key_configured": api_key_configured,
-        "warning": None if api_key_configured else "Please set API__API_KEY in .env first",
+        "warning": None if api_key_configured else "Please set API__API_KEY in your user secrets.env or root .env",
     }
 
 
@@ -123,9 +169,8 @@ async def logout(response: Response):
 @router.get("/user/profile")
 async def get_profile(user_id: str = Depends(get_current_user_id)):
     user_config = user_manager.get_user_config(user_id)
-    api_key_configured = bool(
-        config.api.api_key and config.api.api_key != "placeholder-key-not-set"
-    )
+    secrets_status = get_user_secrets_status(user_id)
+    api_key_configured = bool((secrets_status.get("api") or {}).get("api_key_configured"))
     user = user_manager.get_user_by_id(user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -136,7 +181,7 @@ async def get_profile(user_id: str = Depends(get_current_user_id)):
         "agent_name": user_config.get("agent_name", user.get("agent_name")),
         "system_prompt": user_config.get("system_prompt", user.get("system_prompt")),
         "api_key_configured": api_key_configured,
-        "warning": None if api_key_configured else "Please set API__API_KEY in .env first",
+        "warning": None if api_key_configured else "Please set API__API_KEY in your user secrets.env or root .env",
     }
 
 
@@ -164,7 +209,18 @@ async def update_config(
 
         sanitized = dict(result.get("config") or {})
         if isinstance(sanitized.get("api"), dict):
-            sanitized["api"]["api_key"] = ""
+            for key in ("api_key", "base_url", "model", "failover_models"):
+                sanitized["api"].pop(key, None)
+        if isinstance(sanitized.get("memory"), dict):
+            mem = sanitized["memory"]
+            if isinstance(mem.get("api"), dict):
+                for key in ("api_key", "base_url", "model", "use_main_api"):
+                    mem["api"].pop(key, None)
+            if isinstance(mem.get("neo4j"), dict):
+                for key in ("enabled", "uri", "username", "password", "database"):
+                    mem["neo4j"].pop(key, None)
+            for key in ("store_backend", "sqlite_graph_path", "flat_memory_path"):
+                mem.pop(key, None)
 
         return {
             "status": "success",
@@ -229,6 +285,20 @@ async def delete_user_account(
             message_manager.delete_session(raw_sid, user_id=user_id)
     except Exception as e:
         logger.warning("user delete: failed to clear session cache for {}: {}", user_id, e)
+
+    try:
+        gateway = get_gateway_integration().gateway_server
+        workflow_engine = getattr(gateway, "workflow_engine", None)
+        purge = getattr(workflow_engine, "purge_user_state", None) if workflow_engine else None
+        if callable(purge):
+            purge(user_id)
+        config_service = getattr(gateway, "config_service", None)
+        cache = getattr(config_service, "_user_config_cache", None) if config_service else None
+        if isinstance(cache, dict):
+            cache.pop(user_id, None)
+            cache.pop(user_id.replace("user_", "", 1), None)
+    except Exception as e:
+        logger.warning("user delete: failed to clear runtime user state for {}: {}", user_id, e)
 
     success = user_manager.delete_user(user_id)
     if not success:

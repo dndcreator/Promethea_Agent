@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""DingTalk channel adapter."""
 import hmac
 import hashlib
 import base64
@@ -13,7 +12,7 @@ from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
 
 
 class DingTalkChannel(BaseChannel):
-    """TODO: add docstring."""
+    """DingTalk adapter supporting bot webhook and API sends."""
     
     def __init__(self, config: ChannelConfig):
         super().__init__("dingtalk", ChannelType.DINGTALK, config)
@@ -31,7 +30,7 @@ class DingTalkChannel(BaseChannel):
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def connect(self) -> bool:
-        """TODO: add docstring."""
+        """Create the HTTP session and optionally fetch an access token."""
         try:
             self.session = aiohttp.ClientSession()
             
@@ -47,7 +46,7 @@ class DingTalkChannel(BaseChannel):
             return False
     
     async def disconnect(self) -> bool:
-        """TODO: add docstring."""
+        """Close the HTTP session and mark DingTalk disconnected."""
         if self.session:
             await self.session.close()
             self.session = None
@@ -57,7 +56,7 @@ class DingTalkChannel(BaseChannel):
         return True
     
     async def _refresh_access_token(self):
-        """TODO: add docstring."""
+        """Refresh DingTalk API access token when API mode is used."""
         url = f"{self.api_base}/gettoken"
         params = {
             "appkey": self.app_key,
@@ -74,12 +73,12 @@ class DingTalkChannel(BaseChannel):
                 raise Exception(f"Failed to get access token: {data}")
     
     async def _ensure_token(self):
-        """TODO: add docstring."""
+        """Refresh the API token when missing or near expiry."""
         if not self.access_token or time.time() >= self.token_expires_at:
             await self._refresh_access_token()
     
     def _generate_signature(self, timestamp: int, secret: str) -> str:
-        """TODO: add docstring."""
+        """Generate DingTalk webhook HMAC signature."""
         string_to_sign = f"{timestamp}\n{secret}"
         hmac_code = hmac.new(
             secret.encode('utf-8'),
@@ -114,7 +113,7 @@ class DingTalkChannel(BaseChannel):
         message_type: MessageType,
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         if not self.webhook_url:
             return {"success": False, "error": "Webhook URL not configured"}
         
@@ -191,7 +190,7 @@ class DingTalkChannel(BaseChannel):
         card_data: Dict[str, Any],
         **kwargs
     ) -> Dict[str, Any]:
-        """TODO: add docstring."""
+        """Channel adapter operation."""
         try:
             url = self.webhook_url
             if self.app_secret:

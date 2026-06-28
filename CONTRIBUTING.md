@@ -147,21 +147,19 @@ Template is in `.github/pull_request_template.md`.
 
 ---
 
-## Architecture decision records (ADRs)
+## Architecture notes
 
-All significant design decisions are documented in `docs/adr/`.
+Current architecture guidance lives in `docs/architecture/` and `docs/reference/`.
 
-Before implementing a non-trivial change, check whether an ADR already exists.  
-If your change contradicts an existing ADR, open a discussion first.
+Before implementing a non-trivial change, check whether the public architecture docs already describe the affected runtime boundary. If your change contradicts an existing document, open a discussion first.
 
-Naming: `ADR-NNN-short-description.md`
+Historical ADRs are kept by maintainers as local release history, but they are not part of the public documentation surface.
 
 ---
 
 ## Backlog tasks
 
-Backlog items live in `docs/backlogs/`.  
-Each file describes a concrete, scoped task with acceptance criteria.
+Public backlog tasks should live in GitHub issues. Each issue should describe a concrete, scoped task with acceptance criteria.
 
 To claim a task: leave a comment on the corresponding GitHub issue.
 

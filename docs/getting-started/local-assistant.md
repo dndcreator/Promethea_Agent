@@ -4,11 +4,11 @@ Promethea can be used as a local assistant shell while preserving protocol-first
 
 ## UI Entry
 
-- Open `http://127.0.0.1:8000/UI/index.html`
+- Open `http://127.0.0.1:5173`
 
 ## CLI Entry
 
-- `promethea chat send "ÄãºÃ"`
+- `promethea chat send "ä½ å¥½"`
 - `promethea status services`
 
 ## Key Principle

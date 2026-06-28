@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .archive_tools import ArchiveZipCreateTool, ArchiveZipExtractTool, ArchiveZipListTool
+from .code_tools import CodeRunPythonTool
 from .command_tools import RuntimeExecCommandTool, RuntimeReadEnvTool
 from .data_tools import DataCsvToJsonTool, DataJsonToCsvTool
 from .math_tools import MathCalculateTool
@@ -38,7 +40,9 @@ from .workflow_tools import (
 )
 from .workspace_tools import (
     WorkspaceCopyFileTool,
+    WorkspaceApplyPatchTool,
     WorkspaceDeleteFileTool,
+    WorkspaceDiffFileTool,
     WorkspaceEnsureDirTool,
     WorkspaceFileInfoTool,
     WorkspaceGlobFilesTool,
@@ -127,9 +131,15 @@ def register_official_tools(
     if workspace_service is not None:
         tools.extend(
             [
+                ArchiveZipCreateTool(workspace_service=workspace_service),
+                ArchiveZipExtractTool(workspace_service=workspace_service),
+                ArchiveZipListTool(workspace_service=workspace_service),
+                CodeRunPythonTool(workspace_service=workspace_service),
                 WebDownloadToWorkspaceTool(workspace_service=workspace_service),
+                WorkspaceApplyPatchTool(workspace_service=workspace_service),
                 WorkspaceCopyFileTool(workspace_service=workspace_service),
                 WorkspaceDeleteFileTool(workspace_service=workspace_service),
+                WorkspaceDiffFileTool(workspace_service=workspace_service),
                 WorkspaceEnsureDirTool(workspace_service=workspace_service),
                 WorkspaceFileInfoTool(workspace_service=workspace_service),
                 WorkspaceGlobFilesTool(workspace_service=workspace_service),

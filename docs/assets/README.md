@@ -4,8 +4,6 @@ This directory stores presentation-layer visuals referenced by README and docs.
 
 ## Files
 
-- `hero-architecture.png`: homepage architecture hero visual
-- `demo-flow.png`: demo runtime flow visual
 - `screenshots/`: UI/CLI evidence screenshots used in README/docs/posts
 
-Current PNG files are placeholders so links resolve in public docs. Replace with final visuals from `docs/DEMO_PLAN.md`.
+Historical placeholder images are kept locally under `docs/_local_history/assets/`. Public release materials should only reference curated screenshots or visuals that are present in this directory.

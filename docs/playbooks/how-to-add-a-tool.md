@@ -1,30 +1,48 @@
-# Playbook: How to Add a Tool
+# Playbook: How To Add A Tool
 
-This guide explains how to add a new locally-implemented tool to Promethea so it is:
-
-- Discoverable via the tool catalog
-- Subject to `ToolPolicy` enforcement
-- Traced and audited automatically
-- Testable in isolation
-
----
+This guide explains how to add a locally implemented tool to Promethea so it is discoverable, policy-governed, traceable, and testable.
 
 ## Concepts
 
-A **tool** in Promethea has three parts:
-1. **`ToolSpec`** — metadata: name, description, schema, side-effect level, permission scope
-2. **Implementation** — a class with an `invoke` method
-3. **Registration** — register with `ToolService` at startup
+A tool in Promethea has three parts:
 
-The `ToolService` handles policy checks and event emission; your tool only needs to implement `invoke`.
+1. `ToolSpec`: metadata, name, description, schema, side-effect level, and permission scope.
+2. Implementation: a class with an async `invoke(args, ctx=None)` method.
+3. Registration: startup code registers the tool with `ToolService`.
 
----
+`ToolService` handles policy checks, namespace resolution, event emission, and audit/trace integration. A tool implementation should focus on the capability itself.
 
-## Step 1 — Define the ToolSpec
+## Tool, Extension, And Skill Boundaries
+
+| Type | Use it for | Runtime surface |
+| --- | --- | --- |
+| Tool | A callable operation the model or workflow can execute. | `ToolService`, `ToolRegistry`, `/api/status/tools` |
+| Extension | A plugin or manifest pack that contributes tools, channels, or services. | Extension catalog and plugin runtime |
+| Skill | Reusable task instruction plus metadata and optional tool policy hints. | Skill registry and `skill.run` lazy expansion |
+
+If the capability performs an action, implement it as a tool. If the capability is distributed as a drop-in package, wrap it as an extension. If the capability is primarily task guidance or reusable expertise, package it as a skill.
+
+## Capability Provider Runtimes
+
+If a tool represents one stable capability that can be served by multiple backends, keep one public tool id and put provider selection inside the tool's runtime layer.
+
+Use this pattern for official capabilities such as web search:
+
+```text
+ToolService
+  web.search
+
+WebSearchRuntime
+  auto | brave | tavily | serpapi | searxng | duckduckgo
+```
+
+Do not register separate official tools for the same general capability, such as `brave.search`, `tavily.search`, and `searxng.search`. That leaks provider choice into router and prompt logic. Provider routing should be explicit runtime configuration, normally stored in `.env` or the current user's `config/users/<user_id>/secrets.env`.
+
+Community tools can stay simple. Add a provider runtime only when the community tool also exposes one stable capability backed by multiple providers.
+
+## Step 1: Define The ToolSpec
 
 ```python
-# gateway/tools/spec.py (or your tool's own file)
-
 from gateway.tools.spec import ToolSpec, ToolSource, SideEffectLevel, CapabilityType
 
 weather_spec = ToolSpec(
@@ -45,24 +63,21 @@ weather_spec = ToolSpec(
 )
 ```
 
-### Side-effect levels
+Side-effect levels:
 
 | Level | Meaning | Default policy |
-|---|---|---|
-| `NONE` | Read-only, no external state changed | Allowed by default |
-| `WORKSPACE_WRITE` | Writes to user workspace | Requires explicit allow |
-| `EXTERNAL_WRITE` | Modifies external system (API, DB) | Requires explicit allow |
-| `PRIVILEGED_HOST_ACTION` | Runs system commands | Requires explicit allow + audit |
+| --- | --- | --- |
+| `NONE` | Read-only; no external state changed. | Allowed by default |
+| `WORKSPACE_WRITE` | Writes to user workspace. | Requires explicit allow |
+| `EXTERNAL_WRITE` | Modifies an external system. | Requires explicit allow |
+| `PRIVILEGED_HOST_ACTION` | Runs host commands or privileged local actions. | Requires explicit allow and audit |
 
-For a read-only tool, set `SideEffectLevel.NONE` and it will pass policy checks in all modes.
-
----
-
-## Step 2 — Implement the tool
+## Step 2: Implement The Tool
 
 ```python
 from typing import Any, Dict, Optional
 from gateway.tool_service import ToolInvocationContext
+
 
 class WeatherTool:
     tool_id = "weather.current"
@@ -78,7 +93,6 @@ class WeatherTool:
         if not city:
             raise ValueError("city is required")
 
-        # Replace with real implementation
         return {
             "city": city,
             "temperature_c": 22,
@@ -86,11 +100,9 @@ class WeatherTool:
         }
 ```
 
----
+## Step 3: Register At Startup
 
-## Step 3 — Register at startup
-
-In `gateway/app.py` or your application startup code:
+Register the tool in application startup code, usually through the same path that initializes official local tools.
 
 ```python
 from gateway.tool_service import ToolService
@@ -100,49 +112,44 @@ tool_service = ToolService(event_emitter=event_emitter)
 tool_service.register_tool(WeatherTool())
 ```
 
-`register_tool` adds the tool to both `_registered_tools` (for invocation) and `ToolRegistry` (for policy resolution and catalog queries).
+`register_tool` adds the tool to both invocation storage and `ToolRegistry`, which is used for policy resolution and catalog queries.
 
----
-
-## Step 4 — Verify registration
+## Step 4: Verify Registration
 
 After starting Promethea:
 
 ```bash
-curl http://127.0.0.1:8000/api/tools/list
+curl http://127.0.0.1:8000/api/status/tools
 ```
 
-Your tool should appear in the response with `"type": "local"`.
+The tool should appear with a canonical id such as `weather.current`.
 
----
+## Step 5: Invoke The Tool
 
-## Step 5 — Invoke the tool
-
-Via the gateway server (programmatically):
+Programmatic gateway invocation:
 
 ```python
 result = await tool_service.call_tool(
     tool_name="weather.current",
     params={"city": "Tokyo"},
-    run_context=run_context,   # carries user_id, trace_id, etc.
+    run_context=run_context,
 )
 ```
 
-The call flow is:
-1. `_assert_tool_namespace` — checks user boundary
-2. `ToolRegistry.resolve` — looks up the spec
-3. `ToolPolicy.evaluate` — policy check against `run_context`
-4. `local_tool.invoke(params, ctx)` — your implementation
-5. `TOOL_CALL_RESULT` event emitted — captured in trace/audit
+Call flow:
 
----
+1. Namespace and user-boundary checks run.
+2. `ToolRegistry.resolve` looks up the spec.
+3. `ToolPolicy.evaluate` checks the call against `run_context`.
+4. The tool's `invoke` method runs.
+5. Tool result events are emitted for trace/audit.
 
-## Step 6 — Add tests
+## Step 6: Add Tests
 
 ```python
-# tests/test_weather_tool.py
 import pytest
 from yourmodule.weather_tool import WeatherTool
+
 
 @pytest.mark.asyncio
 async def test_weather_tool_returns_conditions():
@@ -151,6 +158,7 @@ async def test_weather_tool_returns_conditions():
     assert result["city"] == "Tokyo"
     assert "temperature_c" in result
 
+
 @pytest.mark.asyncio
 async def test_weather_tool_requires_city():
     tool = WeatherTool()
@@ -158,24 +166,20 @@ async def test_weather_tool_requires_city():
         await tool.invoke({})
 ```
 
----
-
 ## Checklist
 
-- [ ] `ToolSpec` defined with correct `side_effect_level` and `capability_type`
-- [ ] `invoke` is `async` and accepts `(args, ctx=None)`
-- [ ] Tool registered in startup code
-- [ ] Appears in `/api/tools/list`
-- [ ] Tests cover main path and error path
-- [ ] If `side_effect_level` is not `NONE`: tool appears in policy config and is audited
+- [ ] `ToolSpec` defines correct `side_effect_level` and `capability_type`.
+- [ ] `invoke` is async and accepts `(args, ctx=None)`.
+- [ ] Tool is registered at startup.
+- [ ] Tool appears in `/api/status/tools`.
+- [ ] Tests cover main path and error path.
+- [ ] Non-read-only tools have explicit policy and audit expectations.
 
----
-
-## What you do NOT need to change
+## What You Do Not Need To Change
 
 - `ToolService` invocation logic
 - `ToolPolicy` evaluation
 - Event emission
 - Audit trail capture
 
-These are all handled by `ToolService.call_tool` automatically.
+These are handled by `ToolService.call_tool`.

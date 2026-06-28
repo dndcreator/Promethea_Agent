@@ -46,7 +46,7 @@ def _register_service(name: str, *, visibility=None):
 
 
 @pytest.mark.asyncio
-async def test_service_health_snapshot_defaults_offline(isolated_mcp_registry):
+async def test_inprocess_service_health_snapshot_defaults_ready(isolated_mcp_registry):
     _register_service("svc_a")
     manager = MCPManager()
 
@@ -54,8 +54,26 @@ async def test_service_health_snapshot_defaults_offline(isolated_mcp_registry):
 
     assert len(rows) == 1
     assert rows[0]["service_name"] == "svc_a"
-    assert rows[0]["status"] == "offline"
+    assert rows[0]["status"] == "ready"
+    assert rows[0]["source"] == "inprocess"
     assert rows[0]["user_visibility"] == "visible"
+
+
+@pytest.mark.asyncio
+async def test_remote_service_health_snapshot_defaults_unknown(isolated_mcp_registry):
+    MCP_REGISTRY["svc_remote"] = {"type": "python", "script_path": "remote.py"}
+    MANIFEST_CACHE["svc_remote"] = {
+        "name": "svc_remote",
+        "label": "svc_remote",
+        "capabilities": {"invocation_commands": []},
+        "visibility": {"public": True},
+    }
+    manager = MCPManager()
+
+    rows = manager.list_service_health(user_id="u1")
+
+    assert rows[0]["status"] == "unknown"
+    assert rows[0]["source"] == "registry"
 
 
 @pytest.mark.asyncio

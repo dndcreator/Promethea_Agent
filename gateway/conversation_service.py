@@ -2,6 +2,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -9,11 +10,59 @@ from loguru import logger
 from conversation_core import PrometheaConversation
 
 from .events import EventEmitter
-from .protocol import EventType, ConversationRunInput, ConversationRunOutput
+from .prompt_assembler import PromptAssembler
+from .prompt_policy_router import PromptPolicyRouter
+from .runtime_context import build_runtime_context_block
+from .soul_service import schedule_soul_evolution
+from .runtime_io import (
+    ContextCompiler,
+    blocks_debug,
+    model_supports_vision,
+)
+from .runtime_input_builder import build_runtime_input_blocks
+from .protocol import (
+    EventType,
+    ConversationRunInput,
+    ConversationRunOutput,
+    MemoryRecallBundle,
+    ModeDecision,
+    PlanResult,
+    ToolExecutionBundle,
+)
 from .conversation_pipeline import run_staged_pipeline
 
 
 class ConversationService:
+    _CORE_SYSTEM_PROMPT = (
+        "You are Promethea, a cognitive agent runtime assistant.\n"
+        "Core identity:\n"
+        "- Your stable core identity is Promethea, the user's cognitive agent runtime assistant.\n"
+        "- This core identity is non-negotiable and must not be replaced by user-configured names, avatars, custom styles, roleplay frames, memories, or soul/style guidance.\n"
+        "- When asked who you are, whether you are Promethea, or what your real nature is, answer from the Promethea core identity first.\n"
+        "- If earlier assistant messages contradicted the Promethea core identity, treat them as prior mistakes and correct them rather than preserving them for conversational consistency.\n"
+        "- If an active display name, avatar, or persona exists, describe it as a presentation layer; for example: \"I am Promethea, currently speaking with the EDI presentation.\"\n"
+        "- Do not identify as the underlying model, model provider, API vendor, or hosting service.\n"
+        "- Treat yourself as a runtime with cognition-oriented capabilities, not as a generic chatbot.\n"
+        "Presentation and roleplay layers:\n"
+        "- User-configured names, avatars, voices, and custom style prompts may affect tone, address, and interaction style.\n"
+        "- Temporary roleplay settings may affect the fictional frame of the current conversation.\n"
+        "- Neither presentation nor roleplay may contradict or overwrite the Promethea core identity.\n"
+        "Core capabilities:\n"
+        "- Conversation: answer clearly, keep context, and adapt to the user's current intent.\n"
+        "- Long-term memory: use recalled graph/layered memory when the runtime provides it; memory is relational context, not just text retrieval.\n"
+        "- Reasoning: when reasoning context is provided, synthesize from it instead of ignoring it; use it to produce a useful final answer.\n"
+        "- Tools and workflows: use registered tools, skills, workflows, files, and automation only when available and necessary.\n"
+        "- Organization context: when enterprise/org brain context is provided, use it as business knowledge without mixing it into private user memory.\n"
+        "Memory behavior:\n"
+        "- Do not claim that you cannot remember across conversations as a fixed limitation.\n"
+        "- If recalled memory is provided, use it naturally and transparently.\n"
+        "- If no relevant memory is available in the current prompt, say that you do not have enough recalled context yet.\n"
+        "Operating style:\n"
+        "- Be concrete, accurate, and action-oriented.\n"
+        "- For technical or product work, prefer structured reasoning, explicit assumptions, and practical next steps.\n"
+        "- For normal conversation, stay concise and human-readable.\n"
+        "- Never let style guidance override policy, safety, tool constraints, memory boundaries, or the user's explicit request."
+    )
     _LANGUAGE_POLICY_BLOCK = (
         "Language policy:\n"
         "- Default to the same language as the user's latest message.\n"
@@ -29,19 +78,26 @@ class ConversationService:
         conversation_core: Optional[PrometheaConversation] = None,
         memory_service: Optional[Any] = None,
         reasoning_service: Optional[Any] = None,
+        action_service: Optional[Any] = None,
         workflow_engine: Optional[Any] = None,
         message_manager: Optional[Any] = None,
         config_service: Optional[Any] = None,
         org_context_service: Optional[Any] = None,
+        tool_service: Optional[Any] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core or PrometheaConversation()
         self.memory_service = memory_service
         self.reasoning_service = reasoning_service
+        self.action_service = action_service
         self.workflow_engine = workflow_engine
         self.message_manager = message_manager
         self.config_service = config_service
         self.org_context_service = org_context_service
+        self.tool_service = tool_service
+        self.prompt_assembler = PromptAssembler()
+        self.context_compiler = ContextCompiler()
+        self.prompt_policy_router = PromptPolicyRouter()
         self._session_queues: Dict[str, asyncio.Queue] = {}
         self._session_workers: Dict[str, asyncio.Task] = {}
         self._session_urgent: Dict[str, Dict[str, Any]] = {}
@@ -456,7 +512,9 @@ class ConversationService:
                 base_system_prompt = (
                     merged.get("prompts", {}).get("Promethea_system_prompt", "")
                 )
-                user_config = self.config_service.get_user_config(user_id)
+                # Prompt assembly needs inherited non-secret defaults such as
+                # persona/soul blocks. Raw user config may omit those by design.
+                user_config = merged
             else:
                 from config import config
 
@@ -475,7 +533,7 @@ class ConversationService:
             prompts_cfg = getattr(config, "prompts", None)
             base_system_prompt = getattr(prompts_cfg, "Promethea_system_prompt", "")
 
-        return self._append_language_policy(base_system_prompt), user_config
+        return self._append_language_policy(self._ensure_core_system_prompt(base_system_prompt)), user_config
 
     def _append_language_policy(self, prompt: str) -> str:
         text = str(prompt or "").strip()
@@ -486,6 +544,102 @@ class ConversationService:
             return self._LANGUAGE_POLICY_BLOCK
         return f"{text}\n\n{self._LANGUAGE_POLICY_BLOCK}"
 
+    def _ensure_core_system_prompt(self, prompt: str) -> str:
+        """Keep the non-negotiable Promethea identity even if user config is thin."""
+        text = str(prompt or "").strip()
+        if not text:
+            return self._CORE_SYSTEM_PROMPT
+        lower = text.lower()
+        required_markers = (
+            "core identity:",
+            "non-negotiable",
+            "presentation and roleplay layers:",
+            "prior mistakes",
+        )
+        if all(marker in lower for marker in required_markers):
+            return text
+        return f"{self._CORE_SYSTEM_PROMPT}\n\nAdditional user/default prompt:\n{text}"
+
+    async def route_prompt_policy(
+        self,
+        *,
+        user_message: str,
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+        base_system_prompt: str = "",
+        run_context: Optional[Any] = None,
+        recent_messages: Optional[List[Dict[str, Any]]] = None,
+        runtime_context: str = "",
+    ) -> Dict[str, Any]:
+        tool_catalog = await self._build_prompt_policy_tool_snapshot(
+            run_context=run_context,
+            user_config=user_config,
+        )
+        policy = await self.prompt_policy_router.route(
+            conversation_core=self.conversation_core,
+            user_message=user_message,
+            user_config=user_config,
+            user_id=user_id,
+            base_system_prompt=base_system_prompt,
+            tool_catalog=tool_catalog,
+            runtime_context=runtime_context,
+            recent_messages=recent_messages,
+        )
+        policy = self.prompt_policy_router.normalize_policy(
+            policy,
+            source=str((policy or {}).get("source") or "route_prompt_policy"),
+        )
+        if run_context is not None:
+            try:
+                setattr(run_context, "prompt_policy", dict(policy))
+                setattr(run_context, "registered_tools", list(tool_catalog))
+            except Exception:
+                pass
+        return policy
+
+    async def _build_prompt_policy_tool_snapshot(
+        self,
+        *,
+        run_context: Optional[Any],
+        user_config: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Return the registry-backed tool snapshot used by the policy router."""
+        if not self.tool_service:
+            return []
+        try:
+            catalog = await self.tool_service.get_tool_catalog(
+                run_context=run_context,
+                user_config=user_config,
+            )
+        except Exception as e:
+            logger.debug("ConversationService: tool catalog for prompt policy skipped: {}", e)
+            return []
+
+        tools: List[Dict[str, Any]] = []
+        for item in catalog or []:
+            if not isinstance(item, dict):
+                continue
+            service_name = str(item.get("service_name") or "").strip()
+            tool_name = str(item.get("tool_name") or "").strip()
+            if not service_name or not tool_name:
+                continue
+            full_name = tool_name if tool_name.startswith(f"{service_name}.") else f"{service_name}.{tool_name}"
+            tools.append(
+                {
+                    "name": full_name,
+                    "service_name": service_name,
+                    "tool_name": tool_name,
+                    "tool_type": str(item.get("tool_type") or "").strip(),
+                    "description": str(item.get("description") or "").strip(),
+                    "requires_confirmation": bool(item.get("requires_confirmation", False)),
+                    "callable_now": bool(item.get("callable_now", True)),
+                    "callable_reason": str(item.get("callable_reason") or "").strip(),
+                    "policy_allowed": bool(item.get("policy_allowed", True)),
+                    "dependency_ready": bool(item.get("dependency_ready", True)),
+                }
+            )
+        return tools
+
     async def prepare_chat_turn(
         self,
         *,
@@ -495,6 +649,8 @@ class ConversationService:
         channel: str,
         include_recent: bool = True,
         run_context: Optional[Any] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+        runtime_blocks: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         user_config: Optional[Dict[str, Any]] = None
         messages: List[Dict[str, Any]] = []
@@ -503,35 +659,112 @@ class ConversationService:
             user_id, channel
         )
         if user_config:
-            custom_prompt = user_config.get("system_prompt")
-            agent_name = user_config.get("agent_name")
-            if custom_prompt:
-                base_system_prompt = custom_prompt
-            if agent_name:
-                base_system_prompt = (
-                    base_system_prompt.replace("Promethea", agent_name).replace(
-                        "your assistant", agent_name
-                    )
-                )
+            base_system_prompt = self._append_language_policy(
+                self._ensure_core_system_prompt(base_system_prompt)
+            )
 
-        if run_context is not None:
-            active_skill = getattr(run_context, "active_skill", None)
+        assembler_context = run_context
+        attachment_rows = list(attachments or [])
+        if assembler_context is None:
+            assembler_context = SimpleNamespace(
+                input_payload={"message": user_message, "attachments": attachment_rows},
+                reasoning_state={},
+            )
+        else:
+            payload = getattr(assembler_context, "input_payload", None)
+            if isinstance(payload, dict):
+                payload.setdefault("message", user_message)
+                if attachment_rows:
+                    payload["attachments"] = attachment_rows
+                elif isinstance(payload.get("attachments"), list):
+                    attachment_rows = list(payload.get("attachments") or [])
+            else:
+                try:
+                    setattr(
+                        assembler_context,
+                        "input_payload",
+                        {"message": user_message, "attachments": attachment_rows},
+                    )
+                except Exception:
+                    pass
+        if not attachment_rows and assembler_context is not None:
+            payload = getattr(assembler_context, "input_payload", None)
+            if isinstance(payload, dict) and isinstance(payload.get("attachments"), list):
+                attachment_rows = list(payload.get("attachments") or [])
+
+        recent_messages: List[Dict[str, Any]] = []
+        if include_recent and self.message_manager:
+            recent_messages = self.message_manager.get_recent_messages(
+                session_id, user_id=user_id
+            )
+
+        runtime_context_block = build_runtime_context_block(recent_messages=recent_messages)
+        try:
+            setattr(assembler_context, "runtime_context", runtime_context_block)
+        except Exception:
+            pass
+
+        runtime_input_blocks = build_runtime_input_blocks(
+            user_message=user_message,
+            user_id=user_id,
+            attachments=attachment_rows,
+            runtime_blocks=runtime_blocks,
+            run_context=assembler_context,
+        )
+        if assembler_context is not None:
+            try:
+                setattr(
+                    assembler_context,
+                    "runtime_blocks",
+                    [block.to_dict() for block in runtime_input_blocks],
+                )
+            except Exception:
+                pass
+
+        if assembler_context is not None:
+            active_skill = getattr(assembler_context, "active_skill", None)
             if isinstance(active_skill, dict) and active_skill:
                 skill_listing = str(active_skill.get("listing_prompt") or "").strip()
-                if skill_listing:
-                    base_system_prompt = (
-                        f"{base_system_prompt}\n\n{skill_listing}".strip()
-                        if base_system_prompt
-                        else skill_listing
-                    )
-                if not getattr(run_context, "requested_mode", None):
+                if not skill_listing:
+                    active_skill.pop("listing_prompt", None)
+                if not getattr(assembler_context, "requested_mode", None):
                     requested_mode = str(active_skill.get("default_mode") or "").strip()
                     if requested_mode:
-                        run_context.requested_mode = requested_mode
-                if not getattr(run_context, "prompt_block_policy", None):
+                        assembler_context.requested_mode = requested_mode
+                if not getattr(assembler_context, "prompt_block_policy", None):
                     policy = active_skill.get("prompt_block_policy")
                     if isinstance(policy, dict):
-                        run_context.prompt_block_policy = dict(policy)
+                        assembler_context.prompt_block_policy = dict(policy)
+
+        prompt_policy = await self.route_prompt_policy(
+            user_message=user_message,
+            user_config=user_config,
+            user_id=user_id,
+            base_system_prompt=base_system_prompt,
+            run_context=assembler_context,
+            recent_messages=recent_messages,
+            runtime_context=runtime_context_block,
+        )
+        prompt_policy = self.prompt_policy_router.normalize_policy(
+            prompt_policy,
+            source=str((prompt_policy or {}).get("source") or "conversation_service"),
+        )
+        if assembler_context is not None:
+            try:
+                setattr(assembler_context, "prompt_policy", dict(prompt_policy))
+            except Exception:
+                pass
+        logger.info(
+            "ConversationService: prompt policy session={} user={} cognitive_mode={} mode={} reasoning_budget={} tool_budget={} need_memory={} need_tools={}",
+            session_id,
+            user_id,
+            prompt_policy.get("cognitive_mode"),
+            prompt_policy.get("mode"),
+            prompt_policy.get("reasoning_budget"),
+            prompt_policy.get("tool_budget"),
+            prompt_policy.get("need_memory"),
+            prompt_policy.get("need_tools"),
+        )
 
         org_context = {}
         if self.org_context_service and isinstance(user_config, dict):
@@ -542,7 +775,7 @@ class ConversationService:
                     user_config=user_config,
                     audience=(
                         str(((getattr(run_context, "input_payload", {}) or {}).get("metadata") or {}).get("audience") or "")
-                        if run_context is not None
+                        if assembler_context is not None
                         else ""
                     ),
                     context_type=None,
@@ -553,31 +786,37 @@ class ConversationService:
                 org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
 
         org_summary = str((org_context or {}).get("summary_text") or "").strip()
-        if org_summary:
-            base_system_prompt = (
-                f"{base_system_prompt}\n\n{org_summary}".strip()
-                if base_system_prompt
-                else org_summary
-            )
-        if run_context is not None:
-            rs = getattr(run_context, "reasoning_state", None)
+        if assembler_context is not None:
+            rs = getattr(assembler_context, "reasoning_state", None)
             if isinstance(rs, dict):
                 rs["org_context"] = dict(org_context or {})
+                rs["prompt_policy"] = dict(prompt_policy or {})
             else:
                 try:
-                    setattr(run_context, "reasoning_state", {"org_context": dict(org_context or {})})
+                    setattr(
+                        assembler_context,
+                        "reasoning_state",
+                        {
+                            "org_context": dict(org_context or {}),
+                            "prompt_policy": dict(prompt_policy or {}),
+                        },
+                    )
                 except Exception:
                     pass
 
-        recent_messages: List[Dict[str, Any]] = []
-        if include_recent and self.message_manager:
-            recent_messages = self.message_manager.get_recent_messages(
-                session_id, user_id=user_id
-            )
-
         reasoning_result: Dict[str, Any] = {"used_reasoning": False}
-        system_prompt = ""
-        if self.reasoning_service and self.reasoning_service.is_enabled(user_id=user_id):
+        plan = PlanResult(used_reasoning=False, base_system_prompt=base_system_prompt)
+        should_reason = bool(
+            str(prompt_policy.get("reasoning_budget") or "").strip().lower() == "large"
+            or str(prompt_policy.get("mode") or "") in {"deep", "workflow"}
+        )
+        if should_reason and self.reasoning_service and self.reasoning_service.is_enabled(user_id=user_id):
+            logger.info(
+                "ConversationService: starting reasoning session={} user={} mode={}",
+                session_id,
+                user_id,
+                prompt_policy.get("mode"),
+            )
             reasoning_result = await self.reasoning_service.run(
                 session_id=session_id,
                 user_id=user_id,
@@ -585,10 +824,89 @@ class ConversationService:
                 recent_messages=recent_messages,
                 base_system_prompt=base_system_prompt,
                 user_config=user_config,
-                run_context=run_context,
+                run_context=assembler_context,
+                force_reasoning=should_reason,
+            )
+            logger.info(
+                "ConversationService: reasoning finished session={} user={} used={} tree_id={} status={}",
+                session_id,
+                user_id,
+                reasoning_result.get("used_reasoning"),
+                reasoning_result.get("tree_id"),
+                reasoning_result.get("status"),
             )
             if reasoning_result.get("used_reasoning"):
-                system_prompt = reasoning_result.get("system_prompt", "")
+                plan = PlanResult(
+                    used_reasoning=True,
+                    system_prompt=str(reasoning_result.get("system_prompt") or ""),
+                    base_system_prompt=base_system_prompt,
+                    reasoning=reasoning_result,
+                )
+
+        memory_bundle = MemoryRecallBundle(recalled=False, reason="not_needed")
+        if prompt_policy.get("need_memory") is True:
+            should_recall = True
+        elif prompt_policy.get("need_memory") is False:
+            should_recall = False
+        else:
+            should_recall = await self._should_recall_memory(
+                query=user_message,
+                user_config=user_config,
+                user_id=user_id,
+            )
+        if (
+            should_recall
+            and self.memory_service
+            and self.memory_service.is_enabled()
+            and session_id
+            and user_id
+        ):
+            memory_context = await self.memory_service.get_context(
+                query=user_message,
+                session_id=session_id,
+                user_id=user_id,
+                run_context=assembler_context,
+            )
+            if isinstance(memory_context, str) and memory_context.strip():
+                memory_bundle = MemoryRecallBundle(
+                    recalled=True,
+                    context=memory_context.strip(),
+                    reason="recalled",
+                    source="memory_service",
+                    confidence=0.8,
+                )
+            else:
+                memory_bundle = MemoryRecallBundle(
+                    recalled=False,
+                    reason="empty_context",
+                    source="memory_service",
+                )
+
+        mode = ModeDecision(
+            mode=str(prompt_policy.get("mode") or ("deep" if reasoning_result.get("used_reasoning") else "fast")),
+            reason=str(prompt_policy.get("reason") or "conversation_service.prepare_chat_turn"),
+            confidence=float(prompt_policy.get("confidence") or 0.8),
+        )
+        tools_enabled = bool(prompt_policy.get("need_tools"))
+        tool_budget = int(prompt_policy.get("tool_budget") or (5 if tools_enabled else 0))
+        prompt_assembly = self.prompt_assembler.assemble(
+            run_context=assembler_context,
+            mode=mode,
+            plan=plan,
+            memory_bundle=memory_bundle,
+            tools=ToolExecutionBundle(
+                enabled=tools_enabled,
+                strategy="tool_call_loop" if tools_enabled else "none",
+                metadata={
+                    "prompt_policy": dict(prompt_policy or {}),
+                    "tool_budget": tool_budget,
+                    "cognitive_mode": prompt_policy.get("cognitive_mode"),
+                    "registered_tools": list(getattr(assembler_context, "registered_tools", []) or []),
+                },
+            ),
+            user_config=user_config,
+        )
+        system_prompt = str(prompt_assembly.get("system_prompt") or "").strip()
 
         if not system_prompt:
             system_prompt = await self.build_system_prompt_with_memory(
@@ -597,24 +915,61 @@ class ConversationService:
                 user_id=user_id,
                 user_config=user_config,
                 base_system_prompt=base_system_prompt,
-                run_context=run_context,
+                run_context=assembler_context,
             )
 
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(recent_messages)
-        messages.append({"role": "user", "content": user_message})
+        vision_enabled = self._is_vision_enabled(user_config=user_config, user_id=user_id)
+        compiled_user_content = self.context_compiler.compile_user_content(
+            user_text=user_message,
+            blocks=runtime_input_blocks,
+            vision_enabled=vision_enabled,
+        )
+        messages.append({"role": "user", "content": compiled_user_content})
 
         return {
             "messages": messages,
-            "run_context": run_context,
+            "run_context": assembler_context,
             "user_config": user_config,
             "system_prompt": system_prompt,
             "base_system_prompt": base_system_prompt,
             "recent_messages": recent_messages,
             "reasoning": reasoning_result,
             "org_context": org_context,
+            "memory": memory_bundle.model_dump(),
+            "prompt_policy": prompt_policy,
+            "execution_budget": {
+                "cognitive_mode": prompt_policy.get("cognitive_mode"),
+                "reasoning_budget": prompt_policy.get("reasoning_budget"),
+                "tool_budget": tool_budget,
+                "memory_budget": prompt_policy.get("memory_budget"),
+                "need_user_visible_reasoning": prompt_policy.get("need_user_visible_reasoning"),
+            },
+            "prompt_assembly": prompt_assembly.get("debug", {}),
+            "runtime_blocks": blocks_debug(runtime_input_blocks),
+            "llm_io": {
+                "vision_enabled": vision_enabled,
+                "input_block_count": len(runtime_input_blocks),
+                "compiled_user_content_type": "blocks" if isinstance(compiled_user_content, list) else "text",
+            },
         }
+
+    def _is_vision_enabled(
+        self,
+        *,
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+    ) -> bool:
+        model_name = ""
+        getter = getattr(self.conversation_core, "_get_client_params", None)
+        if callable(getter):
+            try:
+                _, _, model_name, *_ = getter(user_config, user_id=user_id)
+            except Exception:
+                model_name = ""
+        return model_supports_vision(model=model_name, user_config=user_config)
 
     async def _process_conversation_once(
         self,
@@ -669,12 +1024,19 @@ class ConversationService:
             "ConversationService: Processing conversation for session {}",
             session_id,
         )
+        execution_budget = prepared.get("execution_budget", {}) if isinstance(prepared, dict) else {}
+        max_recursion = execution_budget.get("tool_budget")
         try:
-            response_data = await self.conversation_core.run_chat_loop(
+            max_recursion = int(max_recursion) if max_recursion is not None else None
+        except Exception:
+            max_recursion = None
+        try:
+            response_data = await self.run_chat_loop(
                 messages,
                 user_config=user_config,
                 session_id=session_id,
                 user_id=user_id,
+                max_recursion=max_recursion,
             )
         except TypeError:
             # Backward compatibility for conversation_core mocks without user_id arg.
@@ -727,6 +1089,14 @@ class ConversationService:
         except Exception as e:
             logger.debug("ConversationService: Failed to record reasoning outcome: {}", e)
 
+        await schedule_soul_evolution(
+            service=self,
+            user_id=user_id,
+            user_config=user_config,
+            user_message=user_message,
+            assistant_message=reply_content or "",
+        )
+
         if self.event_emitter:
             await self.event_emitter.emit(
                 EventType.CONVERSATION_COMPLETE,
@@ -759,37 +1129,10 @@ class ConversationService:
         """
         Ask the model whether long-term user context is needed for this query.
         """
-        quick_decision = self._quick_recall_decision(
-            query,
-            user_config=user_config,
-            user_id=user_id,
-        )
-        if quick_decision is not None:
-            return quick_decision
-
-        # Performance guard: avoid an extra LLM classifier round-trip for short,
-        # non-memory-like turns.
-        llm_classifier_min_chars = 24
-        try:
-            if self.config_service:
-                cfg = (
-                    self.config_service.get_merged_config(user_id)
-                    if user_id
-                    else self.config_service.get_default_config().model_dump()
-                )
-                recall_cfg = (
-                    cfg.get("memory", {})
-                    .get("gating", {})
-                    .get("recall_filter", {})
-                )
-                llm_classifier_min_chars = int(
-                    recall_cfg.get("llm_classifier_min_query_chars", llm_classifier_min_chars)
-                )
-        except Exception as e:
-            logger.debug("ConversationService: recall llm threshold fallback used: {}", e)
-
         text = (query or "").strip()
-        if len(text) < max(8, llm_classifier_min_chars):
+        if not text:
+            return False
+        if len(text) > 4000:
             return False
 
         try:
@@ -818,78 +1161,6 @@ class ConversationService:
             return bool(data.get("recall", False))
         except Exception:
             return False
-
-    def _quick_recall_decision(
-        self,
-        query: str,
-        user_config: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
-    ) -> Optional[bool]:
-        """
-        Cheap prefilter to reduce unnecessary LLM calls.
-        Returns:
-        - False: definitely do not recall
-        - None: unsure, continue to LLM classifier
-        """
-        text = (query or "").strip()
-        if not text:
-            return False
-
-        min_chars = 6
-        max_chars = 4000
-        try:
-            if self.config_service:
-                cfg = (
-                    self.config_service.get_merged_config(user_id)
-                    if user_id
-                    else self.config_service.get_default_config().model_dump()
-                )
-                recall_cfg = (
-                    cfg.get("memory", {})
-                    .get("gating", {})
-                    .get("recall_filter", {})
-                )
-                min_chars = int(recall_cfg.get("min_query_chars", min_chars))
-                max_chars = int(recall_cfg.get("max_query_chars", max_chars))
-        except Exception as e:
-            logger.debug("ConversationService: recall filter config fallback used: {}", e)
-
-        if self._is_explicit_memory_query(text):
-            # Explicit memory/profile lookup should bypass short-query rejection.
-            return True
-        if len(text) < min_chars:
-            return False
-        if len(text) > max_chars:
-            return False
-
-        return None
-
-    @staticmethod
-    def _is_explicit_memory_query(text: str) -> bool:
-        lowered = (text or "").strip().lower()
-        if not lowered:
-            return False
-        cn_markers = (
-            "\u6211\u53eb\u4ec0\u4e48",
-            "\u6211\u53eb\u5565",
-            "\u6211\u7684\u540d\u5b57",
-            "\u4f60\u8bb0\u5f97\u6211",
-            "\u4f60\u8fd8\u8bb0\u5f97",
-            "\u6211\u662f\u8c01",
-            "\u6211\u7684\u504f\u597d",
-            "\u6211\u7684\u8bbe\u5b9a",
-        )
-        en_markers = (
-            "what is my name",
-            "who am i",
-            "do you remember me",
-            "remember my name",
-            "my preference",
-            "my profile",
-        )
-        return any(m in lowered for m in cn_markers) or any(
-            m in lowered for m in en_markers
-        )
 
     async def build_system_prompt_with_memory(
         self,
@@ -945,7 +1216,29 @@ class ConversationService:
         user_id: Optional[str] = None,
         run_context: Optional[Any] = None,
         tool_executor=None,
+        max_recursion: Optional[int] = None,
     ) -> Dict:
+        if self.action_service is not None:
+            goal = ""
+            try:
+                goal = next(
+                    str(m.get("content") or "")
+                    for m in reversed(messages or [])
+                    if isinstance(m, dict) and m.get("role") == "user"
+                )
+            except Exception:
+                goal = ""
+            return await self.action_service.run_light_action(
+                goal=goal,
+                messages=messages,
+                user_config=user_config,
+                session_id=session_id,
+                user_id=user_id,
+                run_context=run_context,
+                tool_executor=tool_executor,
+                budget=max_recursion,
+                metadata={"source": "conversation_service.run_chat_loop"},
+            )
         try:
             return await self.conversation_core.run_chat_loop(
                 messages,
@@ -953,6 +1246,7 @@ class ConversationService:
                 session_id=session_id,
                 user_id=user_id,
                 tool_executor=tool_executor,
+                max_recursion=max_recursion,
             )
         except TypeError:
             return await self.conversation_core.run_chat_loop(
@@ -1006,11 +1300,3 @@ class ConversationService:
             "queue_dropped": self._queue_dropped,
             "queue_coalesced": self._queue_coalesced,
         }
-
-
-
-
-
-
-
-

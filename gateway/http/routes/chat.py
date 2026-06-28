@@ -50,10 +50,10 @@ def _summarize_memory_visibility(value):
     }
 
 
-def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
+def _emit_interaction_completed_async(gateway_server, payload: dict):
     event_emitter = getattr(gateway_server, "event_emitter", None)
     if not event_emitter:
-        return
+        return None
 
     task = asyncio.create_task(
         event_emitter.emit(EventType.INTERACTION_COMPLETED, payload)
@@ -68,6 +68,29 @@ def _emit_interaction_completed_async(gateway_server, payload: dict) -> None:
             logger.error(f"background interaction.completed failed: {exc}")
 
     task.add_done_callback(_log_background_failure)
+    return task
+
+
+def _drain_memory_visibility(gateway_server, *, session_id: str, user_id: str, limit: int = 3):
+    memory_service = getattr(getattr(gateway_server, "conversation_service", None), "memory_service", None)
+    drain = getattr(memory_service, "drain_visibility_hints", None) if memory_service else None
+    if not callable(drain) or not session_id or not user_id:
+        return None
+    try:
+        rows = list(drain(session_id=session_id, user_id=user_id, limit=limit) or [])
+    except Exception:
+        return None
+    if not rows:
+        return None
+    return {
+        "enabled": True,
+        "recalled": False,
+        "recall_notice": "",
+        "write_notice": "",
+        "review_notice": "",
+        "notices": [],
+        "feedback_hints": rows,
+    }
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -101,6 +124,7 @@ async def chat(
                             message_manager.create_session(session_id=session_id, user_id=user_id)
                     else:
                         session_id = message_manager.create_session(user_id=user_id)
+                    yield _sse({"type": "session_started", "session_id": session_id})
 
                     began = message_manager.begin_turn(
                         session_id=session_id,
@@ -120,9 +144,18 @@ async def chat(
                             user_message=user_text,
                             channel="web",
                             include_recent=True,
+                            attachments=request.attachments,
                         )
                     )
                     discovered_tree_id = None
+                    yield _sse(
+                        {
+                            "type": "reasoning_meta",
+                            "session_id": session_id,
+                            "status": "preparing",
+                            "message": "Preparing prompt policy and runtime context.",
+                        }
+                    )
                     while not prepared_task.done():
                         reasoning_service = gateway_server.reasoning_service
                         if reasoning_service and session_id:
@@ -155,6 +188,15 @@ async def chat(
                     prepared = await prepared_task
                     messages = prepared["messages"]
                     user_config = prepared["user_config"]
+                    prompt_policy = prepared.get("prompt_policy", {}) if isinstance(prepared, dict) else {}
+                    needs_tools = bool(
+                        isinstance(prompt_policy, dict) and prompt_policy.get("need_tools") is True
+                    )
+                    tool_budget = int(
+                        (prepared.get("execution_budget") or {}).get("tool_budget")
+                        or (prompt_policy.get("tool_budget") if isinstance(prompt_policy, dict) else 0)
+                        or (5 if needs_tools else 0)
+                    )
                     reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
                     tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
                     if tree_id and tree_id != discovered_tree_id:
@@ -172,22 +214,21 @@ async def chat(
                     memory_write_summary = None
                     stream_failed = False
                     run_chat_loop_result = {}
-                    async for chunk in gateway_server.conversation_service.call_llm_stream(
-                        messages, user_config=user_config, user_id=user_id
-                    ):
-                        if isinstance(chunk, str) and chunk.startswith("[error]"):
-                            stream_failed = True
-                            break
-                        if chunk:
-                            full_text += chunk
-                            yield _sse({"type": "text", "content": chunk})
-
-                    if stream_failed:
+                    if needs_tools:
+                        yield _sse(
+                            {
+                                "type": "tool_meta",
+                                "session_id": session_id,
+                                "status": "executing",
+                                "message": "Tool-capable turn is using the runtime tool loop.",
+                            }
+                        )
                         run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
                             messages,
                             user_config=user_config,
                             session_id=session_id,
                             user_id=user_id,
+                            max_recursion=tool_budget,
                             tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
                                 name,
                                 payload,
@@ -195,11 +236,60 @@ async def chat(
                                 user_id=user_id,
                                 request_id=f"http_stream_{turn_id}",
                                 connection_id=f"http_stream_{turn_id}",
+                                user_config=user_config,
                             ),
                         )
                         full_text = run_chat_loop_result.get("content", "")
-                        if full_text:
-                            yield _sse({"type": "text", "content": full_text})
+                    else:
+                        async for chunk in gateway_server.conversation_service.call_llm_stream(
+                            messages, user_config=user_config, user_id=user_id
+                        ):
+                            if isinstance(chunk, str) and chunk.startswith("[error]"):
+                                stream_failed = True
+                                break
+                            if chunk:
+                                full_text += chunk
+                                yield _sse({"type": "text", "content": chunk})
+
+                        if stream_failed:
+                            run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
+                                messages,
+                                user_config=user_config,
+                                session_id=session_id,
+                                user_id=user_id,
+                                max_recursion=tool_budget or None,
+                                tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
+                                    name,
+                                    payload,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    request_id=f"http_stream_{turn_id}",
+                                    connection_id=f"http_stream_{turn_id}",
+                                    user_config=user_config,
+                                ),
+                            )
+                            full_text = run_chat_loop_result.get("content", "")
+
+                    confirmation_payload = None
+                    if isinstance(run_chat_loop_result, dict) and run_chat_loop_result.get("status") == "needs_confirmation":
+                        pending = dict(run_chat_loop_result)
+                        pending["current_messages"] = messages
+                        pending["turn_id"] = turn_id
+                        message_manager.set_pending_confirmation(
+                            session_id,
+                            pending,
+                            user_id=user_id,
+                        )
+                        confirmation_payload = {
+                            "status": "needs_confirmation",
+                            "tool_call_id": run_chat_loop_result.get("tool_call_id"),
+                            "tool_name": run_chat_loop_result.get("tool_name"),
+                            "args": _normalize_tool_args(run_chat_loop_result.get("args")),
+                        }
+                        full_text = f"Tool `{run_chat_loop_result.get('tool_name')}` requires confirmation."
+
+                    if (needs_tools or stream_failed) and full_text:
+                        yield _sse({"type": "text", "content": full_text})
 
                     committed = message_manager.commit_turn(
                         session_id=session_id,
@@ -215,26 +305,47 @@ async def chat(
                         memory_write_summary = _summarize_memory_visibility(
                             run_chat_loop_result.get("memory_visibility")
                         )
-                    if not memory_write_summary:
-                        memory_service = getattr(gateway_server.conversation_service, "memory_service", None)
-                        drain = getattr(memory_service, "drain_visibility_hints", None) if memory_service else None
-                        if callable(drain) and session_id and user_id:
+                    if not stream_failed:
+                        interaction_context = []
+                        try:
+                            interaction_context = message_manager.get_recent_messages(
+                                session_id,
+                                count=6,
+                                user_id=user_id,
+                            )
+                        except Exception:
+                            interaction_context = []
+                        interaction_task = _emit_interaction_completed_async(
+                            gateway_server,
+                            {
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "channel": "web",
+                                "user_input": user_text,
+                                "assistant_output": full_text,
+                                "interaction_context": interaction_context,
+                                "attachments": request.attachments,
+                            },
+                        )
+                        if interaction_task is not None:
                             try:
-                                rows = list(drain(session_id=session_id, user_id=user_id, limit=3) or [])
-                                if rows:
-                                    memory_write_summary = {
-                                        "enabled": True,
-                                        "recalled": False,
-                                        "recall_notice": "",
-                                        "write_notice": "",
-                                        "review_notice": "",
-                                        "notices": [],
-                                        "feedback_hints": rows,
-                                    }
+                                await asyncio.wait_for(asyncio.shield(interaction_task), timeout=0.8)
+                            except asyncio.TimeoutError:
+                                pass
                             except Exception:
-                                memory_write_summary = None
+                                pass
+
+                    if not memory_write_summary:
+                        memory_write_summary = _drain_memory_visibility(
+                            gateway_server,
+                            session_id=session_id,
+                            user_id=user_id,
+                            limit=3,
+                        )
 
                     done_payload = {"type": "done", "session_id": session_id}
+                    if confirmation_payload:
+                        done_payload.update(confirmation_payload)
                     if memory_write_summary:
                         done_payload["memory_write_summary"] = memory_write_summary
                         done_payload["memory_visibility"] = memory_write_summary
@@ -277,17 +388,6 @@ async def chat(
                             done_payload["tree_id"] = tree_id
 
                     yield _sse(done_payload)
-                    if not stream_failed:
-                        _emit_interaction_completed_async(
-                            gateway_server,
-                            {
-                                "session_id": session_id,
-                                "user_id": user_id,
-                                "channel": "web",
-                                "user_input": user_text,
-                                "assistant_output": full_text,
-                            },
-                        )
                 except Exception as e:
                     message_manager.abort_turn(session_id, turn_id, user_id=user_id)
                     logger.error(f"chat stream failed: {e}")
@@ -311,6 +411,7 @@ async def chat(
                     "stream": False,
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
+                    "attachments": request.attachments,
                 },
                 user_id=user_id,
                 request=raw_request,
@@ -323,6 +424,7 @@ async def chat(
                     "session_id": request.session_id,
                     "message": request.message,
                     "user_id": user_id,
+                    "attachments": request.attachments,
                 }
             )
             perm = adapter.permission_check(adapter.normalize_identity({"user_id": user_id}))
@@ -337,6 +439,7 @@ async def chat(
                     "channel": gateway_request.channel_id,
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
+                    "attachments": request.attachments,
                 },
                 user_id=gateway_request.user_id,
                 request=raw_request,

@@ -24,7 +24,7 @@ promethea auth register <username> <password>
 promethea auth login <username> <password>
 
 # one chat turn
-promethea chat send "°ïÎÒ×Ü½á½ñÌìµÄÈÎÎñ" --stream
+promethea chat send "Ã¨Â¯Â·Ã¦Â€Â»Ã§Â»Â“Ã¤Â»ÂŠÃ¥Â¤Â©Ã§ÂšÂ„Ã¥Â·Â¥Ã¤Â½Âœ" --stream
 
 # inspect tools and services
 promethea status official-tools
@@ -101,20 +101,22 @@ Use this group when your goal is "what can this runtime do right now".
 
 ### 6) Voice
 
+Experimental/provider-dependent in the current preview. These commands are not part of the supported DeepSeek-only setup path because DeepSeek chat APIs do not provide STT/audio transcription.
+
 - `voice capabilities`
 - `voice stt <file>`
 - `voice tts <text>`
 - `voice turn <text>`
 - `voice ptt <file>`
 
-Use this group when your goal is speech in/speech out turn-based interaction.
+Use this group only when an OpenAI-compatible audio transcription provider is configured.
 
 ## Example User Journeys
 
 ### Journey A: "Search web then write report"
 
 ```bash
-promethea chat send "ËÑË÷ OpenAI ×îÐÂÄ£ÐÍÐÂÎÅ²¢ÔÚ workspace ÀïÐ´Ò»·Ý markdown ±¨¸æ" --stream
+promethea chat send "Ã¨Â¯Â·Ã¨Â°ÂƒÃ§Â Â” OpenAI Ã¦ÂœÂ€Ã¦Â–Â°Ã¦Â¨Â¡Ã¥ÂžÂ‹Ã¯Â¼ÂŒÃ¥Â¹Â¶Ã¥ÂœÂ¨ workspace Ã¥Â†Â™Ã¤Â¸Â€Ã¤Â»Â½ markdown Ã¦ÂŠÂ¥Ã¥Â‘ÂŠ" --stream
 promethea workflow list
 promethea status tools
 ```
@@ -159,7 +161,7 @@ These are presentation differences, not core capability gaps.
 - If command exists but fails: run `promethea status services` first.
 - If tool call denied: inspect policy using `promethea config tool-policy`.
 - If memory behavior odd: inspect `memory recall-runs` + `memory recall-inspect`.
-- If voice fails: check `voice capabilities` and provider env.
+- If voice fails: confirm that an audio transcription provider is configured; DeepSeek-only chat configuration is not enough for voice input.
 
 ## Suggested Smoke Suite
 

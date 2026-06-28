@@ -1,4 +1,5 @@
 ﻿import json
+import os
 import shutil
 import unittest
 import uuid
@@ -41,7 +42,7 @@ class TestPluginsLoader(unittest.TestCase):
 
     def test_cache_key_auto_includes_extensions_changes(self):
         workspace_root = Path(__file__).resolve().parents[1]
-        tmp_base = workspace_root / "_pytest_case_tmp"
+        tmp_base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", str(workspace_root / ".tmp" / "pytest-runtime"))) / "plugins-loader"
         tmp_base.mkdir(parents=True, exist_ok=True)
         workspace = tmp_base / f"plugins_reload_{uuid.uuid4().hex}"
         workspace.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import shutil
+import os
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ from agentkit.tools.cron_tools.cron_tools import CronToolsService
 
 
 def _make_workspace() -> Path:
-    base = Path(".pytest-cron-tools")
+    base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "cron-tools"
     if base.exists():
         shutil.rmtree(base, ignore_errors=True)
     base.mkdir(parents=True, exist_ok=True)

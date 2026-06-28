@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -27,6 +28,10 @@ from .runtime_governance import (
     build_orchestration_snapshot,
     build_task_graph_snapshot,
 )
+from .runtime_io import blocks_debug
+from .runtime_input_builder import build_runtime_input_blocks
+from .memory_visibility import build_memory_visibility
+from .runtime_context import build_runtime_context_block
 
 PROMPT_ASSEMBLER = PromptAssembler()
 
@@ -55,60 +60,6 @@ def _normalize_recall_context(value: Any) -> str:
     if isinstance(value, str):
         return value.strip()
     return ""
-
-
-def _extract_recall_snippet(context: str, *, max_chars: int = 80) -> str:
-    text = str(context or "").strip()
-    if not text:
-        return ""
-    lines = [ln.strip("- ").strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("[")]
-    if not lines:
-        return ""
-    snippet = lines[0].replace("\n", " ").strip()
-    if len(snippet) > max_chars:
-        snippet = snippet[: max(1, int(max_chars) - 3)] + "..."
-    return snippet
-
-
-def _build_memory_visibility(
-    *,
-    memory_bundle: MemoryRecallBundle,
-    feedback_hints: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    notices: List[str] = []
-    recall_notice = ""
-    if memory_bundle.recalled:
-        snippet = _extract_recall_snippet(memory_bundle.context)
-        if snippet:
-            recall_notice = f"我参考了你的历史记忆：{snippet}"
-        else:
-            recall_notice = "我参考了你的历史记忆来回答。"
-        notices.append(recall_notice)
-
-    saved_rows = [row for row in (feedback_hints or []) if str((row or {}).get("type", "")) == "memory_saved"]
-    review_rows = [row for row in (feedback_hints or []) if str((row or {}).get("type", "")) == "memory_review_needed"]
-    write_notice = ""
-    review_notice = ""
-    if saved_rows:
-        first = saved_rows[-1]
-        mt = str(first.get("memory_type") or "记忆")
-        write_notice = f"已记住你的一条{mt}信息。"
-        notices.append(write_notice)
-    if review_rows:
-        first = review_rows[-1]
-        mt = str(first.get("memory_type") or "记忆")
-        review_notice = f"检测到{mt}冲突，待你确认后再写入。"
-        notices.append(review_notice)
-
-    return {
-        "enabled": bool(memory_bundle.recalled or feedback_hints),
-        "recalled": bool(memory_bundle.recalled),
-        "recall_notice": recall_notice,
-        "write_notice": write_notice,
-        "review_notice": review_notice,
-        "feedback_hints": list(feedback_hints or []),
-        "notices": notices,
-    }
 
 
 def _memory_visibility_enabled(user_config: Optional[Dict[str, Any]]) -> bool:
@@ -220,13 +171,21 @@ async def stage_input_normalization(service: Any, run_input: ConversationRunInpu
     if run_input.include_recent and service.message_manager and session_id and user_id:
         recent_messages = service.message_manager.get_recent_messages(session_id, user_id=user_id)
 
+    attachments = list(run_input.attachments or [])
+    if not attachments and isinstance(payload.get("attachments"), list):
+        attachments = list(payload.get("attachments") or [])
+    runtime_blocks = list(run_input.runtime_blocks or [])
+    if isinstance(payload.get("runtime_blocks"), list):
+        runtime_blocks.extend(list(payload.get("runtime_blocks") or []))
+
     return NormalizedInput(
         user_message=user_message,
         session_id=session_id,
         user_id=user_id,
         channel=run_input.channel or "web",
         input_payload=payload,
-        attachments=payload.get("attachments") or [],
+        attachments=attachments,
+        runtime_blocks=runtime_blocks,
         metadata=payload.get("metadata") or {},
         recent_messages=recent_messages,
     )
@@ -241,6 +200,52 @@ async def stage_mode_detection(service: Any, normalized: NormalizedInput) -> Mod
     return ModeDecision(mode="fast", reason="default_fast_path", confidence=0.65)
 
 
+def _apply_prompt_policy_to_mode(mode: ModeDecision, prompt_policy: Dict[str, Any]) -> ModeDecision:
+    if not isinstance(prompt_policy, dict):
+        return mode
+    if str(prompt_policy.get("source") or "").strip().lower() == "default":
+        return mode
+    cognitive_mode = str(prompt_policy.get("cognitive_mode") or "").strip().lower()
+    if cognitive_mode == "direct":
+        return ModeDecision(
+            mode="fast",
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    if cognitive_mode == "light_action":
+        return ModeDecision(
+            mode="fast",
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    if cognitive_mode == "deep_reasoning":
+        return ModeDecision(
+            mode="deep",
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    if cognitive_mode == "workflow":
+        return ModeDecision(
+            mode="workflow",
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    policy_mode = str(prompt_policy.get("mode") or "").strip().lower()
+    if policy_mode in {"workflow", "deep"} and mode.mode == "fast":
+        return ModeDecision(
+            mode=policy_mode,
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    if bool(prompt_policy.get("need_reasoning")) and mode.mode == "fast":
+        return ModeDecision(
+            mode="deep",
+            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
+            confidence=float(prompt_policy.get("confidence") or mode.confidence),
+        )
+    return mode
+
+
 async def stage_memory_recall(
     service: Any,
     *,
@@ -251,11 +256,17 @@ async def stage_memory_recall(
 ) -> MemoryRecallBundle:
     if not normalized.user_message or not normalized.session_id or not normalized.user_id:
         return MemoryRecallBundle(recalled=False, reason="missing_identity")
-    should_recall = await service._should_recall_memory(
-        normalized.user_message,
-        user_config=user_config,
-        user_id=normalized.user_id,
-    )
+    prompt_policy = getattr(run_context, "prompt_policy", None) if run_context is not None else None
+    if isinstance(prompt_policy, dict) and prompt_policy.get("need_memory") is True:
+        should_recall = True
+    elif isinstance(prompt_policy, dict) and prompt_policy.get("need_memory") is False:
+        should_recall = False
+    else:
+        should_recall = await service._should_recall_memory(
+            normalized.user_message,
+            user_config=user_config,
+            user_id=normalized.user_id,
+        )
     if not should_recall or not service.memory_service or not service.memory_service.is_enabled():
         reason = "mode_fast" if mode.mode == "fast" else "not_needed"
         return MemoryRecallBundle(recalled=False, reason=reason)
@@ -485,11 +496,30 @@ async def stage_tool_execution(
     run_input: ConversationRunInput,
     mode: ModeDecision,
 ) -> ToolExecutionBundle:
+    prompt_policy = getattr(run_input.run_context, "prompt_policy", None) if run_input.run_context is not None else None
+    if isinstance(prompt_policy, dict):
+        enabled = bool(prompt_policy.get("need_tools")) or run_input.tool_executor is not None
+        budget = int(prompt_policy.get("tool_budget") or (5 if enabled else 0))
+        return ToolExecutionBundle(
+            enabled=enabled,
+            strategy="tool_call_loop" if enabled else "none",
+            tool_executor=run_input.tool_executor,
+            metadata={
+                "mode": mode.mode,
+                "prompt_policy": dict(prompt_policy),
+                "tool_budget": budget,
+                "cognitive_mode": prompt_policy.get("cognitive_mode"),
+                "registered_tools": list(getattr(run_input.run_context, "registered_tools", []) or []),
+            },
+        )
     return ToolExecutionBundle(
         enabled=run_input.tool_executor is not None,
         strategy="llm_native" if run_input.tool_executor is not None else "none",
         tool_executor=run_input.tool_executor,
-        metadata={"mode": mode.mode},
+        metadata={
+            "mode": mode.mode,
+            "registered_tools": list(getattr(run_input.run_context, "registered_tools", []) or []),
+        },
     )
 
 
@@ -548,6 +578,22 @@ async def stage_response_synthesis(
             "source": "prebuilt_messages",
         }
     else:
+        runtime_input_blocks = build_runtime_input_blocks(
+            user_message=normalized.user_message,
+            user_id=normalized.user_id or "default_user",
+            attachments=normalized.attachments,
+            runtime_blocks=normalized.runtime_blocks,
+            run_context=run_input.run_context,
+        )
+        if run_input.run_context is not None:
+            try:
+                setattr(
+                    run_input.run_context,
+                    "runtime_blocks",
+                    [block.to_dict() for block in runtime_input_blocks],
+                )
+            except Exception:
+                pass
         assembly = PROMPT_ASSEMBLER.assemble(
             run_context=run_input.run_context,
             mode=mode,
@@ -561,7 +607,23 @@ async def stage_response_synthesis(
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(normalized.recent_messages)
-        messages.append({"role": "user", "content": normalized.user_message})
+        vision_enabled = service._is_vision_enabled(user_config=user_config, user_id=normalized.user_id)
+        messages.append(
+            {
+                "role": "user",
+                "content": service.context_compiler.compile_user_content(
+                    user_text=normalized.user_message,
+                    blocks=runtime_input_blocks,
+                    vision_enabled=vision_enabled,
+                ),
+            }
+        )
+        prompt_assembly["runtime_blocks"] = blocks_debug(runtime_input_blocks)
+        prompt_assembly["llm_io"] = {
+            "vision_enabled": vision_enabled,
+            "input_block_count": len(runtime_input_blocks),
+            "compiled_user_content_type": "blocks" if isinstance(messages[-1].get("content"), list) else "text",
+        }
 
     response_data = await service.run_chat_loop(
         messages,
@@ -570,6 +632,7 @@ async def stage_response_synthesis(
         user_id=normalized.user_id,
         run_context=run_input.run_context,
         tool_executor=tools.tool_executor,
+        max_recursion=int((tools.metadata or {}).get("tool_budget") or 5),
     )
     final_response = response_data if isinstance(response_data, dict) else {"raw": response_data}
     feedback_hints: List[Dict[str, Any]] = []
@@ -585,7 +648,7 @@ async def stage_response_synthesis(
                 feedback_hints = list(hint_out or [])
             except Exception:
                 feedback_hints = []
-    memory_visibility = _build_memory_visibility(memory_bundle=memory_bundle, feedback_hints=feedback_hints)
+    memory_visibility = build_memory_visibility(memory_bundle=memory_bundle, feedback_hints=feedback_hints)
     if _memory_visibility_enabled(user_config):
         final_response["memory_visibility"] = memory_visibility
     else:
@@ -636,6 +699,20 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
         normalized = await stage_input_normalization(service, run_input)
         session_id = normalized.session_id
         user_id = normalized.user_id
+        runtime_context_block = build_runtime_context_block(recent_messages=normalized.recent_messages)
+        if run_context is None:
+            run_context = SimpleNamespace(
+                input_payload={"message": normalized.user_message, "metadata": normalized.metadata},
+                reasoning_state={},
+            )
+            try:
+                run_input.run_context = run_context
+            except Exception:
+                pass
+        try:
+            setattr(run_context, "runtime_context", runtime_context_block)
+        except Exception:
+            pass
         await _emit_stage_event(
             service,
             stage=current_stage,
@@ -668,6 +745,16 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             user_id=user_id,
         )
         mode = await stage_mode_detection(service, normalized)
+        prompt_policy = await service.route_prompt_policy(
+            user_message=normalized.user_message,
+            user_config=user_config,
+            user_id=user_id,
+            base_system_prompt=base_system_prompt,
+            run_context=run_context,
+            recent_messages=normalized.recent_messages,
+            runtime_context=runtime_context_block,
+        )
+        mode = _apply_prompt_policy_to_mode(mode, prompt_policy)
         await _emit_stage_event(
             service,
             stage=current_stage,
@@ -675,7 +762,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             run_context=run_context,
             session_id=session_id,
             user_id=user_id,
-            payload={"mode": mode.mode, "reason": mode.reason},
+            payload={"mode": mode.mode, "reason": mode.reason, "prompt_policy": prompt_policy},
         )
         state["stages"].append(current_stage)
         state["stage_status"][current_stage] = {"status": "ok", "mode": mode.mode}
@@ -848,6 +935,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
         )
         raw.setdefault("pipeline", state)
         raw.setdefault("mode", mode.mode)
+        raw.setdefault("prompt_policy", prompt_policy)
         raw.setdefault("memory_recalled", memory_bundle.recalled)
         raw.setdefault("used_reasoning", plan.used_reasoning)
         raw.setdefault("capability_state", capability_state)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -11,26 +12,60 @@ from agentkit.mcp.mcp_manager import get_mcp_manager
 from agentkit.mcp.mcpregistry import initialize_mcp_registry
 from agentkit.mcp.tool_call import tool_call_loop
 from config import config
+from gateway.user_secrets import resolve_llm_runtime_settings
+
+
+def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None) -> None:
+    """Best-effort runtime metrics hook; never let observability break chat."""
+    try:
+        from gateway.http.metrics import get_metrics_collector
+
+        usage = usage or {}
+        get_metrics_collector().record_llm_call(
+            duration=duration,
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+        )
+    except Exception as exc:
+        logger.debug("failed to record LLM metrics: {}", exc)
 
 
 class PrometheaConversation:
     def __init__(self):
         self.dev_mode = False
-        self.client = OpenAI(
-            api_key=config.api.api_key,
-            base_url=config.api.base_url.rstrip("/") + "/",
-        )
-        self.async_client = AsyncOpenAI(
-            api_key=config.api.api_key,
-            base_url=config.api.base_url.rstrip("/") + "/",
-        )
+        self.client = self._build_sync_client(config.api.api_key, config.api.base_url)
+        self.async_client = self._build_async_client(config.api.api_key, config.api.base_url)
 
         self.mcp_manager = get_mcp_manager()
         self._init_tools()
 
+    @staticmethod
+    def _normalized_base_url(base_url: str) -> Optional[str]:
+        text = str(base_url or "").strip()
+        if not text:
+            return None
+        return text.rstrip("/") + "/"
+
+    def _build_sync_client(self, api_key: str, base_url: str) -> OpenAI:
+        kwargs: Dict[str, Any] = {"api_key": api_key or "placeholder-key-not-set"}
+        normalized = self._normalized_base_url(base_url)
+        if normalized:
+            kwargs["base_url"] = normalized
+        return OpenAI(**kwargs)
+
+    def _build_async_client(self, api_key: str, base_url: str) -> AsyncOpenAI:
+        kwargs: Dict[str, Any] = {"api_key": api_key or "placeholder-key-not-set"}
+        normalized = self._normalized_base_url(base_url)
+        if normalized:
+            kwargs["base_url"] = normalized
+        return AsyncOpenAI(**kwargs)
+
     def _init_tools(self):
         try:
             services = initialize_mcp_registry(scan_dir="agentkit")
+            community_services = initialize_mcp_registry(scan_dir="extensions/community", force=True)
+            if community_services:
+                services = list(services or []) + list(community_services or [])
             logger.info(f"Loaded tool services: {services}")
         except Exception as e:
             logger.error(f"Tool initialization failed: {e}")
@@ -43,7 +78,13 @@ class PrometheaConversation:
 
         system_prompt = (
             "You are Promethea, an assistant that can call tools.\n"
-            "When you need tools, output strict JSON objects.\nUse keys: tool_name, service_name (optional), and args (object).\nIf service_name is omitted, tool_name is used as the service name.\n"
+            "When you need tools, output only one strict JSON object and no prose in that assistant turn.\n"
+            "For action turns, use a lightweight ReAct loop: Action, runtime Observation, then minimal verification before claiming success.\n"
+            "Use keys: tool_name, agentType, service_name, and args (object). "
+            "For official built-in tools use agentType=\"local\" and service_name equal to tool_name.\n"
+            "Never write fake function syntax such as math.calculate(...), web_search(...), or file_create(...). "
+            "Never claim a tool ran unless a runtime observation/result is present.\n"
+            "Common official tools include math.calculate, web.search, web.fetch_text, workspace.write_file, workspace.read_file, workspace.list_files, code.run_python, and runtime.list_tools.\n"
             "Available tools:\n"
             f"{services_desc}"
         )
@@ -69,6 +110,7 @@ class PrometheaConversation:
         session_id: str = None,
         user_id: Optional[str] = None,
         tool_executor=None,
+        max_recursion: Optional[int] = None,
     ) -> Dict:
         messages_with_tools = self._inject_system_prompt(messages)
         llm_caller = lambda msgs: self.call_llm(msgs, user_config, user_id=user_id)
@@ -78,30 +120,34 @@ class PrometheaConversation:
             mcp_manager=self.mcp_manager,
             llm_caller=llm_caller,
             is_streaming=False,
+            max_recursion=max_recursion,
             session_id=session_id,
             tool_executor=tool_executor,
         )
 
         return final_response
 
-    def _get_client_params(self, user_config: Optional[Dict[str, Any]] = None):
-        api_key = config.api.api_key
-        base_url = config.api.base_url
-        model = config.api.model
-        temperature = config.api.temperature
-        max_tokens = config.api.max_tokens
+    def _get_client_params(
+        self,
+        user_config: Optional[Dict[str, Any]] = None,
+        user_id: Optional[str] = None,
+    ):
+        runtime = resolve_llm_runtime_settings(user_id, behavior_config=user_config)
+        return (
+            runtime.get("api_key", ""),
+            runtime.get("base_url", ""),
+            runtime.get("model", ""),
+            runtime.get("temperature", config.api.temperature),
+            runtime.get("max_tokens", config.api.max_tokens),
+            runtime.get("failover_models", []),
+        )
 
-        if user_config and "api" in user_config:
-            user_api = user_config["api"]
-            # Sensitive model routing stays env-controlled.
-            if user_api.get("temperature") is not None:
-                temperature = user_api["temperature"]
-            if user_api.get("max_tokens") is not None:
-                max_tokens = user_api["max_tokens"]
-
-        return api_key, base_url, model, temperature, max_tokens
-
-    def _resolve_model_candidates(self, user_config: Optional[Dict[str, Any]], primary_model: str) -> List[str]:
+    def _resolve_model_candidates(
+        self,
+        user_config: Optional[Dict[str, Any]],
+        primary_model: str,
+        runtime_failover_models: Optional[List[str]] = None,
+    ) -> List[str]:
         candidates: List[str] = []
         seen = set()
 
@@ -116,7 +162,7 @@ class PrometheaConversation:
 
         _push(primary_model)
 
-        fallback_models = getattr(config.api, "failover_models", []) or []
+        fallback_models = runtime_failover_models or getattr(config.api, "failover_models", []) or []
 
         if isinstance(fallback_models, list):
             for model_name in fallback_models:
@@ -125,8 +171,8 @@ class PrometheaConversation:
         return candidates
 
     def _resolve_async_client(self, user_config: Optional[Dict[str, Any]], api_key: str, base_url: str) -> AsyncOpenAI:
-        if user_config and "api" in user_config:
-            return AsyncOpenAI(api_key=api_key, base_url=base_url.rstrip("/") + "/")
+        if api_key != config.api.api_key or base_url != config.api.base_url:
+            return self._build_async_client(api_key, base_url)
         return self.async_client
 
     async def call_llm(
@@ -135,13 +181,25 @@ class PrometheaConversation:
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ) -> Dict:
-        api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
-        model_candidates = self._resolve_model_candidates(user_config, model)
+        api_key, base_url, model, temperature, max_tokens, failover_models = self._get_client_params(
+            user_config,
+            user_id=user_id,
+        )
+        model_candidates = self._resolve_model_candidates(user_config, model, failover_models)
         errors: List[str] = []
+        if not model_candidates:
+            return {
+                "content": "API call failed: API__MODEL is not configured in user secrets.env or root .env",
+                "status": "error",
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+                "model_used": None,
+                "model_attempts": 0,
+            }
 
         for idx, candidate_model in enumerate(model_candidates):
             try:
                 client = self._resolve_async_client(user_config, api_key, base_url)
+                started = time.perf_counter()
                 resp = await client.chat.completions.create(
                     model=candidate_model,
                     messages=messages,
@@ -156,19 +214,22 @@ class PrometheaConversation:
                     if message:
                         content = getattr(message, "content", "") or ""
 
+                usage = {
+                    "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0)
+                    if hasattr(resp, "usage") and resp.usage
+                    else 0,
+                    "completion_tokens": getattr(resp.usage, "completion_tokens", 0)
+                    if hasattr(resp, "usage") and resp.usage
+                    else 0,
+                }
+                _record_llm_metrics(time.perf_counter() - started, usage)
+
                 result = {
                     "content": content,
                     "status": "success",
                     "model_used": candidate_model,
                     "model_attempts": idx + 1,
-                    "usage": {
-                        "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0)
-                        if hasattr(resp, "usage") and resp.usage
-                        else 0,
-                        "completion_tokens": getattr(resp.usage, "completion_tokens", 0)
-                        if hasattr(resp, "usage") and resp.usage
-                        else 0,
-                    },
+                    "usage": usage,
                 }
 
                 try:
@@ -215,29 +276,57 @@ class PrometheaConversation:
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
     ):
-        api_key, base_url, model, temperature, max_tokens = self._get_client_params(user_config)
-        model_candidates = self._resolve_model_candidates(user_config, model)
+        api_key, base_url, model, temperature, max_tokens, failover_models = self._get_client_params(
+            user_config,
+            user_id=user_id,
+        )
+        model_candidates = self._resolve_model_candidates(user_config, model, failover_models)
         errors: List[str] = []
+        if not model_candidates:
+            yield "[error] API__MODEL is not configured in user secrets.env or root .env"
+            return
 
         for idx, candidate_model in enumerate(model_candidates):
             try:
                 client = self._resolve_async_client(user_config, api_key, base_url)
-                stream = await client.chat.completions.create(
-                    model=candidate_model,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    stream=True,
-                )
+                started = time.perf_counter()
+                try:
+                    stream = await client.chat.completions.create(
+                        model=candidate_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                    )
+                except Exception as stream_exc:
+                    message = str(stream_exc).lower()
+                    if "stream_options" not in message and "include_usage" not in message:
+                        raise
+                    stream = await client.chat.completions.create(
+                        model=candidate_model,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        stream=True,
+                    )
                 if idx > 0:
                     logger.warning(
                         "LLM stream failover succeeded: fallback model '{}' used after {} failures",
                         candidate_model,
                         idx,
-                    )
+                        )
+                usage = {"prompt_tokens": 0, "completion_tokens": 0}
                 async for chunk in stream:
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage:
+                        usage = {
+                            "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
+                            "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
+                        }
                     if chunk.choices and chunk.choices[0].delta.content:
                         yield chunk.choices[0].delta.content
+                _record_llm_metrics(time.perf_counter() - started, usage)
                 return
             except Exception as e:
                 err = str(e)

@@ -28,7 +28,7 @@ class MemoryEntryUpdateRequest(BaseModel):
 
 
 class MemoryProposalDecisionRequest(BaseModel):
-    action: str = Field(description="confirm_write | ignore_once | reduce_similar")
+    action: str = Field(description="confirm_write | confirm_write_keep_existing | ignore_once | reduce_similar")
 
 
 def _get_runtime_components():
@@ -188,6 +188,8 @@ async def get_memory_graph_global(
             "user_id": user_id,
             "graph_available": bool(result.get("graph_available", False)),
             "graph_mode": result.get("graph_mode", "none"),
+            "graph_semantics": result.get("graph_semantics", "none"),
+            "semantic_graph_available": bool(result.get("semantic_graph_available", False)),
             "nodes": result.get("nodes") or [],
             "edges": result.get("edges") or [],
             "stats": result.get("stats") or {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
@@ -196,6 +198,40 @@ async def get_memory_graph_global(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Get global memory graph failed: {e}")
+
+
+@router.get("/memory/graph/search")
+async def search_memory_graph(
+    q: str = "",
+    depth: int = 1,
+    limit_nodes: int = 80,
+    limit_edges: int = 160,
+    user_id: str = Depends(get_current_user_id),
+):
+    memory_service = _get_runtime_components()
+    result = memory_service.search_graph_for_user(
+        user_id=user_id,
+        query=q,
+        depth=depth,
+        limit_nodes=limit_nodes,
+        limit_edges=limit_edges,
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=str(result.get("reason") or "graph_search_failed"))
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "graph_available": bool(result.get("graph_available", False)),
+        "graph_mode": result.get("graph_mode", "none"),
+        "graph_semantics": result.get("graph_semantics", "none"),
+        "semantic_graph_available": bool(result.get("semantic_graph_available", False)),
+        "query": result.get("query") or q,
+        "search_mode": result.get("search_mode") or "overview",
+        "seed_node_ids": result.get("seed_node_ids") or [],
+        "nodes": result.get("nodes") or [],
+        "edges": result.get("edges") or [],
+        "stats": result.get("stats") or {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
+    }
 
 
 @router.get("/memory/graph/{session_id}")
@@ -212,6 +248,8 @@ async def get_memory_graph(
                 "session_id": session_id,
                 "graph_available": bool(prebuilt.get("graph_available", False)),
                 "graph_mode": prebuilt.get("graph_mode", "none"),
+                "graph_semantics": prebuilt.get("graph_semantics", "none"),
+                "semantic_graph_available": bool(prebuilt.get("semantic_graph_available", False)),
                 "nodes": prebuilt.get("nodes") or [],
                 "edges": prebuilt.get("edges") or [],
                 "stats": prebuilt.get("stats") or {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
@@ -221,7 +259,14 @@ async def get_memory_graph(
             {"session_id": session_id},
             user_id=user_id,
         )
-        return {"status": "success", "graph_available": True, "graph_mode": "neo4j", **payload}
+        return {
+            "status": "success",
+            "graph_available": True,
+            "graph_mode": "neo4j",
+            "graph_semantics": "semantic",
+            "semantic_graph_available": True,
+            **payload,
+        }
     except HTTPException as e:
         # Fresh sessions may not have memory nodes yet. Keep UI stable with empty graph.
         if e.status_code == 404:
@@ -230,6 +275,8 @@ async def get_memory_graph(
                 "session_id": session_id,
                 "graph_available": True,
                 "graph_mode": "neo4j",
+                "graph_semantics": "semantic",
+                "semantic_graph_available": True,
                 "nodes": [],
                 "edges": [],
                 "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
@@ -278,6 +325,32 @@ async def list_memory_entries(
     return {
         "status": "success",
         "user_id": user_id,
+        "entries": result.get("entries") or [],
+        "total": int(result.get("total") or 0),
+    }
+
+
+@router.get("/memory/search")
+async def search_memory_entries(
+    q: str,
+    limit: int = 30,
+    user_id: str = Depends(get_current_user_id),
+):
+    memory_service = _get_runtime_components()
+    result = memory_service.search_entries(
+        user_id=user_id,
+        query=q,
+        limit=limit,
+    )
+    if not result.get("ok"):
+        reason = str(result.get("reason") or "search_failed")
+        if reason == "query_required":
+            raise HTTPException(status_code=400, detail="q is required")
+        raise HTTPException(status_code=503, detail="Memory system not enabled")
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "query": result.get("query") or q,
         "entries": result.get("entries") or [],
         "total": int(result.get("total") or 0),
     }

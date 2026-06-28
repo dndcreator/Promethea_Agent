@@ -247,6 +247,15 @@ class Neo4jConnectionPool:
 
     _instance = None
     _connector = None
+    _last_error = ""
+    _last_error_code = ""
+
+    @staticmethod
+    def _classify_error(error: Exception) -> str:
+        text = f"{error.__class__.__name__}: {error}".lower()
+        if "auth" in text or "unauthorized" in text or "password" in text:
+            return "neo4j_authentication_failed"
+        return "neo4j_unavailable"
 
     @classmethod
     def get_connector(cls, config=None):
@@ -264,10 +273,18 @@ class Neo4jConnectionPool:
 
             try:
                 cls._connector = Neo4jConnector(config)
+                cls._last_error = ""
+                cls._last_error_code = ""
             except Exception as e:
                 logger.warning(f"Neo4j connector initialization failed, running without memory backend: {e}")
                 cls._connector = None
+                cls._last_error = str(e)
+                cls._last_error_code = cls._classify_error(e)
         return cls._connector
+
+    @classmethod
+    def get_last_error(cls) -> Dict[str, str]:
+        return {"code": cls._last_error_code, "message": cls._last_error}
 
     @classmethod
     def close(cls):

@@ -48,6 +48,13 @@ powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite b
 pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_tool_service.py
 ```
 
+### 临时文件策略
+- 测试临时文件统一写入 `.tmp/pytest-runtime/`。
+- `tests/conftest.py` 会把 `TEMP`、`TMP`、`TMPDIR`、`PYTEST_DEBUG_TEMPROOT` 和 `PROMETHEA_TEST_TMP_ROOT` 指向该目录。
+- 测试正常结束时会清理 `.tmp/pytest-runtime/`。
+- 如果测试被中断，最多残留 `.tmp/pytest-runtime/` 一个目录；不应再在仓库根目录生成新的 `.pytest-*`、`tmp_*`、`_pytest_case_tmp` 或 `_pytest_session_tmp` 目录。
+- 清理逻辑只允许删除当前仓库内计算出的 `.tmp/pytest-runtime/`，不清理用户数据、上传文件、`config/users/`、`memory/` 或 `logs/`。
+
 ### 场景增强测试组织
 - `tests/business_plus/`: 贴近业务链路的轻量真实场景测试（chat/tool/workflow 组合流程）。
 - `tests/business_plus/README.md`: `business_plus` 用例边界、命名约定与新增标准。
@@ -71,3 +78,9 @@ python tests/run_all_tests.py --pattern "memory and not live"
 python tests/run_all_tests.py --live
 $env:RUN_STRESS_TESTS="1"; pytest -q -m stress tests/test_memory_stress.py
 ```
+
+### Temporary Files
+- Test artifacts should live under `.tmp/pytest-runtime/`.
+- Normal pytest completion removes `.tmp/pytest-runtime/`.
+- Interrupted runs may leave that single directory behind.
+- Test cleanup is intentionally narrow and must not delete runtime user data such as `config/users/`, `memory/`, or `logs/`.

@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Hot memory layer: extract structured graph facts from recent messages."""
 import logging
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -15,9 +14,16 @@ logger = logging.getLogger(__name__)
 
 
 class HotLayerManager:
-    """TODO: add docstring."""
+    """Persist L1 hot memory nodes and relations for one user/session."""
     
-    def __init__(self, extractor: LLMExtractor, connector: Neo4jConnector, session_id: str, user_id: str = "default_user"):
+    def __init__(
+        self,
+        extractor: LLMExtractor,
+        connector: Neo4jConnector,
+        session_id: str,
+        user_id: str = "default_user",
+        config: Optional[Any] = None,
+    ):
         """
         Initialize hot-layer manager and ensure user/session nodes exist.
         
@@ -31,7 +37,20 @@ class HotLayerManager:
         self.connector = connector
         self.session_id = session_id
         self.user_id = user_id
+        self.config = config
+        self._extractor_user_id = user_id
         self._ensure_session_node()
+
+    def _ensure_user_scoped_extractor(self) -> None:
+        if not self.config or self.user_id == self._extractor_user_id:
+            return
+        try:
+            from .llm_extractor import create_extractor_from_config
+
+            self.extractor = create_extractor_from_config(self.config, user_id=self.user_id)
+            self._extractor_user_id = self.user_id
+        except Exception as exc:
+            logger.warning("Failed to refresh user-scoped memory extractor: %s", exc)
     
     def _ensure_session_node(self):
         uid = user_node_id(self.user_id)
@@ -70,13 +89,9 @@ class HotLayerManager:
         context: Optional[List[Dict]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """
-        
-        Args:
-            
-        Returns:
-        """
+        """Extract and persist message-level facts, entities, time, and locations."""
         self._ensure_session_node()
+        self._ensure_user_scoped_extractor()
 
         logger.info("Processing memory write candidate: role=%s session=%s", role, self.session_id)
         
@@ -124,7 +139,7 @@ class HotLayerManager:
         extraction: ExtractionResult,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Neo4jNode:
-        """TODO: add docstring."""
+        """Create the message node and attach it to the current session."""
         emotion_data = extraction.metadata.get("emotion", {})
         emotion_primary = emotion_data.get("primary", "neutral") if isinstance(emotion_data, dict) else "neutral"
         emotion_intensity = emotion_data.get("intensity", 0.5) if isinstance(emotion_data, dict) else 0.5
@@ -167,7 +182,7 @@ class HotLayerManager:
         return message_node
     
     def _store_fact_tuple(self, fact: FactTuple, message_id: str):
-        """TODO: add docstring."""
+        """Store one subject-predicate-object tuple and its provenance edges."""
         edge_suffix = message_id
         subject_id = self.connector.find_node_by_content(
             NodeType.ENTITY, fact.subject, user_id=self.user_id
@@ -257,14 +272,13 @@ class HotLayerManager:
             ))
     
     def _normalize_content(self, content: str) -> str:
-        """
-        """
+        """Normalize extracted node text for graph lookup."""
         if not content:
             return ""
         return content.strip().lower()
 
     def _create_entity_node(self, entity: str, message_id: str) -> str:
-        """TODO: add docstring."""
+        """Create or reuse an entity node and link it to the source message."""
         normalized_entity = self._normalize_content(entity)
         if not normalized_entity:
             return ""
@@ -323,7 +337,7 @@ class HotLayerManager:
         return time_id
     
     def _create_location_node(self, location: str, message_id: str) -> str:
-        """TODO: add docstring."""
+        """Create or reuse a location node and link it to the source message."""
         normalized_location = self._normalize_content(location)
         if not normalized_location:
             return ""

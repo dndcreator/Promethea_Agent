@@ -1,4 +1,4 @@
-# Using a Local Model with Promethea
+﻿# Using a Local Model with Promethea
 
 Promethea works with any model server that implements the OpenAI Chat Completions API (`/v1/chat/completions`).  
 This includes vLLM, Ollama (via its OpenAI proxy), LM Studio, llama.cpp server, and similar tools.
@@ -7,12 +7,13 @@ This includes vLLM, Ollama (via its OpenAI proxy), LM Studio, llama.cpp server, 
 
 ## How it works
 
-Promethea's `APIConfig` maps directly to an OpenAI-style client:
+Promethea resolves the active user runtime settings from `.env` / `config/users/<user_id>/secrets.env`, then builds an OpenAI-style client:
 
 ```python
 # Internally:
-client = OpenAI(api_key=cfg.api.api_key, base_url=cfg.api.base_url)
-response = client.chat.completions.create(model=cfg.api.model, ...)
+runtime = resolve_llm_runtime_settings(user_id, behavior_config=user_config)
+client = OpenAI(api_key=runtime["api_key"], base_url=runtime["base_url"])
+response = client.chat.completions.create(model=runtime["model"], ...)
 ```
 
 If your local server provides a compatible endpoint, it just works.
@@ -29,7 +30,7 @@ API__BASE_URL=http://127.0.0.1:8001/v1
 API__MODEL=your-model-id         # must exactly match the model ID your server uses
 ```
 
-> ⚠️ The model ID must match what your server reports. If your vLLM instance serves `meta-llama/Llama-3-8B-Instruct`, set `API__MODEL=meta-llama/Llama-3-8B-Instruct`.
+> Warning: The model ID must match what your server reports. If your vLLM instance serves `meta-llama/Llama-3-8B-Instruct`, set `API__MODEL=meta-llama/Llama-3-8B-Instruct`.
 
 ---
 
@@ -73,7 +74,7 @@ API__MODEL=llama3
 
 ## LM Studio
 
-Enable the local server in LM Studio (Settings → Local Server → Start).  
+Enable the local server in LM Studio (Settings -> Local Server -> Start).
 Default port is 1234.
 
 `.env`:

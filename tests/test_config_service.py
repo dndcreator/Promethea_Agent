@@ -62,8 +62,12 @@ class TestConfigService:
             assert result['success'] is True
     
     @pytest.mark.asyncio
-    async def test_switch_model(self):
+    async def test_switch_model(self, tmp_path, monkeypatch):
         """TODO: add docstring."""
+        from gateway import user_secrets
+
+        monkeypatch.setattr(user_secrets, "ENV_FILE", tmp_path / ".env")
+        monkeypatch.setattr(user_secrets, "USER_SECRETS_DIR", tmp_path / "users")
         service = ConfigService(event_emitter=EventEmitter())
         
         with patch('gateway.config_service.user_manager') as mock_user_manager:
@@ -102,8 +106,8 @@ class TestConfigService:
             assert persisted.get("api", {}).get("api_key") is None
             assert persisted.get("memory", {}).get("neo4j", {}).get("password") is None
             assert persisted.get("memory", {}).get("api", {}).get("api_key") is None
-            assert persisted.get("api", {}).get("model") == "gpt-4.1-mini"
-            assert any("env-only secret ignored" in w for w in result.get("warnings", []))
+            assert persisted.get("api", {}).get("model") is None
+            assert any("sensitive env field ignored" in w for w in result.get("warnings", []))
 
     def test_get_merged_config_pins_env_only_secrets(self):
         service = ConfigService()
@@ -136,7 +140,7 @@ class TestConfigService:
             )
 
         sources = payload.get("sources") or {}
-        assert sources.get("api.model") == "user_override"
+        assert sources.get("api.model") == "env_only_secret"
         assert sources.get("api.api_key") == "env_only_secret"
         assert sources.get("system.stream_mode") == "user_override"
 

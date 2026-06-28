@@ -50,13 +50,40 @@ Outputs:
 - user/session identity
 - initial `RunContext`
 
-### Stage 2: Complexity Gate
+### Stage 2: Cognitive Budget Gate
 
-Runtime evaluates whether the request is simple or complex.
+Runtime evaluates how much cognition the request deserves before it assembles the full prompt.
 
 Decision objective:
-- simple: direct response path
-- complex: explicit reasoning path
+- `direct`: answer from the core prompt and normal context; no tool loop and no reasoning tree.
+- `light_action`: allow a small number of tool calls for simple current-data lookup, calculation, search, or one-shot file/workspace action; no full reasoning tree.
+- `deep_reasoning`: use the full reasoning tree for multi-step investigation, planning, debugging, comparison, design, or research synthesis.
+- `workflow`: use explicit long-running workflow orchestration.
+
+Before prompt assembly, Promethea also runs a lightweight prompt policy routing
+pass. This first pass exposes only a minimal router system block and asks for
+structured JSON, not a user-facing answer. The router returns an execution budget:
+
+- `cognitive_mode`: `direct | light_action | deep_reasoning | workflow`
+- `reasoning_budget`: `none | small | large`
+- `tool_budget`: bounded number of tool-loop turns
+- `memory_budget`: `none | brief | full`
+- `need_user_visible_reasoning`: whether the UI should expect a visible reasoning tree
+
+The router may also suggest dynamic blocks:
+- memory recall
+- reasoning/deep mode when `reasoning_budget=large`
+- tools/workspace context
+- organization context
+
+The router cannot disable identity, soul core, or safety/policy blocks.
+Those remain code-enforced runtime contracts.
+
+Only `reasoning_budget=large` starts the full reasoning tree. Simple tool tasks
+should stay in `light_action`, so a request such as checking a current stock
+price can call a tool briefly without paying the latency of full ReAct/ToT
+planning. If the light action fails, the runtime reports the failure or asks
+whether to continue with a deeper attempt instead of silently escalating forever.
 
 ### Stage 3: ReAct + ToT Planning/Reasoning
 
@@ -99,9 +126,35 @@ Runtime composes final user-visible response from:
 - tool/workflow observations
 
 Prompt assembly model:
-- stable blocks first (identity/persona/soul)
+- stable blocks first (identity/soul)
 - dynamic blocks second (memory/reasoning/tools/policy/workspace)
 - optional budget compaction with block-level debug output
+
+`PromptAssembler` runs in two places:
+- Canonical staged pipeline: `stage_response_synthesis` calls it when the run does not already provide prebuilt messages.
+- Streaming/legacy chat path: `ConversationService.prepare_chat_turn` calls it before handing messages to the LLM.
+
+The assembler receives structured runtime inputs instead of ad-hoc string patches:
+- `prompt_policy`: LLM/heuristic routing result for dynamic block suggestions.
+- `PlanResult`: base identity prompt, or the reasoning service's rewritten system prompt.
+- `MemoryRecallBundle`: recalled personal memory context, when recall is allowed and available.
+- `ToolExecutionBundle`: whether tool capability is active for this run.
+- `RunContext`: skill listing, tool policy, workspace handle, org context, input payload, token budget, and prompt block policy.
+- `user_config`: merged non-secret behavior defaults plus user overrides.
+
+Current prompt blocks:
+- `identity`: Promethea's base runtime identity and language policy.
+- `soul_core`: the read-mostly soul prompt, style/personality only.
+- `memory`: recalled personal memory context.
+- `org_context`: enterprise/org brain context when `org_brain.enabled=true`.
+- `reasoning`: final reasoning decision summary when explicit reasoning is used.
+- `skill`: active skill/tool registration guidance.
+- `tools`: tool availability guidance.
+- `workspace`: current workspace handle.
+- `policy`: runtime tool/security policy.
+- `response_format`: user-level response style.
+
+If callers intentionally pass fully prebuilt messages to the staged pipeline, the pipeline preserves those messages and marks prompt assembly as `source=prebuilt_messages`. Normal chat entrypoints should avoid bypassing `prepare_chat_turn` unless they are deliberately replaying or continuing a previously assembled conversation.
 
 ### Stage 7: Memory Write Governance
 
@@ -111,12 +164,12 @@ Before long-term persistence, memory write gate evaluates candidate writes (`all
 
 Runtime emits structured events for later inspection and debugging.
 
-### Runtime Persona/Soul Evolution (Async Side Loop)
+### Runtime Soul Evolution (Async Side Loop)
 
 After response synthesis, runtime may trigger asynchronous soul evolution:
 - input: latest user message + assistant response + current `persona.soul`
 - decision: LLM returns `should_update` and candidate soul text
-- guardrails: style-only scope, rate limit, max length
+- guardrails: style-only scope, durable preference requirement, rate limit, max length
 - persistence: user-scoped config update to `persona.soul.*`
 
 This side loop does not block current turn latency.
@@ -159,6 +212,7 @@ This side loop does not block current turn latency.
 - explicit state transitions
 - iterative plan-act-observe
 - configurable budget controls
+- full reasoning tree only starts when the cognitive budget explicitly allows it
 
 ## Contracts Over Assumptions
 

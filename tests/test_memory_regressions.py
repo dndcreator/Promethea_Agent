@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 import threading
 import json
+import os
 
 import pytest
 
@@ -28,14 +29,14 @@ def test_hot_layer_factory_uses_extractor_factory(monkeypatch):
     monkeypatch.setattr(
         memory_pkg,
         "create_extractor_from_config",
-        lambda config: extractor,
+        lambda config, user_id=None: extractor if user_id == "u1" else None,
     )
     monkeypatch.setattr(
         memory_pkg,
         "HotLayerManager",
-        lambda ext, conn, session_id, user_id: (
+        lambda ext, conn, session_id, user_id, config=None: (
             hot_layer
-            if (ext is extractor and conn is connector and session_id == "s1" and user_id == "u1")
+            if (ext is extractor and conn is connector and session_id == "s1" and user_id == "u1" and config is cfg)
             else None
         ),
     )
@@ -386,6 +387,34 @@ def test_raw_log_replay_writes_store_and_updates_offset(tmp_path):
     with open(adapter._raw_log_state_path, "r", encoding="utf-8") as f:
         state = json.load(f)
     assert int(state.get("last_offset", 0)) > 0
+
+
+def test_raw_log_state_persist_retries_transient_replace_permission_error(tmp_path, monkeypatch):
+    from memory.adapter import MemoryAdapter
+
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter._raw_log_state_path = str(tmp_path / "raw_log.state.json")
+    adapter._raw_log_state = {"last_offset": 42, "last_entry_id": "entry-1", "updated_at": 0.0}
+
+    original_replace = os.replace
+    attempts = {"count": 0}
+
+    def flaky_replace(src, dst):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise PermissionError("transient lock")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr("memory.adapter.os.replace", flaky_replace)
+
+    adapter._persist_raw_log_state()
+
+    assert attempts["count"] == 2
+    with open(adapter._raw_log_state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    assert state["last_offset"] == 42
+    assert state["last_entry_id"] == "entry-1"
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_on_message_saved_skips_when_raw_log_deferred():

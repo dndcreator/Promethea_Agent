@@ -303,6 +303,7 @@ class MemoryService:
         user_input: str,
         assistant_output: str,
         candidates: List[Dict[str, Any]],
+        interaction_context: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Verify candidate meaning/attribution before writing to memory.
@@ -312,18 +313,21 @@ class MemoryService:
             return []
         prompt = (
             "You are a memory write verifier.\n"
-            "Given USER_INPUT, ASSISTANT_OUTPUT and candidate memories, decide whether each candidate can be safely written.\n"
+            "Given RECENT_CONTEXT, USER_INPUT, ASSISTANT_OUTPUT and candidate memories, decide whether each candidate can be safely written.\n"
             "Acceptance requirements:\n"
-            "1) Candidate meaning is supported by the interaction.\n"
+            "1) Candidate meaning is supported by the current interaction or by immediate conversational context.\n"
             "2) Attribution is correct: should not convert assistant explanation into user preference.\n"
             "3) It looks durable (not temporary tool/runtime artifact).\n"
+            "4) Short answers may be valid when they answer a direct prior question in RECENT_CONTEXT.\n"
             "Return strict JSON:\n"
             "{\"decisions\":[{\"index\":0,\"accept\":true|false,\"confidence\":0..1,"
             "\"reason\":\"...\",\"evidence\":\"...\",\"attribution\":\"user|assistant|project|unclear\"}]}\n"
             "Prefer rejecting uncertain candidates."
         )
         cands_json = json.dumps(candidates, ensure_ascii=False)
+        context_json = json.dumps(interaction_context or [], ensure_ascii=False)
         query = (
+            f"[RECENT_CONTEXT]\n{context_json}\n\n"
             f"[USER_INPUT]\n{user_input}\n\n"
             f"[ASSISTANT_OUTPUT]\n{assistant_output}\n\n"
             f"[CANDIDATES]\n{cands_json}\n"
@@ -364,35 +368,6 @@ class MemoryService:
             accepted.append(row)
         return accepted
 
-    def _heuristic_classify(
-        self, user_input: str, assistant_output: str
-    ) -> Dict[str, Any]:
-        """
-        Fallback path when LLM is unavailable.
-        Conservative by default to avoid noisy writes.
-        """
-        text = f"{user_input}\n{assistant_output}".lower()
-        hints = [
-            ("preference", ["prefer", "like"]),
-            ("constraint", ["must", "cannot", "deadline"]),
-            ("goal", ["goal", "plan to"]),
-            ("identity", ["i am", "my name is"]),
-            ("project_state", ["project", "milestone", "release"]),
-        ]
-        for mem_type, tokens in hints:
-            if any(token in text for token in tokens):
-                return {
-                    "has_long_term_state": True,
-                    "candidates": [
-                        {
-                            "type": mem_type,
-                            "content": user_input.strip(),
-                            "semantic_keys": self._build_semantic_keys(user_input),
-                        }
-                    ],
-                }
-        return {"has_long_term_state": False, "candidates": []}
-
     def _get_user_config(self, user_id: str) -> Optional[Dict[str, Any]]:
         if not self.config_service:
             return None
@@ -431,22 +406,25 @@ class MemoryService:
 
     def _resolve_memory_api_for_user(self, user_id: str) -> Dict[str, str]:
         cfg = self._get_merged_config(user_id=user_id) or {}
-        api_cfg = cfg.get("api", {})
-        memory_api = cfg.get("memory", {}).get("api", {})
-        use_main = self._to_bool(memory_api.get("use_main_api", True), default=True)
+        try:
+            from gateway.user_secrets import resolve_memory_runtime_settings
 
-        if use_main:
+            return resolve_memory_runtime_settings(user_id, behavior_config=cfg)
+        except Exception:
+            api_cfg = cfg.get("api", {})
+            memory_api = cfg.get("memory", {}).get("api", {})
+            use_main = self._to_bool(memory_api.get("use_main_api", True), default=True)
+            if use_main:
+                return {
+                    "api_key": api_cfg.get("api_key", ""),
+                    "base_url": api_cfg.get("base_url", ""),
+                    "model": api_cfg.get("model", ""),
+                }
             return {
-                "api_key": api_cfg.get("api_key", ""),
-                "base_url": api_cfg.get("base_url", ""),
-                "model": api_cfg.get("model", ""),
+                "api_key": memory_api.get("api_key") or api_cfg.get("api_key", ""),
+                "base_url": memory_api.get("base_url") or api_cfg.get("base_url", ""),
+                "model": memory_api.get("model") or api_cfg.get("model", ""),
             }
-
-        return {
-            "api_key": memory_api.get("api_key") or api_cfg.get("api_key", ""),
-            "base_url": memory_api.get("base_url") or api_cfg.get("base_url", ""),
-            "model": memory_api.get("model") or api_cfg.get("model", ""),
-        }
 
     async def _call_memory_classifier_llm(
         self,
@@ -511,13 +489,14 @@ class MemoryService:
         user_input: str,
         assistant_output: str,
         user_id: str,
+        interaction_context: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         if not self._should_run_memory_llm(user_input, assistant_output, user_id=user_id):
             return {"has_long_term_state": False, "candidates": []}
 
         prompt = (
             "You are a strict memory classifier. Input is one completed interaction "
-            "(user input + assistant output). Ignore tool logs and execution traces. "
+            "(recent context + user input + assistant output). Ignore tool logs and execution traces. "
             "Find only durable user or project state worth long-term memory.\n"
             "Allowed types: goal, preference, constraint, identity, project_state.\n"
             "Return strict JSON with this schema:\n"
@@ -526,19 +505,22 @@ class MemoryService:
             "Rules:\n"
             "- If no durable state, return has_long_term_state=false and empty candidates.\n"
             "- Keep each content concise and factual.\n"
-            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 鑻规灉).\n"
+            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
             "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
             "- Do not include temporary tool/output details.\n"
-            "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference."
+            "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference.\n"
+            "- If the current user input is a short answer to an immediate prior assistant question, use RECENT_CONTEXT to resolve what it means."
         )
+        context_json = json.dumps(interaction_context or [], ensure_ascii=False)
         query = (
+            f"[RECENT_CONTEXT]\n{context_json}\n\n"
             f"[USER_INPUT]\n{user_input}\n\n"
             f"[ASSISTANT_OUTPUT]\n{assistant_output}\n"
         )
         try:
             text = await self._call_memory_classifier_llm(user_id, prompt, query)
             if not text:
-                return self._heuristic_classify(user_input, assistant_output)
+                return {"has_long_term_state": False, "candidates": []}
             obj = self._extract_json(text)
             if not obj:
                 return {"has_long_term_state": False, "candidates": []}
@@ -550,7 +532,7 @@ class MemoryService:
             return {"has_long_term_state": has_state, "candidates": candidates}
         except Exception as e:
             logger.debug("MemoryService: LLM interaction classifier failed: {}", e)
-            return self._heuristic_classify(user_input, assistant_output)
+            return {"has_long_term_state": False, "candidates": []}
 
     def _should_run_memory_llm(
         self,
@@ -875,6 +857,7 @@ class MemoryService:
             "channel": payload.get("channel"),
             "user_input": user_input,
             "assistant_output": assistant_output,
+            "interaction_context": list(payload.get("interaction_context") or []),
             "queued_at": time.time(),
         }
 
@@ -938,6 +921,7 @@ class MemoryService:
         channel = payload.get("channel")
         user_input = (payload.get("user_input") or "").strip()
         assistant_output = (payload.get("assistant_output") or "").strip()
+        interaction_context = list(payload.get("interaction_context") or [])
 
         if not session_id or (not user_input and not assistant_output):
             return
@@ -946,6 +930,7 @@ class MemoryService:
             user_input=user_input,
             assistant_output=assistant_output,
             user_id=user_id,
+            interaction_context=interaction_context,
         )
         if not classification.get("has_long_term_state", False):
             return
@@ -956,6 +941,7 @@ class MemoryService:
             user_input=user_input,
             assistant_output=assistant_output,
             candidates=raw_candidates,
+            interaction_context=interaction_context,
         )
         saved_count = 0
         for item in candidates:
@@ -1644,18 +1630,20 @@ class MemoryService:
                 edges_raw = snapshot.get("edges") or []
                 nodes = []
                 for n in nodes_raw:
+                    node_type = str(n.get("node_type") or n.get("type") or "").lower()
                     nodes.append(
                         {
                             "id": n.get("id"),
-                            "type": str(n.get("node_type") or n.get("type") or "").lower(),
+                            "type": node_type,
                             "content": n.get("content", ""),
-                            "layer": 1 if str(n.get("node_type") or "") == "token" else 0,
+                            "layer": 1 if node_type == "token" else 0,
                             "importance": n.get("importance", 0.5),
                             "access_count": 0,
                             "created_at": n.get("created_at"),
                             "role": "",
                             "memory_type": "",
                             "memory_source": "sqlite_graph",
+                            "semantic_level": "lightweight",
                         }
                     )
                 edges = [
@@ -1673,6 +1661,8 @@ class MemoryService:
                     "user_id": user_id,
                     "graph_available": True,
                     "graph_mode": "sqlite_graph",
+                    "graph_semantics": "lightweight",
+                    "semantic_graph_available": False,
                     "nodes": nodes,
                     "edges": edges,
                     "stats": {
@@ -1692,6 +1682,8 @@ class MemoryService:
                     "user_id": user_id,
                     "graph_available": False,
                     "graph_mode": "none",
+                    "graph_semantics": "none",
+                    "semantic_graph_available": False,
                     "nodes": [],
                     "edges": [],
                     "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
@@ -1746,6 +1738,7 @@ class MemoryService:
                     "role": n.get("role", ""),
                     "memory_type": n.get("memory_type", ""),
                     "memory_source": n.get("memory_source", ""),
+                    "semantic_level": "semantic",
                 }
                 for n in nodes_raw
             ]
@@ -1773,6 +1766,8 @@ class MemoryService:
                 "user_id": user_id,
                 "graph_available": True,
                 "graph_mode": "neo4j",
+                "graph_semantics": "semantic",
+                "semantic_graph_available": True,
                 "nodes": nodes,
                 "edges": edges,
                 "stats": {
@@ -1813,21 +1808,24 @@ class MemoryService:
                                 "weight": e.get("weight", 1.0),
                             }
                         )
-                nodes = [
-                    {
-                        "id": n.get("id"),
-                        "type": str(n.get("node_type") or n.get("type") or "").lower(),
-                        "content": n.get("content", ""),
-                        "layer": 1 if str(n.get("node_type") or "") == "token" else 0,
-                        "importance": n.get("importance", 0.5),
-                        "access_count": 0,
-                        "created_at": n.get("created_at"),
-                        "role": "",
-                        "memory_type": "",
-                        "memory_source": "sqlite_graph",
-                    }
-                    for n in nodes_raw
-                ]
+                nodes = []
+                for n in nodes_raw:
+                    node_type = str(n.get("node_type") or n.get("type") or "").lower()
+                    nodes.append(
+                        {
+                            "id": n.get("id"),
+                            "type": node_type,
+                            "content": n.get("content", ""),
+                            "layer": 1 if node_type == "token" else 0,
+                            "importance": n.get("importance", 0.5),
+                            "access_count": 0,
+                            "created_at": n.get("created_at"),
+                            "role": "",
+                            "memory_type": "",
+                            "memory_source": "sqlite_graph",
+                            "semantic_level": "lightweight",
+                        }
+                    )
                 return {
                     "ok": True,
                     "handled": True,
@@ -1835,6 +1833,8 @@ class MemoryService:
                     "session_id": session_id,
                     "graph_available": True,
                     "graph_mode": "sqlite_graph",
+                    "graph_semantics": "lightweight",
+                    "semantic_graph_available": False,
                     "nodes": nodes,
                     "edges": edges,
                     "stats": {
@@ -1855,6 +1855,8 @@ class MemoryService:
                     "session_id": session_id,
                     "graph_available": False,
                     "graph_mode": "none",
+                    "graph_semantics": "none",
+                    "semantic_graph_available": False,
                     "nodes": [],
                     "edges": [],
                     "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
@@ -1862,6 +1864,224 @@ class MemoryService:
             return {"ok": True, "handled": False}
         except Exception as e:
             return {"ok": False, "reason": f"graph_session_failed:{e}", "handled": False}
+
+    def search_entries(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        limit: int = 30,
+    ) -> Dict[str, Any]:
+        q = str(query or "").strip()
+        if not q:
+            return {"ok": False, "reason": "query_required"}
+        result = self.list_entries(
+            user_id=user_id,
+            query=q,
+            limit=max(1, min(100, int(limit or 30))),
+        )
+        if not result.get("ok"):
+            return result
+        entries = result.get("entries") or []
+        lowered = q.lower()
+        for item in entries:
+            content = str(item.get("content") or "")
+            item["score"] = self._memory_search_score(
+                query=lowered,
+                text=content,
+                base=float(item.get("importance") or 0.5),
+            )
+            item["match_type"] = "text"
+        entries = [item for item in entries if float(item.get("score") or 0) > 0]
+        graph = self.get_graph_global_for_user(user_id=user_id)
+        if graph.get("ok"):
+            known_ids = {str(item.get("memory_id") or item.get("id") or "") for item in entries}
+            for node in graph.get("nodes") or []:
+                node_id = str(node.get("id") or "")
+                if not node_id or node_id in known_ids:
+                    continue
+                content = str(node.get("content") or node.get("label") or node.get("title") or node_id)
+                semantic_keys = node.get("semantic_keys") if isinstance(node.get("semantic_keys"), list) else []
+                score = self._memory_search_score(
+                    query=lowered,
+                    text=" ".join([content, " ".join(str(x) for x in semantic_keys)]),
+                    base=float(node.get("importance") or 0.5),
+                )
+                if score <= 0:
+                    continue
+                entries.append(
+                    {
+                        "memory_id": node_id,
+                        "user_id": user_id,
+                        "session_id": "",
+                        "role": str(node.get("role") or ""),
+                        "memory_type": str(node.get("memory_type") or node.get("type") or "graph_node").lower(),
+                        "source_layer": str(node.get("source_layer") or node.get("layer") or ""),
+                        "content": content,
+                        "importance": float(node.get("importance") or 0.5),
+                        "created_at": node.get("created_at"),
+                        "updated_at": node.get("updated_at") or node.get("created_at"),
+                        "status": "active",
+                        "metadata": {"match_source": "graph_node", "semantic_level": node.get("semantic_level")},
+                        "score": score,
+                        "match_type": "graph_node",
+                    }
+                )
+                known_ids.add(node_id)
+        entries.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+        limited = entries[: max(1, min(100, int(limit or 30)))]
+        return {"ok": True, "query": q, "entries": limited, "total": len(limited)}
+
+    def search_graph_for_user(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        depth: int = 1,
+        limit_nodes: int = 80,
+        limit_edges: int = 160,
+    ) -> Dict[str, Any]:
+        q = str(query or "").strip()
+        if not q:
+            graph = self.get_graph_global_for_user(user_id=user_id)
+            if not graph.get("ok"):
+                return graph
+            return self._slice_graph_payload(
+                graph,
+                query=q,
+                seed_ids=set(),
+                limit_nodes=limit_nodes,
+                limit_edges=limit_edges,
+                search_mode="overview",
+            )
+
+        graph = self.get_graph_global_for_user(user_id=user_id)
+        if not graph.get("ok"):
+            return graph
+
+        nodes = list(graph.get("nodes") or [])
+        edges = list(graph.get("edges") or [])
+        lowered = q.lower()
+        scored: List[Dict[str, Any]] = []
+        for node in nodes:
+            text = " ".join(
+                str(node.get(key) or "")
+                for key in ("content", "label", "title", "type", "memory_type", "role", "semantic_level")
+            )
+            score = self._memory_search_score(
+                query=lowered,
+                text=text,
+                base=float(node.get("importance") or 0.5),
+            )
+            if score > 0:
+                scored.append({"id": str(node.get("id") or ""), "score": score})
+        scored.sort(key=lambda row: row["score"], reverse=True)
+        seed_ids = {row["id"] for row in scored[: max(1, min(24, int(limit_nodes or 80) // 3))] if row["id"]}
+
+        expanded = set(seed_ids)
+        max_depth = max(0, min(3, int(depth or 1)))
+        frontier = set(seed_ids)
+        for _ in range(max_depth):
+            if not frontier:
+                break
+            next_frontier = set()
+            for edge in edges:
+                source = str(edge.get("source") or edge.get("from") or edge.get("source_id") or "")
+                target = str(edge.get("target") or edge.get("to") or edge.get("target_id") or "")
+                if source in frontier and target:
+                    next_frontier.add(target)
+                if target in frontier and source:
+                    next_frontier.add(source)
+            next_frontier -= expanded
+            expanded |= next_frontier
+            frontier = next_frontier
+
+        if not expanded:
+            expanded = seed_ids
+        return self._slice_graph_payload(
+            graph,
+            query=q,
+            seed_ids=seed_ids,
+            allowed_ids=expanded,
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+            search_mode="focus",
+        )
+
+    @staticmethod
+    def _memory_search_score(*, query: str, text: str, base: float = 0.5) -> float:
+        q = str(query or "").strip().lower()
+        haystack = str(text or "").strip().lower()
+        if not q or not haystack:
+            return 0.0
+        score = 0.0
+        if q in haystack:
+            score += 10.0
+        terms = [term for term in q.replace("，", " ").replace(",", " ").split() if term]
+        if terms:
+            score += sum(2.5 for term in terms if term in haystack)
+        return score + max(0.0, min(2.0, base * 2.0)) if score > 0 else 0.0
+
+    def _slice_graph_payload(
+        self,
+        graph: Dict[str, Any],
+        *,
+        query: str,
+        seed_ids: set,
+        limit_nodes: int,
+        limit_edges: int,
+        search_mode: str,
+        allowed_ids: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        nodes = list(graph.get("nodes") or [])
+        edges = list(graph.get("edges") or [])
+        node_limit = max(1, min(300, int(limit_nodes or 80)))
+        edge_limit = max(0, min(600, int(limit_edges or 160)))
+        allowed = allowed_ids if allowed_ids is not None else {str(n.get("id") or "") for n in nodes}
+        selected_nodes = [n for n in nodes if str(n.get("id") or "") in allowed]
+        selected_nodes.sort(
+            key=lambda n: (
+                str(n.get("id") or "") not in seed_ids,
+                -float(n.get("importance") or 0.5),
+                str(n.get("created_at") or ""),
+            )
+        )
+        selected_nodes = selected_nodes[:node_limit]
+        selected_ids = {str(n.get("id") or "") for n in selected_nodes}
+        selected_edges = []
+        for edge in edges:
+            source = str(edge.get("source") or edge.get("from") or edge.get("source_id") or "")
+            target = str(edge.get("target") or edge.get("to") or edge.get("target_id") or "")
+            if source in selected_ids and target in selected_ids:
+                selected_edges.append(edge)
+            if len(selected_edges) >= edge_limit:
+                break
+        layers = {"hot": 0, "warm": 0, "cold": 0}
+        for node in selected_nodes:
+            layer = node.get("layer", 0)
+            if layer == 0 or str(layer).lower() == "hot":
+                layers["hot"] += 1
+            elif layer == 1 or str(layer).lower() == "warm":
+                layers["warm"] += 1
+            elif layer == 2 or str(layer).lower() == "cold":
+                layers["cold"] += 1
+        return {
+            **graph,
+            "ok": True,
+            "status": "success",
+            "query": query,
+            "search_mode": search_mode,
+            "seed_node_ids": sorted(seed_ids),
+            "nodes": selected_nodes,
+            "edges": selected_edges,
+            "stats": {
+                "total_nodes": len(selected_nodes),
+                "total_edges": len(selected_edges),
+                "source_total_nodes": len(nodes),
+                "source_total_edges": len(edges),
+                "layers": layers,
+            },
+        }
 
     async def _save_reduce_memory_feedback(
         self,
@@ -1928,12 +2148,12 @@ class MemoryService:
         if str(row.get("status") or "") != "pending":
             return {"ok": False, "reason": "proposal_not_pending"}
         action_norm = str(action or "").strip().lower()
-        if action_norm not in {"confirm_write", "ignore_once", "reduce_similar"}:
+        if action_norm not in {"confirm_write", "confirm_write_keep_existing", "ignore_once", "reduce_similar"}:
             return {"ok": False, "reason": "invalid_action"}
 
         row["updated_at"] = datetime.now(timezone.utc).isoformat()
         row["resolved_action"] = action_norm
-        if action_norm == "confirm_write":
+        if action_norm in {"confirm_write", "confirm_write_keep_existing"}:
             if not self.memory_adapter:
                 return {"ok": False, "reason": "memory_adapter_unavailable"}
             ok = self.memory_adapter.add_message(
@@ -1951,35 +2171,36 @@ class MemoryService:
             )
             if not ok:
                 return {"ok": False, "reason": "adapter_write_failed"}
-            for prev in row.get("conflict_candidates") or []:
-                prev_text = str(prev or "").strip()
-                if not prev_text:
-                    continue
-                try:
-                    found = self.memory_adapter.list_memory_entries(
-                        user_id=user_id,
-                        session_id=None,
-                        memory_types=[str(row.get("memory_type") or "")],
-                        query=prev_text,
-                        limit=20,
-                        offset=0,
-                    )
-                    for item in found or []:
-                        if self._normalize_content(str(item.get("content") or "")) != self._normalize_content(prev_text):
-                            continue
-                        mid = str(item.get("memory_id") or "")
-                        if not mid:
-                            continue
-                        self.memory_adapter.update_memory_entry(
+            if action_norm == "confirm_write":
+                for prev in row.get("conflict_candidates") or []:
+                    prev_text = str(prev or "").strip()
+                    if not prev_text:
+                        continue
+                    try:
+                        found = self.memory_adapter.list_memory_entries(
                             user_id=user_id,
-                            memory_id=mid,
-                            metadata={
-                                "status": "superseded",
-                                "superseded_by_proposal": str(proposal_id),
-                            },
+                            session_id=None,
+                            memory_types=[str(row.get("memory_type") or "")],
+                            query=prev_text,
+                            limit=20,
+                            offset=0,
                         )
-                except Exception:
-                    continue
+                        for item in found or []:
+                            if self._normalize_content(str(item.get("content") or "")) != self._normalize_content(prev_text):
+                                continue
+                            mid = str(item.get("memory_id") or "")
+                            if not mid:
+                                continue
+                            self.memory_adapter.update_memory_entry(
+                                user_id=user_id,
+                                memory_id=mid,
+                                metadata={
+                                    "status": "superseded",
+                                    "superseded_by_proposal": str(proposal_id),
+                                },
+                            )
+                    except Exception:
+                        continue
             row["status"] = "confirmed"
             await self._emit_memory_write_decision(
                 session_id=str(row.get("session_id") or ""),
@@ -1990,7 +2211,11 @@ class MemoryService:
                 semantic_keys=list(row.get("semantic_keys") or []),
                 decision="allow",
                 target_memory_layer=str(row.get("target_memory_layer") or ""),
-                reason="user_confirmed_conflict_write",
+                reason=(
+                    "user_confirmed_conflict_write"
+                    if action_norm == "confirm_write"
+                    else "user_confirmed_write_keep_existing"
+                ),
                 persisted=True,
                 proposal_id=str(proposal_id),
             )

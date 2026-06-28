@@ -3,20 +3,19 @@ from __future__ import annotations
 import unicodedata
 from typing import Any
 
+# These corrupted-looking fragments are intentional markers used to score
+# mojibake; do not "clean" them as UI copy.
 MOJIBAKE_MARKERS = (
     "Ã",
     "Â",
-    "�",
+    "\ufffd",
     "锟",
-    "锛",
-    "浣",
-    "鏄",
+    "脙",
+    "脗",
     "鐨",
-    "鍙",
-    "鎴",
     "涓",
+    "浣",
     "闂",
-    "鎵",
 )
 
 
@@ -24,7 +23,7 @@ def text_corruption_score(text: str) -> int:
     if not text:
         return 0
     score = 0
-    score += text.count("�") * 20
+    score += text.count("\ufffd") * 20
     for marker in MOJIBAKE_MARKERS:
         score += text.count(marker)
     for ch in text:
@@ -40,8 +39,8 @@ def repair_common_mojibake(text: str) -> str:
     has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in text)
     has_katakana = any("\u30a0" <= ch <= "\u30ff" for ch in text)
     has_hangul = any("\uac00" <= ch <= "\ud7a3" for ch in text)
-    has_euro = "€" in text
-    if marker_hits < 2 and "�" not in text and not (has_cjk and (has_katakana or has_hangul or has_euro)):
+    has_euro = "\u20ac" in text
+    if marker_hits < 2 and "\ufffd" not in text and not (has_cjk and (has_katakana or has_hangul or has_euro)):
         return text
 
     best = text

@@ -26,7 +26,7 @@ def _utc_now_iso() -> str:
 
 class MCPServiceHealth(BaseModel):
     service_name: str
-    status: str = "offline"
+    status: str = "unknown"
     last_seen_at: Optional[str] = None
     last_sync_at: Optional[str] = None
     tool_count: int = 0
@@ -63,7 +63,13 @@ class MCPManager:
         health = self.health_cache.get(service_name)
         if health is not None:
             return health
-        health = MCPServiceHealth(service_name=service_name, source=source)
+        registry_entry = MCP_REGISTRY.get(service_name)
+        if registry_entry is not None and not isinstance(registry_entry, dict):
+            status = "ready"
+            source = "inprocess"
+        else:
+            status = "unknown"
+        health = MCPServiceHealth(service_name=service_name, source=source, status=status)
         self.health_cache[service_name] = health
         return health
 
@@ -427,8 +433,6 @@ class MCPManager:
             visible = self._is_service_visible_for_user(service_name, user_id=user_id)
             health = self._ensure_health(service_name)
             health.user_visibility = "visible" if visible else "hidden"
-            if health.last_seen_at is None:
-                health.status = "offline"
             rows.append(health.model_dump())
         return rows
 

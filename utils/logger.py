@@ -57,7 +57,7 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
         retention="30 days",
         level="ERROR",
         backtrace=True,        # Include detailed stack traces
-        diagnose=True,         # Enable diagnose mode
+        diagnose=False,        # Avoid logging local variables such as passwords.
         encoding="utf-8",
     )
 

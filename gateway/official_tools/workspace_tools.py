@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import difflib
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -522,4 +523,80 @@ class WorkspaceReplaceTextTool:
             requester_user_id=user_id,
         )
         row["replacements"] = int(changed)
+        return row
+
+
+class WorkspaceDiffFileTool:
+    tool_id = "workspace.diff_file"
+    name = "workspace.diff_file"
+    description = "Create a unified diff between a workspace file and proposed content."
+    official = True
+    official_domain = "workspace"
+
+    def __init__(self, *, workspace_service: Any) -> None:
+        self.workspace_service = workspace_service
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        path = str((args or {}).get("path") or "").strip()
+        proposed = str((args or {}).get("content") or "")
+        if not path:
+            raise ValueError("path is required")
+        user_id, workspace_id = _resolve_identity(args, ctx)
+        handle = self.workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id=workspace_id)
+        root = Path(handle.root_path)
+        target = _safe_path_under_root(root, path)
+        original = target.read_text(encoding="utf-8") if target.exists() and target.is_file() else ""
+        diff = "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                proposed.splitlines(keepends=True),
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+            )
+        )
+        return {
+            "workspace_id": handle.workspace_id,
+            "path": str(path).replace("\\", "/"),
+            "exists": target.exists(),
+            "changed": original != proposed,
+            "diff": diff,
+        }
+
+
+class WorkspaceApplyPatchTool:
+    tool_id = "workspace.apply_patch"
+    name = "workspace.apply_patch"
+    description = "Apply a simple text patch by replacing exact old text with new text in a workspace file."
+    official = True
+    official_domain = "workspace"
+
+    def __init__(self, *, workspace_service: Any) -> None:
+        self.workspace_service = workspace_service
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        path = str((args or {}).get("path") or "").strip()
+        old_text = str((args or {}).get("old_text") or "")
+        new_text = str((args or {}).get("new_text") or "")
+        if not path:
+            raise ValueError("path is required")
+        if old_text == "":
+            raise ValueError("old_text is required")
+        user_id, workspace_id = _resolve_identity(args, ctx)
+        handle = self.workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id=workspace_id)
+        root = Path(handle.root_path)
+        target = _safe_path_under_root(root, path)
+        if not target.exists() or not target.is_file():
+            raise FileNotFoundError(f"artifact not found: {path}")
+        original = target.read_text(encoding="utf-8")
+        count = original.count(old_text)
+        if count != 1:
+            raise ValueError(f"old_text must match exactly once, matched {count}")
+        updated = original.replace(old_text, new_text, 1)
+        row = self.workspace_service.update_document(
+            handle=handle,
+            relative_path=str(target.relative_to(root)).replace("\\", "/"),
+            content=updated,
+            requester_user_id=user_id,
+        )
+        row["patched"] = True
         return row

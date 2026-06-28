@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 import config as config_module
 from gateway.config_protocol import normalize_config_update_params
 from gateway.soul_service import build_soul_response_payload
+from gateway.user_secrets import get_user_secrets_status, update_user_secrets
 from gateway_integration import get_gateway_integration
 
 from .auth import get_current_user_id
@@ -19,8 +20,26 @@ router = APIRouter()
 
 ENV_ONLY_SECRET_PATHS = [
     "api.api_key",
+    "api.base_url",
+    "api.model",
+    "api.failover_models",
     "memory.api.api_key",
+    "memory.api.base_url",
+    "memory.api.model",
+    "memory.api.use_main_api",
+    "memory.neo4j.enabled",
+    "memory.neo4j.uri",
+    "memory.neo4j.username",
     "memory.neo4j.password",
+    "memory.neo4j.database",
+    "memory.store_backend",
+    "memory.sqlite_graph_path",
+    "memory.flat_memory_path",
+    "search.provider",
+    "search.brave_api_key",
+    "search.tavily_api_key",
+    "search.serpapi_api_key",
+    "search.searxng_url",
 ]
 
 SIMPLE_CONFIG_FIELDS = [
@@ -28,27 +47,15 @@ SIMPLE_CONFIG_FIELDS = [
     "system_prompt",
     "memory.enabled",
     "memory.profile",
-    "memory.store_backend",
     "reasoning.enabled",
     "system.stream_mode",
     "org_brain.enabled",
 ]
 
 ADVANCED_CONFIG_FIELDS = [
-    "api.base_url",
-    "api.model",
     "api.temperature",
     "api.max_tokens",
     "api.max_history_rounds",
-    "memory.neo4j.enabled",
-    "memory.neo4j.uri",
-    "memory.neo4j.username",
-    "memory.neo4j.database",
-    "memory.api.use_main_api",
-    "memory.api.base_url",
-    "memory.api.model",
-    "memory.sqlite_graph_path",
-    "memory.flat_memory_path",
     "memory.migration.mode",
     "memory.migration.source_backend",
     "memory.migration.target_backend",
@@ -105,6 +112,10 @@ class ConfigSwitchModelRequest(BaseModel):
     base_url: Optional[str] = None
 
 
+class SecretsUpdateRequest(BaseModel):
+    values: Dict[str, str] = Field(default_factory=dict)
+
+
 def _get_config_service():
     gateway_integration = get_gateway_integration()
     if not gateway_integration:
@@ -134,13 +145,21 @@ def _deep_update(base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> None
 def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = copy.deepcopy(config_data or {})
     if isinstance(sanitized.get("api"), dict):
-        sanitized["api"]["api_key"] = ""
+        for key in ("api_key", "base_url", "model", "failover_models"):
+            sanitized["api"].pop(key, None)
     if isinstance(sanitized.get("memory"), dict):
         mem = sanitized["memory"]
         if isinstance(mem.get("api"), dict):
-            mem["api"]["api_key"] = ""
+            for key in ("api_key", "base_url", "model", "use_main_api"):
+                mem["api"].pop(key, None)
         if isinstance(mem.get("neo4j"), dict):
-            mem["neo4j"]["password"] = ""
+            for key in ("enabled", "uri", "username", "password", "database"):
+                mem["neo4j"].pop(key, None)
+        for key in ("store_backend", "sqlite_graph_path", "flat_memory_path"):
+            mem.pop(key, None)
+    if isinstance(sanitized.get("search"), dict):
+        for key in ("provider", "brave_api_key", "tavily_api_key", "serpapi_api_key", "searxng_url"):
+            sanitized["search"].pop(key, None)
     return sanitized
 
 
@@ -319,6 +338,31 @@ async def get_config(
     if include_sources:
         payload["sources"] = effective_bundle.get("sources") or {}
     return payload
+
+
+@router.get("/config/secrets")
+async def get_config_secrets(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    status = get_user_secrets_status(current_user_id)
+    return {
+        "status": "success",
+        "user_id": current_user_id,
+        "secrets": status,
+        "message": "Sensitive runtime settings are stored in the user secrets.env file and are not returned in full.",
+    }
+
+
+@router.post("/config/secrets")
+async def update_config_secrets(
+    request: SecretsUpdateRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    status = update_user_secrets(current_user_id, request.values)
+    return {
+        "status": "success",
+        "user_id": current_user_id,
+        "secrets": status,
+        "message": "Sensitive runtime settings saved to user secrets.env.",
+    }
 
 
 @router.get("/config/contract")

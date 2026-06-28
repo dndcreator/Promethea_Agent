@@ -1,6 +1,6 @@
 ﻿from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .spec import SideEffectLevel, ToolSource, ToolSpec
 
@@ -70,6 +70,69 @@ class ToolRegistry:
                     input_schema=action.get("input_schema") or {},
                 )
                 self.register_spec(spec)
+
+    def normalize_call(self, *, tool_name: str, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """Normalize model-produced tool calls to a registered canonical tool id.
+
+        MCP manifests expose tools as ``<service>.<action>``. LLMs sometimes swap
+        ``tool_name`` and ``service_name`` or omit one of them. This method keeps
+        that tolerance registry-driven: only shapes that can be mapped to an
+        already registered spec are corrected.
+        """
+        params = dict(params or {})
+        raw_tool_name = str(tool_name or "").strip()
+        service_name = str(params.get("service_name") or "").strip()
+        actual_tool_name = str(params.get("tool_name") or params.get("command") or raw_tool_name).strip()
+        agent_type = str(params.get("agentType", "mcp")).lower()
+
+        if agent_type == "agent":
+            return raw_tool_name, params
+
+        if raw_tool_name in self._specs and self._specs[raw_tool_name].source == ToolSource.LOCAL:
+            return raw_tool_name, params
+
+        candidates = []
+        if raw_tool_name:
+            candidates.append(raw_tool_name)
+        if service_name and actual_tool_name:
+            candidates.append(f"{service_name}.{actual_tool_name}")
+        if raw_tool_name and service_name:
+            candidates.append(f"{raw_tool_name}.{service_name}")
+        if raw_tool_name and actual_tool_name and raw_tool_name != actual_tool_name:
+            candidates.append(f"{raw_tool_name}.{actual_tool_name}")
+
+        seen = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            spec = self._specs.get(candidate)
+            if spec is None:
+                continue
+            if spec.source == ToolSource.LOCAL:
+                return spec.full_name, params
+            normalized = dict(params)
+            normalized["agentType"] = "mcp"
+            normalized["service_name"] = spec.service_name or spec.tool_name
+            normalized["tool_name"] = spec.tool_name
+            return spec.full_name, normalized
+
+        # If a bare MCP action name is unique across services, map it safely.
+        if raw_tool_name:
+            matches = [
+                spec
+                for spec in self._specs.values()
+                if spec.source == ToolSource.MCP and spec.tool_name == raw_tool_name
+            ]
+            if len(matches) == 1:
+                spec = matches[0]
+                normalized = dict(params)
+                normalized["agentType"] = "mcp"
+                normalized["service_name"] = spec.service_name or spec.tool_name
+                normalized["tool_name"] = spec.tool_name
+                return spec.full_name, normalized
+
+        return raw_tool_name, params
 
     def resolve(self, *, tool_name: str, params: Dict[str, Any]) -> ToolSpec:
         # Prefer exact full name.

@@ -128,11 +128,11 @@ Check the response for `deprecation_warnings`.
 
 ### "The workflow stopped"
 
-1. `GET /api/workflow/{run_id}/status` — current step and run status.
-2. If status is `waiting_human`: call `POST /workflow/approve_step`.
-3. If status is `failed`: call `POST /workflow/retry_step` with the step_id.
-4. If status is `paused`: call `POST /workflow/resume`.
-5. Check checkpoints: `GET /api/workflow/{run_id}/checkpoints`.
+1. `GET /api/workflow/run/{workflow_run_id}` — current step and run status.
+2. If status is `waiting_human`: call `POST /api/workflow/approve`.
+3. If status is `failed`: call `POST /api/workflow/retry` with the step id.
+4. If status is `paused`: call `POST /api/workflow/resume/{workflow_run_id}`.
+5. Check checkpoints: `GET /api/workflow/checkpoints/{workflow_run_id}`.
 
 ### "Config change didn't take effect"
 

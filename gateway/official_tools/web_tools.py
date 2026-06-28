@@ -5,10 +5,12 @@ import re
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote_plus
 
 from agentkit.security.sandbox import get_sandbox_policy
 from gateway.tool_service import ToolInvocationContext
+from gateway.user_secrets import resolve_search_runtime_settings
+
+from .web_search_runtime import WebSearchRuntime, WebSearchSettings
 
 
 class WebFetchTextTool:
@@ -25,6 +27,9 @@ class WebFetchTextTool:
             raise ValueError("url is required")
         if not (url.startswith("http://") or url.startswith("https://")):
             raise ValueError("only http/https URLs are supported")
+        decision = get_sandbox_policy().check_url(url)
+        if not decision.allowed:
+            raise PermissionError(f"sandbox blocked url: {decision.reason}")
 
         timeout_s = int((args or {}).get("timeout_s") or 15)
         timeout_s = max(3, min(timeout_s, 60))
@@ -124,35 +129,30 @@ class WebSearchTool:
     official = True
     official_domain = "web"
 
+    def __init__(self) -> None:
+        self.runtime = WebSearchRuntime()
+
     async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
-        _ = ctx
         query = str((args or {}).get("query") or "").strip()
         if not query:
             raise ValueError("query is required")
         max_results = int((args or {}).get("max_results") or 8)
         max_results = max(1, min(max_results, 20))
-        endpoint = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-        decision = get_sandbox_policy().check_url(endpoint)
-        if not decision.allowed:
-            raise PermissionError(f"sandbox blocked url: {decision.reason}")
-        req = urllib.request.Request(endpoint, headers={"User-Agent": "PrometheaAgent/1.0"}, method="GET")
-        with urllib.request.urlopen(req, timeout=20) as resp:  # noqa: S310
-            html = resp.read().decode(resp.headers.get_content_charset() or "utf-8", errors="replace")
-
-        rows: List[Dict[str, Any]] = []
-        for m in re.finditer(
-            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            html,
-            flags=re.IGNORECASE | re.DOTALL,
-        ):
-            href = re.sub(r"\s+", " ", re.sub(r"<.*?>", "", m.group(1) or "")).strip()
-            title = re.sub(r"\s+", " ", re.sub(r"<.*?>", "", m.group(2) or "")).strip()
-            if not href:
-                continue
-            rows.append({"title": title, "url": href})
-            if len(rows) >= max_results:
-                break
-        return {"query": query, "count": len(rows), "results": rows}
+        user_id = str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "").strip() or None
+        resolved = resolve_search_runtime_settings(user_id)
+        provider_override = str((args or {}).get("provider") or "").strip().lower()
+        if provider_override:
+            resolved["provider"] = provider_override
+        settings = WebSearchSettings(
+            provider=resolved.get("provider") or "auto",
+            brave_api_key=resolved.get("brave_api_key") or "",
+            tavily_api_key=resolved.get("tavily_api_key") or "",
+            serpapi_api_key=resolved.get("serpapi_api_key") or "",
+            searxng_url=resolved.get("searxng_url") or "",
+        )
+        payload = self.runtime.search(query, max_results, settings)
+        payload["providers"] = self.runtime.provider_status(settings)
+        return payload
 
 
 class WebDownloadToWorkspaceTool:

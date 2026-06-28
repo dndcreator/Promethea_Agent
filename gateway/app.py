@@ -144,10 +144,12 @@ async def lifespan(app: FastAPI):
         try:
             from agentkit.mcp.mcpregistry import (
                 ensure_builtin_service,
-                initialize_mcp_registry,
+                reload_mcp_registry,
             )
 
-            registered_services = initialize_mcp_registry("agentkit")
+            registered_services = reload_mcp_registry(
+                ["agentkit", "extensions/community"]
+            )
             if not registered_services:
                 registered_services = ensure_builtin_service()
             logger.info(

@@ -9,6 +9,7 @@ from gateway.conversation_pipeline import (
     stage_mode_detection,
 )
 from gateway.conversation_service import ConversationService
+from gateway.http.user_file_store import UserFileStore
 from gateway.protocol import (
     ConversationRunInput,
     EventType,
@@ -213,6 +214,187 @@ async def test_pipeline_exposes_prompt_assembly_debug():
     prompt_debug = out.raw.get("prompt_assembly")
     assert isinstance(prompt_debug, dict)
     assert "used_block_ids" in prompt_debug
+    assert "identity" in prompt_debug["used_block_ids"]
+    assert "persona_core" not in prompt_debug["used_block_ids"]
+    assert "soul_core" in prompt_debug["used_block_ids"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_uses_prompt_assembler_blocks():
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="hello world",
+        channel="web",
+        include_recent=False,
+    )
+
+    prompt_debug = prepared.get("prompt_assembly") or {}
+    used_block_ids = prompt_debug.get("used_block_ids") or []
+    assert "identity" in used_block_ids
+    assert "runtime_context" in used_block_ids
+    assert "persona_core" not in used_block_ids
+    assert "soul_core" in used_block_ids
+    assert prepared["messages"][0]["role"] == "system"
+    assert "Current local date" in prepared["messages"][0]["content"]
+    assert "Soul Prompt" in prepared["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_keeps_core_identity_when_agent_name_is_customized():
+    config_service = MagicMock()
+    config_service.get_merged_config.return_value = {
+        "agent_name": "EDI",
+        "system_prompt": "Speak in a calm tactical style.",
+        "prompts": {"Promethea_system_prompt": "You are Promethea."},
+    }
+    service = ConversationService(
+        conversation_core=_DummyCore(),
+        event_emitter=None,
+        config_service=config_service,
+    )
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "mode": "fast",
+            "cognitive_mode": "direct",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": False,
+            "reason": "test",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="Are you Promethea?",
+        channel="web",
+        include_recent=False,
+    )
+
+    system_prompt = prepared["messages"][0]["content"]
+    used_block_ids = (prepared.get("prompt_assembly") or {}).get("used_block_ids") or []
+    assert "You are Promethea" in system_prompt
+    assert "You are EDI" not in system_prompt
+    assert "Active display name: EDI" in system_prompt
+    assert "Speak in a calm tactical style" in system_prompt
+    assert "customization" in used_block_ids
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_wraps_legacy_core_prompt_with_identity_layering():
+    legacy_prompt = (
+        "You are Promethea, a cognitive agent runtime assistant. "
+        "Promethea is a runtime with graph/layered long-term memory."
+    )
+    config_service = MagicMock()
+    config_service.get_merged_config.return_value = {
+        "agent_name": "EDI",
+        "system_prompt": "",
+        "prompts": {"Promethea_system_prompt": legacy_prompt},
+    }
+    service = ConversationService(
+        conversation_core=_DummyCore(),
+        event_emitter=None,
+        config_service=config_service,
+    )
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "mode": "fast",
+            "cognitive_mode": "direct",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": False,
+            "reason": "test",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="Any new answer now?",
+        channel="web",
+        include_recent=False,
+    )
+
+    system_prompt = prepared["messages"][0]["content"]
+    assert "Core identity:" in system_prompt
+    assert "Presentation and roleplay layers:" in system_prompt
+    assert "prior mistakes" in system_prompt
+    assert "Additional user/default prompt:" in system_prompt
+    assert legacy_prompt in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_injects_tool_protocol_when_policy_needs_tools():
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "mode": "fast",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": True,
+            "reason": "test",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="calculate this with a tool",
+        channel="web",
+        include_recent=False,
+    )
+
+    prompt_debug = prepared.get("prompt_assembly") or {}
+    used_block_ids = prompt_debug.get("used_block_ids") or []
+    system_prompt = prepared["messages"][0]["content"]
+    assert "tools" in used_block_ids
+    assert "Tool execution protocol" in system_prompt
+    assert "Never claim a tool ran" in system_prompt
+    assert "Runtime registered tools (structured JSON)" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_light_action_does_not_start_reasoning_tree():
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    reasoning = MagicMock()
+    reasoning.is_enabled.return_value = True
+    reasoning.run = AsyncMock(side_effect=AssertionError("light action should not run full reasoning"))
+    service.reasoning_service = reasoning
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "source": "test",
+            "cognitive_mode": "light_action",
+            "mode": "fast",
+            "reasoning_budget": "small",
+            "tool_budget": 3,
+            "memory_budget": "brief",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": True,
+            "reason": "simple lookup",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="查一下茅台最新股价",
+        channel="web",
+        include_recent=False,
+    )
+
+    assert prepared["reasoning"]["used_reasoning"] is False
+    assert prepared["prompt_policy"]["cognitive_mode"] == "light_action"
+    assert prepared["execution_budget"]["tool_budget"] == 3
+    assert "tools" in (prepared.get("prompt_assembly") or {}).get("used_block_ids", [])
 
 
 @pytest.mark.asyncio
@@ -355,3 +537,103 @@ async def test_pipeline_exposes_task_graph_and_context_budget_contracts():
     assert orchestration.get("version") == "1.0"
     assert orchestration.get("execution_core") == "single_loop_runtime"
     assert isinstance(orchestration.get("reasoning_engine"), dict)
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_compiles_text_attachment_as_runtime_block(tmp_path, monkeypatch):
+    import gateway.http.user_file_store as file_store_module
+
+    store = UserFileStore(root_dir=str(tmp_path))
+    entry = store.save_upload(
+        user_id="u1",
+        filename="notes.txt",
+        content=b"enterprise graph context",
+        content_type="text/plain",
+        session_id="s1",
+    )
+    monkeypatch.setattr(file_store_module, "user_file_store", store)
+
+    service = ConversationService(conversation_core=_DummyCore(), event_emitter=None)
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "mode": "fast",
+            "cognitive_mode": "direct",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": False,
+            "reason": "test",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="summarize this",
+        channel="web",
+        include_recent=False,
+        attachments=[{"file_id": entry["file_id"]}],
+    )
+
+    user_content = prepared["messages"][-1]["content"]
+    assert isinstance(user_content, str)
+    assert "summarize this" in user_content
+    assert "enterprise graph context" in user_content
+    assert prepared["llm_io"]["input_block_count"] >= 2
+    assert any(
+        row.get("source") == "attachment" and row.get("modality") == "text"
+        for row in prepared["runtime_blocks"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_turn_compiles_image_attachment_for_vision_model(tmp_path, monkeypatch):
+    import gateway.http.user_file_store as file_store_module
+
+    store = UserFileStore(root_dir=str(tmp_path))
+    entry = store.save_upload(
+        user_id="u1",
+        filename="diagram.png",
+        content=b"fake image bytes",
+        content_type="image/png",
+        session_id="s1",
+    )
+    monkeypatch.setattr(file_store_module, "user_file_store", store)
+
+    config_service = MagicMock()
+    config_service.get_merged_config.return_value = {
+        "vision_enabled": True,
+        "api": {"model": "gpt-4o"},
+        "prompts": {"Promethea_system_prompt": "Promethea system"},
+    }
+    service = ConversationService(
+        conversation_core=_DummyCore(),
+        event_emitter=None,
+        config_service=config_service,
+    )
+    service.route_prompt_policy = AsyncMock(
+        return_value={
+            "mode": "fast",
+            "cognitive_mode": "direct",
+            "need_reasoning": False,
+            "need_memory": False,
+            "need_tools": False,
+            "reason": "test",
+            "confidence": 0.9,
+        }
+    )
+
+    prepared = await service.prepare_chat_turn(
+        session_id="s1",
+        user_id="u1",
+        user_message="what is in this image?",
+        channel="web",
+        include_recent=False,
+        attachments=[{"file_id": entry["file_id"]}],
+    )
+
+    user_content = prepared["messages"][-1]["content"]
+    assert isinstance(user_content, list)
+    assert any(part.get("type") == "text" for part in user_content)
+    assert any(part.get("type") == "image_url" for part in user_content)
+    assert prepared["llm_io"]["vision_enabled"] is True

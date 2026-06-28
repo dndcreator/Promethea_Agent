@@ -246,6 +246,38 @@ class TestToolService:
         assert row.get("policy_allowed") is False
         assert row.get("callable_now") is False
 
+    @pytest.mark.asyncio
+    async def test_call_tool_normalizes_swapped_mcp_call_before_execution(self):
+        class _DummyMCPManager:
+            def get_available_services_filtered(self):
+                return {
+                    "mcp_services": [
+                        {
+                            "name": "computer_control",
+                            "description": "computer tools",
+                            "available_tools": [{"name": "execute_command", "description": "run command"}],
+                        }
+                    ],
+                    "agent_services": [],
+                }
+
+            async def unified_call(self, service_name, tool_name, args):
+                return {"service_name": service_name, "tool_name": tool_name, "args": args}
+
+        service = ToolService(event_emitter=EventEmitter(), mcp_manager=_DummyMCPManager())
+        out = await service.call_tool(
+            "computer_control",
+            {
+                "agentType": "local",
+                "service_name": "execute_command",
+                "command": "echo hello",
+            },
+        )
+
+        assert out["service_name"] == "computer_control"
+        assert out["tool_name"] == "execute_command"
+        assert out["args"]["command"] == "echo hello"
+
 
     @pytest.mark.asyncio
     async def test_tool_hooks_are_invoked_on_success_and_error(self):

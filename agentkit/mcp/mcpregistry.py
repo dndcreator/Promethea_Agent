@@ -10,6 +10,7 @@ import types
 
 MCP_REGISTRY = {}
 MANIFEST_CACHE = {}
+MANIFEST_SOURCES = {}
 
 def load_tools_manifest(manifest_path: Path) -> Optional[Dict[str, Any]]:
 
@@ -62,6 +63,7 @@ def scan_and_register_services(service_dir: str = 'agentkit') -> List[str]:
 
             if service_type == 'mcp':
                 MANIFEST_CACHE[service_name] = manifest
+                MANIFEST_SOURCES[service_name] = str(manifest_file.resolve())
                 service_instance = create_service_instance(manifest)
                 if service_instance:
                     MCP_REGISTRY[service_name] = service_instance
@@ -182,6 +184,34 @@ def initialize_mcp_registry(scan_dir: str = 'agentkit', force: bool = False) -> 
         return scan_and_register_services(scan_dir)
     return list(MCP_REGISTRY.keys())
 
+def reload_mcp_registry(scan_dirs: Optional[List[str]] = None) -> List[str]:
+    """Reload MCP manifests from one or more roots.
+
+    This keeps the historical global registry shape but refreshes entries whose
+    manifest came from the selected roots. It is intentionally conservative:
+    only services with a known source path under those roots are removed before
+    rescanning, so unrelated runtime registrations are preserved.
+    """
+    roots = [Path(x or "agentkit").resolve() for x in (scan_dirs or ["agentkit"])]
+    removed = []
+    for service_name, source in list(MANIFEST_SOURCES.items()):
+        try:
+            source_path = Path(source).resolve()
+            if any(source_path.is_relative_to(root) for root in roots):
+                removed.append(service_name)
+        except Exception:
+            continue
+    for service_name in removed:
+        MCP_REGISTRY.pop(service_name, None)
+        MANIFEST_CACHE.pop(service_name, None)
+        MANIFEST_SOURCES.pop(service_name, None)
+
+    registered: List[str] = []
+    for root in roots:
+        if root.exists():
+            registered.extend(scan_and_register_services(str(root)))
+    return registered
+
 def is_initialized() -> bool:
     """Return True when at least one MCP-compatible service is registered."""
     return len(MCP_REGISTRY) > 0
@@ -236,6 +266,7 @@ def ensure_builtin_service():
             }
         }
     }
+    MANIFEST_SOURCES["builtin"] = "builtin"
     return ["builtin"]
 
 if __name__ == "__main__":

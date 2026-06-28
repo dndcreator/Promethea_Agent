@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +15,15 @@ from typing import Any, Dict, List, Optional
 
 from agentkit.security.sandbox import get_sandbox_policy
 
+SELF_MODEL_DOCS = [
+    "docs/runtime-overview.md",
+    "docs/architecture/runtime-io.md",
+    "docs/architecture/tool-runtime.md",
+    "docs/architecture/memory-model.md",
+    "docs/architecture/conversation-pipeline.md",
+    "docs/ui-overview.md",
+]
+
 
 class SelfEvolveService:
     """Specialized service for self-improvement planning, patching, and validation."""
@@ -22,6 +33,7 @@ class SelfEvolveService:
         root = Path(workspace_root) if workspace_root else Path.cwd()
         self.workspace_root = root.resolve()
         self.store_path = self.workspace_root / "memory" / "self_evolve_tasks.json"
+        self.self_model_path = self.workspace_root / "memory" / "self_model.json"
         self._sandbox = get_sandbox_policy()
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -54,6 +66,222 @@ class SelfEvolveService:
             json.dumps(state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+    @staticmethod
+    def _doc_outline(text: str, *, max_lines: int = 80) -> List[str]:
+        lines: List[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith("- `") or line.startswith("- "):
+                lines.append(line)
+            if len(lines) >= max_lines:
+                break
+        return lines
+
+    def _read_self_model_docs(self, *, max_chars_per_file: int) -> List[Dict[str, Any]]:
+        docs: List[Dict[str, Any]] = []
+        cap = max(500, int(max_chars_per_file))
+        for rel in SELF_MODEL_DOCS:
+            path = self._resolve_workspace_path(rel)
+            if not path.exists() or not path.is_file():
+                docs.append({"path": rel, "exists": False, "sha256": "", "outline": []})
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            docs.append(
+                {
+                    "path": rel,
+                    "exists": True,
+                    "sha256": hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest(),
+                    "outline": self._doc_outline(text[:cap]),
+                }
+            )
+        return docs
+
+    @staticmethod
+    def _build_capability_inventory() -> Dict[str, Any]:
+        return {
+            "conversation_runtime": {
+                "status": "documented",
+                "modules": ["ConversationService", "RuntimeBlock", "ContextCompiler", "PromptAssembler"],
+                "role": "compile user input, context, memory, tools, reasoning, and workflow outputs into LLM turns",
+            },
+            "memory": {
+                "status": "documented",
+                "modules": ["MemoryService", "memory recall", "memory write gate"],
+                "role": "controlled recall and durable memory writes through runtime services",
+            },
+            "reasoning": {
+                "status": "documented",
+                "modules": ["PromptPolicyRouter", "ReasoningService", "reasoning tree"],
+                "role": "route complex work into explicit multi-step reasoning with summaries and traces",
+            },
+            "tools": {
+                "status": "documented",
+                "modules": ["ToolService", "ToolRegistry", "ToolPolicy"],
+                "role": "normalize, govern, execute, and observe local/MCP/community tools",
+            },
+            "workflow": {
+                "status": "documented",
+                "modules": ["workflow engine", "recovery/checkpoint surfaces"],
+                "role": "long-running or recoverable task orchestration when enabled",
+            },
+            "self_evolve": {
+                "status": "active",
+                "modules": ["SelfEvolveService", "self_model", "task context", "patch", "validate"],
+                "role": "maintain a self-knowledge baseline and run controlled improvement tasks",
+            },
+        }
+
+    @staticmethod
+    def _build_architecture_map() -> Dict[str, Any]:
+        return {
+            "single_turn_path": [
+                "input normalization",
+                "runtime context construction",
+                "prompt policy routing",
+                "memory recall when budgeted",
+                "direct/light_action/deep_reasoning/workflow execution",
+                "response synthesis",
+                "memory write review",
+            ],
+            "key_boundaries": {
+                "ConversationService": "LLM I/O hub, not owner of memory/tools/reasoning/workflows",
+                "MemoryService": "memory recall and write decisions",
+                "ReasoningService": "reasoning trees and summaries",
+                "ToolService": "tool registry, policy, execution, observations",
+                "SelfEvolveService": "self model, controlled code task lifecycle, validation",
+            },
+            "artifact_flow": {
+                "docs": "source of lightweight self-model facts",
+                "memory/self_model.json": "persisted self-evolution baseline",
+                "self_evolve_tasks.json": "reviewable evolution task log",
+            },
+        }
+
+    @staticmethod
+    def _build_runtime_boundaries() -> List[str]:
+        return [
+            "Do not claim live code/file/tool inspection unless the current turn contains an observation.",
+            "Treat the self model as a docs-derived baseline, not direct runtime introspection.",
+            "Refresh or mark the self model stale when source docs change.",
+            "Self-evolve tasks should identify the affected module before proposing a patch.",
+            "Core code changes remain controlled and reviewable; self-evolve should not silently modify arbitrary files.",
+        ]
+
+    @staticmethod
+    def _build_improvement_backlog() -> List[Dict[str, str]]:
+        return [
+            {
+                "area": "self_model_freshness",
+                "priority": "high",
+                "proposal": "Compare source doc hashes before self-evolve work and refresh stale self models.",
+            },
+            {
+                "area": "architecture_grounding",
+                "priority": "high",
+                "proposal": "Use the self model as a required baseline for self-evolve planning and require code/tool claims to cite observations.",
+            },
+            {
+                "area": "task_planning",
+                "priority": "medium",
+                "proposal": "Attach affected modules and acceptance criteria to each self-evolve task.",
+            },
+            {
+                "area": "capability_inventory",
+                "priority": "medium",
+                "proposal": "Extend the self model from docs-only inventory to registry-backed tools and runtime service snapshots.",
+            },
+            {
+                "area": "drift_detection",
+                "priority": "medium",
+                "proposal": "Diff old and new self models to produce migration notes and suggested tests.",
+            },
+            {
+                "area": "general_agent_readiness",
+                "priority": "medium",
+                "proposal": "Track whether memory, tools, reasoning, workflows, UI interruption, and validation are actually wired end to end.",
+            },
+        ]
+
+    @classmethod
+    def _build_self_model_summary(cls, docs: List[Dict[str, Any]]) -> str:
+        available = [str(doc.get("path")) for doc in docs if doc.get("exists")]
+        capabilities = ", ".join(cls._build_capability_inventory().keys())
+        return "\n".join(
+            [
+                "Promethea self model, derived from repository architecture docs.",
+                "Known runtime structure:",
+                "- Promethea is a runtime, not only a prompt-wrapped base model.",
+                "- The request path coordinates identity, runtime context, prompt policy routing, memory, reasoning, tools, workflows, and safety boundaries.",
+                "- ConversationService is the LLM I/O hub; it compiles RuntimeBlock inputs and calls the active model.",
+                "- Prompt policy routing chooses direct, light_action, deep_reasoning, or workflow budgets before final answer generation.",
+                "- ReasoningService owns reasoning trees and summaries for multi-step work.",
+                "- MemoryService owns recall and memory-write decisions; memory is available through controlled runtime paths, not direct model introspection.",
+                "- ToolService owns tool registry, normalization, policy checks, execution, and observations.",
+                "- Self-evolve provides controlled code-evolution tasks, context collection, patching, validation, and this docs-derived self model.",
+                f"Capability inventory areas: {capabilities}.",
+                "Boundaries:",
+                "- The assistant must not claim it inspected code, called tools, read files, or checked live runtime state unless the current turn contains an actual observation/result.",
+                "- This self model is a docs-derived architecture snapshot and may be stale after code changes.",
+                f"Source docs: {', '.join(available) if available else 'none'}",
+            ]
+        )
+
+    def _self_model_freshness(self, model: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if model is None:
+            if not self.self_model_path.exists():
+                return {"exists": False, "stale": True, "changed_sources": [], "missing_sources": SELF_MODEL_DOCS}
+            try:
+                model = json.loads(self.self_model_path.read_text(encoding="utf-8"))
+            except Exception:
+                return {"exists": True, "stale": True, "changed_sources": ["memory/self_model.json"], "missing_sources": []}
+        docs_now = self._read_self_model_docs(max_chars_per_file=500)
+        previous_docs = model.get("documents") if isinstance(model.get("documents"), list) else []
+        previous_by_path = {str(doc.get("path")): doc for doc in previous_docs if isinstance(doc, dict)}
+        changed: List[str] = []
+        missing: List[str] = []
+        for doc in docs_now:
+            rel = str(doc.get("path") or "")
+            if not doc.get("exists"):
+                missing.append(rel)
+                continue
+            old = previous_by_path.get(rel) or {}
+            if old.get("sha256") != doc.get("sha256"):
+                changed.append(rel)
+        return {
+            "exists": True,
+            "stale": bool(changed or missing),
+            "changed_sources": changed,
+            "missing_sources": missing,
+        }
+
+    async def evolve_build_self_model(self, max_chars_per_file: int = 5000) -> Dict[str, Any]:
+        docs = self._read_self_model_docs(max_chars_per_file=max_chars_per_file)
+        model = {
+            "kind": "promethea_self_model",
+            "version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "source": "self_evolve.docs",
+            "summary": self._build_self_model_summary(docs),
+            "architecture_map": self._build_architecture_map(),
+            "capability_inventory": self._build_capability_inventory(),
+            "runtime_boundaries": self._build_runtime_boundaries(),
+            "improvement_backlog": self._build_improvement_backlog(),
+            "documents": docs,
+        }
+        model["freshness"] = self._self_model_freshness(model)
+        self.self_model_path.parent.mkdir(parents=True, exist_ok=True)
+        self.self_model_path.write_text(json.dumps(model, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "self_model": model, "path": self.self_model_path.relative_to(self.workspace_root).as_posix()}
+
+    async def evolve_get_self_model(self) -> Dict[str, Any]:
+        if not self.self_model_path.exists():
+            return {"ok": True, "exists": False, "self_model": None, "path": self.self_model_path.relative_to(self.workspace_root).as_posix()}
+        raw = json.loads(self.self_model_path.read_text(encoding="utf-8"))
+        raw["freshness"] = self._self_model_freshness(raw)
+        return {"ok": True, "exists": True, "self_model": raw, "path": self.self_model_path.relative_to(self.workspace_root).as_posix()}
 
     def _get_task_or_raise(self, task_id: str) -> Dict[str, Any]:
         state = self._load_tasks()
@@ -89,6 +317,19 @@ class SelfEvolveService:
             normalized_files.append(p.relative_to(self.workspace_root).as_posix())
 
         now = time.time()
+        self_model_snapshot: Dict[str, Any] = {"exists": False}
+        if self.self_model_path.exists():
+            try:
+                raw_self_model = json.loads(self.self_model_path.read_text(encoding="utf-8"))
+                self_model_snapshot = {
+                    "exists": True,
+                    "version": raw_self_model.get("version"),
+                    "generated_at": raw_self_model.get("generated_at"),
+                    "freshness": self._self_model_freshness(raw_self_model),
+                    "capability_areas": sorted((raw_self_model.get("capability_inventory") or {}).keys()),
+                }
+            except Exception:
+                self_model_snapshot = {"exists": True, "error": "failed_to_read_self_model"}
         task_id = f"se_{uuid.uuid4().hex}"
         task = {
             "task_id": task_id,
@@ -96,6 +337,7 @@ class SelfEvolveService:
             "target_files": sorted(set(normalized_files)),
             "acceptance_criteria": [str(x) for x in (acceptance_criteria or []) if str(x).strip()],
             "status": "planned",
+            "self_model_snapshot": self_model_snapshot,
             "changes": [],
             "validations": [],
             "created_at": now,
@@ -129,6 +371,25 @@ class SelfEvolveService:
         task = self._get_task_or_raise(task_id)
         out: List[Dict[str, Any]] = []
         cap = max(200, int(max_chars_per_file))
+        self_model = await self.evolve_get_self_model()
+        if self_model.get("exists") and isinstance(self_model.get("self_model"), dict):
+            model = self_model["self_model"]
+            context_model = {
+                "summary": model.get("summary"),
+                "architecture_map": model.get("architecture_map"),
+                "capability_inventory": model.get("capability_inventory"),
+                "runtime_boundaries": model.get("runtime_boundaries"),
+                "improvement_backlog": model.get("improvement_backlog"),
+                "freshness": model.get("freshness"),
+            }
+            out.append(
+                {
+                    "path": "memory/self_model.json",
+                    "exists": True,
+                    "role": "self_evolution_baseline",
+                    "content": json.dumps(context_model, ensure_ascii=False, indent=2)[:cap],
+                }
+            )
 
         for rel in task.get("target_files", []):
             p = self._resolve_workspace_path(rel)

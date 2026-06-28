@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { getMetrics } from '../../lib/api'
+import { getMetrics } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
 
 export default function MetricsModal({ onClose }: { onClose: () => void }) {
@@ -10,18 +10,32 @@ export default function MetricsModal({ onClose }: { onClose: () => void }) {
     getMetrics().then((res) => res.json()).then((data) => setMetrics(data.metrics || data)).catch(() => {})
   }, [])
 
+  const llm = metrics.llm || {}
+  const memory = metrics.memory || {}
+  const sessions = metrics.sessions || {}
+  const personal = metrics.personal || {}
+  const system = metrics.system || {}
+  const cost = metrics.cost || {}
+  const totalCalls = llm.total_calls ?? llm.calls ?? 0
+  const averageLatency = llm.average_latency_ms ?? llm.avg_time_ms ?? 0
+  const estimatedCost = llm.estimated_cost ?? cost.estimated_usd ?? 0
+  const totalRecalls = memory.total_recalls ?? memory.recalls ?? 0
+  const averageRecall = memory.average_recall_time_ms ?? memory.avg_time_ms ?? 0
+  const messagesTotal = metrics.chat?.messages_total ?? sessions.messages ?? 0
+  const uptimeSeconds = system.uptime_seconds ?? metrics.uptime_seconds ?? 0
+
   return (
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-8">
       <div className="bg-white rounded-2xl shadow-xl w-[500px] overflow-hidden">
         <div className="px-6 py-4 border-b border-black/5 flex justify-between items-center bg-gray-50/50">
-          <h2 className="text-lg font-bold text-text-strong">{t('运行指标', 'Metrics')}</h2>
+          <h2 className="text-lg font-bold text-text-strong">{t('系统指标', 'Metrics')}</h2>
           <button onClick={onClose} className="text-2xl leading-none text-text-muted hover:text-text-strong">&times;</button>
         </div>
         <div className="p-6 grid grid-cols-2 gap-4">
-          <MetricCard label={t('Token 使用量', 'Token Usage')} value={metrics.llm?.total_tokens || 0} sub={`Est. Cost: $${(metrics.llm?.estimated_cost || 0).toFixed(4)}`} />
-          <MetricCard label={t('LLM 调用', 'LLM Calls')} value={metrics.llm?.total_calls || 0} sub={`Avg: ${(metrics.llm?.average_latency_ms || 0).toFixed(0)}ms`} />
-          <MetricCard label={t('记忆召回', 'Memory Recalls')} value={metrics.memory?.total_recalls || 0} sub={`Avg: ${(metrics.memory?.average_recall_time_ms || 0).toFixed(0)}ms`} />
-          <MetricCard label={t('会话 / 消息', 'Sessions / Messages')} value={`${metrics.personal?.sessions_current || 0}/${metrics.chat?.messages_total || 0}`} sub={`Uptime: ${metrics.system?.uptime_seconds || 0}s`} />
+          <MetricCard label={t('Token 用量', 'Token Usage')} value={llm.total_tokens || 0} sub={`${t('输入', 'In')}: ${llm.prompt_tokens || 0} / ${t('输出', 'Out')}: ${llm.completion_tokens || 0}`} />
+          <MetricCard label={t('估算成本', 'Estimated Cost')} value={`$${Number(estimatedCost || 0).toFixed(4)}`} sub={`${t('LLM 调用', 'LLM Calls')}: ${totalCalls} · Avg: ${Number(averageLatency || 0).toFixed(0)}ms`} />
+          <MetricCard label={t('记忆召回', 'Memory Recalls')} value={totalRecalls} sub={`Avg: ${Number(averageRecall || 0).toFixed(0)}ms · Items: ${memory.items_recalled || 0}`} />
+          <MetricCard label={t('会话 / 消息', 'Sessions / Messages')} value={`${personal.sessions_current || 0}/${messagesTotal}`} sub={`Uptime: ${uptimeSeconds}s`} />
         </div>
       </div>
     </div>

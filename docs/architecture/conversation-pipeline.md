@@ -28,6 +28,12 @@ All objects are defined in `gateway/protocol.py`.
 
 Pipeline entry is `run_staged_pipeline` in `gateway/conversation_pipeline.py`, and `ConversationService.run_conversation` delegates to it.
 
+`ConversationService` also owns LLM input/output compilation. User text,
+attachments, and module-provided runtime context are normalized into
+`RuntimeBlock` values and compiled by `ContextCompiler` before reaching the
+model. This keeps multimodal and observation handling in one place while
+leaving memory, reasoning, tools, actions, and workflows in their own services.
+
 For each stage:
 
 - emit `conversation.stage.started`

@@ -3,17 +3,58 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --white-matter: #f7f8f5;
+    --white-matter-deep: #e3e7e2;
+    --gray-matter: #68736f;
+    --gray-matter-deep: #2f3c39;
+    --axon-mist: rgba(53, 108, 104, 0.14);
+    --synapse-warm: rgba(178, 139, 83, 0.16);
+    --ink: #1f211f;
+  }
+
   body {
     @apply m-0 text-text-normal font-sans antialiased overflow-hidden;
     background: 
-      radial-gradient(1200px 700px at -20% -10%, #c7e3ff 0%, transparent 62%),
-      radial-gradient(900px 420px at 110% 0%, #ffe2a5 0%, transparent 58%),
-      linear-gradient(180deg, #f5f9ff 0%, #eef4fb 100%);
+      radial-gradient(980px 520px at -18% -12%, rgba(255,255,255,0.72) 0%, transparent 60%),
+      radial-gradient(760px 380px at 110% 4%, rgba(53,108,104,0.10) 0%, transparent 58%),
+      linear-gradient(180deg, #f3f4f1 0%, #e8ece8 100%);
+    font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+    text-rendering: geometricPrecision;
   }
 }
 
 @layer utilities {
   .glass-panel {
-    @apply bg-white/70 backdrop-blur-xl border border-white/60 shadow-md;
+    @apply backdrop-blur-xl border border-white/65 shadow-[0_18px_60px_rgba(52,51,47,0.10)];
+    background-color: rgba(255, 253, 248, 0.72);
+  }
+
+  .hero-panel {
+    background:
+      radial-gradient(circle at 18% 20%, var(--axon-mist), transparent 30%),
+      radial-gradient(circle at 80% 24%, var(--synapse-warm), transparent 26%),
+      linear-gradient(135deg, rgba(255,253,248,0.94), rgba(231,227,218,0.70));
+  }
+
+  .soft-grid {
+    background-image:
+      linear-gradient(rgba(52, 51, 47, 0.045) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(52, 51, 47, 0.045) 1px, transparent 1px);
+    background-size: 30px 30px;
+  }
+
+  .neural-surface {
+    background:
+      radial-gradient(circle at 22% 18%, rgba(255,255,255,0.72), transparent 30%),
+      radial-gradient(circle at 82% 82%, rgba(112,111,104,0.10), transparent 30%),
+      linear-gradient(145deg, rgba(255,253,248,0.82), rgba(230,223,211,0.58));
+  }
+
+  .fine-border {
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.62),
+      0 1px 0 rgba(255,255,255,0.72),
+      0 18px 42px rgba(52,51,47,0.08);
   }
 }

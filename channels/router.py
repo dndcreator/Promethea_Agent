@@ -1,5 +1,4 @@
-﻿"""
-"""
+﻿"""Message routing across registered channels."""
 import logging
 import asyncio
 from typing import Dict, Any, Optional, Callable, List
@@ -10,7 +9,7 @@ logger = logging.getLogger("Channels.Router")
 
 
 class MessageRouter:
-    """TODO: add docstring."""
+    """Apply filters, route inbound messages, and send outbound channel replies."""
     
     def __init__(self, channel_registry: ChannelRegistry):
         self.registry = channel_registry
@@ -26,7 +25,7 @@ class MessageRouter:
         logger.info(f"Registered route handler for channel: {channel_name}")
     
     def register_global_handler(self, handler: Callable):
-        """TODO: add docstring."""
+        """Register a handler that observes every accepted inbound message."""
         if handler not in self._global_handlers:
             self._global_handlers.append(handler)
             logger.info("Registered global message handler")
@@ -37,7 +36,7 @@ class MessageRouter:
             logger.info("Added message filter")
     
     async def route_message(self, message: Message) -> Any:
-        """TODO: add docstring."""
+        """Route one inbound message through filters, a channel handler, and globals."""
         try:
             for filter_func in self._filters:
                 if asyncio.iscoroutinefunction(filter_func):
@@ -86,7 +85,7 @@ class MessageRouter:
         message_type: MessageType = MessageType.TEXT,
         **kwargs
     ) -> Optional[Dict[str, Any]]:
-        """TODO: add docstring."""
+        """Send one outbound message through a named registered channel."""
         channel = self.registry.get(channel_name)
         if not channel:
             logger.error(f"Channel not found: {channel_name}")

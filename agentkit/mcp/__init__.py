@@ -1,2 +1,2 @@
-﻿"""TODO: add docstring."""
+﻿"""MCP integration helpers for AgentKit."""
 

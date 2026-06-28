@@ -1,4 +1,4 @@
-import { confirmToolCall } from '../../lib/api';
+import { confirmToolCall } from '../../services/api';
 import { useLanguage } from '../../store/LanguageContext';
 
 interface ConfirmModalProps {
@@ -15,8 +15,8 @@ export default function ConfirmModal({ toolName, toolArgs, sessionId, toolCallId
     try {
       await confirmToolCall(sessionId, toolCallId, action);
       onClose(action === 'approve');
-    } catch (e) {
-      console.error(e);
+    } catch (error) {
+      console.error(error);
       onClose(false);
     }
   };
@@ -28,7 +28,7 @@ export default function ConfirmModal({ toolName, toolArgs, sessionId, toolCallId
           <h2 className="text-lg font-bold text-red-600">{t('敏感操作确认', 'Sensitive Action Confirmation')}</h2>
         </div>
         <div className="p-6 flex flex-col gap-4">
-          <p className="text-sm text-text-strong">{t('Agent 请求批准以下操作：', 'The agent requests approval for this action:')}</p>
+          <p className="text-sm text-text-strong">{t('Agent 请求你批准此操作：', 'The agent requests approval for this action:')}</p>
           <div className="bg-gray-50 rounded-xl p-4 border border-black/5 font-mono text-xs overflow-x-auto whitespace-pre-wrap">
             <span className="font-bold text-brand-600 mb-2 block">{toolName}</span>
             <span className="text-text-normal">{toolArgs}</span>

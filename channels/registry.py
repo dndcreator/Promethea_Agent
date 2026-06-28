@@ -1,12 +1,11 @@
-﻿"""
-"""
+﻿"""Channel registry for runtime adapters."""
 from loguru import logger
 from typing import Dict, Optional, List
 from .base import BaseChannel, ChannelType
 
 
 class ChannelRegistry:
-    """TODO: add docstring."""
+    """In-memory registry of configured channel adapters."""
     
     def __init__(self):
         self._channels: Dict[str, BaseChannel] = {}

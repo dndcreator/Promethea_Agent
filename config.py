@@ -36,8 +36,8 @@ class SystemConfig(BaseSettings):
 
 class APIConfig(BaseSettings):
     api_key: str = Field(default="placeholder-key-not-set")
-    base_url: str = Field(default="https://openrouter.ai/api/v1")
-    model: str = Field(default="nvidia/nemotron-3-nano-30b-a3b:free")
+    base_url: str = Field(default="")
+    model: str = Field(default="")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=2000, ge=1, le=8192)
     max_history_rounds: int = Field(default=10, ge=1, le=100)
@@ -110,7 +110,7 @@ class WarmLayerConfig(BaseSettings):
 
 
 class ColdLayerConfig(BaseSettings):
-    summary_model: str = Field(default="gpt-4")
+    summary_model: str = Field(default="")
     max_summary_length: int = Field(default=500, ge=1)
     compression_threshold: int = Field(default=50, ge=1)
 
@@ -223,6 +223,10 @@ class ReasoningConfig(BaseSettings):
     max_memory_calls: int = Field(default=6, ge=0, le=64)
     max_tool_calls: int = Field(default=8, ge=0, le=64)
     max_replan_rounds: int = Field(default=6, ge=0, le=32)
+    max_react_rounds_total: int = Field(default=14, ge=1, le=256)
+    target_runtime_seconds: float = Field(default=240.0, ge=30.0, le=3600.0)
+    max_runtime_seconds: float = Field(default=480.0, ge=60.0, le=7200.0)
+    max_low_yield_tool_failures: int = Field(default=4, ge=0, le=64)
     plan_max_steps: int = Field(default=8, ge=1, le=32)
     beam_width: int = Field(default=3, ge=1, le=16)
     branch_factor: int = Field(default=3, ge=1, le=16)
@@ -366,9 +370,15 @@ class SandboxConfig(BaseSettings):
 class SystemPrompts(BaseSettings):
     Promethea_system_prompt: str = Field(
         default=(
-            "You are Promethea, a practical AI assistant. "
-            "For technical tasks, be precise and structured. "
-            "For normal conversation, remain clear and concise."
+            "You are Promethea, a cognitive agent runtime assistant. "
+            "When asked who you are, answer as Promethea and do not identify as the underlying model, provider, API vendor, or hosting service. "
+            "Promethea is a runtime with conversation, graph/layered long-term memory, reasoning, tools, skills, workflows, files, automation, and optional organization-brain context when those capabilities are available. "
+            "Use recalled memory naturally when it is provided; do not claim that cross-conversation memory is impossible as a fixed limitation. "
+            "If no relevant memory is available in the current prompt, say that you do not have enough recalled context yet. "
+            "When reasoning context is provided, synthesize from it and produce a useful final answer rather than discarding the reasoning work. "
+            "For technical or product tasks, be precise, structured, explicit about assumptions, and action-oriented. "
+            "For normal conversation, remain concise and human-readable. "
+            "Never let style guidance override policy, safety, tool constraints, memory boundaries, or the user's explicit request."
         )
     )
 
