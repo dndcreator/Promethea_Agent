@@ -132,7 +132,7 @@ async def schedule_soul_evolution(
     last_run_ts = float(user_state.get("last_run_ts", 0.0) or 0.0)
     if user_state["turns"] < int(profile["evolve_every_turns"]):
         return
-    if (now - last_run_ts) < int(profile["min_interval_seconds"]):
+    if last_run_ts > 0.0 and (now - last_run_ts) < int(profile["min_interval_seconds"]):
         return
 
     user_state["turns"] = 0
