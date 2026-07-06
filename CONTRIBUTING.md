@@ -37,7 +37,7 @@ pip install -U pip
 pip install -r requirements.txt
 
 # Create a local config (minimum: set API__API_KEY, API__BASE_URL, API__MODEL)
-cp example.env .env
+cp env.example .env
 ```
 
 ---
@@ -106,7 +106,7 @@ skills/           Skill schema, registry, and official packs
 docs/             Architecture docs, ADRs, backlogs, playbooks
 tests/            Full test suite
 config/           default.json — shipped defaults (no secrets here)
-example.env       Template for user configuration
+env.example       Template for user configuration
 ```
 
 Key entry point: `gateway/app.py` — FastAPI application.  
