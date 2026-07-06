@@ -17,7 +17,7 @@ If your integration reads this page, your main objective is contract stability.
 2. Pull protocol/method contracts: `GET /api/ops/protocol` and `GET /api/ops/methods`
 3. Pull HTTP contract index: `GET /api/ops/http-contracts`
 4. Validate readiness: `GET /api/ops/readiness`
-5. Start with one chat route and one tool route
+5. Start with chat plus the tool/extension discovery routes
 
 This avoids hardcoding stale assumptions.
 
@@ -29,16 +29,14 @@ This avoids hardcoding stale assumptions.
 - `POST /api/chat/confirm`
 - `POST /api/followup`
 
-### Tools and MCP
+### Tools and Extensions
 
-- `GET /api/tools`
-- `POST /api/tools/call`
 - `GET /api/extensions/catalog`
 - `POST /api/extensions/reload`
-- `GET /api/mcp/services`
-- `GET /api/mcp/services/{name}/health`
-- `GET /api/mcp/services/{name}/tools`
-- `GET /api/mcp/visible-tools`
+- `GET /api/status/tools`
+- `GET /api/status/tools/official`
+
+Tool execution is currently mediated by the chat/reasoning/runtime tool service rather than a stable public `POST /api/tools/call` endpoint. For integrations, discover callable tools via the status and extension catalog endpoints, then drive tool use through chat or workflow routes.
 
 ### Skills
 
@@ -71,7 +69,7 @@ This avoids hardcoding stale assumptions.
 - `GET /api/memory/recall/runs`
 - `GET /api/memory/recall/{target_request_id}`
 
-### Workflow and Workspace
+### Workflow
 
 - `POST /api/workflow/define`
 - `GET /api/workflow/list`
@@ -82,10 +80,6 @@ This avoids hardcoding stale assumptions.
 - `POST /api/workflow/retry`
 - `POST /api/workflow/approve`
 - `GET /api/workflow/checkpoints/{workflow_run_id}`
-- `POST /api/workspace/create-document`
-- `POST /api/workspace/update-document`
-- `GET /api/workspace/list-artifacts`
-- `POST /api/workspace/snapshot-artifact`
 
 ### Files and Search
 
@@ -129,7 +123,8 @@ Voice routes are experimental/provider-dependent in the current preview. They ar
 
 - `GET /api/status`
 - `GET /api/bootstrap` - public first-run UI status, including configured backend, Neo4j availability, registration availability, and restart requirement for backend changes.
-- `GET /api/health`
+- `GET /health`
+- `GET /api/health/memory`
 - `GET /api/ops/capabilities`
 - `GET /api/ops/abstractions`
 - `GET /api/ops/protocol`
@@ -184,7 +179,7 @@ curl -X POST http://127.0.0.1:8000/api/chat \
   -d '{
     "message": "Plan my tasks for today",
     "session_id": "s1",
-    "mode": "auto"
+    "requested_mode": "auto"
   }'
 ```
 
@@ -196,7 +191,8 @@ Chat response may include:
 ### Example: list callable tools
 
 ```bash
-curl http://127.0.0.1:8000/api/tools
+curl http://127.0.0.1:8000/api/status/tools
+curl http://127.0.0.1:8000/api/status/tools/official
 ```
 
 ### Example: list skill catalog

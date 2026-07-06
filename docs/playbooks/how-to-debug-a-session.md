@@ -73,20 +73,23 @@ This is the primary tool for "the agent forgot something it should have remember
 ## 5. Inspect a single recall run
 
 ```bash
-curl "http://127.0.0.1:8000/api/memory/recall/run/{run_id}"
+curl "http://127.0.0.1:8000/api/memory/recall/{request_id}"
 ```
 
 ---
 
-## 6. Check MCP service health
+## 6. Check tool and extension visibility
 
 If a tool invocation failed with a connection error:
 
 ```bash
-curl "http://127.0.0.1:8000/api/mcp/services"
+curl "http://127.0.0.1:8000/api/status/tools"
+curl "http://127.0.0.1:8000/api/status/tools/official"
+curl "http://127.0.0.1:8000/api/extensions/catalog"
+curl "http://127.0.0.1:8000/api/ops/surfaces"
 ```
 
-Returns service health: `online`, `offline`, `degraded`, last sync time, last error.
+These endpoints show the current callable tool surface, official tool subset, extension catalog, and runtime-discovered surfaces.
 
 ---
 
@@ -112,10 +115,10 @@ Check the response for `deprecation_warnings`.
 
 ### "The tool was not called"
 
-1. Check `GET /api/tools/list` — is the tool registered?
+1. Check `GET /api/status/tools` and `GET /api/status/tools/official` — is the tool visible?
 2. Check tool policy: `GET /api/config/tool-policy?user_id=...`
 3. Look at `TOOL_CALL_ERROR` events in the audit log — did a policy check block it?
-4. If MCP tool: check `GET /api/mcp/services` — is the service online?
+4. If it comes from an extension, check `GET /api/extensions/catalog` and reload with `POST /api/extensions/reload`.
 
 ### "I got a security violation I didn't expect"
 

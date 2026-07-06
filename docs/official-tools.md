@@ -126,8 +126,8 @@ This means tool visibility reflects actual runtime wiring.
 ### HTTP
 
 ```bash
-curl http://127.0.0.1:8000/api/tools
-curl http://127.0.0.1:8000/api/mcp/visible-tools
+curl http://127.0.0.1:8000/api/status/tools
+curl http://127.0.0.1:8000/api/status/tools/official
 ```
 
 ### CLI

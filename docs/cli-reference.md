@@ -76,11 +76,11 @@ Use this group when your goal is "inspect or maintain long-term memory".
 - `workflow define`
 - `workflow list`
 - `workflow start`
-- `workflow status`
+- `workflow run`
 - `workflow pause`
 - `workflow resume`
-- `workflow retry-step`
-- `workflow approve-step`
+- `workflow retry`
+- `workflow approve`
 - `workflow checkpoints`
 
 Use this group when your goal is "long-running or resumable tasks".
@@ -168,6 +168,6 @@ These are presentation differences, not core capability gaps.
 For CI or release gate, keep these as minimal checks:
 - one chat turn
 - official tools list
-- workflow start + status
+- workflow start + run
 - config effective
 - ops protocol + http-contracts

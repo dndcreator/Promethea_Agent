@@ -189,7 +189,7 @@ Runtime user data is stored under `config/users/` and is ignored by git.
 
 ### `API key is not configured`
 
-Check `API__API_KEY` in `.env`.
+Check `API__API_KEY` in `.env`. Chat also requires `API__BASE_URL` and `API__MODEL` to match the same OpenAI-compatible provider.
 
 ### The UI opens but chat fails
 

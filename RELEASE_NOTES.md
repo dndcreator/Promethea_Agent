@@ -40,6 +40,7 @@ Release-focused checks run during preparation:
 
 - `python -m pytest`: 500 passed, 5 skipped
 - `npm run build` in `UI/`: TypeScript and Vite production build passed
+- `npm run lint` in `UI/`: ESLint passed
 
 Manual checks still required before a stable tag:
 

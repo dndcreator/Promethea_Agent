@@ -100,7 +100,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     try {
       await authFetch('/api/auth/logout', { method: 'POST' });
-    } catch {}
+    } catch {
+      // Local logout should still clear client state if the server is unavailable.
+    }
     clearAuthToken();
     setUser(null);
     lastVerifiedAtRef.current = 0;

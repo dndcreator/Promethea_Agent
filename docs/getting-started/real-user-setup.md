@@ -95,11 +95,11 @@ python start_gateway_service.py
 
 Open:
 - UI: `http://127.0.0.1:5173`
-- health: `http://127.0.0.1:8000/api/health`
+- health: `http://127.0.0.1:8000/health`
 
 ## 6. First-run verification checklist
 
-1. `/api/health` returns 200.
+1. `/health` returns 200.
 2. `/api/status` returns tools and runtime status.
 3. Send one message from UI and receive model response.
 4. Send second message and verify memory behavior matches your backend expectation.
@@ -142,8 +142,9 @@ Ask for these three items:
 3. output of:
 
 ```bash
-GET /api/health
+GET /health
 GET /api/status
+GET /api/health/memory
 GET /api/ops/readiness
 ```
 

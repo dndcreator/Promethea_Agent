@@ -16,7 +16,7 @@ If your target is "new users can run it with minimal support", start from:
 
 - Python 3.10+
 - Valid LLM provider credentials via environment variables
-- Optional: Neo4j for full memory backend
+- Neo4j for the full graph-memory backend, or an explicit fallback backend for reduced local runs
 - Optional: Tesseract OCR binary for image OCR tools (`pytesseract` is the Python wrapper)
 
 ## 3. Environment Baseline
@@ -43,7 +43,8 @@ pip install -r requirements.txt
 
 2. Prepare `.env` from `env.example`.
    - Keep the provider trio coherent: `API__API_KEY`, `API__BASE_URL`, `API__MODEL`.
-   - For first-time users, prefer `MEMORY__STORE_BACKEND=sqlite_graph` to reduce external dependencies.
+   - For the intended public-preview experience, keep `MEMORY__STORE_BACKEND=neo4j` and confirm Neo4j is reachable.
+   - For a temporary reduced local run, explicitly set `MEMORY__STORE_BACKEND=sqlite_graph` and `MEMORY__NEO4J__ENABLED=false`.
 
 3. Start service:
 
@@ -53,8 +54,9 @@ python start_gateway_service.py
 
 4. Verify readiness:
 
-- `GET /api/health`
+- `GET /health`
 - `GET /api/status`
+- `GET /api/health/memory`
 - `GET /api/ops/readiness`
 - `GET /api/automation/scheduler/status`
 
@@ -73,7 +75,7 @@ Before exposing service:
 
 ## 6. Upgrade / Rollback
 
-- Read `CHANGELOG.md` before upgrade.
+- Read `RELEASE_NOTES.md` before upgrade.
 - Back up runtime state files and memory backend.
 - Validate config compatibility via config contract and diagnostics endpoints.
 - Keep previous version ready for rollback if readiness regresses.

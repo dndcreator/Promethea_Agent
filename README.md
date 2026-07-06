@@ -137,6 +137,8 @@ Promethea also includes many detailed capabilities: self-checking, human-friendl
 
 ## Try It
 
+Requires Python 3.10+ and Node.js/npm. For the full memory experience, start Neo4j first; see [QUICK_START.md](QUICK_START.md) for the complete first-run path.
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1

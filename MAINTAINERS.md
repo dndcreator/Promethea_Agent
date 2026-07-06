@@ -7,7 +7,7 @@ This file describes maintainer responsibilities and review ownership.
 - Protect runtime correctness and user-boundary safety.
 - Review PRs for behavior regressions, security risks, and protocol drift.
 - Keep docs and tests aligned with shipped behavior.
-- Triage critical issues and coordinate release readiness.
+- Triage critical issues and coordinate releases.
 
 ## Review Ownership (Code Areas)
 

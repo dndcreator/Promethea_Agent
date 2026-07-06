@@ -99,7 +99,7 @@ or `config/users/<user_id>/config.json`.
 | `api.temperature` | float 0-2 | `0.7` | Generation temperature. |
 | `api.max_tokens` | int 1-8192 | `2000` | Max tokens per completion. |
 | `api.max_history_rounds` | int 1-100 | `10` | Conversation turns kept in context. |
-| `api.timeout` | int 1-600 | `null` | Request timeout in seconds. |
+| `api.timeout` | int 1-300 | `null` | Request timeout in seconds. |
 | `api.retry_count` | int 0-10 | `null` | Retry attempts on failure. |
 
 ---
@@ -170,7 +170,7 @@ Provider implementation rule:
 
 | Variable | Type | Default | Notes |
 |---|---|---|---|
-| `MEMORY__ENABLED` | bool | `false` | Master switch. Set to `true` to enable long-term memory. |
+| `MEMORY__ENABLED` | bool | `true` | Master switch. Set to `false` to disable long-term memory. |
 | `MEMORY__STORE_BACKEND` | enum | `neo4j` | `neo4j` \| `sqlite_graph` \| `flat_memory` |
 | `MEMORY__SQLITE_GRAPH_PATH` | path | `memory/sqlite_graph.db` | File path for sqlite_graph backend. |
 | `MEMORY__FLAT_MEMORY_PATH` | path | `memory/flat_memory.jsonl` | File path for flat_memory backend. |
@@ -179,8 +179,8 @@ Provider implementation rule:
 
 | Backend | External service needed | Graph recall | Hot/warm/cold layers | Recommended for |
 |---|---|---|---|---|
-| `flat_memory` | No | No | No | First-time users, minimal setup |
-| `sqlite_graph` | No | Yes (recursive CTE) | No | Personal use, development |
+| `flat_memory` | No | No | No | Minimal degraded local run |
+| `sqlite_graph` | No | Yes (recursive CTE) | No | Personal use or development when Neo4j is unavailable |
 | `neo4j` | Yes (Neo4j >= 5) | Yes (Cypher) | Yes (full stack) | Production, multi-session |
 
 ### Cold-start behavior and health
@@ -209,7 +209,7 @@ Only needed when `MEMORY__STORE_BACKEND=neo4j`.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `MEMORY__NEO4J__ENABLED` | `false` | Must set to `true` explicitly. |
+| `MEMORY__NEO4J__ENABLED` | `true` | Keep `true` for the default Neo4j path; set `false` when intentionally using another backend. |
 | `MEMORY__NEO4J__URI` | `bolt://localhost:7687` | Neo4j bolt URI. |
 | `MEMORY__NEO4J__USERNAME` | `neo4j` | Database username. |
 | `MEMORY__NEO4J__PASSWORD` | _(empty)_ | Set this. Never commit it. |
@@ -288,11 +288,11 @@ Denied command fragments (always active when sandbox is enabled):
 
 ## Section: `reasoning` - Multi-step planning
 
-Disabled by default. Enabling this increases token usage significantly.
+Enabled by default in the public preview. It only starts a full reasoning tree when the runtime budget gate selects deep reasoning, but complex turns can still increase token usage.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `REASONING__ENABLED` | `false` | Enable reasoning tree. |
+| `REASONING__ENABLED` | `true` | Enable reasoning tree support. |
 | `REASONING__MODE` | `react_tot` | Currently only `react_tot` is supported. |
 | `REASONING__MAX_DEPTH` | `4` | Maximum tree depth. |
 | `REASONING__MAX_NODES` | `24` | Maximum nodes across the tree. |

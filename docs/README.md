@@ -12,8 +12,6 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 
 ## Build And Operate
 - [Deployment](./deployment.md)
-- [Release Checklist](./release-checklist.md)
-- [Release Readiness](./operations/release-readiness.md)
 - [Testing Strategy](./testing-strategy.md)
 - [Local Model Quickstart](./quickstart-local-model.md)
 
@@ -41,4 +39,4 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 - [Change Memory Backend](./playbooks/how-to-change-memory-backend.md)
 - [Debug a Session](./playbooks/how-to-debug-a-session.md)
 
-Historical audits, demos, backlogs, ADRs, placeholder assets, and local root-level side notes are kept under `docs/_local_history/`, which is ignored by git and excluded from the release surface.
+Local historical notes and internal working records are kept outside the public release surface.

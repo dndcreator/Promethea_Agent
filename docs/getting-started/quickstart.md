@@ -6,6 +6,8 @@ If you want the full hand-holding version, use [Real User Setup](./real-user-set
 ## Prerequisites
 
 - Python 3.10+
+- Node.js / npm for the Web UI
+- Neo4j for the full graph-memory path
 - one valid model provider key
 
 ## Install
@@ -56,8 +58,9 @@ python start_gateway_service.py
 
 ## Validate
 
-- `GET /api/health`
+- `GET /health`
 - `GET /api/status`
+- `GET /api/health/memory`
 - `GET /api/ops/readiness`
 
-If these fail, go to [Operations / Release Readiness](../operations/release-readiness.md).
+If these fail, run `promethea doctor run` or open [Release Notes](../../RELEASE_NOTES.md) for current preview limitations.

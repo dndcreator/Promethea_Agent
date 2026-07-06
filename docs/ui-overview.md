@@ -87,4 +87,4 @@ curl "http://127.0.0.1:8000/api/health/memory"
 
 - `docs/configuration.md`
 - `docs/playbooks/how-to-change-memory-backend.md`
-- `docs/operations/release-readiness.md`
+- `RELEASE_NOTES.md`
