@@ -20,11 +20,24 @@ def test_memory_text_utils_normalize_and_extract():
 
 def test_memory_text_utils_candidate_normalization():
     out = normalize_candidates(
-        [{"type": "preference", "content": "Prefer concise", "semantic_keys": ["concise"]}]
+        [{
+            "type": "preference",
+            "content": "Prefer concise",
+            "semantic_keys": ["concise"],
+            "modality": "actual",
+            "persistence": "durable",
+        }]
     )
     assert out and out[0]["type"] == "preference"
+    assert out[0]["modality"] == "actual"
+    assert out[0]["persistence"] == "durable"
     keys = build_semantic_keys("prefer concise answers", llm_keys=["concise"])
-    assert "concise" in keys
+    assert keys == ["concise"]
+    assert build_semantic_keys("prefer concise answers") == ["concise answers", "prefer concise"]
+
+    unknown = normalize_candidates([{"type": "goal", "content": "x"}])[0]
+    assert unknown["modality"] == "unknown"
+    assert unknown["persistence"] == "unknown"
 
 
 def test_memory_recall_policy_and_mapping():

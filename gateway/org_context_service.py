@@ -314,7 +314,8 @@ class OrgContextService:
 
         connector = self._resolve_connector()
         if connector:
-            payload = self._recall_from_neo4j(
+            payload = await asyncio.to_thread(
+                self._recall_from_neo4j,
                 connector=connector,
                 org_id=oid,
                 topic=q,

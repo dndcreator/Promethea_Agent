@@ -505,6 +505,20 @@ class Neo4jMemoryStore(MemoryStore):
             "reason": None if (imported_items + imported_nodes + imported_edges) > 0 else "no_importable_memory_items",
         }
 
+    def clear_user_data(self, *, user_id: str) -> None:
+        if not self.connector:
+            return
+        raw = str(user_id or "").strip()
+        aliases = [raw, raw[5:] if raw.startswith("user_") else f"user_{raw}"]
+        self.connector.query(
+            "MATCH (n) WHERE n.user_id IN $aliases DETACH DELETE n",
+            {"aliases": aliases},
+        )
+        self.connector.query(
+            "MATCH (:User {id: $user_id})<-[:OWNED_BY]-(s:Session) DETACH DELETE s",
+            {"user_id": raw if raw.startswith("user_") else f"user_{raw}"},
+        )
+
     def list_memory_entries(
         self,
         *,

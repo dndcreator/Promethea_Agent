@@ -72,6 +72,8 @@ async def test_interaction_completed_remembers_write_key_only_after_success(monk
                     "type": "goal",
                     "content": "remember this long-term state",
                     "semantic_keys": ["remember"],
+                    "modality": "plan",
+                    "persistence": "bounded",
                 }
             ],
         }
@@ -120,6 +122,8 @@ async def test_interaction_completed_passes_memory_metadata(monkeypatch):
                     "type": "preference",
                     "content": "I prefer concise answers.",
                     "semantic_keys": ["prefer", "concise"],
+                    "modality": "actual",
+                    "persistence": "durable",
                 }
             ],
         }
@@ -258,6 +262,8 @@ async def test_interaction_completed_rejects_assistant_attributed_candidate(monk
                     "type": "preference",
                     "content": "user does not like calculator tools",
                     "semantic_keys": ["calculator", "preference"],
+                    "modality": "actual",
+                    "persistence": "durable",
                 }
             ],
         }
@@ -306,6 +312,8 @@ async def test_interaction_completed_persists_verifier_metadata(monkeypatch):
                     "type": "preference",
                     "content": "prefer concise answers",
                     "semantic_keys": ["prefer", "concise"],
+                    "modality": "actual",
+                    "persistence": "durable",
                 }
             ],
         }

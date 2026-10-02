@@ -2,7 +2,7 @@
 
 ## Goal
 
-Introduce a unified memory write gate so long-term memory writes are explicit, reviewable, and safer.
+Provide durable, governed memory as the evidence base for the agent's user-scoped cognition and Self Model.
 
 ## Core Contracts
 
@@ -108,6 +108,56 @@ Operational rules:
 artifact. Treat `memory/raw_log.jsonl` and `memory/raw_log.state.json` as runtime
 memory state. Cleanup scripts and test teardown must not remove them; tests that need
 disposable raw-log data should redirect the raw-log paths into their own temp directory.
+
+## Cognition and Self Model
+
+Cognition is not a fourth memory layer. The memory pipeline stores governed records and
+history; the Self Model projects those records into a current, user-scoped view that the
+runtime and UI can consume.
+
+The unified Self Model has three owned projections and one downstream consumer:
+
+- `self`: stable runtime identity and architecture knowledge derived from project docs
+- `cognition`: current, evolving, uncertain, and historical interpretations projected from user memory
+- `capabilities`: live capability and tool knowledge
+- Self Evolve consumes the model to author append-only capability packages; it does not own cognition or modify Core
+
+`GET /api/memory/cognition` returns the public `CognitionBundle`. It does not duplicate
+memory or introduce a new persistence backend. The projection uses structured memory
+types and metadata, not language-specific keyword rules. Pending write proposals appear
+as uncertain cognition requiring review.
+
+User cognition is assembled at request time and is never written into the repository-level
+`memory/self_model.json`. That file remains a non-user-specific architecture/capability model.
+`ConversationService` places one bounded projection in `RunContext`; `PromptAssembler`,
+Reasoning tools, and detached workflows then inherit that same context through existing runtime
+boundaries. Runtime events continue to flow into MemoryService and the hippocampus for later
+consolidation rather than being written back by SelfModelService directly.
+
+### Adaptive cognitive recall
+
+`SelfModelService` owns active cognition calculation while `MemoryService`
+remains the source of governed candidates. The model-facing `cognition.recall`
+capability requests one shared candidate pool, preserves critical records in a
+bounded skip buffer, and selects Fast, Adaptive, or Deep reduction under explicit
+channel, depth, concurrency, call-count, and deadline budgets.
+
+Adaptive and Deep modes may decompose the query into independent kernels. Supplied
+facets bypass decomposition. Deep mode groups records into graph-aware receptive
+fields using available community, cluster, revision-chain, relationship, and
+layer metadata before at most one upper reduction layer. Missing graph metadata
+degrades to bounded layer grouping.
+
+The resulting `CognitionSnapshot` is attached to the current `RunContext` and may
+flow into reasoning or a detached workflow. It is never a second memory store.
+Durable insights must be proposed through Hippocampus and pass the existing
+Memory write gate.
+
+Completed, non-degraded adaptive cognition can also leave a bounded hint in the
+Hippocampus checkpoint state. A hint contains only the temporary synthesis and its
+source memory IDs. Replay uses it to prioritize records and avoid repeating exploratory
+work, but treats the text as an untrusted hypothesis: only re-read memory records may
+support a durable insight. Consumed hints are removed after the replay cycle.
 
 ## Procedural Memory (Basal Ganglia)
 

@@ -36,7 +36,7 @@ This avoids hardcoding stale assumptions.
 - `GET /api/status/tools`
 - `GET /api/status/tools/official`
 
-Tool execution is currently mediated by the chat/reasoning/runtime tool service rather than a stable public `POST /api/tools/call` endpoint. For integrations, discover callable tools via the status and extension catalog endpoints, then drive tool use through chat or workflow routes.
+Tool execution is mediated by `CapabilityService` rather than a public `POST /api/tools/call` endpoint. Discover callable tools through the status and extension catalog endpoints, then drive tool use through chat, task, or workflow routes.
 
 ### Skills
 
@@ -53,9 +53,12 @@ Tool execution is currently mediated by the chat/reasoning/runtime tool service 
 - `GET /api/memory/summaries/{session_id}`
 - `GET /api/memory/summary/{summary_id}`
 - `GET /api/memory/graph`
+- `GET /api/memory/graph/search`
 - `GET /api/memory/graph/{session_id}`
 - `GET /api/memory/capabilities`
+- `GET /api/memory/cognition`
 - `GET /api/memory/entries`
+- `GET /api/memory/search`
 - `POST /api/memory/entries`
 - `PATCH /api/memory/entries/{memory_id}`
 - `DELETE /api/memory/entries/{memory_id}`
@@ -80,6 +83,30 @@ Tool execution is currently mediated by the chat/reasoning/runtime tool service 
 - `POST /api/workflow/retry`
 - `POST /api/workflow/approve`
 - `GET /api/workflow/checkpoints/{workflow_run_id}`
+
+### Tasks and Workbench
+
+- `POST /api/tasks`
+- `GET /api/tasks`
+- `GET /api/tasks/{task_id}`
+- `PATCH /api/tasks/{task_id}`
+- `POST /api/tasks/{task_id}/runs`
+- `POST /api/tasks/{task_id}/pause`
+- `POST /api/tasks/{task_id}/resume`
+- `POST /api/tasks/{task_id}/cancel`
+- `GET /api/workbench/snapshot`
+- `GET /api/workbench/stream`
+
+Tasks own durable work independently of conversations. Workbench exposes the
+read model and resumable event stream; clients do not own task lifecycle state.
+
+### Canvas Environments
+
+- `GET /api/canvas/environments`
+- `GET /api/canvas/{workspace_id}/{environment_id}/preview/{asset_path}`
+- `WS /api/canvas/{workspace_id}/{environment_id}/preview/{asset_path}`
+
+Canvas previews are authenticated and confined to registered workspace environments.
 
 ### Files and Search
 
@@ -126,6 +153,7 @@ Voice routes are experimental/provider-dependent in the current preview. They ar
 - `GET /health`
 - `GET /api/health/memory`
 - `GET /api/ops/capabilities`
+- `GET /api/ops/schema`
 - `GET /api/ops/abstractions`
 - `GET /api/ops/protocol`
 - `GET /api/ops/readiness`
@@ -133,6 +161,7 @@ Voice routes are experimental/provider-dependent in the current preview. They ar
 - `GET /api/ops/methods`
 - `GET /api/ops/framework-check`
 - `GET /api/ops/surfaces`
+- `GET /api/ops/governance`
 - `GET /api/ops/runbook`
 
 ## WebSocket Contract

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from computer import BrowserController, FileSystemController, ProcessController, ScreenController
+from agentkit.security.sandbox import SandboxPolicy
 from gateway_integration import GatewayIntegration
 
 
@@ -53,6 +54,53 @@ class TestComputerControllers(unittest.IsolatedAsyncioTestCase):
 
         await pc.cleanup()
 
+    async def test_direct_process_execution_is_fail_closed(self):
+        pc = ProcessController()
+        pc.is_initialized = True
+        pc.sandbox = SandboxPolicy(command_mode="deny")
+
+        result = await pc.execute("run", {"command": "python -V"})
+
+        self.assertFalse(result.success)
+        self.assertIn("host process execution disabled", result.error)
+
+    async def test_process_get_never_mutates_tracked_process(self):
+        class _Tracked:
+            def kill(self):
+                raise AssertionError("get must not kill a process")
+
+            def terminate(self):
+                raise AssertionError("get must not terminate a process")
+
+        pc = ProcessController()
+        pc.is_initialized = True
+        pc.sandbox = SandboxPolicy()
+        pc.active_processes[12345] = _Tracked()
+
+        await pc.execute("get", {"pid": 12345})
+
+        self.assertIn(12345, pc.active_processes)
+
+    async def test_direct_desktop_input_is_observation_only(self):
+        sc = ScreenController()
+        sc.is_initialized = True
+        sc.sandbox = SandboxPolicy(desktop_mode="observe_only")
+
+        result = await sc.execute("click", {"x": 1, "y": 1})
+
+        self.assertFalse(result.success)
+        self.assertIn("host desktop input is disabled", result.error)
+
+    async def test_direct_browser_call_cannot_bypass_network_policy(self):
+        bc = BrowserController()
+        bc.is_initialized = True
+        bc.sandbox = SandboxPolicy()
+
+        result = await bc.execute("navigate", {"url": "http://127.0.0.1/private"})
+
+        self.assertFalse(result.success)
+        self.assertIn("private/loopback host blocked", result.error)
+
     async def test_browser_live_optional(self):
         if os.getenv("PROMETHEA_LIVE_TEST") != "1":
             self.skipTest("set PROMETHEA_LIVE_TEST=1 to run live browser tests")
@@ -84,15 +132,17 @@ class TestComputerIntegration(unittest.IsolatedAsyncioTestCase):
 
     async def test_unknown_capability(self):
         gi = GatewayIntegration("gateway_config.json")
-        result = await gi.execute_computer_action("unknown_capability", "some_action", {})
+        from computer.execution_context import bind_workspace
+        from gateway.capability_service import CapabilityService
+        from gateway.workspace_service import WorkspaceHandle
+
+        service = CapabilityService(computer_runtime=gi.computer_runtime)
+        handle = WorkspaceHandle(workspace_id="test", user_id="test", root_path=os.getcwd())
+        with bind_workspace(handle):
+            result = await service.execute_computer_action("unknown_capability", "some_action", {})
         self.assertFalse(result.success)
         self.assertIn("Unknown capability", result.error)
-
-    async def test_uninitialized_controller(self):
-        gi = GatewayIntegration("gateway_config.json")
-        result = await gi.execute_computer_action("browser", "navigate", {"url": "https://example.com"})
-        self.assertFalse(result.success)
-        self.assertIn("not initialized", result.error)
+        await gi.computer_runtime.close()
 
 
 if __name__ == "__main__":

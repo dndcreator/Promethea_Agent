@@ -37,8 +37,10 @@ tmp_reasoning_template/
 node_modules/
 UI/node_modules/
 UI/dist/
+sdk/typescript/dist/
 package-lock.json
 !UI/package-lock.json
+!sdk/typescript/package-lock.json
 yarn.lock
 
 # Tauri / desktop build artifacts
@@ -62,6 +64,10 @@ browser_state.json
 sessions.json
 gateway/sessions.json
 gateway/workflow_state.json
+gateway/task_state.json
+gateway/.workflow_state.json.*.tmp
+gateway/.task_state.json.*.tmp
+gateway/runtime_events.jsonl*
 users/
 workspace/
 config/users/
@@ -83,10 +89,15 @@ memory/raw_log.jsonl
 memory/raw_log.state.json
 memory/raw_log.state.json.*.tmp
 memory/self_model.json
+memory/self_evolve_tasks.json
+memory/hippocampus/replay_state.json*
+memory/hippocampus/.replay_state.json.*.tmp
 
 # Local benchmark and scratch workspaces
 .benchmark-workspace/
 .tmp/
+.runtime/
+extensions/community/_generated/
 
 # Local historical docs kept out of release packaging
 docs/_local_history/

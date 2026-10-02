@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 class TextWordStatsTool:
     tool_id = "text.word_stats"
+    side_effect_level = "read_only"
     name = "text.word_stats"
     description = "Compute basic text stats: chars/words/lines."
     official = True
@@ -27,6 +28,7 @@ class TextWordStatsTool:
 
 class TextFindMatchesTool:
     tool_id = "text.find_matches"
+    side_effect_level = "read_only"
     name = "text.find_matches"
     description = "Find query occurrences in text and return previews."
     official = True
@@ -65,6 +67,7 @@ class TextFindMatchesTool:
 
 class TextNormalizeJsonTool:
     tool_id = "text.normalize_json"
+    side_effect_level = "read_only"
     name = "text.normalize_json"
     description = "Validate and normalize JSON text."
     official = True
@@ -81,4 +84,3 @@ class TextNormalizeJsonTool:
         obj = json.loads(raw)
         normalized = json.dumps(obj, ensure_ascii=False, indent=indent, sort_keys=sort_keys)
         return {"valid": True, "normalized": normalized, "type": type(obj).__name__}
-

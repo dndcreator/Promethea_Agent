@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import inspect
-import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from .action.models import resolve_action_budget
+from .memory_visibility import build_memory_visibility
+from .prompt_assembler import PromptAssembler
 from .protocol import (
     ConversationRunInput,
     ConversationRunOutput,
@@ -17,21 +18,18 @@ from .protocol import (
     PlanResult,
     ResponseDraft,
     ToolExecutionBundle,
-
 )
-
-from .memory_recall_schema import MemoryRecallRequest
-from .prompt_assembler import PromptAssembler
-from .soul_service import build_soul_response_payload, schedule_soul_evolution
+from .runtime_context import build_runtime_context_block
 from .runtime_governance import (
     build_context_budget_snapshot,
     build_orchestration_snapshot,
     build_task_graph_snapshot,
 )
-from .runtime_io import blocks_debug
 from .runtime_input_builder import build_runtime_input_blocks
-from .memory_visibility import build_memory_visibility
-from .runtime_context import build_runtime_context_block
+from .runtime_io import blocks_debug
+from .soul_service import build_soul_response_payload, schedule_soul_evolution
+from .capability_service import ToolInvocationContext
+
 
 PROMPT_ASSEMBLER = PromptAssembler()
 
@@ -49,73 +47,37 @@ def _to_bool(value: Any, default: bool = False) -> bool:
             return True
         if lowered in {"false", "0", "no", "n", "off", ""}:
             return False
-        return default
-    return bool(value)
-
-
-def _normalize_recall_context(value: Any) -> str:
-    """Accept only real text context; reject mock/object stringifications."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    return ""
+    return default
 
 
 def _memory_visibility_enabled(user_config: Optional[Dict[str, Any]]) -> bool:
     cfg = user_config if isinstance(user_config, dict) else {}
-    memory_cfg = cfg.get("memory", {}) if isinstance(cfg.get("memory", {}), dict) else {}
-    visibility = memory_cfg.get("visibility", {}) if isinstance(memory_cfg.get("visibility", {}), dict) else {}
-    value = visibility.get("enabled")
-    if value is None:
-        return True
-    return _to_bool(value, default=True)
+    memory_cfg = cfg.get("memory", {}) if isinstance(cfg.get("memory"), dict) else {}
+    visibility = memory_cfg.get("visibility", {}) if isinstance(memory_cfg.get("visibility"), dict) else {}
+    return _to_bool(visibility.get("enabled"), default=True)
 
-def _extract_context_fields(
+
+def _context_fields(
     run_context: Optional[Any],
     *,
-    session_id: Optional[str] = None,
-    user_id: Optional[str] = None,
+    session_id: Optional[str],
+    user_id: Optional[str],
 ) -> Dict[str, Any]:
     fields: Dict[str, Any] = {}
-    if run_context is not None:
-        trace_id = getattr(run_context, "trace_id", None)
-        request_id = getattr(run_context, "request_id", None)
-        run_session_id = getattr(run_context, "session_id", None)
-        run_user_id = getattr(run_context, "user_id", None)
-        tenant_id = getattr(run_context, "tenant_id", None)
-        environment = getattr(run_context, "environment", None)
-        session_state = getattr(run_context, "session_state", None)
-        if run_session_id is None and session_state is not None:
-            run_session_id = getattr(session_state, "session_id", None)
-        if run_user_id is None and session_state is not None:
-            run_user_id = getattr(session_state, "user_id", None)
-        if tenant_id is None and session_state is not None:
-            tenant_id = getattr(session_state, "tenant_id", None)
-        if environment is None and session_state is not None:
-            environment = getattr(session_state, "environment", None)
-        if trace_id is None and session_state is not None:
-            trace_id = getattr(session_state, "trace_id", None)
-        if trace_id:
-            fields["trace_id"] = str(trace_id)
-        if request_id:
-            fields["request_id"] = str(request_id)
-        if run_session_id:
-            fields["session_id"] = str(run_session_id)
-        if run_user_id:
-            fields["user_id"] = str(run_user_id)
-        if tenant_id:
-            fields["tenant_id"] = str(tenant_id)
-        if environment:
-            fields["environment"] = str(environment)
-    if session_id and "session_id" not in fields:
-        fields["session_id"] = str(session_id)
-    if user_id and "user_id" not in fields:
-        fields["user_id"] = str(user_id)
+    for name in ("trace_id", "request_id", "task_id", "run_id", "tenant_id", "environment"):
+        value = getattr(run_context, name, None) if run_context is not None else None
+        if value:
+            fields[name] = str(value)
+    resolved_session = getattr(run_context, "session_id", None) if run_context is not None else None
+    resolved_user = getattr(run_context, "user_id", None) if run_context is not None else None
+    if resolved_session or session_id:
+        fields["session_id"] = str(resolved_session or session_id)
+    if resolved_user or user_id:
+        fields["user_id"] = str(resolved_user or user_id)
     return fields
 
 
-async def _emit_stage_event(
+async def _emit_stage(
     service: Any,
     *,
     stage: str,
@@ -127,57 +89,48 @@ async def _emit_stage_event(
 ) -> None:
     if not service.event_emitter:
         return
-    event_map = {
+    event_type = {
         "started": EventType.CONVERSATION_STAGE_STARTED,
         "finished": EventType.CONVERSATION_STAGE_FINISHED,
         "failed": EventType.CONVERSATION_STAGE_FAILED,
-    }
-    event_type = event_map.get(status)
+    }.get(status)
     if event_type is None:
         return
-    body = {
-        "stage": stage,
-        "status": status,
-        **_extract_context_fields(run_context, session_id=session_id, user_id=user_id),
-    }
-    if payload:
-        body.update(payload)
-    await service.event_emitter.emit(event_type, body)
+    await service.event_emitter.emit(
+        event_type,
+        {
+            "stage": stage,
+            "status": status,
+            **_context_fields(run_context, session_id=session_id, user_id=user_id),
+            **dict(payload or {}),
+        },
+    )
 
 
 async def stage_input_normalization(service: Any, run_input: ConversationRunInput) -> NormalizedInput:
-    session_id = run_input.session_id
-    user_id = run_input.user_id
-    run_context = run_input.run_context
-    if run_context is not None:
-        session_id = session_id or getattr(run_context, "session_id", None)
-        user_id = user_id or getattr(run_context, "user_id", None)
-
-    user_message = (run_input.user_message or "").strip()
+    session_id = run_input.session_id or getattr(run_input.run_context, "session_id", None)
+    user_id = run_input.user_id or getattr(run_input.run_context, "user_id", None)
+    user_message = str(run_input.user_message or "").strip()
     if not user_message:
-        for msg in reversed(run_input.messages or []):
-            if str(msg.get("role", "")).lower() == "user":
-                user_message = str(msg.get("content", "") or "").strip()
+        for message in reversed(run_input.messages or []):
+            if str(message.get("role") or "").lower() == "user":
+                content = message.get("content")
+                if isinstance(content, str):
+                    user_message = content.strip()
                 break
-    if not user_message and run_context is not None:
-        payload = getattr(run_context, "input_payload", {}) or {}
+
+    payload = dict(getattr(run_input.run_context, "input_payload", {}) or {})
+    if not user_message:
         user_message = str(payload.get("message") or payload.get("query") or "").strip()
 
-    payload = {}
-    if run_context is not None:
-        payload = dict(getattr(run_context, "input_payload", {}) or {})
-
     recent_messages: List[Dict[str, Any]] = []
-    if run_input.include_recent and service.message_manager and session_id and user_id:
+    if run_input.include_recent and service.message_manager and session_id and user_id and not run_input.messages:
         recent_messages = service.message_manager.get_recent_messages(session_id, user_id=user_id)
 
-    attachments = list(run_input.attachments or [])
-    if not attachments and isinstance(payload.get("attachments"), list):
-        attachments = list(payload.get("attachments") or [])
+    attachments = list(run_input.attachments or payload.get("attachments") or [])
     runtime_blocks = list(run_input.runtime_blocks or [])
     if isinstance(payload.get("runtime_blocks"), list):
-        runtime_blocks.extend(list(payload.get("runtime_blocks") or []))
-
+        runtime_blocks.extend(payload["runtime_blocks"])
     return NormalizedInput(
         user_message=user_message,
         session_id=session_id,
@@ -186,392 +139,118 @@ async def stage_input_normalization(service: Any, run_input: ConversationRunInpu
         input_payload=payload,
         attachments=attachments,
         runtime_blocks=runtime_blocks,
-        metadata=payload.get("metadata") or {},
+        metadata=dict(payload.get("metadata") or {}),
         recent_messages=recent_messages,
     )
 
 
-async def stage_mode_detection(service: Any, normalized: NormalizedInput) -> ModeDecision:
-    text = (normalized.user_message or "").lower()
-    if "workflow" in text or "/workflow" in text:
-        return ModeDecision(mode="workflow", reason="explicit_workflow", confidence=0.9)
-    if len(text) > 160 or "分析" in text or "plan" in text or "step" in text:
-        return ModeDecision(mode="deep", reason="complexity_heuristic", confidence=0.75)
-    return ModeDecision(mode="fast", reason="default_fast_path", confidence=0.65)
-
-
-def _apply_prompt_policy_to_mode(mode: ModeDecision, prompt_policy: Dict[str, Any]) -> ModeDecision:
-    if not isinstance(prompt_policy, dict):
-        return mode
-    if str(prompt_policy.get("source") or "").strip().lower() == "default":
-        return mode
-    cognitive_mode = str(prompt_policy.get("cognitive_mode") or "").strip().lower()
-    if cognitive_mode == "direct":
-        return ModeDecision(
-            mode="fast",
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    if cognitive_mode == "light_action":
-        return ModeDecision(
-            mode="fast",
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    if cognitive_mode == "deep_reasoning":
-        return ModeDecision(
-            mode="deep",
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    if cognitive_mode == "workflow":
-        return ModeDecision(
-            mode="workflow",
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    policy_mode = str(prompt_policy.get("mode") or "").strip().lower()
-    if policy_mode in {"workflow", "deep"} and mode.mode == "fast":
-        return ModeDecision(
-            mode=policy_mode,
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    if bool(prompt_policy.get("need_reasoning")) and mode.mode == "fast":
-        return ModeDecision(
-            mode="deep",
-            reason=str(prompt_policy.get("reason") or "prompt_policy_router"),
-            confidence=float(prompt_policy.get("confidence") or mode.confidence),
-        )
-    return mode
-
-
-async def stage_memory_recall(
+def _default_tool_executor(
     service: Any,
     *,
     normalized: NormalizedInput,
-    run_context: Optional[Any],
+    run_context: Any,
     user_config: Optional[Dict[str, Any]],
-    mode: ModeDecision,
-) -> MemoryRecallBundle:
-    if not normalized.user_message or not normalized.session_id or not normalized.user_id:
-        return MemoryRecallBundle(recalled=False, reason="missing_identity")
-    prompt_policy = getattr(run_context, "prompt_policy", None) if run_context is not None else None
-    if isinstance(prompt_policy, dict) and prompt_policy.get("need_memory") is True:
-        should_recall = True
-    elif isinstance(prompt_policy, dict) and prompt_policy.get("need_memory") is False:
-        should_recall = False
-    else:
-        should_recall = await service._should_recall_memory(
-            normalized.user_message,
-            user_config=user_config,
+):
+    if service.capability_service is None:
+        return None
+
+    async def execute(tool_name: str, args: Dict[str, Any]) -> Any:
+        context = ToolInvocationContext(
+            session_id=normalized.session_id,
             user_id=normalized.user_id,
+            source="conversation",
+            metadata={"run_context": run_context, "user_config": user_config},
         )
-    if not should_recall or not service.memory_service or not service.memory_service.is_enabled():
-        reason = "mode_fast" if mode.mode == "fast" else "not_needed"
-        return MemoryRecallBundle(recalled=False, reason=reason)
-
-    req_id = ""
-    trace_id = ""
-    if run_context is not None:
-        req_id = str(getattr(run_context, "request_id", "") or "")
-        trace_id = str(getattr(run_context, "trace_id", "") or "")
-        if not req_id:
-            session_state = getattr(run_context, "session_state", None)
-            req_id = str(getattr(session_state, "request_id", "") or "")
-        if not trace_id:
-            session_state = getattr(run_context, "session_state", None)
-            trace_id = str(getattr(session_state, "trace_id", "") or "")
-
-    recall_request = MemoryRecallRequest(
-        request_id=req_id or f"recall_{normalized.session_id}",
-        trace_id=trace_id or f"trace_{normalized.session_id}",
-        session_id=normalized.session_id,
-        user_id=normalized.user_id,
-        query_text=normalized.user_message,
-        mode=mode.mode,
-        top_k=8 if mode.mode in {"deep", "workflow"} else 4,
-        filters={"channel": normalized.channel},
-    )
-    context = ""
-    recall_memory = getattr(service.memory_service, "recall_memory", None)
-    if callable(recall_memory):
-        recall_out = recall_memory(
-            recall_request,
+        return await service.capability_service.call_tool(
+            tool_name=tool_name,
+            params=args,
+            ctx=context,
             run_context=run_context,
+            user_config=user_config,
         )
-        result = await recall_out if inspect.isawaitable(recall_out) else recall_out
-        context = _normalize_recall_context(
-            getattr(result, "formatted_context", None)
-            or (result.get("formatted_context") if isinstance(result, dict) else None)
-            or (result if isinstance(result, str) else "")
-        )
-        if not context:
-            get_context = getattr(service.memory_service, "get_context", None)
-            if callable(get_context):
-                try:
-                    fallback_out = get_context(
-                        normalized.user_message,
-                        normalized.session_id,
-                        normalized.user_id,
-                    )
-                except TypeError:
-                    fallback_out = get_context(
-                        normalized.user_message,
-                        normalized.session_id,
-                    )
-                raw_fallback = await fallback_out if inspect.isawaitable(fallback_out) else fallback_out
-                context = _normalize_recall_context(raw_fallback)
-    else:
-        get_context = getattr(service.memory_service, "get_context", None)
-        if callable(get_context):
-            try:
-                recall_out = get_context(
-                    normalized.user_message,
-                    normalized.session_id,
-                    normalized.user_id,
-                )
-            except TypeError:
-                recall_out = get_context(
-                    normalized.user_message,
-                    normalized.session_id,
-                )
-            raw_context = await recall_out if inspect.isawaitable(recall_out) else recall_out
-            context = _normalize_recall_context(raw_context)
-    if not context:
-        return MemoryRecallBundle(recalled=False, reason="empty_context")
-    return MemoryRecallBundle(
-        recalled=True,
-        context=context,
-        reason="memory_recall_policy",
-        source="memory_service",
-        confidence=0.8,
-    )
+
+    return execute
 
 
-async def stage_plan_or_reason(
-    service: Any,
-    *,
-    normalized: NormalizedInput,
-    run_context: Optional[Any],
-    mode: ModeDecision,
-    user_config: Optional[Dict[str, Any]],
-    base_system_prompt: str,
-) -> PlanResult:
-    if (
-        mode.mode == "fast"
-        or not service.reasoning_service
-        or not service.reasoning_service.is_enabled(user_id=normalized.user_id)
-    ):
-        return PlanResult(used_reasoning=False, base_system_prompt=base_system_prompt)
-
-    result = await service.reasoning_service.run(
-        session_id=normalized.session_id or "default_session",
-        user_id=normalized.user_id or "default_user",
-        user_message=normalized.user_message,
-        recent_messages=normalized.recent_messages,
-        base_system_prompt=base_system_prompt,
-        user_config=user_config,
-        run_context=run_context,
-    )
-    workflow_trace = await _attach_plan_workflow_trace(
-        service,
-        normalized=normalized,
-        mode=mode,
-        reasoning_result=result if isinstance(result, dict) else {},
-        run_context=run_context,
-    )
-    if workflow_trace and isinstance(result, dict):
-        result = dict(result)
-        result["workflow_trace"] = workflow_trace
-    return PlanResult(
-        used_reasoning=bool(result.get("used_reasoning")),
-        system_prompt=str(result.get("system_prompt", "") or ""),
-        base_system_prompt=base_system_prompt,
-        reasoning=result if isinstance(result, dict) else {},
-    )
-
-
-def _normalize_plan_steps(raw_steps: Any) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
-    if not isinstance(raw_steps, list):
-        return normalized
-    for idx, item in enumerate(raw_steps):
-        if not isinstance(item, dict):
-            continue
-        title = str(item.get("title") or f"Plan Step {idx + 1}").strip() or f"Plan Step {idx + 1}"
-        goal = str(item.get("goal") or title).strip() or title
-        normalized.append(
-            {
-                "title": title,
-                "goal": goal,
-                "requires_memory": _to_bool(item.get("requires_memory"), default=False),
-                "requires_tools": _to_bool(item.get("requires_tools"), default=False),
-                "tool_intent": str(item.get("tool_intent") or "").strip(),
-                "memory_query": str(item.get("memory_query") or "").strip(),
-            }
-        )
-    return normalized
-
-
-async def _attach_plan_workflow_trace(
-    service: Any,
-    *,
-    normalized: NormalizedInput,
-    mode: ModeDecision,
-    reasoning_result: Dict[str, Any],
-    run_context: Optional[Any],
-) -> Dict[str, Any]:
-    if mode.mode not in {"deep", "workflow"}:
-        return {}
-    if not service.workflow_engine:
-        return {}
-    if not bool(reasoning_result.get("used_reasoning")):
-        return {}
-
-    steps = _normalize_plan_steps(reasoning_result.get("plan_steps"))
-    if not steps:
-        return {}
-    try:
-        from .workflow_models import WorkflowDefinition, WorkflowStep
-
-        workflow_id = f"reasoning_plan_{uuid.uuid4().hex}"
-        definition_steps: List[WorkflowStep] = []
-        for idx, step in enumerate(steps):
-            definition_steps.append(
-                WorkflowStep(
-                    step_id=f"plan_{idx + 1}",
-                    step_type="reasoning_step",
-                    name=step["title"],
-                    description=step["goal"],
-                    inputs=step,
-                )
-            )
-        definition = WorkflowDefinition(
-            workflow_id=workflow_id,
-            workflow_type="linear",
-            name=f"Reasoning Plan {workflow_id[-8:]}",
-            description="Ephemeral workflow trace generated from reasoning plan steps.",
-            owner_user_id=normalized.user_id or "default_user",
-            steps=definition_steps,
-            policy={
-                "source": "reasoning_plan",
-                "mode": mode.mode,
-                "tree_id": reasoning_result.get("tree_id"),
-            },
-        )
-        service.workflow_engine.define_workflow(definition)
-        start_async = getattr(service.workflow_engine, "start_workflow_async", None)
-        kwargs = {
-            "workflow_id": workflow_id,
-            "session_id": normalized.session_id or "default_session",
-            "user_id": normalized.user_id or "default_user",
-            "workspace_id": normalized.session_id or "default_workspace",
-            "run_context": run_context,
-            "run_metadata": {
-                "source": "reasoning_plan",
-                "mode": mode.mode,
-                "tree_id": reasoning_result.get("tree_id"),
-                "step_count": len(steps),
-            },
-        }
-        if callable(start_async):
-            run = await start_async(**kwargs)
-        else:
-            run = service.workflow_engine.start_workflow(**kwargs)
-        return {
-            "workflow_id": workflow_id,
-            "workflow_run_id": str(getattr(run, "workflow_run_id", "") or ""),
-            "step_count": len(steps),
-            "source": "reasoning_plan",
-        }
-    except Exception as e:
-        logger.debug("conversation_pipeline: attach plan workflow trace skipped: {}", e)
-        return {}
-
-
-async def stage_tool_execution(
+async def stage_capability_discovery(
     service: Any,
     *,
     run_input: ConversationRunInput,
-    mode: ModeDecision,
+    normalized: NormalizedInput,
+    run_context: Any,
+    user_config: Optional[Dict[str, Any]],
 ) -> ToolExecutionBundle:
-    prompt_policy = getattr(run_input.run_context, "prompt_policy", None) if run_input.run_context is not None else None
-    if isinstance(prompt_policy, dict):
-        enabled = bool(prompt_policy.get("need_tools")) or run_input.tool_executor is not None
-        budget = int(prompt_policy.get("tool_budget") or (5 if enabled else 0))
-        return ToolExecutionBundle(
-            enabled=enabled,
-            strategy="tool_call_loop" if enabled else "none",
-            tool_executor=run_input.tool_executor,
-            metadata={
-                "mode": mode.mode,
-                "prompt_policy": dict(prompt_policy),
-                "tool_budget": budget,
-                "cognitive_mode": prompt_policy.get("cognitive_mode"),
-                "registered_tools": list(getattr(run_input.run_context, "registered_tools", []) or []),
-            },
+    action_budget = resolve_action_budget(user_config)
+    catalog = list(getattr(run_context, "registered_tools", []) or [])
+    if not catalog:
+        catalog = await service.prepare_runtime_capabilities(
+            user_config=user_config,
+            run_context=run_context,
         )
+    executor = run_input.tool_executor or _default_tool_executor(
+        service,
+        normalized=normalized,
+        run_context=run_context,
+        user_config=user_config,
+    )
     return ToolExecutionBundle(
-        enabled=run_input.tool_executor is not None,
-        strategy="llm_native" if run_input.tool_executor is not None else "none",
-        tool_executor=run_input.tool_executor,
+        enabled=bool(executor and any(item.get("callable_now") for item in catalog)),
+        strategy="main_model_control_loop",
+        tool_executor=executor,
         metadata={
-            "mode": mode.mode,
-            "registered_tools": list(getattr(run_input.run_context, "registered_tools", []) or []),
+            "tool_budget": action_budget,
+            "registered_tools": catalog,
+            "decision_owner": "main_model",
         },
     )
 
 
-async def stage_response_synthesis(
+async def _attach_org_context(
     service: Any,
     *,
     normalized: NormalizedInput,
-    memory_bundle: MemoryRecallBundle,
-    plan: PlanResult,
-    tools: ToolExecutionBundle,
-    mode: ModeDecision,
-    run_input: ConversationRunInput,
+    run_context: Any,
     user_config: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    existing_state = getattr(run_context, "reasoning_state", None)
+    if isinstance(existing_state, dict) and isinstance(existing_state.get("org_context"), dict):
+        return dict(existing_state["org_context"])
+    if service.org_context_service is None or not isinstance(user_config, dict) or not normalized.user_id:
+        return {}
+    try:
+        org_context = await service.org_context_service.recall_for_turn(
+            query=normalized.user_message,
+            user_id=normalized.user_id,
+            user_config=user_config,
+            audience=str((normalized.metadata or {}).get("audience") or ""),
+            context_type=None,
+            top_k=None,
+        )
+    except Exception as exc:
+        logger.debug("Conversation pipeline: org context unavailable: {}", exc)
+        org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
+    reasoning_state = getattr(run_context, "reasoning_state", None)
+    if not isinstance(reasoning_state, dict):
+        reasoning_state = {}
+        setattr(run_context, "reasoning_state", reasoning_state)
+    reasoning_state["org_context"] = dict(org_context or {})
+    return dict(org_context or {})
+
+
+async def _assemble_response(
+    service: Any,
+    *,
+    normalized: NormalizedInput,
+    run_input: ConversationRunInput,
+    run_context: Any,
+    user_config: Optional[Dict[str, Any]],
+    base_system_prompt: str,
+    tools: ToolExecutionBundle,
 ) -> ResponseDraft:
-    org_context: Dict[str, Any] = {}
-    if run_input.run_context is not None:
-        rs0 = getattr(run_input.run_context, "reasoning_state", None)
-        if isinstance(rs0, dict) and isinstance(rs0.get("org_context"), dict):
-            org_context = dict(rs0.get("org_context") or {})
-    if (
-        getattr(service, "org_context_service", None)
-        and normalized.user_id
-        and isinstance(user_config, dict)
-        and not org_context
-    ):
-        try:
-            org_context = await service.org_context_service.recall_for_turn(
-                query=normalized.user_message,
-                user_id=normalized.user_id,
-                user_config=user_config,
-                audience=str((normalized.metadata or {}).get("audience") or ""),
-                context_type=None,
-                top_k=None,
-            )
-        except Exception as e:
-            logger.debug("conversation_pipeline: org context recall skipped: {}", e)
-            org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
-
-    if run_input.run_context is not None:
-        rs = getattr(run_input.run_context, "reasoning_state", None)
-        if isinstance(rs, dict):
-            rs["org_context"] = dict(org_context or {})
-        else:
-            try:
-                setattr(run_input.run_context, "reasoning_state", {"org_context": dict(org_context or {})})
-            except Exception:
-                pass
-
-    messages: List[Dict[str, Any]] = []
+    messages: List[Dict[str, Any]]
     if run_input.messages:
-        messages = [dict(m) for m in run_input.messages]
-        prompt_assembly = {
+        messages = [dict(message) for message in run_input.messages]
+        prompt_debug: Dict[str, Any] = {
             "used_block_ids": [],
             "dropped_block_ids": [],
             "compacted": False,
@@ -583,29 +262,20 @@ async def stage_response_synthesis(
             user_id=normalized.user_id or "default_user",
             attachments=normalized.attachments,
             runtime_blocks=normalized.runtime_blocks,
-            run_context=run_input.run_context,
+            run_context=run_context,
         )
-        if run_input.run_context is not None:
-            try:
-                setattr(
-                    run_input.run_context,
-                    "runtime_blocks",
-                    [block.to_dict() for block in runtime_input_blocks],
-                )
-            except Exception:
-                pass
+        setattr(run_context, "runtime_blocks", [block.to_dict() for block in runtime_input_blocks])
         assembly = PROMPT_ASSEMBLER.assemble(
-            run_context=run_input.run_context,
-            mode=mode,
-            plan=plan,
-            memory_bundle=memory_bundle,
+            run_context=run_context,
+            mode=ModeDecision(mode="fast", reason="main_model_control_loop", confidence=1.0),
+            plan=PlanResult(used_reasoning=False, base_system_prompt=base_system_prompt),
+            memory_bundle=MemoryRecallBundle(recalled=False, reason="available_on_demand"),
             tools=tools,
             user_config=user_config,
         )
-        system_prompt = assembly.get("system_prompt", "")
-        prompt_assembly = assembly.get("debug", {})
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+        messages = []
+        if assembly.get("system_prompt"):
+            messages.append({"role": "system", "content": assembly["system_prompt"]})
         messages.extend(normalized.recent_messages)
         vision_enabled = service._is_vision_enabled(user_config=user_config, user_id=normalized.user_id)
         messages.append(
@@ -618,332 +288,224 @@ async def stage_response_synthesis(
                 ),
             }
         )
-        prompt_assembly["runtime_blocks"] = blocks_debug(runtime_input_blocks)
-        prompt_assembly["llm_io"] = {
+        prompt_debug = dict(assembly.get("debug") or {})
+        prompt_debug["runtime_blocks"] = blocks_debug(runtime_input_blocks)
+        prompt_debug["llm_io"] = {
             "vision_enabled": vision_enabled,
             "input_block_count": len(runtime_input_blocks),
-            "compiled_user_content_type": "blocks" if isinstance(messages[-1].get("content"), list) else "text",
+            "compiled_user_content_type": "blocks" if isinstance(messages[-1]["content"], list) else "text",
         }
 
-    response_data = await service.run_chat_loop(
+    response = await service.run_chat_loop(
         messages,
         user_config=user_config,
         session_id=normalized.session_id,
         user_id=normalized.user_id,
-        run_context=run_input.run_context,
-        tool_executor=tools.tool_executor,
-        max_recursion=int((tools.metadata or {}).get("tool_budget") or 5),
+        run_context=run_context,
+        tool_executor=tools.tool_executor if tools.enabled else None,
+        max_recursion=int((tools.metadata or {}).get("tool_budget") or resolve_action_budget(user_config)),
     )
-    final_response = response_data if isinstance(response_data, dict) else {"raw": response_data}
-    feedback_hints: List[Dict[str, Any]] = []
-    if service.memory_service and normalized.session_id and normalized.user_id:
-        drain = getattr(service.memory_service, "drain_visibility_hints", None)
-        if callable(drain):
-            try:
-                hint_out = drain(
-                    session_id=normalized.session_id,
-                    user_id=normalized.user_id,
-                    limit=3,
-                )
-                feedback_hints = list(hint_out or [])
-            except Exception:
-                feedback_hints = []
-    memory_visibility = build_memory_visibility(memory_bundle=memory_bundle, feedback_hints=feedback_hints)
-    if _memory_visibility_enabled(user_config):
-        final_response["memory_visibility"] = memory_visibility
-    else:
-        final_response["memory_visibility"] = {"enabled": False, "notices": []}
-    final_response.setdefault("prompt_assembly", prompt_assembly)
-    final_response["soul"] = build_soul_response_payload(user_config)
-    final_response["org_context"] = {
-        "enabled": bool((org_context or {}).get("enabled")),
-        "recalled": bool((org_context or {}).get("recalled")),
-        "org_id": str((org_context or {}).get("org_id") or ""),
-        "audience": str((org_context or {}).get("audience") or ""),
-        "backend": str((org_context or {}).get("backend") or ""),
-        "items": list((org_context or {}).get("items") or []),
-    }
+    raw = dict(response) if isinstance(response, dict) else {"raw": response}
+    raw.setdefault("prompt_assembly", prompt_debug)
+    raw["soul"] = build_soul_response_payload(user_config)
     return ResponseDraft(
-        status=str(final_response.get("status", "success") or "success"),
-        content=str(final_response.get("content", "") or ""),
+        status=str(raw.get("status") or "success"),
+        content=str(raw.get("content") or ""),
         messages=messages,
-        response_data=final_response,
+        response_data=raw,
     )
+
+
+def _capability_outcome(raw: Dict[str, Any]) -> Dict[str, Any]:
+    calls = [item for item in (raw.get("tool_calls") or []) if isinstance(item, dict)]
+    successful_names = [
+        str(item.get("tool_name") or "")
+        for item in calls
+        if bool(item.get("ok", False))
+    ]
+    failed = [item for item in calls if not bool(item.get("ok", False))]
+    used_reasoning = "reasoning.run" in successful_names
+    memory_recalled = "memory.get_context" in successful_names
+    workflow_used = any(name.startswith("workflow.") for name in successful_names)
+    mode = "workflow" if workflow_used else ("deep" if used_reasoning else "fast")
+    return {
+        "calls": calls,
+        "mode": mode,
+        "used_reasoning": used_reasoning,
+        "memory_recalled": memory_recalled,
+        "workflow_used": workflow_used,
+        "failed": failed,
+    }
 
 
 async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> ConversationRunOutput:
-    stages = [
-        "input_normalization",
-        "mode_detection",
-        "memory_recall",
-        "planning_reasoning",
-        "tool_execution",
-        "response_synthesis",
-    ]
+    stages = ["input_normalization", "capability_discovery", "model_control_loop", "response_finalize"]
     state: Dict[str, Any] = {"stages": [], "stage_status": {}}
-    current_stage: Optional[str] = None
+    current_stage = stages[0]
     run_context = run_input.run_context
     session_id = run_input.session_id
     user_id = run_input.user_id
 
     try:
-        current_stage = stages[0]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-        )
+        await _emit_stage(service, stage=current_stage, status="started", run_context=run_context, session_id=session_id, user_id=user_id)
         normalized = await stage_input_normalization(service, run_input)
-        session_id = normalized.session_id
-        user_id = normalized.user_id
-        runtime_context_block = build_runtime_context_block(recent_messages=normalized.recent_messages)
+        session_id, user_id = normalized.session_id, normalized.user_id
         if run_context is None:
             run_context = SimpleNamespace(
                 input_payload={"message": normalized.user_message, "metadata": normalized.metadata},
                 reasoning_state={},
             )
-            try:
-                run_input.run_context = run_context
-            except Exception:
-                pass
-        try:
-            setattr(run_context, "runtime_context", runtime_context_block)
-        except Exception:
-            pass
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="finished",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"user_message_length": len(normalized.user_message)},
-        )
+            run_input.run_context = run_context
+        await _emit_stage(service, stage=current_stage, status="finished", run_context=run_context, session_id=session_id, user_id=user_id)
         state["stages"].append(current_stage)
         state["stage_status"][current_stage] = {"status": "ok"}
 
         user_config = run_input.user_config
-        if user_config is None and service.config_service and user_id:
-            user_config = service.config_service.get_merged_config(user_id)
-        base_system_prompt, config_user = await service._get_user_prompt_and_config(
-            user_id or "default_user",
-            normalized.channel,
-        )
+        base_system_prompt, resolved_config = await service._get_user_prompt_and_config(user_id or "default_user", normalized.channel)
         if user_config is None:
-            user_config = config_user
-
-        current_stage = stages[1]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
+            user_config = resolved_config
+        setattr(
+            run_context,
+            "runtime_context",
+            build_runtime_context_block(
+                recent_messages=normalized.recent_messages,
+                user_config=user_config,
+                timezone_name=str((normalized.metadata or {}).get("timezone") or ""),
+            ),
         )
-        mode = await stage_mode_detection(service, normalized)
-        prompt_policy = await service.route_prompt_policy(
-            user_message=normalized.user_message,
-            user_config=user_config,
-            user_id=user_id,
-            base_system_prompt=base_system_prompt,
-            run_context=run_context,
-            recent_messages=normalized.recent_messages,
-            runtime_context=runtime_context_block,
-        )
-        mode = _apply_prompt_policy_to_mode(mode, prompt_policy)
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="finished",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"mode": mode.mode, "reason": mode.reason, "prompt_policy": prompt_policy},
-        )
-        state["stages"].append(current_stage)
-        state["stage_status"][current_stage] = {"status": "ok", "mode": mode.mode}
-
-        current_stage = stages[2]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-        )
-        memory_bundle = await stage_memory_recall(
+        base_system_prompt = service._append_language_policy(service._ensure_core_system_prompt(base_system_prompt))
+        org_context = await _attach_org_context(
             service,
             normalized=normalized,
             run_context=run_context,
             user_config=user_config,
-            mode=mode,
         )
-        await _emit_stage_event(
+        self_model_context = await service.attach_self_model_context(
+            user_id=user_id or "default_user",
+            user_message=normalized.user_message,
+            run_context=run_context,
+        )
+
+        current_stage = stages[1]
+        await _emit_stage(service, stage=current_stage, status="started", run_context=run_context, session_id=session_id, user_id=user_id)
+        tools = await stage_capability_discovery(
+            service,
+            run_input=run_input,
+            normalized=normalized,
+            run_context=run_context,
+            user_config=user_config,
+        )
+        await _emit_stage(
             service,
             stage=current_stage,
             status="finished",
             run_context=run_context,
             session_id=session_id,
             user_id=user_id,
-            payload={"recalled": memory_bundle.recalled},
+            payload={"available_tools": len((tools.metadata or {}).get("registered_tools") or [])},
         )
         state["stages"].append(current_stage)
-        memory_stage_status = "ok" if memory_bundle.recalled else "skipped"
-        if (not memory_bundle.recalled) and str(memory_bundle.reason or "") not in {"mode_fast", "not_needed", "missing_identity"}:
-            memory_stage_status = "degraded"
+        state["stage_status"][current_stage] = {"status": "ok", "enabled": tools.enabled}
+
+        current_stage = stages[2]
+        await _emit_stage(service, stage=current_stage, status="started", run_context=run_context, session_id=session_id, user_id=user_id)
+        response = await _assemble_response(
+            service,
+            normalized=normalized,
+            run_input=run_input,
+            run_context=run_context,
+            user_config=user_config,
+            base_system_prompt=base_system_prompt,
+            tools=tools,
+        )
+        outcome = _capability_outcome(response.response_data)
+        await _emit_stage(
+            service,
+            stage=current_stage,
+            status="finished",
+            run_context=run_context,
+            session_id=session_id,
+            user_id=user_id,
+            payload={"tool_call_count": len(outcome["calls"]), "mode": outcome["mode"]},
+        )
+        state["stages"].append(current_stage)
         state["stage_status"][current_stage] = {
-            "status": memory_stage_status,
-            "reason_code": str(memory_bundle.reason or ""),
-            "recalled": bool(memory_bundle.recalled),
+            "status": "degraded" if outcome["failed"] else "ok",
+            "tool_call_count": len(outcome["calls"]),
         }
 
         current_stage = stages[3]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
+        await _emit_stage(service, stage=current_stage, status="started", run_context=run_context, session_id=session_id, user_id=user_id)
+        feedback_hints: List[Dict[str, Any]] = []
+        if service.memory_service and session_id and user_id:
+            drain = getattr(service.memory_service, "drain_visibility_hints", None)
+            if callable(drain):
+                try:
+                    feedback_hints = list(drain(session_id=session_id, user_id=user_id, limit=3) or [])
+                except Exception:
+                    feedback_hints = []
+        memory_bundle = MemoryRecallBundle(
+            recalled=outcome["memory_recalled"],
+            reason="main_model_tool_call" if outcome["memory_recalled"] else "not_requested",
         )
-        plan = await stage_plan_or_reason(
-            service,
-            normalized=normalized,
-            run_context=run_context,
-            mode=mode,
-            user_config=user_config,
-            base_system_prompt=base_system_prompt,
+        raw = dict(response.response_data)
+        raw["memory_visibility"] = (
+            build_memory_visibility(memory_bundle=memory_bundle, feedback_hints=feedback_hints)
+            if _memory_visibility_enabled(user_config)
+            else {"enabled": False, "notices": []}
         )
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="finished",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"used_reasoning": plan.used_reasoning},
-        )
-        state["stages"].append(current_stage)
-        plan_stage_status = "ok" if plan.used_reasoning else ("skipped" if mode.mode == "fast" else "degraded")
-        state["stage_status"][current_stage] = {
-            "status": plan_stage_status,
-            "used_reasoning": bool(plan.used_reasoning),
-            "reason_code": "reasoning_disabled_or_unavailable" if plan_stage_status == "degraded" else "",
+        raw["org_context"] = {
+            "enabled": bool(org_context.get("enabled")),
+            "recalled": bool(org_context.get("recalled")),
+            "org_id": str(org_context.get("org_id") or ""),
+            "audience": str(org_context.get("audience") or ""),
+            "backend": str(org_context.get("backend") or ""),
+            "items": list(org_context.get("items") or []),
         }
-
-        current_stage = stages[4]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-        )
-        tools = await stage_tool_execution(service, run_input=run_input, mode=mode)
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="finished",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"enabled": tools.enabled},
-        )
-        state["stages"].append(current_stage)
-        state["stage_status"][current_stage] = {
-            "status": "ok" if tools.enabled else "skipped",
-            "enabled": bool(tools.enabled),
+        raw["self_model"] = {
+            "version": self_model_context.get("version"),
+            "revision": self_model_context.get("revision"),
+            "available": bool(self_model_context.get("prompt_text")),
         }
-
-        current_stage = stages[5]
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="started",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
+        state["stages"].append(current_stage)
+        state["stage_status"][current_stage] = {"status": "ok", "response_status": response.status}
+        raw["pipeline"] = state
+        raw["mode"] = outcome["mode"]
+        raw["prompt_policy"] = {
+            "source": "main_model_control_loop",
+            "decision_owner": "main_model",
+            "tool_budget": int((tools.metadata or {}).get("tool_budget") or resolve_action_budget(user_config)),
+        }
+        raw["memory_recalled"] = outcome["memory_recalled"]
+        raw["used_reasoning"] = outcome["used_reasoning"]
+        raw["capability_state"] = {
+            "memory": {"status": "ok" if outcome["memory_recalled"] else "skipped"},
+            "reasoning": {"status": "ok" if outcome["used_reasoning"] else "skipped"},
+            "tools": {
+                "status": "degraded" if outcome["failed"] else ("ok" if outcome["calls"] else "skipped"),
+                "call_count": len(outcome["calls"]),
+            },
+            "degraded": bool(outcome["failed"]),
+            "degraded_stages": ["model_control_loop"] if outcome["failed"] else [],
+        }
+        raw["task_graph"] = build_task_graph_snapshot(
+            stage_status=state["stage_status"],
+            mode=outcome["mode"],
+            response_status=response.status,
         )
-        response = await stage_response_synthesis(
-            service,
-            normalized=normalized,
-            memory_bundle=memory_bundle,
-            plan=plan,
-            tools=tools,
-            mode=mode,
-            run_input=run_input,
-            user_config=user_config,
+        raw["context_budget"] = build_context_budget_snapshot(raw.get("prompt_assembly") or {})
+        raw["orchestration"] = build_orchestration_snapshot(
+            mode=outcome["mode"],
+            used_reasoning=outcome["used_reasoning"],
         )
         await schedule_soul_evolution(
             service=service,
-            user_id=normalized.user_id,
+            user_id=user_id,
             user_config=user_config,
             user_message=normalized.user_message,
             assistant_message=response.content,
         )
-        await _emit_stage_event(
-            service,
-            stage=current_stage,
-            status="finished",
-            run_context=run_context,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"status": response.status},
-        )
-        state["stages"].append(current_stage)
-        state["stage_status"][current_stage] = {"status": "ok", "response_status": response.status}
-
-        raw = dict(response.response_data)
-        degraded_stages = [
-            stage_name
-            for stage_name, info in (state.get("stage_status") or {}).items()
-            if isinstance(info, dict) and str(info.get("status") or "") == "degraded"
-        ]
-        capability_state = {
-            "memory": state["stage_status"].get("memory_recall", {}),
-            "reasoning": state["stage_status"].get("planning_reasoning", {}),
-            "tools": state["stage_status"].get("tool_execution", {}),
-            "workflow_trace_attached": bool(isinstance(plan.reasoning, dict) and plan.reasoning.get("workflow_trace")),
-            "degraded": bool(degraded_stages),
-            "degraded_stages": degraded_stages,
-        }
-        workflow_trace = (
-            plan.reasoning.get("workflow_trace")
-            if isinstance(plan.reasoning, dict)
-            else None
-        )
-        task_graph = build_task_graph_snapshot(
-            stage_status=state.get("stage_status", {}),
-            mode=mode.mode,
-            response_status=response.status,
-            workflow_trace=workflow_trace if isinstance(workflow_trace, dict) else None,
-        )
-        context_budget = build_context_budget_snapshot(
-            raw.get("prompt_assembly", {}) if isinstance(raw.get("prompt_assembly"), dict) else {}
-        )
-        orchestration = build_orchestration_snapshot(
-            mode=mode.mode,
-            used_reasoning=bool(plan.used_reasoning),
-            workflow_trace=workflow_trace if isinstance(workflow_trace, dict) else None,
-            reasoning=plan.reasoning if isinstance(plan.reasoning, dict) else None,
-        )
-        raw.setdefault("pipeline", state)
-        raw.setdefault("mode", mode.mode)
-        raw.setdefault("prompt_policy", prompt_policy)
-        raw.setdefault("memory_recalled", memory_bundle.recalled)
-        raw.setdefault("used_reasoning", plan.used_reasoning)
-        raw.setdefault("capability_state", capability_state)
-        raw.setdefault("task_graph", task_graph)
-        raw.setdefault("context_budget", context_budget)
-        raw.setdefault("orchestration", orchestration)
-        if isinstance(plan.reasoning, dict) and plan.reasoning.get("workflow_trace"):
-            raw.setdefault("workflow_trace", plan.reasoning.get("workflow_trace"))
+        await _emit_stage(service, stage=current_stage, status="finished", run_context=run_context, session_id=session_id, user_id=user_id)
         return ConversationRunOutput(
             status=response.status,
             content=response.content,
@@ -952,19 +514,15 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             args=raw.get("args") if isinstance(raw.get("args"), dict) else None,
             raw=raw,
         )
-    except Exception as e:
-        failed_stage = current_stage or stages[min(len(state["stages"]), len(stages) - 1)]
-        await _emit_stage_event(
+    except Exception as exc:
+        logger.exception("Conversation pipeline failed at {}: {}", current_stage, exc)
+        await _emit_stage(
             service,
-            stage=failed_stage,
+            stage=current_stage,
             status="failed",
             run_context=run_context,
             session_id=session_id,
             user_id=user_id,
-            payload={"error": str(e)},
+            payload={"error": str(exc)},
         )
         raise
-
-
-
-

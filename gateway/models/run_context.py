@@ -13,11 +13,15 @@ class RunContext(BaseModel):
 
     request_id: str
     trace_id: str
+    task_id: Optional[str] = None
+    run_id: Optional[str] = None
     session_state: SessionState
     user_identity: Dict[str, Any] = Field(default_factory=dict)
     input_payload: Dict[str, Any] = Field(default_factory=dict)
     normalized_input: Dict[str, Any] = Field(default_factory=dict)
     memory_bundle: Dict[str, Any] = Field(default_factory=dict)
+    self_model_context: Dict[str, Any] = Field(default_factory=dict)
+    cognition_snapshot: Dict[str, Any] = Field(default_factory=dict)
     tool_availability: Dict[str, Any] = Field(default_factory=dict)
     tool_policy: Dict[str, Any] = Field(default_factory=dict)
     reasoning_state: Dict[str, Any] = Field(default_factory=dict)
@@ -25,10 +29,12 @@ class RunContext(BaseModel):
     prompt_block_policy: Dict[str, Any] = Field(default_factory=dict)
     requested_mode: Optional[str] = None
     requested_skill: Optional[str] = None
+    requested_workflow: Optional[str] = None
     active_skill: Dict[str, Any] = Field(default_factory=dict)
     token_budget: Optional[int] = None
     cost_budget: Optional[float] = None
     workspace_handle: Dict[str, Any] = Field(default_factory=dict)
+    action_state: Dict[str, Any] = Field(default_factory=dict)
     event_buffer: list[Dict[str, Any]] = Field(default_factory=list)
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

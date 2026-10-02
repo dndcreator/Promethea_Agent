@@ -17,7 +17,8 @@ Key principles:
 
 Additional memory keys:
 - memory.raw_log (L0 memory layer: append-only write-ahead log and replay; runtime memory data, not a cleanup target)
-- memory.hippocampus (idle/background consolidation cadence for warm/cold layers)
+- memory.hippocampus (durable idle-time replay over accepted memory; separate from warm/cold maintenance)
+- memory.forgetting (decay and cleanup cadence)
 
 Procedural-memory runtime note:
 - reasoning/action procedural assets are persisted under `brain/basal_ganglia` (not user profile config fields)

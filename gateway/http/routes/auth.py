@@ -9,12 +9,10 @@ from neo4j.exceptions import AuthError, ServiceUnavailable
 from ..schemas import (
     ChannelBindRequest,
     UserDeleteRequest,
-    UserConfigUpdate,
     UserLogin,
     UserRegister,
 )
 from ..user_manager import user_manager
-from ..config_compat import build_user_config_payload
 from config import config
 from gateway.user_secrets import get_user_secrets_status
 from gateway_integration import get_gateway_integration
@@ -43,6 +41,14 @@ def decode_access_token(token: str) -> dict:
     return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
 
 
+def user_id_from_access_token(token: str) -> str:
+    payload = decode_access_token(token)
+    user_id = payload.get("sub")
+    if not user_id:
+        raise JWTError("access token has no subject")
+    return str(user_id)
+
+
 async def get_current_user_id(request: Request, token: str | None = Depends(oauth2_scheme)) -> str:
     middleware_user_id = getattr(request.state, "user_id", None)
     if middleware_user_id:
@@ -60,11 +66,7 @@ async def get_current_user_id(request: Request, token: str | None = Depends(oaut
         raise credentials_exception
 
     try:
-        payload = decode_access_token(token)
-        user_id: str = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-        return user_id
+        return user_id_from_access_token(token)
     except JWTError:
         raise credentials_exception
 
@@ -183,71 +185,6 @@ async def get_profile(user_id: str = Depends(get_current_user_id)):
         "api_key_configured": api_key_configured,
         "warning": None if api_key_configured else "Please set API__API_KEY in your user secrets.env or root .env",
     }
-
-
-def _get_config_service():
-    integration = get_gateway_integration()
-    if not integration:
-        raise HTTPException(status_code=503, detail="Gateway not initialized")
-    gateway_server = integration.get_gateway_server()
-    if not gateway_server or not gateway_server.config_service:
-        raise HTTPException(status_code=503, detail="Config service not initialized")
-    return gateway_server.config_service
-
-
-@router.post("/user/config")
-async def update_config(
-    req: UserConfigUpdate,
-    user_id: str = Depends(get_current_user_id),
-):
-    payload = build_user_config_payload(req)
-    try:
-        config_service = _get_config_service()
-        result = await config_service.update_user_config(user_id, payload, validate=True)
-        if not result.get("success"):
-            raise HTTPException(status_code=400, detail=result.get("message", "Update config failed"))
-
-        sanitized = dict(result.get("config") or {})
-        if isinstance(sanitized.get("api"), dict):
-            for key in ("api_key", "base_url", "model", "failover_models"):
-                sanitized["api"].pop(key, None)
-        if isinstance(sanitized.get("memory"), dict):
-            mem = sanitized["memory"]
-            if isinstance(mem.get("api"), dict):
-                for key in ("api_key", "base_url", "model", "use_main_api"):
-                    mem["api"].pop(key, None)
-            if isinstance(mem.get("neo4j"), dict):
-                for key in ("enabled", "uri", "username", "password", "database"):
-                    mem["neo4j"].pop(key, None)
-            for key in ("store_backend", "sqlite_graph_path", "flat_memory_path"):
-                mem.pop(key, None)
-
-        return {
-            "status": "success",
-            "message": result.get("message", "Config updated"),
-            "deprecated": True,
-            "canonical_endpoint": "/api/config/update",
-            "config": sanitized,
-        }
-    except HTTPException as exc:
-        if exc.status_code != 503:
-            raise
-        # Fallback: keep legacy behavior if gateway services are unavailable.
-        graph_sync_ok = user_manager.update_user_config(
-            user_id,
-            agent_name=req.agent_name,
-            system_prompt=req.system_prompt,
-        )
-        file_ok = user_manager.update_user_config_file(user_id, payload) if payload else True
-        if not file_ok:
-            raise HTTPException(status_code=500, detail="Update config failed")
-        return {
-            "status": "success",
-            "message": "Config updated (legacy fallback)",
-            "graph_sync_ok": graph_sync_ok,
-            "deprecated": True,
-            "canonical_endpoint": "/api/config/update",
-        }
 
 
 @router.post("/user/channels/bind")

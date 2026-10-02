@@ -3,7 +3,7 @@
   "label": "Runtime Tools",
   "version": "1.0.0",
   "description": "Gateway/runtime operations for sessions, agents, memory, messaging, and plugins.",
-  "serviceType": "mcp",
+  "serviceType": "internal_tool",
   "entryPoint": {
     "module": "agentkit.tools.runtime_tools.runtime_tools",
     "class": "RuntimeToolsService"
@@ -12,31 +12,57 @@
     "invocation_commands": [
       {
         "command": "gateway_action",
+        "sideEffectLevel": "read_only",
         "description": "Inspect gateway status/routes/tools.",
         "example": "gateway_action(action='status')"
       },
       {
         "command": "sessions_action",
+        "sideEffectLevel": "workspace_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "workspace_write",
+          "groups": { "read_only": ["list", "get"] }
+        },
         "description": "List/query/update/delete chat sessions.",
         "example": "sessions_action(action='list', user_id='default_user')"
       },
       {
         "command": "agents_action",
+        "sideEffectLevel": "read_only",
         "description": "List or query registered agents.",
         "example": "agents_action(action='list')"
       },
       {
         "command": "memory_action",
+        "sideEffectLevel": "workspace_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "workspace_write",
+          "groups": { "read_only": ["stats", "search"] }
+        },
         "description": "Search or maintain memory state.",
         "example": "memory_action(action='search', session_id='s1', query='project goal')"
       },
       {
         "command": "message_action",
+        "sideEffectLevel": "external_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "external_write",
+          "groups": { "read_only": ["list_channels"] }
+        },
         "description": "List channels or send a channel message.",
         "example": "message_action(action='send', channel='web', receiver_id='u1', content='hello')"
       },
       {
         "command": "plugins_action",
+        "sideEffectLevel": "workspace_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "workspace_write",
+          "groups": { "read_only": ["list", "diagnostics"] }
+        },
         "description": "List plugin runtime state and diagnostics.",
         "example": "plugins_action(action='list')"
       }

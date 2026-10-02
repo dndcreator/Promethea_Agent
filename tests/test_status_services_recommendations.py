@@ -8,7 +8,7 @@ async def test_status_services_returns_failed_components_and_recommendations(mon
     class _DummyGateway:
         def get_services_health(self):
             return {
-                "tool_service": True,
+                "capability_service": True,
                 "memory_service": False,
                 "reasoning_service": True,
                 "workflow_engine": False,

@@ -3,6 +3,17 @@
 from agentkit.security.sandbox import SandboxPolicy
 
 
+def test_sandbox_defaults_fail_closed_for_unconfined_host_capabilities():
+    policy = SandboxPolicy()
+
+    assert policy.is_enforced() is True
+    assert policy.check_command("python -V").allowed is False
+    assert policy.check_desktop_action("screenshot").allowed is True
+    assert policy.check_desktop_action("click").allowed is False
+    assert policy.check_process_action("kill", managed=False).allowed is False
+    assert policy.check_process_action("kill", managed=True).allowed is True
+
+
 def test_sandbox_blocks_write_when_workspace_read_only():
     policy = SandboxPolicy(
         enabled=True,
@@ -48,3 +59,16 @@ def test_sandbox_blocks_private_network_and_enforces_domain_allowlist():
 
     allowed = policy.check_url("https://api.example.com/data")
     assert allowed.allowed is True
+
+
+def test_explicit_host_control_does_not_disable_other_sandbox_boundaries():
+    policy = SandboxPolicy(
+        desktop_mode="host_control",
+        process_mode="host_control",
+        workspace_access="rw",
+        command_mode="deny",
+    )
+
+    assert policy.check_desktop_action("click").allowed is True
+    assert policy.check_process_action("terminate", managed=False).allowed is True
+    assert policy.check_command("python -V").allowed is False

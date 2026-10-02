@@ -3,8 +3,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 
-from agentkit.security.policy import global_policy
-
+from agentkit.mcp.action_protocol import build_action_mode_contract
 from agentkit.mcp.tool_call import parse_tool_calls, execute_tool_calls, tool_call_loop
 from conversation_core import PrometheaConversation
 
@@ -13,7 +12,7 @@ class MockMCPManager:
     def __init__(self):
         self.call_log = []
 
-    async def unified_call(self, service_name, tool_name, args):
+    async def call_service_tool(self, service_name, tool_name, args):
         self.call_log.append({
             "service": service_name,
             "tool": tool_name,
@@ -23,10 +22,19 @@ class MockMCPManager:
         await asyncio.sleep(0.1)
         return {"success": True, "result": f"Result from {service_name}.{tool_name}"}
         
-    def format_available_services(self):
-        return "- mock_service: Mock Description"
-
 class TestToolExecution(unittest.TestCase):
+
+    @staticmethod
+    def _safe_confirmation(_name, _payload):
+        return False
+
+    @staticmethod
+    async def _mcp_executor(manager, _name, payload):
+        return await manager.call_service_tool(
+            service_name=payload["service_name"],
+            tool_name=payload["tool_name"],
+            args={k: v for k, v in payload.items() if k not in {"service_name", "tool_name", "agentType"}},
+        )
 
     def test_parse_tool_calls(self):
         """Test parsing of tool calls from LLM output"""
@@ -63,6 +71,8 @@ class TestToolExecution(unittest.TestCase):
         self.assertEqual(calls[0]["name"], "content_tools.web_fetch")
         self.assertEqual(calls[0]["args"]["url"], "https://example.com")
         self.assertNotIn("action", calls[0]["args"])
+        self.assertNotIn("agentType", calls[0]["args"])
+        self.assertNotIn("service_name", calls[0]["args"])
 
     def test_parallel_execution(self):
         """Test parallel execution of tool calls"""
@@ -74,7 +84,11 @@ class TestToolExecution(unittest.TestCase):
             ]
             
             start = time.time()
-            result = await execute_tool_calls(tool_calls, manager)
+            result = await execute_tool_calls(
+                tool_calls,
+                tool_executor=lambda name, payload: self._mcp_executor(manager, name, payload),
+                confirmation_resolver=self._safe_confirmation,
+            )
             end = time.time()
             
             # Since each call sleeps 0.1s, parallel execution should take roughly 0.1s, not 0.2s
@@ -101,7 +115,11 @@ class TestToolExecution(unittest.TestCase):
             calls = parse_tool_calls(
                 '{"tool_name":"math.calculate","agentType":"local","service_name":"math.calculate","args":{"expression":"100 / 5"}}'
             )
-            result = await execute_tool_calls(calls, manager, tool_executor=tool_executor)
+            result = await execute_tool_calls(
+                calls,
+                tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
+            )
 
             self.assertEqual(len(seen), 1)
             self.assertEqual(seen[0][0], "math.calculate")
@@ -136,13 +154,17 @@ class TestToolExecution(unittest.TestCase):
 
             out = await tool_call_loop(
                 messages=[{"role": "user", "content": "calculate 2 + 2"}],
-                mcp_manager=manager,
                 llm_caller=llm_caller,
                 tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
                 max_recursion=2,
             )
 
             self.assertEqual(out["content"], "The observed result is 4.")
+            self.assertEqual(
+                out["tool_calls"],
+                [{"tool_name": "math.calculate", "tool_call_id": out["tool_calls"][0]["tool_call_id"], "ok": True}],
+            )
             second_turn_messages = seen[1]
             observation = second_turn_messages[-1]["content"]
             flat_text = "\n".join(
@@ -152,6 +174,39 @@ class TestToolExecution(unittest.TestCase):
             )
             self.assertIn("Lightweight ReAct gate", flat_text)
             self.assertIn("Observation", flat_text)
+
+        asyncio.run(run_test())
+
+    def test_tool_loop_reuses_initial_model_response(self):
+        async def run_test():
+            manager = MockMCPManager()
+            llm_calls = []
+
+            async def llm_caller(messages):
+                llm_calls.append(messages)
+                return {"content": '{"action":"answer","content":"The result is 4."}'}
+
+            async def tool_executor(name, payload):
+                self.assertEqual(name, "math.calculate")
+                self.assertEqual(payload["expression"], "2 + 2")
+                return {"value": 4}
+
+            out = await tool_call_loop(
+                messages=[{"role": "system", "content": build_action_mode_contract()}],
+                llm_caller=llm_caller,
+                tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
+                initial_response={
+                    "content": (
+                        '{"action":"tool_call","tool_name":"math.calculate",'
+                        '"args":{"expression":"2 + 2"}}'
+                    )
+                },
+            )
+
+            self.assertEqual(out["content"], "The result is 4.")
+            self.assertEqual(len(llm_calls), 1)
+            self.assertEqual(out["tool_calls"][0]["tool_name"], "math.calculate")
 
         asyncio.run(run_test())
 
@@ -174,7 +229,11 @@ class TestToolExecution(unittest.TestCase):
                 '{"tool_name":"memory.list_entries","agentType":"local",'
                 '"service_name":"memory.list_entries","args":{"limit":1}}'
             )
-            result = await execute_tool_calls(calls, manager, tool_executor=tool_executor)
+            result = await execute_tool_calls(
+                calls,
+                tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
+            )
             flat_text = "\n".join([b.get("text", "") for b in result if b.get("type") == "text"])
 
             self.assertIn('"ok": true', flat_text)
@@ -211,9 +270,9 @@ class TestToolExecution(unittest.TestCase):
                     {"role": "system", "content": "Action mode contract:"},
                     {"role": "user", "content": "calculate 2 + 2"},
                 ],
-                mcp_manager=manager,
                 llm_caller=llm_caller,
                 tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
                 max_recursion=2,
             )
 
@@ -238,7 +297,6 @@ class TestToolExecution(unittest.TestCase):
                     {"role": "system", "content": "Action mode contract:"},
                     {"role": "user", "content": "do something unavailable"},
                 ],
-                mcp_manager=manager,
                 llm_caller=llm_caller,
                 max_recursion=2,
             )
@@ -254,8 +312,8 @@ class TestToolExecution(unittest.TestCase):
             responses = [
                 {
                     "content": (
-                        '{"tool_name":"websearch.news_search","agentType":"mcp",'
-                        '"service_name":"websearch","args":{"query":"today news"}}'
+                        '{"tool_name":"newswire.latest","agentType":"mcp",'
+                        '"service_name":"newswire","args":{"query":"today news"}}'
                     )
                 },
                 {
@@ -277,9 +335,9 @@ class TestToolExecution(unittest.TestCase):
 
             out = await tool_call_loop(
                 messages=[{"role": "user", "content": "check today's news"}],
-                mcp_manager=manager,
                 llm_caller=llm_caller,
                 tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
                 max_recursion=1,
             )
 
@@ -329,9 +387,9 @@ class TestToolExecution(unittest.TestCase):
                     {"role": "system", "content": "Action mode contract:"},
                     {"role": "user", "content": "fetch the full article"},
                 ],
-                mcp_manager=manager,
                 llm_caller=llm_caller,
                 tool_executor=tool_executor,
+                confirmation_resolver=self._safe_confirmation,
                 max_recursion=1,
             )
 
@@ -346,43 +404,37 @@ class TestToolExecution(unittest.TestCase):
         async def run_test():
             manager = MockMCPManager()
 
-            # Force 'press_keys' to be HIGH risk for this test
-            original = dict(global_policy.tool_risk_map)
-            try:
-                # ensure at least one tool is considered HIGH
-                from agentkit.security.policy import ToolRiskLevel
-                global_policy.tool_risk_map["press_keys"] = ToolRiskLevel.HIGH
+            tool_calls = [
+                {"name": "safe1", "args": {"service_name": "s1", "tool_name": "search", "q": "x"}},
+                {"name": "danger", "args": {"service_name": "s2", "tool_name": "press_keys", "keys": ["ALT", "F4"]}},
+                {"name": "safe2", "args": {"service_name": "s3", "tool_name": "search", "q": "y"}},
+            ]
 
-                tool_calls = [
-                    {"name": "safe1", "args": {"service_name": "s1", "tool_name": "search", "q": "x"}},
-                    {"name": "danger", "args": {"service_name": "s2", "tool_name": "press_keys", "keys": ["ALT", "F4"]}},
-                    {"name": "safe2", "args": {"service_name": "s3", "tool_name": "search", "q": "y"}},
-                ]
+            from agentkit.mcp.tool_call import ToolConfirmationRequired
+            with self.assertRaises(ToolConfirmationRequired):
+                await execute_tool_calls(
+                    tool_calls,
+                    session_id="t",
+                    approved_call_ids=set(),
+                    tool_executor=lambda name, payload: self._mcp_executor(manager, name, payload),
+                    confirmation_resolver=lambda _name, payload: payload.get("tool_name") == "press_keys",
+                )
 
-                from agentkit.mcp.tool_call import ToolConfirmationRequired
-                with self.assertRaises(ToolConfirmationRequired):
-                    await execute_tool_calls(tool_calls, manager, session_id="t", approved_call_ids=set())
-
-                # No calls should have executed because we pre-scan and abort the whole batch
-                self.assertEqual(manager.call_log, [])
-            finally:
-                global_policy.tool_risk_map = original
+            self.assertEqual(manager.call_log, [])
 
         asyncio.run(run_test())
 
     def test_system_prompt_injection(self):
         """Test system prompt injection in ConversationCore"""
-        # Mock dependencies
         conv = PrometheaConversation()
-        conv.mcp_manager = MockMCPManager()
         
         messages = [{'role': 'user', 'content': 'hello'}]
         new_messages = conv.prepare_messages(messages)
         
         self.assertEqual(len(new_messages), 2)
         self.assertEqual(new_messages[0]['role'], 'system')
-        self.assertIn("", new_messages[0]['content'])
-        self.assertIn("mock_service", new_messages[0]['content'])
+        self.assertIn("runtime tool block", new_messages[0]['content'])
+        self.assertNotIn("mock_service", new_messages[0]['content'])
 
 if __name__ == '__main__':
     unittest.main()

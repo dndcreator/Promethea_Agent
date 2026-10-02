@@ -1,29 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
-from zoneinfo import ZoneInfo
+
+from .temporal import clock_snapshot, resolve_context_timezone_name
 
 
-DEFAULT_TIMEZONE = "Asia/Shanghai"
-
-
-def build_runtime_clock(*, timezone_name: str = DEFAULT_TIMEZONE) -> Dict[str, str]:
+def build_runtime_clock(
+    *,
+    timezone_name: str = "",
+    user_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
     """Return a compact, timezone-aware clock snapshot for runtime prompts."""
-    try:
-        tz = ZoneInfo(timezone_name)
-    except Exception:
-        # Windows/minimal Python distributions may not ship IANA tzdata.
-        # Keep the runtime clock available instead of failing conversation setup.
-        tz = timezone(timedelta(hours=8), name=DEFAULT_TIMEZONE)
-        timezone_name = DEFAULT_TIMEZONE
-    now = datetime.now(tz)
-    return {
-        "timezone": timezone_name,
-        "local_date": now.date().isoformat(),
-        "local_time": now.strftime("%H:%M:%S"),
-        "local_datetime": now.isoformat(timespec="seconds"),
-    }
+    resolved = resolve_context_timezone_name(user_config, timezone_name)
+    return clock_snapshot(requested_timezone=resolved)
 
 
 def format_recent_messages(
@@ -49,11 +38,14 @@ def format_recent_messages(
 def build_runtime_context_block(
     *,
     recent_messages: Optional[Iterable[Dict[str, Any]]] = None,
-    timezone_name: str = DEFAULT_TIMEZONE,
+    timezone_name: str = "",
+    user_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the shared runtime-context block used by routing and answering."""
-    clock = build_runtime_clock(timezone_name=timezone_name)
-    recent_text = format_recent_messages(recent_messages)
+    clock = build_runtime_clock(timezone_name=timezone_name, user_config=user_config)
+    # Recent conversation is owned by the policy/router or the message list.
+    # Keeping it here duplicated model-visible context and token usage.
+    _ = recent_messages
     sections = [
         "Runtime context:",
         f"- Current local date: {clock['local_date']}",
@@ -63,6 +55,4 @@ def build_runtime_context_block(
         "- For current/latest/recent external facts, use runtime observations from tools; do not infer stale dates.",
         "- Do not claim that a search, tool call, file read/write, browser action, or external lookup happened unless a runtime Observation/result exists in this turn.",
     ]
-    if recent_text:
-        sections.extend(["Recent conversation:", recent_text])
     return "\n".join(sections)

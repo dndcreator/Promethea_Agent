@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 from typing import Any, Dict, List, Optional
@@ -6,8 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Request
 
 from config import config
-from gateway.official_tools import register_official_tools
-from gateway.tool_service import ToolService
+from gateway.extension_catalog import ensure_capability_service
 from .. import state
 from ..dispatcher import get_gateway_server
 from ..user_manager import user_manager
@@ -97,19 +96,10 @@ def _sanitize_welcome(obj: Dict[str, Any], *, fallback: Dict[str, Any]) -> Dict[
     }
 
 
-def _ensure_tool_service():
+def _ensure_capability_service():
     gateway_server = get_gateway_server()
-    if not gateway_server.tool_service:
-        gateway_server.tool_service = ToolService(gateway_server.event_emitter)
-    register_official_tools(
-        tool_service=gateway_server.tool_service,
-        workspace_service=getattr(gateway_server, "workspace_service", None),
-        memory_service=getattr(gateway_server, "memory_service", None),
-        message_manager=getattr(gateway_server, "message_manager", None),
-        gateway_server=gateway_server,
-    )
+    ensure_capability_service(gateway_server)
     return gateway_server
-
 
 @router.get("/bootstrap")
 async def get_bootstrap_status():
@@ -339,7 +329,7 @@ async def get_status():
         "self_evolve": {
             "service_ready": self_evolve_svc is not None,
             "enabled_default": bool(self_evolve_profile.get("enabled", False)),
-            "core_capability": "controlled_code_evolution",
+            "core_capability": str(self_evolve_profile.get("core_capability") or ""),
         },
         "scheduler": scheduler_status,
         "workflow_recovery": workflow_recovery,
@@ -450,8 +440,8 @@ async def get_gateway_routes(request: Request):
 
 @router.get("/status/tools")
 async def get_tools_status():
-    gateway_server = _ensure_tool_service()
-    catalog = await gateway_server.tool_service.get_tool_catalog()
+    gateway_server = _ensure_capability_service()
+    catalog = await gateway_server.capability_service.get_tool_catalog()
     by_type: dict[str, int] = {}
     for item in catalog:
         tool_type = str(item.get("tool_type", "unknown") or "unknown")
@@ -467,8 +457,8 @@ async def get_tools_status():
 
 @router.get("/status/tools/official")
 async def get_official_tools_status():
-    gateway_server = _ensure_tool_service()
-    registered = getattr(gateway_server.tool_service, "_registered_tools", {}) or {}
+    gateway_server = _ensure_capability_service()
+    registered = getattr(gateway_server.capability_service, "_registered_tools", {}) or {}
     items = []
     domains: dict[str, int] = {}
     for tool_id, tool in registered.items():

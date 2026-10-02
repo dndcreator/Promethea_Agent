@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { X } from 'lucide-react'
 import { authFetch, getBootstrap } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
@@ -48,6 +49,15 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
       .then((data) => setBootstrap(data))
       .catch(() => setBootstrap(null))
   }, [])
+
+  useEffect(() => {
+    if (!onClose) return
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
 
   const backendLabel = bootstrap?.configured_backend || 'neo4j'
   const neo4jReason = bootstrap?.reason || bootstrap?.neo4j_error?.code || ''
@@ -133,12 +143,18 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center">
-      <div className="bg-white rounded-2xl shadow-xl w-[400px] overflow-hidden">
-        <div className="px-6 py-4 border-b border-black/5">
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
+      {onClose && <button type="button" aria-label={t('关闭登录', 'Close sign in')} onClick={onClose} className="absolute inset-0 cursor-default" />}
+      <div className="relative max-h-[calc(100vh-2rem)] w-full max-w-[400px] overflow-y-auto rounded-2xl bg-white shadow-xl">
+        <div className="flex items-center justify-between border-b border-black/5 px-6 py-4">
           <h2 className="text-xl font-bold text-text-strong">
             {isRegister ? t('注册', 'Sign Up') : t('登录', 'Sign In')}
           </h2>
+          {onClose && (
+            <button type="button" onClick={onClose} title={t('关闭', 'Close')} aria-label={t('关闭登录', 'Close sign in')} className="grid h-9 w-9 place-items-center rounded-lg text-text-muted hover:bg-gray-100 hover:text-text-strong">
+              <X size={18} />
+            </button>
+          )}
         </div>
         <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
           {notice && (
@@ -202,7 +218,7 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
                 onChange={(e) => setRemember(e.target.checked)}
                 className="mt-0.5"
               />
-              <span>{t('保持登录：只保存登录令牌，不保存密码。', 'Stay signed in: store a sign-in token, never the password.')}</span>
+              <span>{t('保持登录', 'Stay signed in')}</span>
             </label>
           )}
 

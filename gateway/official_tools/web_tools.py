@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import urllib.request
@@ -7,14 +8,20 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agentkit.security.sandbox import get_sandbox_policy
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 from gateway.user_secrets import resolve_search_runtime_settings
 
-from .web_search_runtime import WebSearchRuntime, WebSearchSettings
+from .web_search_runtime import (
+    WebSearchError,
+    WebSearchRuntime,
+    WebSearchSettings,
+    build_default_web_search_runtime,
+)
 
 
 class WebFetchTextTool:
     tool_id = "web.fetch_text"
+    side_effect_level = "read_only"
     name = "web.fetch_text"
     description = "Fetch text content from a web page (GET only)."
     official = True
@@ -61,6 +68,7 @@ class WebFetchTextTool:
 
 class WebExtractLinksTool:
     tool_id = "web.extract_links"
+    side_effect_level = "read_only"
     name = "web.extract_links"
     description = "Extract links from HTML text."
     official = True
@@ -89,6 +97,7 @@ class WebExtractLinksTool:
 
 class WebFetchJsonTool:
     tool_id = "web.fetch_json"
+    side_effect_level = "read_only"
     name = "web.fetch_json"
     description = "Fetch JSON from an HTTP endpoint."
     official = True
@@ -124,39 +133,93 @@ class WebFetchJsonTool:
 
 class WebSearchTool:
     tool_id = "web.search"
+    side_effect_level = "read_only"
     name = "web.search"
     description = "Search the web and return result links/snippets."
     official = True
     official_domain = "web"
+    timeout_ms = 30000
+    input_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"query": {"type": "string", "minLength": 1}},
+        "required": ["query"],
+    }
+    output_schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "provider": {"type": "string"},
+            "count": {"type": "integer"},
+            "results": {"type": "array"},
+            "truncated": {"type": "boolean"},
+        },
+        "required": ["query", "provider", "count", "results", "truncated"],
+    }
 
-    def __init__(self) -> None:
-        self.runtime = WebSearchRuntime()
+    def __init__(self, *, runtime: Optional[WebSearchRuntime] = None, max_results: int = 8) -> None:
+        self.runtime = runtime or build_default_web_search_runtime()
+        self.max_results = max(1, min(int(max_results), 20))
 
     async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
         query = str((args or {}).get("query") or "").strip()
         if not query:
             raise ValueError("query is required")
-        max_results = int((args or {}).get("max_results") or 8)
-        max_results = max(1, min(max_results, 20))
-        user_id = str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "").strip() or None
+        user_id = str((ctx.user_id if ctx else "") or "").strip() or None
         resolved = resolve_search_runtime_settings(user_id)
-        provider_override = str((args or {}).get("provider") or "").strip().lower()
-        if provider_override:
-            resolved["provider"] = provider_override
         settings = WebSearchSettings(
             provider=resolved.get("provider") or "auto",
-            brave_api_key=resolved.get("brave_api_key") or "",
-            tavily_api_key=resolved.get("tavily_api_key") or "",
-            serpapi_api_key=resolved.get("serpapi_api_key") or "",
-            searxng_url=resolved.get("searxng_url") or "",
+            fallback_policy=resolved.get("fallback_policy") or "fallback",
+            provider_order=tuple(
+                item.strip().lower()
+                for item in str(resolved.get("provider_order") or "").split(",")
+                if item.strip()
+            ),
+            values=resolved,
         )
-        payload = self.runtime.search(query, max_results, settings)
-        payload["providers"] = self.runtime.provider_status(settings)
+        try:
+            async with asyncio.timeout(self.timeout_ms / 1000):
+                payload = await self.runtime.search(query, self.max_results, settings)
+        except asyncio.TimeoutError as exc:
+            raise WebSearchError("web search timed out", "SEARCH_TIMEOUT", retryable=True) from exc
         return payload
+
+    @staticmethod
+    def result_summary(result: Any) -> str:
+        if not isinstance(result, dict):
+            return "Web search completed"
+        count = int(result.get("count") or 0)
+        provider = str(result.get("provider") or "web")
+        suffix = " after provider fallback" if result.get("fallback_used") else ""
+        return f"Found {count} sources via {provider}{suffix}"
+
+    @staticmethod
+    def result_metadata(result: Any) -> Dict[str, Any]:
+        if not isinstance(result, dict):
+            return {}
+        return {
+            "kind": "web_search",
+            "query": str(result.get("query") or ""),
+            "provider": str(result.get("provider") or ""),
+            "configured_provider": str(result.get("configured_provider") or ""),
+            "count": int(result.get("count") or 0),
+            "truncated": bool(result.get("truncated", False)),
+            "fallback_used": bool(result.get("fallback_used", False)),
+            "sources": [
+                {
+                    key: row[key]
+                    for key in ("title", "url", "snippet", "source", "published_at")
+                    if row.get(key) not in (None, "")
+                }
+                for row in (result.get("results") or [])[:20]
+                if isinstance(row, dict)
+            ],
+        }
 
 
 class WebDownloadToWorkspaceTool:
     tool_id = "web.download_to_workspace"
+    side_effect_level = "workspace_write"
     name = "web.download_to_workspace"
     description = "Download URL content and save to workspace text file."
     official = True

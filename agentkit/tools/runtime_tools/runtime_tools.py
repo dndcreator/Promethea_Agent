@@ -1,11 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, List
 
 from agentkit.mcp.agent_manager import get_agent_manager
 from core.plugins.runtime import get_active_plugin_registry
 from gateway.http.message_manager import message_manager
-from gateway.tool_service import ToolService
 from gateway_integration import get_gateway_integration
 
 
@@ -34,11 +33,8 @@ class RuntimeToolsService:
             return {"ok": True, "routes": methods, "total": len(methods)}
 
         if action == "tools":
-            tool_service = server.tool_service if server else None
-            if not tool_service and server:
-                tool_service = ToolService(server.event_emitter)
-                server.tool_service = tool_service
-            catalog = await tool_service.get_tool_catalog() if tool_service else []
+            capability_service = server.ensure_capability_service() if server else None
+            catalog = await capability_service.get_tool_catalog() if capability_service else []
             return {"ok": True, "tools": catalog, "total": len(catalog)}
 
         raise ValueError(f"unsupported gateway action: {action}")

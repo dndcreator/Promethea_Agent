@@ -445,5 +445,12 @@ class UserFileStore:
                 skipped += 1
         return {"imported_files": imported, "skipped_files": skipped}
 
+    def clear_user_bundle(self, *, user_id: str) -> None:
+        root = self._user_root(user_id)
+        if not root.exists():
+            return
+        import shutil
+        shutil.rmtree(root)
+
 
 user_file_store = UserFileStore()

@@ -38,10 +38,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
     event.preventDefault()
     try {
       await updateConfig(config)
-      setSaveNotice(t(
-        '设置已保存。企业大脑开关属于运行时模块配置，建议重启后再验证前端入口和后端召回状态。',
-        'Settings saved. Enterprise Brain is a runtime module setting; restart before validating UI entrypoints and backend recall state.',
-      ))
+      setSaveNotice(t('设置已保存。', 'Settings saved.'))
     } catch {
       alert(t('保存设置失败', 'Failed to save settings'))
     }
@@ -53,10 +50,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       const data = await res.json().catch(() => ({}))
       setSecrets(data.secrets || secrets)
       setSecretDraft({})
-      setSaveNotice(t(
-        '敏感配置已保存到当前账号的 secrets.env。',
-        'Sensitive settings were saved to this account secrets.env.',
-      ))
+      setSaveNotice(t('敏感配置已保存。', 'Sensitive settings saved.'))
     } catch {
       alert(t('保存敏感配置失败', 'Failed to save sensitive settings'))
     }
@@ -102,7 +96,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   <div className="min-w-0">
                     <div className="text-sm font-semibold text-text-strong">{user?.username || t('未登录', 'Not signed in')}</div>
                     <div className="mt-1 text-xs text-text-muted">
-                      {user?.user_id ? `${t('用户 ID', 'User ID')}: ${user.user_id}` : t('登录后可管理个人配置、记忆、文件和会话。', 'Sign in to manage personal config, memory, files, and sessions.')}
+                      {user?.user_id ? `${t('用户 ID', 'User ID')}: ${user.user_id}` : t('未登录', 'Not signed in')}
                     </div>
                   </div>
                   {user && (
@@ -174,12 +168,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
             <section className="flex flex-col gap-4 mt-4 pt-4 border-t border-black/5">
               <h3 className="font-semibold text-text-strong">{t('敏感运行配置', 'Sensitive Runtime Settings')}</h3>
-              <p className="text-xs leading-relaxed text-text-muted">
-                {t(
-                  'API Key、模型、供应商 URL、记忆后端和 Neo4j 账号密码都保存在当前账号的 secrets.env，不进入普通 config。已有值不会回显；留空表示不修改。',
-                  'API keys, model routing, provider URL, memory backend, and Neo4j credentials are stored in this account secrets.env, not normal config. Existing values are not shown; leave blank to keep them unchanged.',
-                )}
-              </p>
               <div className="grid grid-cols-2 gap-2 text-xs text-text-muted">
                 <StatusPill label="API Key" active={Boolean(secrets?.api?.api_key_configured)} />
                 <StatusPill label="Base URL" active={Boolean(secrets?.api?.base_url_configured)} />
@@ -197,11 +185,23 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 <input type="text" value={secretDraft.API__MODEL || ''} onChange={(e) => setSecretDraft({ ...secretDraft, API__MODEL: e.target.value })} placeholder={secrets?.api?.model || 'gpt-4.1-mini'} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
               </Field>
               <details className="rounded-xl border border-black/5 bg-gray-50/60 p-3">
+                <summary className="cursor-pointer text-sm font-semibold text-text-strong">{t('多模态模型', 'Multimodal Model')}</summary>
+                <div className="mt-3 flex flex-col gap-3">
+                  <StatusPill label={t('独立多模态模型', 'Dedicated multimodal model')} active={Boolean(secrets?.multimodal?.configured)} />
+                  <Field label="MULTIMODAL__MODEL">
+                    <input type="text" value={secretDraft.MULTIMODAL__MODEL || ''} onChange={(e) => setSecretDraft({ ...secretDraft, MULTIMODAL__MODEL: e.target.value })} placeholder={secrets?.multimodal?.model || 'gpt-4.1-mini'} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
+                  </Field>
+                  <Field label="MULTIMODAL__BASE_URL">
+                    <input type="text" value={secretDraft.MULTIMODAL__BASE_URL || ''} onChange={(e) => setSecretDraft({ ...secretDraft, MULTIMODAL__BASE_URL: e.target.value })} placeholder={secrets?.multimodal?.base_url || t('留空继承主模型', 'Leave blank to inherit main model')} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
+                  </Field>
+                  <Field label="MULTIMODAL__API_KEY">
+                    <input type="password" value={secretDraft.MULTIMODAL__API_KEY || ''} onChange={(e) => setSecretDraft({ ...secretDraft, MULTIMODAL__API_KEY: e.target.value })} placeholder={t('留空继承主模型', 'Leave blank to inherit main model')} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
+                  </Field>
+                </div>
+              </details>
+              <details className="rounded-xl border border-black/5 bg-gray-50/60 p-3">
                 <summary className="cursor-pointer text-sm font-semibold text-text-strong">{t('Web Search Provider', 'Web Search Provider')}</summary>
                 <div className="mt-3 flex flex-col gap-3">
-                  <p className="text-xs leading-relaxed text-text-muted">
-                    {t('Configure the provider behind web.search. Auto uses the first configured provider and falls back to DuckDuckGo.', 'Configure the provider behind web.search. Auto uses the first configured provider and falls back to DuckDuckGo.')}
-                  </p>
                   <Field label="SEARCH__PROVIDER">
                     <select value={secretDraft.SEARCH__PROVIDER || ''} onChange={(e) => setSecretDraft({ ...secretDraft, SEARCH__PROVIDER: e.target.value })} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100">
                       <option value="">{`${t('Keep unchanged', 'Keep unchanged')} (${secrets?.search?.provider || 'auto'})`}</option>
@@ -212,6 +212,16 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                       <option value="searxng">searxng</option>
                       <option value="duckduckgo">duckduckgo</option>
                     </select>
+                  </Field>
+                  <Field label="SEARCH__FALLBACK_POLICY">
+                    <select value={secretDraft.SEARCH__FALLBACK_POLICY || ''} onChange={(e) => setSecretDraft({ ...secretDraft, SEARCH__FALLBACK_POLICY: e.target.value })} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100">
+                      <option value="">{`${t('保持不变', 'Keep unchanged')} (${secrets?.search?.fallback_policy || 'fallback'})`}</option>
+                      <option value="fallback">fallback</option>
+                      <option value="strict">strict</option>
+                    </select>
+                  </Field>
+                  <Field label="SEARCH__PROVIDER_ORDER">
+                    <input type="text" value={secretDraft.SEARCH__PROVIDER_ORDER || ''} onChange={(e) => setSecretDraft({ ...secretDraft, SEARCH__PROVIDER_ORDER: e.target.value })} placeholder={secrets?.search?.provider_order || 'brave,tavily,serpapi,searxng,duckduckgo'} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
                   </Field>
                   <Field label="SEARCH__BRAVE_API_KEY">
                     <input type="password" value={secretDraft.SEARCH__BRAVE_API_KEY || ''} onChange={(e) => setSecretDraft({ ...secretDraft, SEARCH__BRAVE_API_KEY: e.target.value })} placeholder={t('Leave blank to keep unchanged', 'Leave blank to keep unchanged')} className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100" />
@@ -282,10 +292,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   rows={4}
                   value={config?.user?.system_prompt || ''}
                   onChange={(e) => setConfig({ ...config, user: { ...config.user, system_prompt: e.target.value } })}
-                  placeholder={t(
-                    '可选。用于长期调整称呼、语气和互动偏好；不会覆盖 Promethea 的核心身份。',
-                    'Optional. Adjusts long-term address, tone, and interaction preferences; it does not override Promethea core identity.',
-                  )}
+                  placeholder={t('称呼、语气和互动偏好（可选）', 'Address, tone, and interaction preferences (optional)')}
                   className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100 resize-none"
                 />
               </Field>
@@ -304,8 +311,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   <span className="text-sm font-semibold text-text-strong">{t('开启企业大脑', 'Enable Enterprise Brain')}</span>
                   <span className="text-xs text-text-muted">
                     {t(
-                      '关闭后前端不展示企业知识入口；保存后请重启服务，让后端模块和提示词注入状态完全一致。',
-                      'When disabled, enterprise knowledge entrypoints are hidden; restart after saving so backend modules and prompt injection state are consistent.',
+                      '保存后需重启服务。',
+                      'Restart the service after saving.',
                     )}
                   </span>
                 </span>
@@ -323,7 +330,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
             <details className="rounded-xl border border-black/5 bg-white/70 p-4">
               <summary className="cursor-pointer text-sm font-semibold text-text-strong">
-                {t('??????', 'Enterprise Brain Details')}
+                {t('企业大脑', 'Enterprise Brain')}
               </summary>
               <div className="mt-3">
                 {orgBrainEnabled ? (
@@ -331,8 +338,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 ) : (
                   <div className="rounded-xl border border-dashed border-black/10 bg-gray-50 p-4 text-sm text-text-muted">
                     {t(
-                      '???????????????????????????????????????????',
-                      'Enterprise Brain is disabled, so enterprise upload, recall, and graph entrypoints are hidden. Enable, save, and restart the service.',
+                      '企业大脑未开启。',
+                      'Enterprise Brain is disabled.',
                     )}
                   </div>
                 )}
@@ -342,12 +349,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               <summary className="cursor-pointer text-sm font-semibold text-text-strong">
                 {t('高级能力与可见性', 'Advanced Capabilities & Visibility')}
               </summary>
-              <p className="mt-2 text-xs text-text-muted">
-                {t(
-                  '这些能力默认折叠，避免把高阶内部机制变成日常配置负担。',
-                  'These controls stay folded to keep advanced internals out of the default setup path.',
-                )}
-              </p>
               <SoulReadOnlyPanel />
               <PersonalWorkspacePanel />
               <PluginCapabilitiesPanel />

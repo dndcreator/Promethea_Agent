@@ -6,12 +6,13 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from .auth import get_current_user_id
 from ..user_file_store import user_file_store
+from gateway.public_contracts import FileUploadResponse
 
 
 router = APIRouter()
 
 
-@router.post("/files/upload")
+@router.post("/files/upload", response_model=FileUploadResponse)
 async def upload_user_file(
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(default=None),

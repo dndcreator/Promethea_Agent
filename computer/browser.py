@@ -4,8 +4,10 @@ Browser controller - based on Playwright.
 import asyncio
 import os
 from pathlib import Path
+from uuid import uuid4
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
+from agentkit.security.sandbox import get_sandbox_policy
 import logging
 
 logger = logging.getLogger("Computer.Browser")
@@ -14,13 +16,19 @@ logger = logging.getLogger("Computer.Browser")
 class BrowserController(ComputerController):
     """Browser controller."""
     
-    def __init__(self):
+    def __init__(self, workspace_root: Optional[str] = None):
         super().__init__("Browser", ComputerCapability.BROWSER)
         self.playwright = None
         self.browser = None
         self.context = None
         self.page = None
         self._pages: Dict[str, Any] = {}  # tab_id -> page
+        self.sandbox = get_sandbox_policy()
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root else Path.cwd()
+        self.state_path = self.workspace_root / "browser_state.json"
+        self._downloads: asyncio.Queue = asyncio.Queue(maxsize=128)
+        self._download_tasks: set[asyncio.Task] = set()
+        self._download_pages: Dict[int, Any] = {}
     
     async def initialize(self) -> bool:
         """Initialize browser, context and first page."""
@@ -40,19 +48,22 @@ class BrowserController(ComputerController):
                 return False
 
             launch_timeout_ms = int(os.getenv("COMPUTER_BROWSER_LAUNCH_TIMEOUT_MS", "5000"))
+            from config import config
+
+            launch_args = []
+            if config.sandbox.browser_disable_chromium_sandbox:
+                logger.warning("Chromium process sandbox explicitly disabled by configuration")
+                launch_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
             
             self.browser = await self.playwright.chromium.launch(
                 headless=False,
+                chromium_sandbox=not config.sandbox.browser_disable_chromium_sandbox,
                 timeout=launch_timeout_ms,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                ]
+                args=launch_args,
             )
             
             # Create browser context and try to restore saved state (cookies, local storage, etc.).
-            import os
-            state_path = "browser_state.json"
+            state_path = str(self.state_path)
             if os.path.exists(state_path):
                 logger.info(f"Loading browser state from {state_path}")
                 self.context = await self.browser.new_context(
@@ -66,8 +77,10 @@ class BrowserController(ComputerController):
                     user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 )
             
+            self.context.on("page", self._track_downloads)
             # Create first page.
             self.page = await self.context.new_page()
+            self._track_downloads(self.page)
             self._pages['default'] = self.page
             
             self.is_initialized = True
@@ -84,10 +97,15 @@ class BrowserController(ComputerController):
     async def cleanup(self) -> bool:
         """Clean up browser resources and save state."""
         try:
+            for task in tuple(self._download_tasks):
+                task.cancel()
+            await asyncio.gather(*tuple(self._download_tasks), return_exceptions=True)
+            self._download_tasks.clear()
+            self._download_pages.clear()
             if self.context:
                 # Persist browser state to disk so it can be restored later.
                 try:
-                    await self.context.storage_state(path="browser_state.json")
+                    await self.context.storage_state(path=str(self.state_path))
                     logger.info("Saved browser state to browser_state.json")
                 except Exception as e:
                     logger.error(f"Failed to save browser state: {e}")
@@ -99,6 +117,8 @@ class BrowserController(ComputerController):
                 await self.playwright.stop()
             
             self.is_initialized = False
+            self.page = self.context = self.browser = self.playwright = None
+            self._pages.clear()
             logger.info("Browser controller cleaned up")
             return True
         except Exception as e:
@@ -114,10 +134,23 @@ class BrowserController(ComputerController):
             )
         
         try:
+            if action == "screenshot" and params.get("path"):
+                decision = self.sandbox.check_path(str(params["path"]), intent="write", workspace_root=self.workspace_root)
+                if not decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked screenshot path: {decision.reason}")
+                params = {**params, "path": str((self.workspace_root / str(params["path"])).resolve())}
+            if action in {"navigate", "new_tab"}:
+                url = str(params.get("url") or "").strip()
+                if url:
+                    decision = self.sandbox.check_url(url)
+                    if not decision.allowed:
+                        return ComputerResult(success=False, error=f"Sandbox blocked browser URL: {decision.reason}")
             action_map = {
                 'navigate': self._navigate,
                 'click': self._click,
                 'type': self._type,
+                'press': self._press,
+                'wait_download': self._wait_download,
                 'screenshot': self._screenshot,
                 'get_content': self._get_content,
                 'evaluate': self._evaluate,
@@ -153,6 +186,8 @@ class BrowserController(ComputerController):
             {"name": "navigate", "description": "Navigate to URL", "params": ["url"]},
             {"name": "click", "description": "Click element", "params": ["selector"]},
             {"name": "type", "description": "Type text", "params": ["selector", "text"]},
+            {"name": "press", "description": "Press a key on an element", "params": ["selector", "key"]},
+            {"name": "wait_download", "description": "Wait for a browser download", "params": ["timeout?"]},
             {"name": "screenshot", "description": "Screenshot", "params": ["full_page?"]},
             {"name": "get_content", "description": "Get page content", "params": []},
             {"name": "evaluate", "description": "Execute JavaScript", "params": ["script"]},
@@ -199,6 +234,57 @@ class BrowserController(ComputerController):
         await self.page.fill(selector, text)
         return f"Typed '{text}' into {selector}"
     
+    def has_background_activity(self) -> bool:
+        return any(not task.done() for task in self._download_tasks)
+
+    def _track_downloads(self, page) -> None:
+        page_key = id(page)
+        if page_key in self._download_pages:
+            return
+        self._download_pages[page_key] = page
+
+        def enqueue(download):
+            task = asyncio.create_task(self._save_download(download))
+            self._download_tasks.add(task)
+            task.add_done_callback(self._download_tasks.discard)
+
+        page.on("download", enqueue)
+        page.on("close", lambda *_: self._download_pages.pop(page_key, None))
+
+    async def _save_download(self, download) -> None:
+        name = Path(str(download.suggested_filename or "download")).name
+        name = "".join("_" if ch in '<>:"/\\|?*\x00' else ch for ch in name).strip(" .")[:160] or "download"
+        target = self.workspace_root / ".promethea" / "downloads" / f"{uuid4().hex}-{name}"
+        try:
+            decision = self.sandbox.check_path(str(target), intent="write", workspace_root=self.workspace_root)
+            if not decision.allowed:
+                raise PermissionError(decision.reason)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            await download.save_as(str(target))
+            result = {"path": str(target), "name": name, "size": target.stat().st_size}
+        except asyncio.CancelledError:
+            await download.cancel()
+            raise
+        except Exception as exc:
+            result = {"error": str(exc)}
+        if self._downloads.full():
+            self._downloads.get_nowait()
+        self._downloads.put_nowait(result)
+
+    async def _wait_download(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        timeout = max(0.1, min(float(params.get("timeout", 30000)) / 1000, 600))
+        result = await asyncio.wait_for(self._downloads.get(), timeout)
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        return result
+
+    async def _press(self, params: Dict[str, Any]) -> str:
+        selector, key = params.get("selector"), params.get("key")
+        if not selector or not key:
+            raise ValueError("selector and key are required")
+        await self.page.press(selector, key)
+        return f"Pressed '{key}' on '{selector}'"
+
     async def _screenshot(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Take a screenshot and return base64 data."""
         full_page = params.get('full_page', False)

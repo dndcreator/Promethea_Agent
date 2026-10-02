@@ -26,18 +26,24 @@ class ReActPlanner:
         action_run: ActionRun,
         *,
         tool_executor: Optional[Any] = None,
+        confirmation_resolver: Optional[Any] = None,
+        initial_response: Optional[Dict[str, Any]] = None,
     ) -> ActionResult:
         ctx = action_run.context
         messages = list(action_run.messages or [])
         messages.append({"role": "system", "content": ACTION_MODE_CONTRACT})
-        response = await self.conversation_core.run_chat_loop(
-            messages,
-            user_config=ctx.user_config,
-            session_id=ctx.session_id,
-            user_id=ctx.user_id,
-            tool_executor=tool_executor,
-            max_recursion=action_run.budget,
-        )
+        call_kwargs = {
+            "user_config": ctx.user_config,
+            "session_id": ctx.session_id,
+            "user_id": ctx.user_id,
+            "tool_executor": tool_executor,
+            "max_recursion": action_run.budget,
+        }
+        if confirmation_resolver is not None:
+            call_kwargs["confirmation_resolver"] = confirmation_resolver
+        if initial_response is not None:
+            call_kwargs["initial_response"] = initial_response
+        response = await self.conversation_core.run_chat_loop(messages, **call_kwargs)
         raw: Dict[str, Any] = response if isinstance(response, dict) else {"raw": response}
         return ActionResult(
             status=str(raw.get("status") or "success"),

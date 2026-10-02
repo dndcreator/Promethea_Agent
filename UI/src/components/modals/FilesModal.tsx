@@ -70,31 +70,26 @@ export default function FilesModal({
   const upload = async () => {
     const file = fileRef.current?.files?.[0]
     if (!file) return
-    const form = new FormData()
-    form.append('file', file)
-    if (sessionId) form.append('session_id', sessionId)
     setLoading(true)
     try {
-      const res = await uploadUserFile(form)
-      const data = await res.json().catch(() => ({}))
-      const saved = data.file as FileRecord | undefined
-      if (res.ok && data.status === 'success') {
-        setMessageTone('success')
-        setMessage(t('文件已保存，可被搜索、导出，也可附加到下一次对话。', 'File saved for search/export and can be attached to the next turn.'))
-        if (saved?.file_id && onAttach) {
-          onAttach({
-            file_id: saved.file_id,
-            filename: saved.filename,
-            modality: saved.modality,
-            text_extraction_status: saved.text_extraction_status,
-          })
-        }
-      } else {
-        setMessageTone('error')
-        setMessage(apiMessage(data, t('文件上传失败。', 'File upload failed.')))
+      const saved = await uploadUserFile(file, file.name, sessionId)
+      setMessageTone('success')
+      setMessage(t('文件已保存，可被搜索、导出，也可附加到下一次对话。', 'File saved for search/export and can be attached to the next turn.'))
+      if (saved.file_id && onAttach) {
+        onAttach({
+          file_id: saved.file_id,
+          filename: saved.filename,
+          modality: saved.modality,
+          content_type: saved.content_type,
+          size: saved.bytes,
+          text_extraction_status: saved.text_extraction_status,
+        })
       }
       if (fileRef.current) fileRef.current.value = ''
       await load('')
+    } catch (error) {
+      setMessageTone('error')
+      setMessage(apiMessage(error, t('文件上传失败。', 'File upload failed.')))
     } finally {
       setLoading(false)
     }

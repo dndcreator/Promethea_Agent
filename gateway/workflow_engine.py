@@ -12,18 +12,22 @@ from uuid import uuid4
 
 from .events import EventEmitter
 from .protocol import EventType
-from .tool_service import ToolInvocationContext
+from .capability_service import ToolInvocationContext
+from .task_service import TaskExecutionConflict
 from .workflow_models import (
     Checkpoint,
     RUN_STATUS_COMPLETED,
+    RUN_STATUS_CANCELLED,
     RUN_STATUS_FAILED,
     RUN_STATUS_PAUSED,
     RUN_STATUS_PENDING,
     RUN_STATUS_RUNNING,
+    RUN_STATUS_RETRY_WAIT,
     RUN_STATUS_WAITING_HUMAN,
     STEP_STATUS_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_RUNNING,
+    STEP_STATUS_RETRY_WAIT,
     STEP_STATUS_SKIPPED,
     STEP_STATUS_SUCCEEDED,
     STEP_STATUS_WAITING_HUMAN,
@@ -52,14 +56,16 @@ class WorkflowEngine:
         workspace_service: Optional[Any] = None,
         reasoning_service: Optional[Any] = None,
         memory_service: Optional[Any] = None,
-        tool_service: Optional[Any] = None,
+        capability_service: Optional[Any] = None,
+        task_service: Optional[Any] = None,
         storage_path: Optional[str] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.workspace_service = workspace_service
         self.reasoning_service = reasoning_service
         self.memory_service = memory_service
-        self.tool_service = tool_service
+        self.capability_service = capability_service
+        self.task_service = task_service
         default_storage_path = Path(__file__).resolve().parent / "workflow_state.json"
         self.storage_path = Path(storage_path) if storage_path else default_storage_path
         self._definitions: Dict[str, WorkflowDefinition] = {}
@@ -125,44 +131,16 @@ class WorkflowEngine:
         run_context: Optional[Any] = None,
         run_metadata: Optional[Dict[str, Any]] = None,
     ) -> WorkflowRun:
-        definition = self.get_workflow(workflow_id)
-        if not definition:
-            raise WorkflowError(f"workflow not found: {workflow_id}")
-
-        run_id = f"wf_run_{uuid4().hex}"
-        steps = [WorkflowStep(**step.model_dump()) for step in definition.steps]
-        initial_step_id = self._select_next_ready_step_id(steps, workflow_type=definition.workflow_type)
-        run_meta = dict(run_metadata or {})
-        wft = str(definition.workflow_type or "linear").strip().lower() or "linear"
-        run_meta.setdefault("workflow_type", wft)
-        run_meta.setdefault("scheduler_mode", self._scheduler_mode_for_type(wft))
-        run = WorkflowRun(
-            workflow_run_id=run_id,
-            workflow_id=definition.workflow_id,
-            session_id=str(session_id or "default_session"),
-            user_id=str(user_id or "default_user"),
-            workspace_id=str(workspace_id or session_id or "default_workspace"),
-            status=RUN_STATUS_RUNNING,
-            current_step_id=initial_step_id,
-            steps=steps,
-            run_metadata=run_meta,
+        run = self.prepare_workflow_run(
+            workflow_id=workflow_id,
+            session_id=session_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            run_metadata=run_metadata,
         )
-        self._runs[run.workflow_run_id] = run
-        self._checkpoints.setdefault(run.workflow_run_id, [])
-        self._persist_state()
-
-        self._emit(
-            EventType.CONVERSATION_STAGE_STARTED,
-            {
-                "stage": "workflow.start",
-                "workflow_id": run.workflow_id,
-                "workflow_run_id": run.workflow_run_id,
-                "session_id": run.session_id,
-                "user_id": run.user_id,
-            },
-        )
-
-        return self.advance_to_next_step(run.workflow_run_id, run_context=run_context)
+        result = self.advance_to_next_step(run.workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
 
     async def start_workflow_async(
         self,
@@ -174,6 +152,27 @@ class WorkflowEngine:
         run_context: Optional[Any] = None,
         run_metadata: Optional[Dict[str, Any]] = None,
     ) -> WorkflowRun:
+        run = self.prepare_workflow_run(
+            workflow_id=workflow_id,
+            session_id=session_id,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            run_metadata=run_metadata,
+        )
+        result = await self.advance_to_next_step_async(run.workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
+
+    def prepare_workflow_run(
+        self,
+        *,
+        workflow_id: str,
+        session_id: str,
+        user_id: str,
+        workspace_id: Optional[str] = None,
+        run_metadata: Optional[Dict[str, Any]] = None,
+    ) -> WorkflowRun:
+        """Persist a runnable workflow before any potentially long operation starts."""
         definition = self.get_workflow(workflow_id)
         if not definition:
             raise WorkflowError(f"workflow not found: {workflow_id}")
@@ -182,9 +181,9 @@ class WorkflowEngine:
         steps = [WorkflowStep(**step.model_dump()) for step in definition.steps]
         initial_step_id = self._select_next_ready_step_id(steps, workflow_type=definition.workflow_type)
         run_meta = dict(run_metadata or {})
-        wft = str(definition.workflow_type or "linear").strip().lower() or "linear"
-        run_meta.setdefault("workflow_type", wft)
-        run_meta.setdefault("scheduler_mode", self._scheduler_mode_for_type(wft))
+        workflow_type = str(definition.workflow_type or "linear").strip().lower() or "linear"
+        run_meta.setdefault("workflow_type", workflow_type)
+        run_meta.setdefault("scheduler_mode", self._scheduler_mode_for_type(workflow_type))
         run = WorkflowRun(
             workflow_run_id=run_id,
             workflow_id=definition.workflow_id,
@@ -197,6 +196,11 @@ class WorkflowEngine:
             run_metadata=run_meta,
         )
         self._runs[run.workflow_run_id] = run
+        try:
+            self._register_task_run(run)
+        except Exception:
+            self._runs.pop(run.workflow_run_id, None)
+            raise
         self._checkpoints.setdefault(run.workflow_run_id, [])
         self._persist_state()
         self._emit(
@@ -209,16 +213,107 @@ class WorkflowEngine:
                 "user_id": run.user_id,
             },
         )
-        return await self.advance_to_next_step_async(run.workflow_run_id, run_context=run_context)
+        self._emit(
+            EventType.WORKFLOW_RUN_STARTED,
+            {
+                "workflow_id": run.workflow_id,
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        return run
+
+    def recovery_context(self, workflow_run_id: str) -> Dict[str, Any]:
+        checkpoints = self._checkpoints.get(str(workflow_run_id or ""), [])
+        if not checkpoints:
+            return {}
+        return dict(checkpoints[-1].run_context_snapshot or {})
+
+    def repair_interrupted_run(self, workflow_run_id: str) -> WorkflowRun:
+        """Close open step attempts after process loss and make them runnable again."""
+        run = self._require_run(workflow_run_id)
+        changed = False
+        now = datetime.now(timezone.utc)
+        for step in run.steps:
+            if not step.active_attempt_id:
+                continue
+            attempt_id = step.active_attempt_id
+            if step.status == STEP_STATUS_SUCCEEDED:
+                self._close_step_attempt(step, status="succeeded", reason="committed_receipt_recovered")
+                event_type = EventType.WORKFLOW_STEP_COMPLETED
+                reason = "committed_receipt_recovered"
+            else:
+                self._close_step_attempt(step, status="interrupted", reason="process_restarted")
+                step.status = STEP_STATUS_PENDING
+                event_type = EventType.WORKFLOW_STEP_INTERRUPTED
+                reason = "process_restarted"
+            changed = True
+            self._emit(
+                event_type,
+                self._step_event_payload(run, step, attempt_id=attempt_id, reason=reason),
+            )
+        if changed:
+            run.run_metadata.setdefault("interruptions", []).append({
+                "at": now.isoformat().replace("+00:00", "Z"),
+                "reason": "process_restarted",
+            })
+            run.updated_at = now
+            self._persist_state()
+            self._sync_task_run(run)
+        return run
 
     def get_run(self, workflow_run_id: str) -> Optional[WorkflowRun]:
         return self._runs.get(str(workflow_run_id or ""))
+
+    def _register_task_run(self, run: WorkflowRun) -> None:
+        if self.task_service is None:
+            return
+        try:
+            task_id = str(run.run_metadata.get("task_id") or "")
+            if not task_id and str(run.run_metadata.get("task_mode") or "").lower() == "ephemeral":
+                return
+            if not task_id:
+                definition = self.get_workflow(run.workflow_id)
+                task = self.task_service.create_task(
+                    user_id=run.user_id,
+                    title=definition.name if definition else run.workflow_id,
+                    objective=definition.description if definition else "",
+                    session_id=run.session_id,
+                    source="workflow",
+                )
+                task_id = str(task["task_id"])
+                run.run_metadata["task_id"] = task_id
+            self.task_service.start_run(
+                task_id=task_id, user_id=run.user_id, run_id=run.workflow_run_id,
+                run_type="workflow", session_id=run.session_id,
+                metadata={"workflow_id": run.workflow_id},
+            )
+        except Exception as exc:
+            raise WorkflowError(f"failed to register task run: {exc}") from exc
+
+    def _sync_task_run(self, run: WorkflowRun) -> None:
+        if self.task_service is None:
+            return
+        task_id = str(run.run_metadata.get("task_id") or "")
+        if not task_id:
+            return
+        try:
+            self.task_service.update_run(
+                task_id=task_id, user_id=run.user_id, run_id=run.workflow_run_id,
+                status=run.status,
+                detail={"workflow_id": run.workflow_id, "current_step_id": run.current_step_id},
+            )
+        except Exception:
+            pass
 
     def list_runs(self, *, user_id: Optional[str] = None, limit: int = 20) -> List[Dict[str, Any]]:
         rows: List[Dict[str, Any]] = []
         for run in self._runs.values():
             if user_id and run.user_id != user_id:
                 continue
+            current_step = self._find_step(run, str(run.current_step_id or ""))
             rows.append(
                 {
                     "workflow_run_id": run.workflow_run_id,
@@ -226,13 +321,93 @@ class WorkflowEngine:
                     "session_id": run.session_id,
                     "user_id": run.user_id,
                     "status": run.status,
+                    "task_id": run.run_metadata.get("task_id"),
                     "current_step_id": run.current_step_id,
+                    "current_step": {
+                        "step_id": current_step.step_id,
+                        "name": current_step.name,
+                        "step_type": current_step.step_type,
+                        "status": current_step.status,
+                        "attempt_count": current_step.attempt_count,
+                        "active_attempt_id": current_step.active_attempt_id,
+                        "idempotency_key": current_step.idempotency_key,
+                    } if current_step else None,
+                    "retry": self._json_safe(run.run_metadata.get("retry")),
                     "started_at": run.started_at.isoformat() + "Z",
                     "updated_at": run.updated_at.isoformat() + "Z",
                 }
             )
         rows = sorted(rows, key=lambda r: r["updated_at"], reverse=True)
         return rows[: max(1, int(limit or 20))]
+
+    def export_user_state(self, *, user_id: str) -> Dict[str, Any]:
+        """Return durable workflow records owned by one user."""
+        user_ids = self._user_id_aliases(user_id)
+        definitions = {
+            workflow_id: self._json_safe(definition.model_dump(mode="python"))
+            for workflow_id, definition in self._definitions.items()
+            if str(definition.owner_user_id or "") in user_ids
+        }
+        runs = {
+            run_id: self._json_safe(run.model_dump(mode="python"))
+            for run_id, run in self._runs.items()
+            if str(run.user_id or "") in user_ids
+        }
+        checkpoints = {
+            run_id: [self._json_safe(item.model_dump(mode="python")) for item in self._checkpoints.get(run_id, [])]
+            for run_id in runs
+        }
+        return {"version": 1, "definitions": definitions, "runs": runs, "checkpoints": checkpoints}
+
+    def import_user_state(self, *, user_id: str, payload: Dict[str, Any], merge: bool = True) -> Dict[str, int]:
+        """Restore durable workflow records without resuming any run automatically."""
+        source = payload if isinstance(payload, dict) else {}
+        user_ids = self._user_id_aliases(user_id)
+        if not merge:
+            self.purge_user_state(user_id)
+        imported = {"definitions": 0, "runs": 0, "checkpoints": 0, "skipped": 0}
+        for workflow_id, raw in (source.get("definitions") or {}).items():
+            try:
+                definition = WorkflowDefinition(**raw)
+            except Exception:
+                imported["skipped"] += 1
+                continue
+            if str(definition.owner_user_id or "") not in user_ids or workflow_id in self._definitions:
+                imported["skipped"] += 1
+                continue
+            self._definitions[str(workflow_id)] = definition
+            imported["definitions"] += 1
+        for run_id, raw in (source.get("runs") or {}).items():
+            try:
+                run = WorkflowRun(**raw)
+            except Exception:
+                imported["skipped"] += 1
+                continue
+            if str(run.user_id or "") not in user_ids or run_id in self._runs:
+                imported["skipped"] += 1
+                continue
+            # Runtime processes and external tool handles do not migrate. Keep
+            # an interrupted run visible but require an explicit resume later.
+            if run.status in {RUN_STATUS_PENDING, RUN_STATUS_RUNNING, RUN_STATUS_WAITING_HUMAN}:
+                run.status = RUN_STATUS_PAUSED
+            self._runs[str(run_id)] = run
+            imported["runs"] += 1
+            parsed = []
+            for checkpoint in (source.get("checkpoints") or {}).get(run_id, []):
+                try:
+                    parsed.append(Checkpoint(**checkpoint))
+                except Exception:
+                    imported["skipped"] += 1
+            self._checkpoints[str(run_id)] = parsed
+            imported["checkpoints"] += len(parsed)
+        self._persist_state()
+        return imported
+
+    @staticmethod
+    def _user_id_aliases(user_id: str) -> Set[str]:
+        raw = str(user_id or "").strip()
+        graph = raw if raw.startswith("user_") else f"user_{raw}"
+        return {raw, graph, graph.replace("user_", "", 1)}
 
     def purge_user_state(self, user_id: str) -> Dict[str, int]:
         """
@@ -270,15 +445,33 @@ class WorkflowEngine:
 
     def pause_workflow(self, workflow_run_id: str) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
-        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED}:
+        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
             return run
+        if run.status == RUN_STATUS_RETRY_WAIT:
+            retry = run.run_metadata.pop("retry", None)
+            if isinstance(retry, dict):
+                run.run_metadata["paused_retry"] = retry
+                step = self._find_step(run, str(retry.get("step_id") or ""))
+                if step is not None and step.status == STEP_STATUS_RETRY_WAIT:
+                    step.status = STEP_STATUS_PENDING
         run.status = RUN_STATUS_PAUSED
         run.updated_at = datetime.now(timezone.utc)
         self._persist_state()
+        self._sync_task_run(run)
         self._emit(
             EventType.CONVERSATION_STAGE_FINISHED,
             {
                 "stage": "workflow.pause",
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        self._emit(
+            EventType.WORKFLOW_RUN_PAUSED,
+            {
+                "workflow_id": run.workflow_id,
                 "workflow_run_id": run.workflow_run_id,
                 "status": run.status,
                 "session_id": run.session_id,
@@ -292,18 +485,64 @@ class WorkflowEngine:
         if run.status != RUN_STATUS_PAUSED:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
+        run.run_metadata.pop("paused_retry", None)
         run.updated_at = datetime.now(timezone.utc)
         self._persist_state()
-        return self.advance_to_next_step(workflow_run_id, run_context=run_context)
+        self._sync_task_run(run)
+        self._emit(
+            EventType.WORKFLOW_RUN_RESUMED,
+            {
+                "workflow_id": run.workflow_id,
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        result = self.advance_to_next_step(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
 
     async def resume_workflow_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
         if run.status != RUN_STATUS_PAUSED:
             raise WorkflowError("workflow run is not paused")
         run.status = RUN_STATUS_RUNNING
+        run.run_metadata.pop("paused_retry", None)
         run.updated_at = datetime.now(timezone.utc)
         self._persist_state()
-        return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._sync_task_run(run)
+        self._emit(
+            EventType.WORKFLOW_RUN_RESUMED,
+            {
+                "workflow_id": run.workflow_id,
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        result = await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
+
+    async def resume_retry_wait_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
+        run = self._require_run(workflow_run_id)
+        if run.status != RUN_STATUS_RETRY_WAIT:
+            raise WorkflowError("workflow run is not waiting for retry")
+        retry = run.run_metadata.get("retry") if isinstance(run.run_metadata.get("retry"), dict) else {}
+        step = self._find_step(run, str(retry.get("step_id") or run.current_step_id or ""))
+        if step is None or step.status != STEP_STATUS_RETRY_WAIT:
+            raise WorkflowError("workflow retry state is incomplete")
+        step.status = STEP_STATUS_PENDING
+        run.status = RUN_STATUS_RUNNING
+        run.run_metadata.pop("retry", None)
+        run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
+        self._sync_task_run(run)
+        result = await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
 
     def retry_step(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
@@ -319,7 +558,9 @@ class WorkflowEngine:
         run.current_step_id = step.step_id
         run.updated_at = datetime.now(timezone.utc)
         self._persist_state()
-        return self.advance_to_next_step(workflow_run_id, run_context=run_context)
+        result = self.advance_to_next_step(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
 
     async def retry_step_async(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
@@ -335,7 +576,9 @@ class WorkflowEngine:
         run.current_step_id = step.step_id
         run.updated_at = datetime.now(timezone.utc)
         self._persist_state()
-        return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        result = await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
 
     def approve_step(self, workflow_run_id: str, step_id: str, approved_by: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
@@ -355,8 +598,66 @@ class WorkflowEngine:
                 run.status = RUN_STATUS_RUNNING
                 run.updated_at = datetime.now(timezone.utc)
                 self._persist_state()
-                return self.advance_to_next_step(workflow_run_id, run_context=run_context)
+                result = self.advance_to_next_step(workflow_run_id, run_context=run_context)
+                self._sync_task_run(result)
+                return result
         self._persist_state()
+        self._sync_task_run(run)
+        return run
+
+    def cancel_workflow(self, workflow_run_id: str, *, reason: str = "user_cancelled") -> WorkflowRun:
+        run = self._require_run(workflow_run_id)
+        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_CANCELLED}:
+            return run
+        run.status = RUN_STATUS_CANCELLED
+        run.updated_at = datetime.now(timezone.utc)
+        run.completed_at = run.updated_at
+        run.run_metadata["cancel_reason"] = str(reason or "user_cancelled")
+        self._persist_state()
+        self._sync_task_run(run)
+        self._emit(
+            EventType.CONVERSATION_STAGE_FINISHED,
+            {
+                "stage": "workflow.cancel",
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        self._emit(
+            EventType.WORKFLOW_RUN_CANCELLED,
+            {
+                "workflow_id": run.workflow_id,
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "reason": run.run_metadata["cancel_reason"],
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
+        return run
+
+    def fail_workflow(self, workflow_run_id: str, *, error: str) -> WorkflowRun:
+        run = self._require_run(workflow_run_id)
+        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_CANCELLED}:
+            return run
+        run.status = RUN_STATUS_FAILED
+        run.updated_at = datetime.now(timezone.utc)
+        run.run_metadata["failure"] = {"code": "runtime_failure", "message": str(error)}
+        self._persist_state()
+        self._sync_task_run(run)
+        self._emit(
+            EventType.WORKFLOW_RUN_FAILED,
+            {
+                "workflow_id": run.workflow_id,
+                "workflow_run_id": run.workflow_run_id,
+                "status": run.status,
+                "error": str(error),
+                "session_id": run.session_id,
+                "user_id": run.user_id,
+            },
+        )
         return run
 
     async def approve_step_async(
@@ -384,8 +685,11 @@ class WorkflowEngine:
                 run.status = RUN_STATUS_RUNNING
                 run.updated_at = datetime.now(timezone.utc)
                 self._persist_state()
-                return await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+                result = await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+                self._sync_task_run(result)
+                return result
         self._persist_state()
+        self._sync_task_run(run)
         return run
 
     def create_checkpoint(self, workflow_run_id: str, step_id: str, *, run_context: Optional[Any], artifact_refs: Optional[List[Dict[str, Any]]] = None) -> Checkpoint:
@@ -451,20 +755,22 @@ class WorkflowEngine:
         user_config: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        if not self.tool_service:
-            raise WorkflowError("tool_service unavailable for workflow tool execution")
+        if not self.capability_service:
+            raise WorkflowError("capability_service unavailable for workflow tool execution")
 
-        req_id = f"workflow_{workflow_run_id or uuid4().hex}"
+        meta = dict(metadata or {})
+        idempotency_key = str(meta.get("idempotency_key") or "").strip()
+        req_id = f"workflow_{idempotency_key or workflow_run_id or uuid4().hex}"
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
             source="workflow",
-            metadata=dict(metadata or {}),
+            metadata=meta,
         )
-        result = await self.tool_service.call_tool(
+        result = await self.capability_service.call_tool(
             tool_name=tool_name,
             params={
-                "agentType": tool_type or "mcp",
+                "agentType": tool_type or "tool",
                 "service_name": service_name or tool_name,
                 "tool_name": tool_name or service_name,
                 **dict(args or {}),
@@ -474,6 +780,9 @@ class WorkflowEngine:
             run_context=run_context,
             user_config=user_config,
         )
+        if workflow_run_id:
+            fenced_run = self._require_run(workflow_run_id)
+            self._assert_execution_fence(fenced_run, run_context)
         observation = str(result if isinstance(result, (str, int, float, bool)) else result)
         payload = {
             "kind": "tool",
@@ -503,11 +812,16 @@ class WorkflowEngine:
 
     async def advance_to_next_step_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
         run = self._require_run(workflow_run_id)
-        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_PAUSED}:
+        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_PAUSED, RUN_STATUS_RETRY_WAIT, RUN_STATUS_CANCELLED}:
             return run
 
         workflow_type = str(run.run_metadata.get("workflow_type") or "linear").strip().lower() or "linear"
         while True:
+            self._assert_execution_fence(run, run_context)
+            if run.status in {RUN_STATUS_PAUSED, RUN_STATUS_CANCELLED}:
+                self._persist_state()
+                self._sync_task_run(run)
+                return run
             ready_steps = self._ready_steps(run, workflow_type=workflow_type)
             if not ready_steps:
                 if self._has_blocked_pending_steps(run):
@@ -532,6 +846,16 @@ class WorkflowEngine:
                         "user_id": run.user_id,
                     },
                 )
+                self._emit(
+                    EventType.WORKFLOW_RUN_COMPLETED,
+                    {
+                        "workflow_run_id": run.workflow_run_id,
+                        "workflow_id": run.workflow_id,
+                        "status": run.status,
+                        "session_id": run.session_id,
+                        "user_id": run.user_id,
+                    },
+                )
                 return run
 
             batch = ready_steps[:1] if workflow_type == "linear" else ready_steps
@@ -547,6 +871,17 @@ class WorkflowEngine:
                     *(self._execute_step_async(run, step, run_context=run_context) for step in batch)
                 )
                 execution_pairs = list(zip(batch, results))
+
+            self._assert_execution_fence(run, run_context)
+
+            retry_steps = [step for step, status in execution_pairs if status == "retry_wait"]
+            if retry_steps:
+                run.status = RUN_STATUS_RETRY_WAIT
+                run.current_step_id = retry_steps[0].step_id
+                run.updated_at = datetime.now(timezone.utc)
+                self._persist_state()
+                self._sync_task_run(run)
+                return run
 
             waiting_steps = [step for step, status in execution_pairs if status == "waiting_human"]
             if waiting_steps:
@@ -578,18 +913,34 @@ class WorkflowEngine:
             self._refresh_run_cursor(run, workflow_type=workflow_type)
             self._persist_state()
 
+    async def continue_workflow_async(self, workflow_run_id: str, *, run_context: Optional[Any] = None) -> WorkflowRun:
+        """Advance a prepared run and synchronize its owning Task."""
+        result = await self.advance_to_next_step_async(workflow_run_id, run_context=run_context)
+        self._sync_task_run(result)
+        return result
+
     def _execute_step(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> str:
         return self._run_async_blocking(self._execute_step_async(run, step, run_context=run_context))
 
     async def _execute_step_async(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> str:
+        self._assert_execution_fence(run, run_context)
         step.status = STEP_STATUS_RUNNING
         step.outputs = step.outputs or {}
+        step.attempt_count = max(0, int(step.attempt_count or 0)) + 1
+        step.active_attempt_id = f"step_attempt_{uuid4().hex}"
+        step.idempotency_key = step.idempotency_key or f"{run.workflow_run_id}:{step.step_id}"
+        step.attempt_started_at = datetime.now(timezone.utc)
+        step.attempt_ended_at = None
+        self._persist_state()
+        self._emit(EventType.WORKFLOW_STEP_STARTED, self._step_event_payload(run, step))
 
         if step.requires_human_approval or step.step_type == "approval_step":
             approvals = run.run_metadata.get("approvals", {})
             if step.step_id not in approvals:
                 step.status = STEP_STATUS_WAITING_HUMAN
                 step.outputs["waiting_reason"] = "human_approval_required"
+                self._close_step_attempt(step, status="waiting_human")
+                self._persist_state()
                 self._emit(
                     EventType.CONVERSATION_STAGE_STARTED,
                     {
@@ -625,6 +976,8 @@ class WorkflowEngine:
             step.outputs["error_code"] = "dependency_unavailable"
             step.outputs["dependency"] = e.dependency
             step.outputs["degraded"] = True
+            self._close_step_attempt(step, status="failed", reason=str(e))
+            self._persist_state()
             self._emit(
                 EventType.CONVERSATION_STAGE_FAILED,
                 {
@@ -638,10 +991,18 @@ class WorkflowEngine:
                     "user_id": run.user_id,
                 },
             )
+            self._emit(EventType.WORKFLOW_STEP_FAILED, self._step_event_payload(run, step, reason=str(e)))
             return "failed"
         except Exception as e:
+            if isinstance(e, TaskExecutionConflict):
+                raise
+            if self._schedule_step_retry(run, step, error=e):
+                self._emit(EventType.WORKFLOW_STEP_RETRY_SCHEDULED, self._step_event_payload(run, step, reason=str(e)))
+                return "retry_wait"
             step.status = STEP_STATUS_FAILED
             step.outputs["error"] = str(e)
+            self._close_step_attempt(step, status="failed", reason=str(e))
+            self._persist_state()
             self._emit(
                 EventType.CONVERSATION_STAGE_FAILED,
                 {
@@ -653,10 +1014,110 @@ class WorkflowEngine:
                     "user_id": run.user_id,
                 },
             )
+            self._emit(EventType.WORKFLOW_STEP_FAILED, self._step_event_payload(run, step, reason=str(e)))
             return "failed"
 
+        self._assert_execution_fence(run, run_context)
         step.status = STEP_STATUS_SUCCEEDED
+        self._close_step_attempt(step, status="succeeded")
+        self._persist_state()
+        self._emit(EventType.WORKFLOW_STEP_COMPLETED, self._step_event_payload(run, step))
         return "succeeded"
+
+    def _schedule_step_retry(self, run: WorkflowRun, step: WorkflowStep, *, error: Exception) -> bool:
+        policy = dict(step.retry_policy or {})
+        default_attempts = 3 if step.step_type == "tool_step" else 1
+        try:
+            max_attempts = max(1, int(policy.get("max_attempts", default_attempts)))
+        except (TypeError, ValueError):
+            max_attempts = default_attempts
+        if step.attempt_count >= max_attempts:
+            return False
+        try:
+            base_delay = max(0.1, float(policy.get("backoff_seconds", 5.0)))
+            max_delay = max(base_delay, float(policy.get("max_backoff_seconds", 300.0)))
+        except (TypeError, ValueError):
+            base_delay, max_delay = 5.0, 300.0
+        delay = min(max_delay, base_delay * (2 ** max(0, step.attempt_count - 1)))
+        next_retry = datetime.now(timezone.utc).timestamp() + delay
+        next_retry_at = datetime.fromtimestamp(next_retry, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        step.outputs["error"] = str(error)
+        step.outputs["retry_scheduled_at"] = next_retry_at
+        step.status = STEP_STATUS_RETRY_WAIT
+        self._close_step_attempt(step, status="retry_scheduled", reason=str(error))
+        run.status = RUN_STATUS_RETRY_WAIT
+        run.current_step_id = step.step_id
+        run.run_metadata["retry"] = {
+            "step_id": step.step_id,
+            "attempt_count": step.attempt_count,
+            "max_attempts": max_attempts,
+            "next_retry_at": next_retry_at,
+            "delay_seconds": delay,
+            "error": str(error),
+        }
+        run.updated_at = datetime.now(timezone.utc)
+        self._persist_state()
+        return True
+
+    def _assert_execution_fence(self, run: WorkflowRun, run_context: Optional[Any]) -> None:
+        if self.task_service is None or run_context is None:
+            return
+        token = run_context.get("execution_token") if isinstance(run_context, dict) else getattr(run_context, "execution_token", None)
+        if not isinstance(token, dict) or not token:
+            return
+        task_id = str(run.run_metadata.get("task_id") or "")
+        if not task_id:
+            raise WorkflowError("fenced workflow run has no task_id")
+        self.task_service.assert_execution(
+            task_id=task_id,
+            user_id=run.user_id,
+            token=token,
+        )
+
+    @staticmethod
+    def _close_step_attempt(step: WorkflowStep, *, status: str, reason: str = "") -> None:
+        if not step.active_attempt_id:
+            return
+        now = datetime.now(timezone.utc)
+        step.attempt_history.append({
+            "attempt_id": step.active_attempt_id,
+            "attempt_count": step.attempt_count,
+            "idempotency_key": step.idempotency_key,
+            "status": str(status),
+            "started_at": step.attempt_started_at.isoformat().replace("+00:00", "Z") if step.attempt_started_at else None,
+            "ended_at": now.isoformat().replace("+00:00", "Z"),
+            "reason": str(reason or "") or None,
+        })
+        if len(step.attempt_history) > 100:
+            step.attempt_history = step.attempt_history[-100:]
+        step.attempt_ended_at = now
+        step.active_attempt_id = None
+
+    @staticmethod
+    def _step_event_payload(
+        run: WorkflowRun,
+        step: WorkflowStep,
+        *,
+        attempt_id: Optional[str] = None,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        latest = step.attempt_history[-1] if step.attempt_history else {}
+        return {
+            "task_id": run.run_metadata.get("task_id"),
+            "workflow_id": run.workflow_id,
+            "workflow_run_id": run.workflow_run_id,
+            "run_id": run.workflow_run_id,
+            "step_id": step.step_id,
+            "step_name": step.name,
+            "step_type": step.step_type,
+            "status": step.status,
+            "attempt_id": attempt_id or step.active_attempt_id or latest.get("attempt_id"),
+            "attempt_count": step.attempt_count,
+            "idempotency_key": step.idempotency_key,
+            "reason": reason or None,
+            "session_id": run.session_id,
+            "user_id": run.user_id,
+        }
 
     def _execute_reasoning_step(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> Dict[str, Any]:
         reasoning_snapshot = self._safe_dict(getattr(run_context, "reasoning_state", None))
@@ -733,11 +1194,11 @@ class WorkflowEngine:
         return self._run_async_blocking(self._execute_tool_step_async(run, step, run_context=run_context))
 
     async def _execute_tool_step_async(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> Dict[str, Any]:
-        if not self.tool_service:
-            raise WorkflowDependencyError("tool_service", "tool_step requires tool service")
+        if not self.capability_service:
+            raise WorkflowDependencyError("capability_service", "tool_step requires tool service")
 
         inputs = dict(step.inputs or {})
-        tool_type = str(inputs.get("tool_type") or inputs.get("agentType") or "mcp").strip() or "mcp"
+        tool_type = str(inputs.get("tool_type") or inputs.get("agentType") or "tool").strip() or "tool"
         service_name = str(inputs.get("service_name") or inputs.get("service") or "").strip()
         tool_name = str(inputs.get("tool_name") or inputs.get("command") or "").strip()
         args = inputs.get("args")
@@ -770,7 +1231,12 @@ class WorkflowEngine:
             args=dict(args or {}),
             run_context=run_context,
             user_config=user_cfg,
-            metadata={"source": "workflow_step", "step_id": step.step_id},
+            metadata={
+                "source": "workflow_step",
+                "step_id": step.step_id,
+                "attempt_id": step.active_attempt_id,
+                "idempotency_key": step.idempotency_key,
+            },
         )
         if not isinstance(payload, dict):
             return {"result": payload}
@@ -1106,6 +1572,15 @@ class WorkflowEngine:
         if not self.event_emitter:
             return
 
+        payload = dict(payload or {})
+        workflow_run_id = str(payload.get("workflow_run_id") or "")
+        run = self._runs.get(workflow_run_id) if workflow_run_id else None
+        if run is not None:
+            payload.setdefault("run_id", run.workflow_run_id)
+            task_id = str(run.run_metadata.get("task_id") or "")
+            if task_id:
+                payload.setdefault("task_id", task_id)
+
         import asyncio
 
         async def _emit_event() -> None:
@@ -1124,10 +1599,10 @@ class WorkflowEngine:
         try:
             with path.open("r", encoding="utf-8") as f:
                 payload = json.load(f)
-        except Exception:
-            return
+        except Exception as exc:
+            raise RuntimeError(f"failed to load durable workflow state: {path}") from exc
         if not isinstance(payload, dict):
-            return
+            raise RuntimeError(f"durable workflow state must be an object: {path}")
         definitions = payload.get("definitions") if isinstance(payload.get("definitions"), dict) else {}
         runs = payload.get("runs") if isinstance(payload.get("runs"), dict) else {}
         checkpoints = payload.get("checkpoints") if isinstance(payload.get("checkpoints"), dict) else {}
@@ -1135,24 +1610,24 @@ class WorkflowEngine:
         for workflow_id, raw in definitions.items():
             try:
                 loaded_definitions[str(workflow_id)] = WorkflowDefinition(**raw)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise RuntimeError(f"invalid workflow definition {workflow_id!r} in {path}") from exc
         loaded_runs: Dict[str, WorkflowRun] = {}
         for run_id, raw in runs.items():
             try:
                 loaded_runs[str(run_id)] = WorkflowRun(**raw)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise RuntimeError(f"invalid workflow run {run_id!r} in {path}") from exc
         loaded_checkpoints: Dict[str, List[Checkpoint]] = {}
         for run_id, rows in checkpoints.items():
             if not isinstance(rows, list):
-                continue
+                raise RuntimeError(f"invalid workflow checkpoint list {run_id!r} in {path}")
             parsed: List[Checkpoint] = []
             for raw in rows:
                 try:
                     parsed.append(Checkpoint(**raw))
-                except Exception:
-                    continue
+                except Exception as exc:
+                    raise RuntimeError(f"invalid workflow checkpoint for {run_id!r} in {path}") from exc
             loaded_checkpoints[str(run_id)] = parsed
         self._definitions.update(loaded_definitions)
         self._runs.update(loaded_runs)

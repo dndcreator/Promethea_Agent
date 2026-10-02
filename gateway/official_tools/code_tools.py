@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import subprocess
 import sys
 import time
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from agentkit.security.sandbox import get_sandbox_policy
-from gateway.tool_service import ToolInvocationContext
+from agentkit.security.process_sandbox import SandboxedProcessRunner
+from gateway.capability_service import ToolInvocationContext
 
 from .workspace_tools import _resolve_identity, _safe_path_under_root
 
@@ -18,6 +19,7 @@ class CodeRunPythonTool:
     description = "Run a short Python script in the current workspace under sandbox policy."
     official = True
     official_domain = "code"
+    side_effect_level = "privileged_host_action"
 
     def __init__(self, *, workspace_service: Any) -> None:
         self.workspace_service = workspace_service
@@ -36,31 +38,27 @@ class CodeRunPythonTool:
         root = Path(handle.root_path)
         run_dir = _safe_path_under_root(root, ".runtime/code")
         run_dir.mkdir(parents=True, exist_ok=True)
-        script_path = run_dir / "snippet.py"
+        script_path = run_dir / f"snippet-{uuid4().hex}.py"
         script_path.write_text(code, encoding="utf-8")
 
-        command_for_policy = f"python {script_path}"
-        decision = get_sandbox_policy().check_command(command_for_policy, cwd=str(root))
-        if not decision.allowed:
-            raise PermissionError(f"sandbox blocked python execution: {decision.reason}")
-
         started = time.time()
-        proc = subprocess.run(  # noqa: S603
-            [sys.executable, str(script_path)],
-            cwd=str(root),
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            encoding="utf-8",
-            errors="replace",
-        )
+        sandbox = get_sandbox_policy()
+        executable = sys.executable
+        try:
+            proc = await SandboxedProcessRunner(sandbox=sandbox).run_async(
+                [executable, str(script_path)],
+                cwd=root, workspace_root=root, timeout=timeout_s,
+                session_id=ctx.session_id if ctx else None,
+            )
+        finally:
+            script_path.unlink(missing_ok=True)
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
         return {
             "ok": proc.returncode == 0,
             "workspace_id": handle.workspace_id,
             "returncode": proc.returncode,
+            "sandbox": proc.sandbox,
             "stdout": stdout[:max_output_chars],
             "stderr": stderr[:max_output_chars],
             "truncated_stdout": len(stdout) > max_output_chars,

@@ -127,7 +127,7 @@ Check the response for `deprecation_warnings`.
 3. Enforcement points:
    - Memory: `gateway/memory_service.py` — cross-user recall
    - Workspace: `gateway/workspace_service.py` — `_assert_owner`
-   - Tools: `gateway/tool_service.py` — `_assert_tool_namespace`
+   - Tools: `gateway/capability_service.py` — `_assert_tool_namespace`
 
 ### "The workflow stopped"
 

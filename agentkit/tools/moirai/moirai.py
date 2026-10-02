@@ -8,7 +8,7 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 
 class MoiraiService:
@@ -20,8 +20,19 @@ class MoiraiService:
         self.workspace_root = root.resolve()
         self.store_dir = self.workspace_root / "memory" / "moirai_runs"
         self.store_dir.mkdir(parents=True, exist_ok=True)
+        self._tool_executor: Optional[Callable[..., Awaitable[Any]]] = None
+        self._confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], bool]] = None
 
-    # ---------- Public MCP methods ----------
+    def configure_tool_runtime(
+        self,
+        *,
+        executor: Callable[..., Awaitable[Any]],
+        confirmation_resolver: Callable[[str, Dict[str, Any]], bool],
+    ) -> None:
+        self._tool_executor = executor
+        self._confirmation_resolver = confirmation_resolver
+
+    # ---------- Public tool methods ----------
 
     async def create_flow(
         self,
@@ -42,7 +53,7 @@ class MoiraiService:
         for i, step in enumerate(steps):
             if not isinstance(step, dict):
                 raise ValueError(f"step[{i}] must be an object")
-            kind = str(step.get("kind") or step.get("type") or "note").strip().lower()
+            kind = self._canonical_step_kind(step.get("kind") or step.get("type") or "note")
             retries = max(0, int(step.get("retries", default_retries)))
             params = dict(step.get("params") or {})
             if "require_approval" in step:
@@ -117,7 +128,7 @@ class MoiraiService:
             {
                 "id": "prepare_target_dir",
                 "name": "Ensure target directory exists",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "fs_action",
@@ -127,7 +138,7 @@ class MoiraiService:
             {
                 "id": "open_source_page",
                 "name": "Open source page in browser",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "browser_action",
@@ -141,7 +152,7 @@ class MoiraiService:
                 {
                     "id": "trigger_download",
                     "name": "Trigger download",
-                    "kind": "mcp_call",
+                    "kind": "tool_call",
                     "params": {
                         "service_name": "computer_control",
                         "tool_name": "browser_action",
@@ -173,7 +184,7 @@ class MoiraiService:
                 {
                     "id": "start_download_client",
                     "name": "Start download client",
-                    "kind": "mcp_call",
+                    "kind": "tool_call",
                     "params": {
                         "service_name": "computer_control",
                         "tool_name": "process_action",
@@ -228,7 +239,7 @@ class MoiraiService:
             {
                 "id": "open_page",
                 "name": "Open task page",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "browser_action",
@@ -238,7 +249,7 @@ class MoiraiService:
             {
                 "id": "snapshot_target",
                 "name": "Snapshot interactive nodes",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "browser_action",
@@ -248,7 +259,7 @@ class MoiraiService:
             {
                 "id": "act_target",
                 "name": "Act on top candidate",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "browser_action",
@@ -304,7 +315,7 @@ class MoiraiService:
             {
                 "id": "ocr_scan",
                 "name": "Scan visible text",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "perception_action",
@@ -314,7 +325,7 @@ class MoiraiService:
             {
                 "id": "click_text",
                 "name": "Click target text on screen",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "perception_action",
@@ -362,7 +373,7 @@ class MoiraiService:
             {
                 "id": "open_page",
                 "name": "Open page",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "browser_action",
@@ -372,7 +383,7 @@ class MoiraiService:
             {
                 "id": "execute_target_with_fallback",
                 "name": "Execute target with DOM/OCR fallback",
-                "kind": "mcp_call",
+                "kind": "tool_call",
                 "params": {
                     "service_name": "computer_control",
                     "tool_name": "perception_action",
@@ -455,7 +466,7 @@ class MoiraiService:
             self._save_run(run)
 
             try:
-                output = await self._execute_step(step)
+                output = await self._execute_step(step, approved=is_approved)
                 step["status"] = "completed"
                 step["output"] = output
                 step["error"] = None
@@ -653,7 +664,7 @@ class MoiraiService:
 
     # ---------- Internal execution ----------
 
-    async def _execute_step(self, step: Dict[str, Any]) -> Any:
+    async def _execute_step(self, step: Dict[str, Any], *, approved: bool = False) -> Any:
         kind = str(step.get("kind") or "note").lower()
         params = dict(step.get("params") or {})
 
@@ -720,8 +731,8 @@ class MoiraiService:
                 "backup": str(backup_path.relative_to(self.workspace_root).as_posix()),
             }
 
-        if kind == "mcp_call":
-            return await self._execute_mcp_call(params)
+        if kind == "tool_call":
+            return await self._execute_tool_call(params, approved=approved)
 
         if kind == "verify_file_exists":
             path = self._resolve_workspace_path(str(params.get("path") or ""))
@@ -741,18 +752,29 @@ class MoiraiService:
             if not command:
                 raise ValueError("verify_command requires params.command")
             timeout = max(1, int(params.get("timeout") or 30))
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                cwd=str(self.workspace_root),
+            from agentkit.security.process_sandbox import SandboxedProcessRunner, cleanup_confined_process
+            spec = SandboxedProcessRunner().prepare(
+                command, cwd=self.workspace_root, workspace_root=self.workspace_root, shell=True,
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *spec.argv,
+                cwd=str(spec.cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=spec.env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+                await asyncio.to_thread(cleanup_confined_process, spec)
                 raise TimeoutError(f"verify_command timed out after {timeout}s")
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                await asyncio.to_thread(cleanup_confined_process, spec)
+                raise
             output = (stdout or b"").decode("utf-8", errors="replace")
             err = (stderr or b"").decode("utf-8", errors="replace")
             expected = str(params.get("expect_contains") or "").strip()
@@ -777,18 +799,29 @@ class MoiraiService:
             cwd = str(params.get("cwd") or ".")
             run_cwd = self._resolve_workspace_path(cwd)
             timeout = max(1, int(params.get("timeout") or 120))
-            proc = await asyncio.create_subprocess_shell(
-                cmd,
-                cwd=str(run_cwd),
+            from agentkit.security.process_sandbox import SandboxedProcessRunner, cleanup_confined_process
+            spec = SandboxedProcessRunner().prepare(
+                cmd, cwd=run_cwd, workspace_root=self.workspace_root, shell=True,
+            )
+            proc = await asyncio.create_subprocess_exec(
+                *spec.argv,
+                cwd=str(spec.cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=spec.env,
             )
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
+                await asyncio.to_thread(cleanup_confined_process, spec)
                 raise TimeoutError(f"command timed out after {timeout}s")
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                await asyncio.to_thread(cleanup_confined_process, spec)
+                raise
             if proc.returncode != 0 and not bool(params.get("allow_nonzero", False)):
                 err_out = stderr.decode("utf-8", errors="replace")[:1000]
                 std_out = stdout.decode("utf-8", errors="replace")[:1000]
@@ -804,25 +837,29 @@ class MoiraiService:
 
         raise ValueError(f"unsupported step kind: {kind}")
 
-    async def _execute_mcp_call(self, params: Dict[str, Any]) -> Any:
+    async def _execute_tool_call(self, params: Dict[str, Any], *, approved: bool) -> Any:
         service_name = str(params.get("service_name") or "").strip()
         tool_name = str(params.get("tool_name") or "").strip()
         args = params.get("args") or {}
         if not service_name or not tool_name:
-            raise ValueError("mcp_call requires params.service_name and params.tool_name")
+            raise ValueError("tool_call requires params.service_name and params.tool_name")
         if not isinstance(args, dict):
-            raise ValueError("mcp_call requires params.args object")
+            raise ValueError("tool_call requires params.args object")
 
-        try:
-            from agentkit.mcp.mcp_manager import get_mcp_manager
-        except Exception as e:
-            raise RuntimeError(f"mcp manager unavailable: {e}") from e
-
-        manager = get_mcp_manager()
-        result = await manager.unified_call(
-            service_name=service_name,
-            tool_name=tool_name,
-            args=args,
+        if self._tool_executor is None:
+            raise RuntimeError("workflow tool runtime is not configured")
+        full_name = f"{service_name}.{tool_name}"
+        payload = {
+            "agentType": "tool",
+            "service_name": service_name,
+            "tool_name": tool_name,
+            **args,
+        }
+        result = await self._tool_executor(
+            full_name,
+            payload,
+            approved=approved,
+            source="workflow",
         )
         return {
             "ok": True,
@@ -844,7 +881,16 @@ class MoiraiService:
         path = self._run_path(run_id)
         if not path.exists():
             raise FileNotFoundError(f"run not found: {run_id}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        run = json.loads(path.read_text(encoding="utf-8"))
+        migrated = False
+        for step in run.get("steps") or []:
+            canonical = self._canonical_step_kind(step.get("kind") or "note")
+            if canonical != step.get("kind"):
+                step["kind"] = canonical
+                migrated = True
+        if migrated:
+            self._save_run(run)
+        return run
 
     def _touch(self, run: Dict[str, Any]) -> None:
         run["updated_at"] = time.time()
@@ -857,6 +903,11 @@ class MoiraiService:
             run["events"] = events[-max_events:]
 
     # ---------- Helpers ----------
+
+    @staticmethod
+    def _canonical_step_kind(value: Any) -> str:
+        kind = str(value or "note").strip().lower()
+        return "tool_call" if kind == "mcp_call" else kind
 
     def _public_view(self, run: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -879,19 +930,20 @@ class MoiraiService:
         }
 
     def _auto_require_approval(self, *, kind: str, params: Dict[str, Any]) -> bool:
-        if kind != "mcp_call":
+        if kind != "tool_call":
             return False
-        service = str(params.get("service_name") or "")
-        tool = str(params.get("tool_name") or "")
+        service = str(params.get("service_name") or "").strip()
+        tool = str(params.get("tool_name") or "").strip()
         args = params.get("args") if isinstance(params.get("args"), dict) else {}
-        action = str(args.get("action") or "").lower()
-        if service == "computer_control" and tool == "process_action":
-            return action in {"run", "run_async", "kill", "terminate"}
-        if service == "computer_control" and tool == "browser_action":
-            return action in {"click", "type", "press"}
-        if service == "computer_control" and tool in {"write_file", "delete_file"}:
+        if not service or not tool or self._confirmation_resolver is None:
             return True
-        return False
+        payload = {
+            "agentType": "tool",
+            "service_name": service,
+            "tool_name": tool,
+            **args,
+        }
+        return bool(self._confirmation_resolver(f"{service}.{tool}", payload))
 
     def _resolve_workspace_path(self, path_str: str) -> Path:
         if not path_str:

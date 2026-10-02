@@ -9,16 +9,16 @@ from loguru import logger
 
 from conversation_core import PrometheaConversation
 
+from .action.models import resolve_action_budget
 from .events import EventEmitter
 from .prompt_assembler import PromptAssembler
-from .prompt_policy_router import PromptPolicyRouter
 from .runtime_context import build_runtime_context_block
 from .soul_service import schedule_soul_evolution
 from .runtime_io import (
     ContextCompiler,
     blocks_debug,
-    model_supports_vision,
 )
+from .user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
 from .runtime_input_builder import build_runtime_input_blocks
 from .protocol import (
     EventType,
@@ -83,7 +83,8 @@ class ConversationService:
         message_manager: Optional[Any] = None,
         config_service: Optional[Any] = None,
         org_context_service: Optional[Any] = None,
-        tool_service: Optional[Any] = None,
+        capability_service: Optional[Any] = None,
+        self_model_service: Optional[Any] = None,
     ) -> None:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core or PrometheaConversation()
@@ -94,10 +95,10 @@ class ConversationService:
         self.message_manager = message_manager
         self.config_service = config_service
         self.org_context_service = org_context_service
-        self.tool_service = tool_service
+        self.capability_service = capability_service
+        self.self_model_service = self_model_service
         self.prompt_assembler = PromptAssembler()
         self.context_compiler = ContextCompiler()
-        self.prompt_policy_router = PromptPolicyRouter()
         self._session_queues: Dict[str, asyncio.Queue] = {}
         self._session_workers: Dict[str, asyncio.Task] = {}
         self._session_urgent: Dict[str, Dict[str, Any]] = {}
@@ -560,59 +561,40 @@ class ConversationService:
             return text
         return f"{self._CORE_SYSTEM_PROMPT}\n\nAdditional user/default prompt:\n{text}"
 
-    async def route_prompt_policy(
+    async def prepare_runtime_capabilities(
         self,
         *,
-        user_message: str,
         user_config: Optional[Dict[str, Any]],
-        user_id: Optional[str],
-        base_system_prompt: str = "",
         run_context: Optional[Any] = None,
-        recent_messages: Optional[List[Dict[str, Any]]] = None,
-        runtime_context: str = "",
-    ) -> Dict[str, Any]:
-        tool_catalog = await self._build_prompt_policy_tool_snapshot(
+    ) -> List[Dict[str, Any]]:
+        """Attach the registry-backed capabilities available to the main model."""
+        tool_catalog = await self._build_runtime_tool_snapshot(
             run_context=run_context,
             user_config=user_config,
         )
-        policy = await self.prompt_policy_router.route(
-            conversation_core=self.conversation_core,
-            user_message=user_message,
-            user_config=user_config,
-            user_id=user_id,
-            base_system_prompt=base_system_prompt,
-            tool_catalog=tool_catalog,
-            runtime_context=runtime_context,
-            recent_messages=recent_messages,
-        )
-        policy = self.prompt_policy_router.normalize_policy(
-            policy,
-            source=str((policy or {}).get("source") or "route_prompt_policy"),
-        )
         if run_context is not None:
             try:
-                setattr(run_context, "prompt_policy", dict(policy))
                 setattr(run_context, "registered_tools", list(tool_catalog))
             except Exception:
                 pass
-        return policy
+        return tool_catalog
 
-    async def _build_prompt_policy_tool_snapshot(
+    async def _build_runtime_tool_snapshot(
         self,
         *,
         run_context: Optional[Any],
         user_config: Optional[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Return the registry-backed tool snapshot used by the policy router."""
-        if not self.tool_service:
+        """Return the structured tool snapshot used by the main-model loop."""
+        if not self.capability_service:
             return []
         try:
-            catalog = await self.tool_service.get_tool_catalog(
+            catalog = await self.capability_service.get_tool_catalog(
                 run_context=run_context,
                 user_config=user_config,
             )
         except Exception as e:
-            logger.debug("ConversationService: tool catalog for prompt policy skipped: {}", e)
+            logger.debug("ConversationService: runtime tool catalog unavailable: {}", e)
             return []
 
         tools: List[Dict[str, Any]] = []
@@ -623,9 +605,12 @@ class ConversationService:
             tool_name = str(item.get("tool_name") or "").strip()
             if not service_name or not tool_name:
                 continue
-            full_name = tool_name if tool_name.startswith(f"{service_name}.") else f"{service_name}.{tool_name}"
-            tools.append(
-                {
+            full_name = (
+                tool_name
+                if tool_name == service_name or tool_name.startswith(f"{service_name}.")
+                else f"{service_name}.{tool_name}"
+            )
+            tool_row = {
                     "name": full_name,
                     "service_name": service_name,
                     "tool_name": tool_name,
@@ -637,8 +622,68 @@ class ConversationService:
                     "policy_allowed": bool(item.get("policy_allowed", True)),
                     "dependency_ready": bool(item.get("dependency_ready", True)),
                 }
-            )
+            required_capability = str(item.get("required_capability") or "").strip()
+            capability_details = dict(item.get("capability_details") or {})
+            if required_capability:
+                tool_row["required_capability"] = required_capability
+            if capability_details:
+                tool_row["capability_details"] = capability_details
+            tools.append(tool_row)
         return tools
+
+    async def attach_self_model_context(
+        self,
+        *,
+        user_id: str,
+        user_message: str,
+        run_context: Optional[Any],
+    ) -> Dict[str, Any]:
+        if run_context is None or self.self_model_service is None:
+            return {}
+        existing = getattr(run_context, "self_model_context", None)
+        if isinstance(existing, dict) and existing:
+            return existing
+        try:
+            context = await self.self_model_service.build_context(
+                user_id=user_id,
+                query=user_message,
+                run_context=run_context,
+            )
+        except Exception as exc:
+            logger.debug("ConversationService: self model context unavailable: {}", exc)
+            context = {}
+        try:
+            setattr(run_context, "self_model_context", dict(context or {}))
+        except Exception:
+            pass
+        return dict(context or {})
+
+    async def recall_org_context_for_turn(
+        self,
+        *,
+        user_id: str,
+        user_message: str,
+        user_config: Optional[Dict[str, Any]],
+        run_context: Optional[Any],
+    ) -> Dict[str, Any]:
+        if self.org_context_service is None or not isinstance(user_config, dict):
+            return {}
+        metadata = {}
+        payload = getattr(run_context, "input_payload", None) if run_context is not None else None
+        if isinstance(payload, dict) and isinstance(payload.get("metadata"), dict):
+            metadata = payload["metadata"]
+        try:
+            return await self.org_context_service.recall_for_turn(
+                query=user_message,
+                user_id=user_id,
+                user_config=user_config,
+                audience=str(metadata.get("audience") or ""),
+                context_type=None,
+                top_k=None,
+            )
+        except Exception as exc:
+            logger.debug("ConversationService: org context recall skipped: {}", exc)
+            return {"enabled": True, "recalled": False, "reason": "org_context_error"}
 
     async def prepare_chat_turn(
         self,
@@ -652,16 +697,25 @@ class ConversationService:
         attachments: Optional[List[Dict[str, Any]]] = None,
         runtime_blocks: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        preparation_started = time.perf_counter()
+        preparation_latency_ms: Dict[str, float] = {}
+
+        async def timed(name: str, factory):
+            started = time.perf_counter()
+            try:
+                return await factory()
+            finally:
+                preparation_latency_ms[name] = round((time.perf_counter() - started) * 1000, 2)
+
         user_config: Optional[Dict[str, Any]] = None
         messages: List[Dict[str, Any]] = []
 
         base_system_prompt, user_config = await self._get_user_prompt_and_config(
             user_id, channel
         )
-        if user_config:
-            base_system_prompt = self._append_language_policy(
-                self._ensure_core_system_prompt(base_system_prompt)
-            )
+        base_system_prompt = self._append_language_policy(
+            self._ensure_core_system_prompt(base_system_prompt)
+        )
 
         assembler_context = run_context
         attachment_rows = list(attachments or [])
@@ -687,6 +741,36 @@ class ConversationService:
                     )
                 except Exception:
                     pass
+        self_model_task = asyncio.create_task(
+            timed(
+                "self_model",
+                lambda: self.attach_self_model_context(
+                    user_id=user_id,
+                    user_message=user_message,
+                    run_context=assembler_context,
+                ),
+            )
+        )
+        tool_catalog_task = asyncio.create_task(
+            timed(
+                "capability_catalog",
+                lambda: self.prepare_runtime_capabilities(
+                    user_config=user_config,
+                    run_context=assembler_context,
+                ),
+            )
+        )
+        org_context_task = asyncio.create_task(
+            timed(
+                "org_context",
+                lambda: self.recall_org_context_for_turn(
+                    user_id=user_id,
+                    user_message=user_message,
+                    user_config=user_config,
+                    run_context=assembler_context,
+                ),
+            )
+        )
         if not attachment_rows and assembler_context is not None:
             payload = getattr(assembler_context, "input_payload", None)
             if isinstance(payload, dict) and isinstance(payload.get("attachments"), list):
@@ -698,12 +782,24 @@ class ConversationService:
                 session_id, user_id=user_id
             )
 
-        runtime_context_block = build_runtime_context_block(recent_messages=recent_messages)
+        runtime_context_block = build_runtime_context_block(
+            recent_messages=recent_messages,
+            user_config=user_config,
+            timezone_name=str(
+                (
+                    (getattr(assembler_context, "input_payload", {}) or {}).get("metadata", {})
+                    if isinstance(getattr(assembler_context, "input_payload", {}), dict)
+                    else {}
+                ).get("timezone")
+                or ""
+            ),
+        )
         try:
             setattr(assembler_context, "runtime_context", runtime_context_block)
         except Exception:
             pass
 
+        await self_model_task
         runtime_input_blocks = build_runtime_input_blocks(
             user_message=user_message,
             user_id=user_id,
@@ -736,54 +832,36 @@ class ConversationService:
                     if isinstance(policy, dict):
                         assembler_context.prompt_block_policy = dict(policy)
 
-        prompt_policy = await self.route_prompt_policy(
-            user_message=user_message,
-            user_config=user_config,
-            user_id=user_id,
-            base_system_prompt=base_system_prompt,
-            run_context=assembler_context,
-            recent_messages=recent_messages,
-            runtime_context=runtime_context_block,
-        )
-        prompt_policy = self.prompt_policy_router.normalize_policy(
-            prompt_policy,
-            source=str((prompt_policy or {}).get("source") or "conversation_service"),
-        )
+        tool_catalog = await tool_catalog_task
+        action_budget = resolve_action_budget(user_config)
+        prompt_policy = {
+            "source": "main_model_control_loop",
+            "cognitive_mode": "adaptive",
+            "mode": "fast",
+            "reasoning_budget": "on_demand",
+            "tool_budget": action_budget,
+            "memory_budget": "on_demand",
+            "need_user_visible_reasoning": False,
+            "need_memory": None,
+            "need_reasoning": None,
+            "need_tools": any(item.get("callable_now") for item in tool_catalog),
+            "reason": "main_model_selects_runtime_capabilities",
+            "confidence": 1.0,
+        }
         if assembler_context is not None:
             try:
                 setattr(assembler_context, "prompt_policy", dict(prompt_policy))
             except Exception:
                 pass
         logger.info(
-            "ConversationService: prompt policy session={} user={} cognitive_mode={} mode={} reasoning_budget={} tool_budget={} need_memory={} need_tools={}",
+            "ConversationService: main-model control loop session={} user={} callable_tools={} budget={}",
             session_id,
             user_id,
-            prompt_policy.get("cognitive_mode"),
-            prompt_policy.get("mode"),
-            prompt_policy.get("reasoning_budget"),
-            prompt_policy.get("tool_budget"),
-            prompt_policy.get("need_memory"),
-            prompt_policy.get("need_tools"),
+            sum(1 for item in tool_catalog if item.get("callable_now")),
+            prompt_policy["tool_budget"],
         )
 
-        org_context = {}
-        if self.org_context_service and isinstance(user_config, dict):
-            try:
-                org_context = await self.org_context_service.recall_for_turn(
-                    query=user_message,
-                    user_id=user_id,
-                    user_config=user_config,
-                    audience=(
-                        str(((getattr(run_context, "input_payload", {}) or {}).get("metadata") or {}).get("audience") or "")
-                        if assembler_context is not None
-                        else ""
-                    ),
-                    context_type=None,
-                    top_k=None,
-                )
-            except Exception as e:
-                logger.debug("ConversationService: org context recall skipped: {}", e)
-                org_context = {"enabled": True, "recalled": False, "reason": "org_context_error"}
+        org_context = await org_context_task
 
         org_summary = str((org_context or {}).get("summary_text") or "").strip()
         if assembler_context is not None:
@@ -804,91 +882,17 @@ class ConversationService:
                 except Exception:
                     pass
 
-        reasoning_result: Dict[str, Any] = {"used_reasoning": False}
+        reasoning_result: Dict[str, Any] = {"used_reasoning": False, "reason": "available_on_demand"}
         plan = PlanResult(used_reasoning=False, base_system_prompt=base_system_prompt)
-        should_reason = bool(
-            str(prompt_policy.get("reasoning_budget") or "").strip().lower() == "large"
-            or str(prompt_policy.get("mode") or "") in {"deep", "workflow"}
-        )
-        if should_reason and self.reasoning_service and self.reasoning_service.is_enabled(user_id=user_id):
-            logger.info(
-                "ConversationService: starting reasoning session={} user={} mode={}",
-                session_id,
-                user_id,
-                prompt_policy.get("mode"),
-            )
-            reasoning_result = await self.reasoning_service.run(
-                session_id=session_id,
-                user_id=user_id,
-                user_message=user_message,
-                recent_messages=recent_messages,
-                base_system_prompt=base_system_prompt,
-                user_config=user_config,
-                run_context=assembler_context,
-                force_reasoning=should_reason,
-            )
-            logger.info(
-                "ConversationService: reasoning finished session={} user={} used={} tree_id={} status={}",
-                session_id,
-                user_id,
-                reasoning_result.get("used_reasoning"),
-                reasoning_result.get("tree_id"),
-                reasoning_result.get("status"),
-            )
-            if reasoning_result.get("used_reasoning"):
-                plan = PlanResult(
-                    used_reasoning=True,
-                    system_prompt=str(reasoning_result.get("system_prompt") or ""),
-                    base_system_prompt=base_system_prompt,
-                    reasoning=reasoning_result,
-                )
-
-        memory_bundle = MemoryRecallBundle(recalled=False, reason="not_needed")
-        if prompt_policy.get("need_memory") is True:
-            should_recall = True
-        elif prompt_policy.get("need_memory") is False:
-            should_recall = False
-        else:
-            should_recall = await self._should_recall_memory(
-                query=user_message,
-                user_config=user_config,
-                user_id=user_id,
-            )
-        if (
-            should_recall
-            and self.memory_service
-            and self.memory_service.is_enabled()
-            and session_id
-            and user_id
-        ):
-            memory_context = await self.memory_service.get_context(
-                query=user_message,
-                session_id=session_id,
-                user_id=user_id,
-                run_context=assembler_context,
-            )
-            if isinstance(memory_context, str) and memory_context.strip():
-                memory_bundle = MemoryRecallBundle(
-                    recalled=True,
-                    context=memory_context.strip(),
-                    reason="recalled",
-                    source="memory_service",
-                    confidence=0.8,
-                )
-            else:
-                memory_bundle = MemoryRecallBundle(
-                    recalled=False,
-                    reason="empty_context",
-                    source="memory_service",
-                )
+        memory_bundle = MemoryRecallBundle(recalled=False, reason="available_on_demand")
 
         mode = ModeDecision(
             mode=str(prompt_policy.get("mode") or ("deep" if reasoning_result.get("used_reasoning") else "fast")),
             reason=str(prompt_policy.get("reason") or "conversation_service.prepare_chat_turn"),
             confidence=float(prompt_policy.get("confidence") or 0.8),
         )
-        tools_enabled = bool(prompt_policy.get("need_tools"))
-        tool_budget = int(prompt_policy.get("tool_budget") or (5 if tools_enabled else 0))
+        tools_enabled = any(item.get("callable_now") for item in tool_catalog)
+        tool_budget = int(prompt_policy["tool_budget"])
         prompt_assembly = self.prompt_assembler.assemble(
             run_context=assembler_context,
             mode=mode,
@@ -909,14 +913,7 @@ class ConversationService:
         system_prompt = str(prompt_assembly.get("system_prompt") or "").strip()
 
         if not system_prompt:
-            system_prompt = await self.build_system_prompt_with_memory(
-                query=user_message,
-                session_id=session_id,
-                user_id=user_id,
-                user_config=user_config,
-                base_system_prompt=base_system_prompt,
-                run_context=assembler_context,
-            )
+            system_prompt = base_system_prompt
 
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -928,6 +925,15 @@ class ConversationService:
             vision_enabled=vision_enabled,
         )
         messages.append({"role": "user", "content": compiled_user_content})
+        preparation_latency_ms["total"] = round(
+            (time.perf_counter() - preparation_started) * 1000,
+            2,
+        )
+        logger.info(
+            "ConversationService: prepared chat turn session={} latency_ms={}",
+            session_id,
+            preparation_latency_ms,
+        )
 
         return {
             "messages": messages,
@@ -954,6 +960,7 @@ class ConversationService:
                 "input_block_count": len(runtime_input_blocks),
                 "compiled_user_content_type": "blocks" if isinstance(compiled_user_content, list) else "text",
             },
+            "preparation_latency_ms": preparation_latency_ms,
         }
 
     def _is_vision_enabled(
@@ -962,14 +969,9 @@ class ConversationService:
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
     ) -> bool:
-        model_name = ""
-        getter = getattr(self.conversation_core, "_get_client_params", None)
-        if callable(getter):
-            try:
-                _, _, model_name, *_ = getter(user_config, user_id=user_id)
-            except Exception:
-                model_name = ""
-        return model_supports_vision(model=model_name, user_config=user_config)
+        main = resolve_llm_runtime_settings(user_id, behavior_config=user_config)
+        dedicated = resolve_multimodal_runtime_settings(user_id, behavior_config=user_config)
+        return bool(main.get("model") or dedicated.get("model"))
 
     async def _process_conversation_once(
         self,
@@ -1030,21 +1032,13 @@ class ConversationService:
             max_recursion = int(max_recursion) if max_recursion is not None else None
         except Exception:
             max_recursion = None
-        try:
-            response_data = await self.run_chat_loop(
-                messages,
-                user_config=user_config,
-                session_id=session_id,
-                user_id=user_id,
-                max_recursion=max_recursion,
-            )
-        except TypeError:
-            # Backward compatibility for conversation_core mocks without user_id arg.
-            response_data = await self.conversation_core.run_chat_loop(
-                messages,
-                user_config=user_config,
-                session_id=session_id,
-            )
+        response_data = await self.run_chat_loop(
+            messages,
+            user_config=user_config,
+            session_id=session_id,
+            user_id=user_id,
+            max_recursion=max_recursion,
+        )
         reply_content = response_data.get("content", "")
 
         if self.message_manager:
@@ -1120,88 +1114,6 @@ class ConversationService:
                 },
             )
 
-    async def _should_recall_memory(
-        self,
-        query: str,
-        user_config: Optional[Dict[str, Any]] = None,
-        user_id: Optional[str] = None,
-    ) -> bool:
-        """
-        Ask the model whether long-term user context is needed for this query.
-        """
-        text = (query or "").strip()
-        if not text:
-            return False
-        if len(text) > 4000:
-            return False
-
-        try:
-            judge_prompt = (
-                "You are a binary classifier. Decide whether answering the user query "
-                "requires long-term user context (profile, preferences, constraints, "
-                "goals, project history). Return strict JSON: {\"recall\": true|false}."
-            )
-            resp = await self.conversation_core.call_llm(
-                [
-                    {"role": "system", "content": judge_prompt},
-                    {"role": "user", "content": query},
-                ],
-                user_config=user_config,
-                user_id=user_id,
-            )
-            text = (resp or {}).get("content", "") or ""
-
-            import json
-            import re
-
-            match = re.search(r"\{[\s\S]*\}", text)
-            if not match:
-                return False
-            data = json.loads(match.group(0))
-            return bool(data.get("recall", False))
-        except Exception:
-            return False
-
-    async def build_system_prompt_with_memory(
-        self,
-        query: str,
-        session_id: str,
-        user_id: Optional[str],
-        user_config: Optional[Dict[str, Any]] = None,
-        base_system_prompt: str = "",
-        run_context: Optional[Any] = None,
-    ) -> str:
-        """
-        Build final system prompt with optional memory recall context.
-        Keeps recall-gating logic shared between stream and non-stream paths.
-        """
-        should_recall = await self._should_recall_memory(
-            query=query,
-            user_config=user_config,
-            user_id=user_id,
-        )
-        memory_context = ""
-        if (
-            should_recall
-            and self.memory_service
-            and self.memory_service.is_enabled()
-            and session_id
-            and user_id
-        ):
-            memory_context = await self.memory_service.get_context(
-                query=query,
-                session_id=session_id,
-                user_id=user_id,
-                run_context=run_context,
-            )
-        if memory_context:
-            return (
-                f"{base_system_prompt}\n\n{memory_context}"
-                if base_system_prompt
-                else memory_context
-            )
-        return base_system_prompt
-
     async def run_conversation(
         self,
         run_input: ConversationRunInput,
@@ -1217,7 +1129,16 @@ class ConversationService:
         run_context: Optional[Any] = None,
         tool_executor=None,
         max_recursion: Optional[int] = None,
+        initial_response: Optional[Dict[str, Any]] = None,
     ) -> Dict:
+        confirmation_resolver = None
+        if callable(getattr(self.capability_service, "requires_confirmation", None)):
+            confirmation_resolver = lambda name, args: self.capability_service.requires_confirmation(
+                name,
+                args,
+                run_context=run_context,
+                user_config=user_config,
+            )
         if self.action_service is not None:
             goal = ""
             try:
@@ -1236,24 +1157,23 @@ class ConversationService:
                 user_id=user_id,
                 run_context=run_context,
                 tool_executor=tool_executor,
+                confirmation_resolver=confirmation_resolver,
                 budget=max_recursion,
                 metadata={"source": "conversation_service.run_chat_loop"},
+                initial_response=initial_response,
             )
-        try:
-            return await self.conversation_core.run_chat_loop(
-                messages,
-                user_config=user_config,
-                session_id=session_id,
-                user_id=user_id,
-                tool_executor=tool_executor,
-                max_recursion=max_recursion,
-            )
-        except TypeError:
-            return await self.conversation_core.run_chat_loop(
-                messages,
-                user_config=user_config,
-                session_id=session_id,
-            )
+        call_kwargs = {
+            "user_config": user_config,
+            "session_id": session_id,
+            "user_id": user_id,
+            "tool_executor": tool_executor,
+            "max_recursion": max_recursion,
+        }
+        if confirmation_resolver is not None:
+            call_kwargs["confirmation_resolver"] = confirmation_resolver
+        if initial_response is not None:
+            call_kwargs["initial_response"] = initial_response
+        return await self.conversation_core.run_chat_loop(messages, **call_kwargs)
 
     async def call_llm(
         self,

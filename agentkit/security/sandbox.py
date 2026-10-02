@@ -33,6 +33,19 @@ DEFAULT_ALLOW_COMMANDS = [
 
 WRITE_INTENTS = {"write", "edit", "patch", "delete", "move", "copy", "mkdir"}
 
+DESKTOP_OBSERVE_ACTIONS = {
+    "get_mouse_position",
+    "get_screen_size",
+    "locate",
+    "position",
+    "screenshot",
+    "size",
+}
+
+PROCESS_OBSERVE_ACTIONS = {"get", "get_output", "list", "system_info", "wait"}
+PROCESS_EXECUTE_ACTIONS = {"run", "run_async"}
+PROCESS_CONTROL_ACTIONS = {"kill", "terminate"}
+
 
 @dataclass
 class SandboxDecision:
@@ -41,20 +54,27 @@ class SandboxDecision:
 
 
 class SandboxPolicy:
-    """Non-Docker sandbox policy: workspace + command + network guardrails."""
+    """Fail-closed capability policy for host-backed tools.
+
+    This policy is not an OS isolation boundary. It constrains direct Python
+    capabilities and denies process/desktop access that cannot honestly be
+    confined by the current runtime.
+    """
 
     def __init__(
         self,
         *,
-        enabled: bool,
-        profile: str,
-        workspace_access: str,
-        command_mode: str,
+        enabled: bool = True,
+        profile: str = "strict",
+        workspace_access: str = "rw",
+        command_mode: str = "approval",
         allowed_commands: Optional[Iterable[str]] = None,
         deny_fragments: Optional[Iterable[str]] = None,
         network_mode: str = "restricted",
         allowed_domains: Optional[Iterable[str]] = None,
         block_private_network: bool = True,
+        desktop_mode: str = "approval",
+        process_mode: str = "managed_only",
     ) -> None:
         self.enabled = bool(enabled)
         self.profile = str(profile or "off").strip().lower()
@@ -65,6 +85,8 @@ class SandboxPolicy:
         self.network_mode = str(network_mode or "restricted").strip().lower()
         self.allowed_domains = [str(x).strip().lower() for x in (allowed_domains or []) if str(x).strip()]
         self.block_private_network = bool(block_private_network)
+        self.desktop_mode = str(desktop_mode or "observe_only").strip().lower()
+        self.process_mode = str(process_mode or "managed_only").strip().lower()
 
     @classmethod
     def from_global_config(cls) -> "SandboxPolicy":
@@ -77,21 +99,26 @@ class SandboxPolicy:
             sb = {}
 
         return cls(
-            enabled=bool(sb.get("enabled", False)),
-            profile=str(sb.get("profile", "off")),
+            enabled=bool(sb.get("enabled", True)),
+            profile=str(sb.get("profile", "strict")),
             workspace_access=str(sb.get("workspace_access", "rw")),
-            command_mode=str(sb.get("command_mode", "allowlist")),
+            command_mode=str(sb.get("command_mode", "approval")),
             allowed_commands=sb.get("allowed_commands") or DEFAULT_ALLOW_COMMANDS,
             deny_fragments=sb.get("deny_fragments") or DEFAULT_DENY_FRAGMENTS,
             network_mode=str(sb.get("network_mode", "restricted")),
             allowed_domains=sb.get("allowed_domains") or [],
             block_private_network=bool(sb.get("block_private_network", True)),
+            desktop_mode=str(sb.get("desktop_mode", "approval")),
+            process_mode=str(sb.get("process_mode", "managed_only")),
         )
 
     def is_enforced(self) -> bool:
         return self.enabled and self.profile != "off"
 
-    def check_path(self, path: str, *, intent: str = "read", workspace_root: Optional[Path] = None) -> SandboxDecision:
+    def check_path(
+        self, path: str, *, intent: str = "read", workspace_root: Optional[Path] = None,
+        read_roots: Optional[Iterable[Path]] = None,
+    ) -> SandboxDecision:
         if not self.is_enforced():
             return SandboxDecision(True, "sandbox disabled")
 
@@ -101,15 +128,22 @@ class SandboxPolicy:
             p = root / p
         p = p.resolve()
 
-        try:
-            p.relative_to(root)
-        except ValueError:
-            return SandboxDecision(False, f"path outside workspace: {p}")
-
         if self.workspace_access == "none":
             return SandboxDecision(False, "workspace access is none")
 
         normalized_intent = str(intent or "read").strip().lower()
+        try:
+            p.relative_to(root)
+        except ValueError:
+            if normalized_intent not in WRITE_INTENTS:
+                for read_root in read_roots or ():
+                    try:
+                        p.relative_to(Path(read_root).resolve())
+                        return SandboxDecision(True, "host read-only location allowed")
+                    except ValueError:
+                        continue
+            return SandboxDecision(False, f"path outside workspace: {p}")
+
         if self.workspace_access == "ro" and normalized_intent in WRITE_INTENTS:
             return SandboxDecision(False, f"workspace is read-only for intent: {normalized_intent}")
 
@@ -136,7 +170,16 @@ class SandboxPolicy:
         if not first:
             return SandboxDecision(False, "cannot parse command token")
 
-        if self.command_mode == "allowlist" and first not in self.allowed_commands:
+        if self.command_mode == "deny":
+            return SandboxDecision(False, "host process execution disabled by sandbox")
+        if self.command_mode == "approval":
+            from .approval import call_is_approved
+
+            if not call_is_approved():
+                return SandboxDecision(False, "process execution requires confirmation for this tool call")
+
+        command_name = first.removesuffix(".exe")
+        if self.command_mode == "allowlist" and command_name not in self.allowed_commands:
             return SandboxDecision(False, f"command not in allowlist: {first}")
 
         return SandboxDecision(True, "command allowed")
@@ -163,6 +206,46 @@ class SandboxPolicy:
             return SandboxDecision(False, f"host not in allowed_domains: {host}")
 
         return SandboxDecision(True, "url allowed")
+
+    def check_desktop_action(self, action: str) -> SandboxDecision:
+        """Authorize direct host-screen input without pretending it is isolated."""
+        if not self.is_enforced():
+            return SandboxDecision(True, "sandbox disabled")
+
+        normalized = str(action or "").strip().lower()
+        if normalized in DESKTOP_OBSERVE_ACTIONS:
+            return SandboxDecision(True, "desktop observation allowed")
+        if self.desktop_mode == "host_control":
+            return SandboxDecision(True, "explicit host desktop control enabled")
+        if self.desktop_mode == "approval":
+            from .approval import call_is_approved
+
+            if call_is_approved():
+                return SandboxDecision(True, "host desktop action approved for this tool call")
+            return SandboxDecision(False, "host desktop input requires confirmation for this tool call")
+        return SandboxDecision(
+            False,
+            "host desktop input is disabled; set sandbox.desktop_mode=host_control only in an isolated desktop",
+        )
+
+    def check_process_action(self, action: str, *, managed: bool = False) -> SandboxDecision:
+        """Restrict process control to children launched by this runtime."""
+        if not self.is_enforced():
+            return SandboxDecision(True, "sandbox disabled")
+
+        normalized = str(action or "").strip().lower()
+        if normalized in PROCESS_EXECUTE_ACTIONS:
+            return SandboxDecision(True, "command policy decides process execution")
+        if normalized in PROCESS_OBSERVE_ACTIONS:
+            return SandboxDecision(True, "process observation allowed")
+        if normalized in PROCESS_CONTROL_ACTIONS:
+            if self.process_mode == "host_control" or managed:
+                return SandboxDecision(True, "managed process control allowed")
+            return SandboxDecision(
+                False,
+                "control of untracked host processes is disabled by sandbox",
+            )
+        return SandboxDecision(False, f"unknown process action blocked: {normalized or 'empty'}")
 
     def _domain_allowed(self, host: str) -> bool:
         for domain in self.allowed_domains:

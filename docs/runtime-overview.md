@@ -1,5 +1,11 @@
 # Promethea Runtime Overview
 
+## Work Domains
+
+Conversation and Task are separate first-class domains. Conversations own user
+interaction; tasks own durable goals and execution runs. See
+`docs/architecture/task-runtime.md`.
+
 This document explains how Promethea executes one request end to end.
 
 ## Why This Exists
@@ -16,6 +22,11 @@ Promethea runtime has one core contract:
 - transport changes, runtime semantics do not
 
 UI is a shell, not the engine.
+
+The supported language and transport boundaries are documented in
+`docs/architecture/protocol-boundaries.md`. Python Core services remain
+in-process; `/openapi.json`, the Gateway WebSocket protocol, and MCP are the
+external integration surfaces.
 
 ## Core Objects
 
@@ -34,6 +45,7 @@ Single-run execution context:
 - identity and trace metadata
 - effective policy and config
 - available tools and memory scope
+- a bounded, user-scoped Self Model projection for the current run
 
 ### Gateway Request/Response
 
@@ -50,40 +62,24 @@ Outputs:
 - user/session identity
 - initial `RunContext`
 
-### Stage 2: Cognitive Budget Gate
+### Stage 2: Capability Discovery and Cognitive Budget
 
-Runtime evaluates how much cognition the request deserves before it assembles the full prompt.
+The runtime reads the current CapabilityService catalog and assembles required identity,
+context, and policy blocks. It does not call a separate router model. The first
+main-model turn decides whether to answer directly or select a registered
+capability such as memory recall, a normal tool, deeper reasoning, or workflow.
 
-Decision objective:
-- `direct`: answer from the core prompt and normal context; no tool loop and no reasoning tree.
-- `light_action`: allow a small number of tool calls for simple current-data lookup, calculation, search, or one-shot file/workspace action; no full reasoning tree.
-- `deep_reasoning`: use the full reasoning tree for multi-step investigation, planning, debugging, comparison, design, or research synthesis.
-- `workflow`: use explicit long-running workflow orchestration.
+The choice is semantic, but execution is constrained by code:
 
-Before prompt assembly, Promethea also runs a lightweight prompt policy routing
-pass. This first pass exposes only a minimal router system block and asks for
-structured JSON, not a user-facing answer. The router returns an execution budget:
+- identity and safety blocks cannot be disabled by the model;
+- only catalog entries marked callable can execute;
+- ToolPolicy and permissions are checked again at invocation;
+- the control-loop step budget is fixed by the runtime;
+- MemoryService, ReasoningService, and Workflow services retain their own policies and persistence.
 
-- `cognitive_mode`: `direct | light_action | deep_reasoning | workflow`
-- `reasoning_budget`: `none | small | large`
-- `tool_budget`: bounded number of tool-loop turns
-- `memory_budget`: `none | brief | full`
-- `need_user_visible_reasoning`: whether the UI should expect a visible reasoning tree
-
-The router may also suggest dynamic blocks:
-- memory recall
-- reasoning/deep mode when `reasoning_budget=large`
-- tools/workspace context
-- organization context
-
-The router cannot disable identity, soul core, or safety/policy blocks.
-Those remain code-enforced runtime contracts.
-
-Only `reasoning_budget=large` starts the full reasoning tree. Simple tool tasks
-should stay in `light_action`, so a request such as checking a current stock
-price can call a tool briefly without paying the latency of full ReAct/ToT
-planning. If the light action fails, the runtime reports the failure or asks
-whether to continue with a deeper attempt instead of silently escalating forever.
+A direct answer therefore takes one model request. A capability call adds model
+turns only after a real runtime observation. Simple tool work stays in the
+lightweight loop; only `reasoning.run` starts the full reasoning tree.
 
 ### Stage 3: ReAct + ToT Planning/Reasoning
 
@@ -131,21 +127,21 @@ Prompt assembly model:
 - optional budget compaction with block-level debug output
 
 `PromptAssembler` runs in two places:
-- Canonical staged pipeline: `stage_response_synthesis` calls it when the run does not already provide prebuilt messages.
+- Canonical staged pipeline: the model-control-loop assembly calls it when the run does not already provide prebuilt messages.
 - Streaming/legacy chat path: `ConversationService.prepare_chat_turn` calls it before handing messages to the LLM.
 
 The assembler receives structured runtime inputs instead of ad-hoc string patches:
-- `prompt_policy`: LLM/heuristic routing result for dynamic block suggestions.
-- `PlanResult`: base identity prompt, or the reasoning service's rewritten system prompt.
-- `MemoryRecallBundle`: recalled personal memory context, when recall is allowed and available.
-- `ToolExecutionBundle`: whether tool capability is active for this run.
-- `RunContext`: skill listing, tool policy, workspace handle, org context, input payload, token budget, and prompt block policy.
+- `PlanResult`: the stable base identity for the initial model turn.
+- `MemoryRecallBundle`: empty on the initial turn; recalled context arrives as a runtime observation.
+- `ToolExecutionBundle`: the live structured capability catalog and code-enforced step budget.
+- `RunContext`: skill listing, tool policy, workspace handle, org context, Self Model context, input payload, token budget, and prompt block policy.
 - `user_config`: merged non-secret behavior defaults plus user overrides.
 
 Current prompt blocks:
 - `identity`: Promethea's base runtime identity and language policy.
 - `soul_core`: the read-mostly soul prompt, style/personality only.
 - `memory`: recalled personal memory context.
+- `self_model`: bounded current/evolving/uncertain cognition projected by `SelfModelService`; it is not a second memory store.
 - `org_context`: enterprise/org brain context when `org_brain.enabled=true`.
 - `reasoning`: final reasoning decision summary when explicit reasoning is used.
 - `skill`: active skill/tool registration guidance.
@@ -201,6 +197,18 @@ This side loop does not block current turn latency.
 - resumable execution
 - checkpoint-aware progression
 - approval/pause/resume support
+- explicit runs are hosted by TaskRuntime independently of client connections
+
+### Task and Workbench
+
+- TaskService owns the durable goal state machine and user control commands
+- TaskRuntime continues explicit workflow runs after the initiating request returns
+- Task revision and execution-epoch fences reject stale commands and stale workers
+- Task Runs retain process Attempts; open attempts become explicit `interrupted` history after restart
+- Workflow Step Attempts persist before execution and carry stable tool idempotency keys
+- durable retry/backoff plus a recovery supervisor resumes due provider/tool work without a client connection
+- running TaskRuntime runs are recovered from persisted Workflow checkpoints after restart
+- WorkbenchProjection materializes Task, Run, Tool, Memory, Workflow, and Artifact activity into one read model
 
 ### Workspace
 

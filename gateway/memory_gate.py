@@ -1,6 +1,5 @@
 ﻿from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -14,6 +13,8 @@ MemoryLayer = Literal[
     "reasoning_template_memory",
 ]
 MemoryDecisionStatus = Literal["allow", "deny", "defer"]
+MemoryModality = Literal["actual", "plan", "hypothetical", "unknown"]
+MemoryPersistence = Literal["ephemeral", "bounded", "durable", "unknown"]
 
 
 class MemoryWriteRequest(BaseModel):
@@ -22,6 +23,8 @@ class MemoryWriteRequest(BaseModel):
     proposed_memory_type: str = ""
     extracted_content: str = ""
     confidence: float = 0.0
+    modality: MemoryModality = "unknown"
+    persistence: MemoryPersistence = "unknown"
     related_entities: List[str] = Field(default_factory=list)
     trace_id: Optional[str] = None
     request_id: Optional[str] = None
@@ -42,27 +45,28 @@ class MemoryWriteDecision(BaseModel):
 
 
 class MemoryWriteGate:
-    _SPECULATIVE_RE = re.compile(
-        r"\b(maybe|might|perhaps|guess|probably|assume|uncertain|rumor)\b",
-        re.IGNORECASE,
-    )
-    _SHORT_LIVED_RE = re.compile(
-        r"\b(today|tonight|tomorrow|this week|for now|temporary|temp)\b",
-        re.IGNORECASE,
-    )
-
     _PROFILE_TYPES = {"preference", "constraint", "identity"}
     _EPISODIC_TYPES = {"goal", "project_state"}
+
+    def relationship_requires_confirmation(self, proposed_type: str, relationship: str) -> bool:
+        relation = str(relationship or "unclear").strip().lower()
+        if relation == "contradicts":
+            return True
+        return self._resolve_layer(str(proposed_type or "").strip().lower()) == "profile_memory" and relation in {
+            "updates",
+            "unclear",
+        }
 
     def evaluate(self, request: MemoryWriteRequest) -> MemoryWriteDecision:
         reasons: List[str] = []
         content = (request.extracted_content or "").strip()
-        source_text = (request.source_text or "").strip()
         proposed_type = (request.proposed_memory_type or "").strip().lower()
         confidence = float(request.confidence or 0.0)
+        modality = str(request.modality or "unknown").strip().lower()
+        persistence = str(request.persistence or "unknown").strip().lower()
         conflicts = [str(item).strip() for item in request.conflict_candidates if str(item).strip()]
 
-        layer = self._resolve_layer(proposed_type)
+        layer = self._resolve_layer(proposed_type, persistence=persistence)
 
         if confidence < 0.45:
             reasons.append("low_confidence")
@@ -72,29 +76,40 @@ class MemoryWriteGate:
                 reason="low_confidence",
                 reasons=reasons,
                 conflict_candidates=conflicts,
-                metadata={"confidence": confidence},
+                metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
             )
 
-        if self._looks_speculative(content) or self._looks_speculative(source_text):
-            reasons.append("speculative_content")
+        if modality == "hypothetical":
+            reasons.append("hypothetical_state")
             return MemoryWriteDecision(
                 decision="deny",
                 target_memory_layer=layer,
-                reason="speculative_content",
+                reason="hypothetical_state",
                 reasons=reasons,
                 conflict_candidates=conflicts,
-                metadata={"confidence": confidence},
+                metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
             )
 
-        if self._looks_short_lived(content) or self._looks_short_lived(source_text):
-            reasons.append("short_lived_context")
+        if persistence == "ephemeral":
+            reasons.append("ephemeral_state")
             return MemoryWriteDecision(
                 decision="defer",
                 target_memory_layer="working_memory",
-                reason="short_lived_context",
+                reason="ephemeral_state",
                 reasons=reasons,
                 conflict_candidates=conflicts,
-                metadata={"confidence": confidence},
+                metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
+            )
+
+        if modality == "unknown" or persistence == "unknown":
+            reasons.append("semantic_scope_unclear")
+            return MemoryWriteDecision(
+                decision="defer",
+                target_memory_layer="working_memory",
+                reason="semantic_scope_unclear",
+                reasons=reasons,
+                conflict_candidates=conflicts,
+                metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
             )
 
         if conflicts:
@@ -106,7 +121,7 @@ class MemoryWriteGate:
                 reasons=reasons,
                 conflict_candidates=conflicts,
                 requires_user_confirmation=True,
-                metadata={"confidence": confidence},
+                metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
             )
 
         reasons.append("durable_factual_state")
@@ -116,18 +131,16 @@ class MemoryWriteGate:
             reason="durable_factual_state",
             reasons=reasons,
             conflict_candidates=conflicts,
-            metadata={"confidence": confidence},
+            metadata={"confidence": confidence, "modality": modality, "persistence": persistence},
         )
 
-    def _resolve_layer(self, proposed_type: str) -> MemoryLayer:
+    def _resolve_layer(self, proposed_type: str, *, persistence: str = "durable") -> MemoryLayer:
+        if persistence == "ephemeral":
+            return "working_memory"
+        if persistence == "bounded":
+            return "episodic_memory"
         if proposed_type in self._PROFILE_TYPES:
             return "profile_memory"
         if proposed_type in self._EPISODIC_TYPES:
             return "episodic_memory"
         return "semantic_memory"
-
-    def _looks_speculative(self, text: str) -> bool:
-        return bool(text and self._SPECULATIVE_RE.search(text))
-
-    def _looks_short_lived(self, text: str) -> bool:
-        return bool(text and self._SHORT_LIVED_RE.search(text))

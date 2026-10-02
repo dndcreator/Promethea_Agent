@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 def _resolve_user_session(
@@ -16,6 +16,7 @@ def _resolve_user_session(
 
 class MemoryGetContextTool:
     tool_id = "memory.get_context"
+    side_effect_level = "read_only"
     name = "memory.get_context"
     description = "Recall memory context for a query."
     official = True
@@ -46,6 +47,7 @@ class MemoryGetContextTool:
 
 class MemoryListEntriesTool:
     tool_id = "memory.list_entries"
+    side_effect_level = "read_only"
     name = "memory.list_entries"
     description = "List memory entries for current user."
     official = True
@@ -74,6 +76,7 @@ class MemoryListEntriesTool:
 
 class MemoryCreateEntryTool:
     tool_id = "memory.create_entry"
+    side_effect_level = "workspace_write"
     name = "memory.create_entry"
     description = "Create a memory entry manually."
     official = True
@@ -100,6 +103,7 @@ class MemoryCreateEntryTool:
 
 class MemorySummarizeSessionTool:
     tool_id = "memory.summarize_session"
+    side_effect_level = "workspace_write"
     name = "memory.summarize_session"
     description = "Trigger session memory summarization."
     official = True
@@ -120,6 +124,7 @@ class MemorySummarizeSessionTool:
 
 class MemoryRecallRunsTool:
     tool_id = "memory.recall_runs"
+    side_effect_level = "read_only"
     name = "memory.recall_runs"
     description = "Inspect recent memory recall runs."
     official = True
@@ -138,4 +143,3 @@ class MemoryRecallRunsTool:
             limit=limit,
         )
         return {"count": len(rows), "runs": rows}
-

@@ -63,7 +63,7 @@ def test_policy_by_provider_override():
     assert blocked.allowed is False
 
     allowed = engine.check(
-        service_name="websearch",
+        service_name="web",
         tool_name="search",
         user_config=cfg,
         provider_id="openrouter",

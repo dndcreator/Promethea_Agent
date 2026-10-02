@@ -65,6 +65,9 @@ class AgentIntegrationTests:
                 "selected_text": "Python async programming",
                 "query_type": "why",
                 "session_id": "default",
+                "message_id": "message-1",
+                "start_offset": 0,
+                "end_offset": 24,
             },
         }
         await self.websocket.send(json.dumps(request))

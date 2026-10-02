@@ -4,13 +4,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 from .workspace_tools import _resolve_identity, _safe_path_under_root
 
 
 class ArchiveZipCreateTool:
     tool_id = "archive.zip_create"
+    side_effect_level = "workspace_write"
     name = "archive.zip_create"
     description = "Create a zip archive from files inside the current workspace."
     official = True
@@ -55,6 +56,7 @@ class ArchiveZipCreateTool:
 
 class ArchiveZipListTool:
     tool_id = "archive.zip_list"
+    side_effect_level = "read_only"
     name = "archive.zip_list"
     description = "List entries in a zip archive inside the current workspace."
     official = True
@@ -80,6 +82,7 @@ class ArchiveZipListTool:
 
 class ArchiveZipExtractTool:
     tool_id = "archive.zip_extract"
+    side_effect_level = "workspace_write"
     name = "archive.zip_extract"
     description = "Extract a zip archive into a workspace subdirectory."
     official = True

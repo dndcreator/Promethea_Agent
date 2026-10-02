@@ -77,3 +77,27 @@ def test_update_user_secrets_does_not_clear_on_empty_input(tmp_path, monkeypatch
     text = path.read_text(encoding="utf-8")
     assert "API__API_KEY=existing" in text
     assert "API__MODEL=new-model" in text
+
+
+def test_multimodal_runtime_inherits_main_endpoint_when_only_model_is_configured(tmp_path, monkeypatch):
+    root_env = tmp_path / ".env"
+    root_env.write_text("", encoding="utf-8")
+    users_dir = tmp_path / "config" / "users"
+    user_dir = users_dir / "u4"
+    user_dir.mkdir(parents=True)
+    (user_dir / "secrets.env").write_text(
+        "API__API_KEY=main-key\n"
+        "API__BASE_URL=https://main.test/v1\n"
+        "API__MODEL=text-model\n"
+        "MULTIMODAL__MODEL=vision-model\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(user_secrets, "ENV_FILE", root_env)
+    monkeypatch.setattr(user_secrets, "USER_SECRETS_DIR", users_dir)
+
+    resolved = user_secrets.resolve_multimodal_runtime_settings("u4")
+
+    assert resolved["configured"] is True
+    assert resolved["model"] == "vision-model"
+    assert resolved["api_key"] == "main-key"
+    assert resolved["base_url"] == "https://main.test/v1"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 import uuid
 
 
@@ -46,38 +46,6 @@ def normalize_runtime_blocks(values: Iterable[Any]) -> List[RuntimeBlock]:
         elif isinstance(value, dict):
             blocks.append(runtime_block_from_dict(value))
     return blocks
-
-
-def model_supports_vision(*, model: str = "", user_config: Optional[Dict[str, Any]] = None) -> bool:
-    cfg = user_config if isinstance(user_config, dict) else {}
-    explicit = cfg.get("vision_enabled")
-    if explicit is None and isinstance(cfg.get("api"), dict):
-        explicit = cfg["api"].get("vision_enabled")
-    if explicit is not None:
-        return bool(explicit)
-
-    model_name = str(model or cfg.get("model") or "").strip().lower()
-    if not model_name and isinstance(cfg.get("api"), dict):
-        model_name = str(cfg["api"].get("model") or "").strip().lower()
-    if not model_name:
-        return False
-
-    vision_markers = (
-        "gpt-4o",
-        "gpt-4.1",
-        "gpt-5",
-        "vision",
-        "vl",
-        "qwen-vl",
-        "gemini",
-        "claude-3",
-        "claude-sonnet",
-        "claude-opus",
-    )
-    text_only_markers = ("deepseek-chat", "deepseek-reasoner", "text-embedding")
-    if any(marker in model_name for marker in text_only_markers):
-        return False
-    return any(marker in model_name for marker in vision_markers)
 
 
 class ContextCompiler:

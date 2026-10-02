@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 from unittest.mock import AsyncMock
 from gateway.reasoning_budget import ReasoningBudgetLedger
 from gateway.reasoning_service import ReasoningService
@@ -60,8 +60,10 @@ async def test_run_skips_reasoning_for_simple_non_action_task(monkeypatch):
 async def test_plan_steps_normalizes_string_booleans(monkeypatch):
     svc = ReasoningService(conversation_core=DummyConversationCore())
     tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="task")
+    captured = {}
 
     async def fake_call_json(messages, user_config=None, user_id=None):
+        captured["messages"] = messages
         return {
             "steps": [
                 {
@@ -97,28 +99,34 @@ async def test_plan_steps_normalizes_string_booleans(monkeypatch):
             "candidate_votes": 2,
             "min_branch_score": 0.0,
         },
+        self_model_context="Current cognition: prefers concise answers.",
     )
 
     assert len(steps) == 1
     assert steps[0]["requires_memory"] is False
     assert steps[0]["requires_tools"] is True
+    assert "Current cognition: prefers concise answers." in captured["messages"][1]["content"]
+
+
+def test_reasoning_context_includes_active_cognition_snapshot():
+    context = {
+        "self_model_context": {"prompt_text": "Stable cognition"},
+        "cognition_snapshot": {
+            "synthesis": "The project now uses Neo4j.",
+            "critical_items": [{"content": "Migration completed on 2026-09-30."}],
+        },
+    }
+
+    prompt = ReasoningService._self_model_prompt(context)
+
+    assert "Stable cognition" in prompt
+    assert "The project now uses Neo4j." in prompt
+    assert "Migration completed on 2026-09-30." in prompt
 
 
 @pytest.mark.asyncio
 async def test_gate_reasoning_normalizes_string_booleans(monkeypatch):
     svc = ReasoningService(conversation_core=DummyConversationCore())
-
-    monkeypatch.setattr(
-        svc,
-        "_heuristic_gate",
-        lambda user_message: {
-            "needs_reasoning": True,
-            "complexity": "high",
-            "needs_memory": True,
-            "needs_tools": True,
-            "reason": "heuristic",
-        },
-    )
 
     async def fake_call_json(messages, user_config=None, user_id=None):
         return {
@@ -140,6 +148,7 @@ async def test_gate_reasoning_normalizes_string_booleans(monkeypatch):
     assert gate["needs_reasoning"] is False
     assert gate["needs_memory"] is False
     assert gate["needs_tools"] is False
+    assert gate["source"] == "model"
 
 
 @pytest.mark.asyncio
@@ -237,7 +246,7 @@ async def test_assess_outcome_requires_confirmation_on_unsure(monkeypatch):
     assert result["review_id"]
 
 
-class DummyToolService:
+class DummyCapabilityService:
     def __init__(self):
         self.calls = []
 
@@ -253,8 +262,9 @@ class DummyToolService:
         return {"run_id": "wf_test"}
 
 
-class DummyToolCatalogService(DummyToolService):
-    async def get_tool_catalog(self):
+class DummyToolCatalogService(DummyCapabilityService):
+    async def get_tool_catalog(self, *, run_context=None, user_config=None):
+        _ = (run_context, user_config)
         return [
             {
                 "tool_type": "mcp",
@@ -456,8 +466,8 @@ def test_tool_catalog_resolver_normalizes_llm_selected_tool():
 
 @pytest.mark.asyncio
 async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
-    tool_service = DummyToolService()
-    svc = ReasoningService(conversation_core=DummyConversationCore(), tool_service=tool_service)
+    capability_service = DummyCapabilityService()
+    svc = ReasoningService(conversation_core=DummyConversationCore(), capability_service=capability_service)
 
     async def fake_gate(**kwargs):
         return {
@@ -509,8 +519,8 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
 
     assert result["used_reasoning"] is True
     assert result["moirai_run_id"] == "wf_test"
-    assert len(tool_service.calls) == 1
-    call = tool_service.calls[0]
+    assert len(capability_service.calls) == 1
+    call = capability_service.calls[0]
     assert call["tool_name"] == "create_flow"
     assert call["params"]["service_name"] == "moirai"
     assert call["params"]["tool_name"] == "create_flow"
@@ -649,7 +659,7 @@ async def test_decide_runtime_outcome_hard_block_fails_without_progress(monkeypa
 async def test_run_tool_step_replays_template_action_then_falls_back(monkeypatch):
     svc = ReasoningService(
         conversation_core=DummyConversationCore(),
-        tool_service=DummyToolCatalogService(),
+        capability_service=DummyToolCatalogService(),
         template_memory=DummyTemplateMemory(),
     )
     tree = svc._create_tree(session_id="s1", user_id="u1", root_goal="task")

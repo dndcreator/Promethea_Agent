@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
-import { Clock3, Link2, Mic, Paperclip, Plus, Search, Send, Smile, Square } from 'lucide-react'
+import { Clock3, Link2, MessageCircleQuestion, Mic, PanelRightOpen, Paperclip, Plus, Search, Send, Smile, Square, X } from 'lucide-react'
 import ConfirmModal from './modals/ConfirmModal'
-import { getActiveReasoning, getMetrics, getSession, getWelcome, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
+import { getActiveReasoning, getMetrics, getSession, getWelcome, sendFollowup, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
 import type { ChatAttachment } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
@@ -24,6 +24,8 @@ interface MainContentProps {
   onOpenFiles: () => void
   onOpenSearch: () => void
   onOpenMemory: () => void
+  onOpenWorkbench: () => void
+  memoryReviewId: string | null
   attachments: ChatAttachment[]
   onRemoveAttachment: (fileId: string) => void
   onClearAttachments: () => void
@@ -33,6 +35,28 @@ type StreamPayload = Record<string, any>
 type MemoryNotice = {
   text: string
   requiresReview: boolean
+}
+
+type FollowupData = {
+  id: string
+  message_id: string
+  selected_text: string
+  start_offset: number
+  end_offset: number
+  query_type: string
+  custom_query?: string | null
+  query: string
+  response: string
+  created_at: number
+}
+
+type TextSelection = {
+  messageId: string
+  selectedText: string
+  startOffset: number
+  endOffset: number
+  left: number
+  top: number
 }
 
 type WelcomeState = {
@@ -104,6 +128,8 @@ export default function MainContent({
   onOpenFiles,
   onOpenSearch,
   onOpenMemory,
+  onOpenWorkbench,
+  memoryReviewId,
   attachments,
   onRemoveAttachment,
   onClearAttachments,
@@ -122,6 +148,9 @@ export default function MainContent({
   const [welcomeClock, setWelcomeClock] = useState(() => new Date())
   const [showEmojiPicker, setShowEmojiPicker] = useState(false)
   const [isNearBottom, setIsNearBottom] = useState(true)
+  const [followups, setFollowups] = useState<FollowupData[]>([])
+  const [textSelection, setTextSelection] = useState<TextSelection | null>(null)
+  const [followupDraft, setFollowupDraft] = useState<TextSelection | null>(null)
   const [meta, setMeta] = useState({ tokens: 0, latency: 0, intensity: 'idle' })
   const messagesScrollRef = useRef<HTMLDivElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -133,6 +162,8 @@ export default function MainContent({
   const activeTreeIdRef = useRef<string | null>(null)
   const welcomeLoadedAtRef = useRef(0)
   const welcomeRequestRef = useRef(0)
+  const selectionActionRef = useRef<HTMLButtonElement>(null)
+  const observedMemoryReviewRef = useRef<string | null>(null)
   const localWelcomeFallback = useMemo<WelcomeState>(() => ({
     greeting: t(
       `你好，我是 ${user?.agent_name || 'Promethea'}。`,
@@ -146,6 +177,41 @@ export default function MainContent({
     ],
   }), [t, user?.agent_name])
   const quickEmojis = ['\u{1F642}', '\u{1F44D}', '\u{1F64F}', '\u{1F4A1}', '\u{2705}', '\u{1F525}']
+
+  useEffect(() => {
+    const previousReviewId = observedMemoryReviewRef.current
+    observedMemoryReviewRef.current = memoryReviewId
+    if (memoryReviewId) {
+      setMemoryNotice({
+        text: t('检测到记忆冲突，等待确认。', 'Memory conflict detected; review is needed.'),
+        requiresReview: true,
+      })
+    } else if (previousReviewId) {
+      setMemoryNotice((current) => current?.requiresReview ? null : current)
+    }
+  }, [memoryReviewId, t])
+
+  useEffect(() => {
+    if (!textSelection) return
+
+    const dismiss = (event: PointerEvent) => {
+      if (selectionActionRef.current?.contains(event.target as Node)) return
+      setTextSelection(null)
+    }
+    const dismissOnKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTextSelection(null)
+    }
+    const dismissOnScroll = () => setTextSelection(null)
+
+    document.addEventListener('pointerdown', dismiss)
+    document.addEventListener('keydown', dismissOnKey)
+    window.addEventListener('scroll', dismissOnScroll, true)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss)
+      document.removeEventListener('keydown', dismissOnKey)
+      window.removeEventListener('scroll', dismissOnScroll, true)
+    }
+  }, [textSelection])
 
   useEffect(() => {
     if (followOutputRef.current) {
@@ -235,7 +301,9 @@ export default function MainContent({
         if (!res.ok) return
         const data = await res.json()
         if (data.tree_id) setTreeId(data.tree_id)
-        setSessionTitle(String(data.title || '').trim())
+        const sessionInfo = data.session_info || data
+        setSessionTitle(String(sessionInfo.title || '').trim())
+        setFollowups(Array.isArray(sessionInfo.followups) ? sessionInfo.followups : [])
         const loadedMessages: MessageData[] = (data.messages || []).map((message: any, index: number) => {
           const role = message.role === 'assistant' ? 'agent' : message.role
           return {
@@ -279,6 +347,9 @@ export default function MainContent({
     setMessages([])
     setSessionTitle('')
     setMemoryNotice(null)
+    setFollowups([])
+    setTextSelection(null)
+    setFollowupDraft(null)
     followOutputRef.current = true
     setIsNearBottom(true)
     setWelcomeRefreshToken((current) => current + 1)
@@ -447,7 +518,20 @@ export default function MainContent({
               .then(async (res) => {
                 if (!res.ok) return
                 const data = await res.json()
-                if (data.title) setSessionTitle(String(data.title))
+                const sessionInfo = data.session_info || data
+                if (sessionInfo.title) setSessionTitle(String(sessionInfo.title))
+                if (Array.isArray(sessionInfo.followups)) setFollowups(sessionInfo.followups)
+                if (Array.isArray(data.messages)) {
+                  setMessages(data.messages.map((message: any, index: number) => {
+                    const role = message.role === 'assistant' ? 'agent' : message.role
+                    return {
+                      id: message.id || `${payload.session_id}-${index}`,
+                      role,
+                      content: message.content || '',
+                      name: role === 'agent' ? user?.agent_name || 'Promethea' : user?.username || 'You',
+                    }
+                  }))
+                }
               })
               .catch(() => {})
           }
@@ -538,19 +622,15 @@ export default function MainContent({
   }
 
   return (
-    <main className="relative flex h-full flex-1 flex-col overflow-hidden rounded-[1.35rem] border border-white/70 bg-bg-card/46 backdrop-blur-md fine-border">
-      <header className="flex items-center justify-between border-b border-white/55 bg-bg-card/48 px-6 py-4">
+    <main className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden rounded-[1.35rem] border border-white/70 bg-bg-card/46 backdrop-blur-md fine-border">
+      <header className="flex items-center justify-between border-b border-white/55 bg-bg-card/48 py-3 pl-14 pr-3 sm:px-6 sm:py-4">
         <div className="min-w-0">
-          <h1 className="flex items-center gap-2 font-display text-[21px] font-semibold tracking-[-0.035em] text-text-strong">
+          <h1 className="flex items-center gap-2 truncate font-display text-[18px] font-semibold tracking-[-0.035em] text-text-strong sm:text-[21px]">
             {sessionId ? (sessionTitle || `${t('会话', 'Session')}: ${sessionId.slice(0, 8)}...`) : t('新的对话', 'New conversation')}
             <Link2 size={15} className="text-text-muted" />
           </h1>
-          <p className="mt-1 flex items-center gap-1 text-[11px] text-text-muted">
-            <Clock3 size={12} />
-            {sessionId ? t('当前会话已接入历史上下文。', 'Current session is connected to conversation history.') : t('新消息会自动创建会话。', 'Sending a message will create a session automatically.')}
-          </p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="ml-2 flex shrink-0 items-center gap-1.5 sm:gap-4">
           <div className="hidden items-center gap-2 text-[11px] lg:flex">
             <span className="text-text-muted">{t('思考强度', 'Thinking')}</span>
             <div className="flex h-3 items-end gap-0.5">
@@ -560,14 +640,21 @@ export default function MainContent({
             </div>
             <span className="ml-1 font-semibold text-brand-600">{meta.intensity === 'idle' ? t('空闲', 'idle') : t('活跃', 'active')}</span>
           </div>
-          <Metric label="Tokens" value={meta.tokens > 1000 ? `${(meta.tokens / 1000).toFixed(1)}k` : String(meta.tokens)} />
-          <Metric label="Latency" value={meta.latency ? `${meta.latency.toFixed(1)}s` : '-'} />
+          <div className="hidden sm:contents">
+            <Metric label="Tokens" value={meta.tokens > 1000 ? `${(meta.tokens / 1000).toFixed(1)}k` : String(meta.tokens)} />
+            <Metric label="Latency" value={meta.latency ? `${meta.latency.toFixed(1)}s` : '-'} />
+          </div>
           <HeaderButton onClick={onOpenSearch} title={t('搜索会话和文件', 'Search sessions and files')}>
             <Search size={15} />
           </HeaderButton>
           <HeaderButton onClick={handleNewChat} title={t('新建对话', 'New chat')}>
             <Plus size={16} />
           </HeaderButton>
+          <span className="xl:hidden">
+            <HeaderButton onClick={onOpenWorkbench} title={t('打开工作台', 'Open workbench')}>
+              <PanelRightOpen size={16} />
+            </HeaderButton>
+          </span>
         </div>
       </header>
 
@@ -586,10 +673,10 @@ export default function MainContent({
         </div>
       )}
 
-      <div ref={messagesScrollRef} onScroll={handleMessagesScroll} className="relative flex-1 overflow-y-auto p-6">
+      <div ref={messagesScrollRef} onScroll={handleMessagesScroll} className="relative flex-1 overflow-y-auto p-3 sm:p-6">
         <div className="flex flex-col gap-6">
           {messages.length === 0 && (
-            <div className="hero-panel soft-grid rounded-[1.6rem] border border-white/70 p-8 text-left text-text-muted fine-border">
+            <div className="hero-panel soft-grid rounded-[1.6rem] border border-white/70 p-4 text-left text-text-muted fine-border sm:p-8">
               <div className="mb-4 flex items-center justify-between gap-3">
                 <div className="rounded-full border border-brand-100 bg-bg-card/82 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-brand-600">
                   {user?.agent_name || 'Promethea'}
@@ -620,25 +707,21 @@ export default function MainContent({
                   </button>
                 ))}
               </div>
-              <div className="hidden mx-auto mb-3 w-fit rounded-full border border-brand-100 bg-bg-card/82 px-3 py-1 text-[10px] font-bold uppercase tracking-[0.24em] text-brand-600">
-                Promethea Agent Console
-              </div>
-              <h2 className="hidden mb-2 font-display text-[32px] font-semibold tracking-[-0.045em] text-text-strong">
-                {t('让记忆、工具和推理一起工作', 'Make memory, tools, and reasoning work together')}
-              </h2>
-              <p className="hidden mx-auto max-w-[620px] text-[13px] leading-7">
-                {t(`你的请求会由 ${user?.agent_name || 'Promethea'} 处理，并保留可检查、可干预的思考轨迹。`, `Your requests will be handled by ${user?.agent_name || 'Promethea'} with an inspectable, steerable reasoning trace.`)}
-              </p>
-              <div className="hidden mt-5 flex-wrap justify-center gap-2 text-[11px]">
-                <span className="rounded-full bg-bg-card/82 px-3 py-1 text-text-normal shadow-sm">{t('记忆召回', 'Memory recall')}</span>
-                <span className="rounded-full bg-bg-card/82 px-3 py-1 text-text-normal shadow-sm">{t('工具确认', 'Tool approval')}</span>
-                <span className="rounded-full bg-bg-card/82 px-3 py-1 text-text-normal shadow-sm">{t('工作流恢复', 'Workflow recovery')}</span>
-              </div>
             </div>
           )}
 
           {messages.map((msg) => (
-            <Message key={msg.id} role={msg.role} avatar={msg.role === 'agent' || msg.role === 'assistant' ? 'agent' : msg.name?.charAt(0).toUpperCase() || 'U'} name={msg.name || msg.role} time={msg.time} content={msg.content} />
+            <Message
+              key={msg.id}
+              role={msg.role}
+              avatar={msg.role === 'agent' || msg.role === 'assistant' ? 'agent' : msg.name?.charAt(0).toUpperCase() || 'U'}
+              name={msg.name || msg.role}
+              time={msg.time}
+              content={msg.content}
+              messageId={msg.id}
+              followups={followups.filter((item) => item.message_id === msg.id)}
+              onSelectText={(selection) => setTextSelection(selection)}
+            />
           ))}
 
           <div ref={messagesEndRef} />
@@ -654,7 +737,7 @@ export default function MainContent({
         )}
       </div>
 
-      <div className="relative z-20 border-t border-white/60 bg-bg-card/70 p-4">
+      <div className="relative z-20 border-t border-white/60 bg-bg-card/70 p-2 sm:p-4">
         <div className={`overflow-hidden rounded-[1.15rem] border bg-bg-card shadow-sm transition-shadow focus-within:ring-2 ${isRecording ? 'border-red-300 ring-2 ring-red-100' : 'border-white/70 focus-within:ring-brand-100'}`}>
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 border-b border-black/5 bg-brand-50/45 px-4 py-2">
@@ -693,7 +776,7 @@ export default function MainContent({
                     }
                   }
                 }}
-                placeholder={t('输入你的消息，支持 @ 提及、/ 命令和快捷操作', 'Type a message, mention @, or enter a command')}
+                placeholder={t('输入消息', 'Type a message')}
                 rows={1}
                 className="max-h-40 min-h-8 w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent text-[14px] leading-6 text-text-strong outline-none placeholder:text-text-muted"
               />
@@ -749,6 +832,35 @@ export default function MainContent({
           onClose={() => setConfirmRequest(null)}
         />
       )}
+
+      {textSelection && (
+        <button
+          ref={selectionActionRef}
+          type="button"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setFollowupDraft(textSelection)
+            setTextSelection(null)
+          }}
+          className="fixed z-40 inline-flex items-center gap-1.5 rounded-lg border border-brand-200 bg-bg-card px-2.5 py-1.5 text-[12px] font-semibold text-brand-700 shadow-lg transition-colors hover:bg-brand-50"
+          style={{ left: textSelection.left, top: textSelection.top }}
+        >
+          <MessageCircleQuestion size={14} />
+          {t('追问', 'Follow up')}
+        </button>
+      )}
+
+      {followupDraft && sessionId && (
+        <FollowupModal
+          selection={followupDraft}
+          sessionId={sessionId}
+          onClose={() => setFollowupDraft(null)}
+          onCreated={(followup) => {
+            setFollowups((items) => [...items, followup])
+            setFollowupDraft(null)
+          }}
+        />
+      )}
     </main>
   )
 }
@@ -776,9 +888,12 @@ type MessageProps = {
   name: string
   time?: string
   content: string
+  messageId: string
+  followups: FollowupData[]
+  onSelectText: (selection: TextSelection) => void
 }
 
-function Message({ role, avatar, name, time, content }: MessageProps) {
+function Message({ role, avatar, name, time, content, messageId, followups, onSelectText }: MessageProps) {
   const isAgent = role === 'agent' || role === 'assistant'
   const isTool = role === 'tool'
 
@@ -820,8 +935,36 @@ function Message({ role, avatar, name, time, content }: MessageProps) {
             <div className="mt-1 rounded-xl bg-black/5 p-2 font-mono text-[11px] whitespace-pre-wrap text-text-normal">{thinkingContent}</div>
           </details>
         )}
-        <div className="whitespace-pre-wrap text-[14px] leading-7 text-text-normal">
-          {displayContent || <span className="animate-pulse">...</span>}
+        <div
+          className="relative whitespace-pre-wrap text-[14px] leading-7 text-text-normal"
+          onMouseUp={(event) => {
+            if (displayContent !== content) return
+            const selection = window.getSelection()
+            const rawText = selection?.toString() || ''
+            const range = selection?.rangeCount ? selection.getRangeAt(0) : null
+            const root = event.currentTarget
+            if (!rawText.trim() || !range || !root.contains(range.startContainer) || !root.contains(range.endContainer)) return
+            const before = range.cloneRange()
+            before.selectNodeContents(root)
+            before.setEnd(range.startContainer, range.startOffset)
+            const rawStartOffset = before.toString().length
+            const leadingWhitespace = rawText.length - rawText.trimStart().length
+            const selectedText = rawText.trim()
+            const startOffset = rawStartOffset + leadingWhitespace
+            const endOffset = startOffset + selectedText.length
+            const rect = range.getBoundingClientRect()
+            if (!rect.width && !rect.height) return
+            onSelectText({
+              messageId,
+              selectedText,
+              startOffset,
+              endOffset,
+              left: Math.max(12, Math.min(window.innerWidth - 130, rect.left)),
+              top: Math.min(window.innerHeight - 44, rect.bottom + 8),
+            })
+          }}
+        >
+          <AnnotatedContent content={displayContent} followups={followups} />
         </div>
       </div>
     </div>
@@ -837,6 +980,123 @@ function IconButton({ icon, ...props }: IconButtonProps) {
     <button type="button" className="flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-black/5 hover:text-text-strong" {...props}>
       {icon}
     </button>
+  )
+}
+
+function AnnotatedContent({ content, followups }: { content: string; followups: FollowupData[] }) {
+  const valid = followups
+    .filter((item) => item.start_offset >= 0 && item.end_offset > item.start_offset && item.end_offset <= content.length && content.slice(item.start_offset, item.end_offset) === item.selected_text)
+    .sort((a, b) => a.start_offset - b.start_offset)
+  if (valid.length === 0) return <>{content || <span className="animate-pulse">...</span>}</>
+
+  const parts: ReactNode[] = []
+  let cursor = 0
+  for (const item of valid) {
+    if (item.start_offset < cursor) continue
+    if (item.start_offset > cursor) parts.push(content.slice(cursor, item.start_offset))
+    parts.push(
+      <span
+        key={item.id}
+        title={`${item.query}\n\n${item.response}`}
+        className="cursor-help rounded-sm bg-brand-100/80 decoration-brand-500 decoration-2 underline underline-offset-2"
+      >
+        {content.slice(item.start_offset, item.end_offset)}
+      </span>,
+    )
+    cursor = item.end_offset
+  }
+  if (cursor < content.length) parts.push(content.slice(cursor))
+  return <>{parts}</>
+}
+
+function FollowupModal({
+  selection,
+  sessionId,
+  onClose,
+  onCreated,
+}: {
+  selection: TextSelection
+  sessionId: string
+  onClose: () => void
+  onCreated: (followup: FollowupData) => void
+}) {
+  const { t } = useLanguage()
+  const [queryType, setQueryType] = useState<'why' | 'risk' | 'alternative' | 'custom'>('why')
+  const [customQuery, setCustomQuery] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [onClose])
+
+  const submit = async () => {
+    if (queryType === 'custom' && !customQuery.trim()) return
+    setIsSubmitting(true)
+    setError('')
+    try {
+      const response = await sendFollowup({
+        selected_text: selection.selectedText,
+        query_type: queryType,
+        custom_query: queryType === 'custom' ? customQuery.trim() : undefined,
+        session_id: sessionId,
+        message_id: selection.messageId,
+        start_offset: selection.startOffset,
+        end_offset: selection.endOffset,
+      })
+      const data = await response.json()
+      if (!response.ok || !data.followup) throw new Error(data?.detail?.message || data?.detail || t('追问失败，请重试。', 'Follow-up failed. Please try again.'))
+      onCreated(data.followup)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : t('追问失败，请重试。', 'Follow-up failed. Please try again.'))
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-5 backdrop-blur-sm" onMouseDown={onClose}>
+      <div className="relative w-full max-w-lg rounded-xl border border-white/70 bg-bg-card p-5 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
+        <button type="button" onClick={onClose} className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-lg text-text-muted hover:bg-black/5 hover:text-text-strong" aria-label={t('关闭', 'Close')}>
+          <X size={16} />
+        </button>
+        <div className="flex items-center gap-2 pr-10 text-text-strong">
+          <MessageCircleQuestion size={18} className="text-brand-600" />
+          <h2 className="text-[16px] font-semibold">{t('追问这段内容', 'Follow up on this text')}</h2>
+        </div>
+        <blockquote className="mt-4 max-h-28 overflow-y-auto border-l-2 border-brand-300 bg-brand-50/55 px-3 py-2 text-[13px] leading-6 text-text-normal">
+          {selection.selectedText}
+        </blockquote>
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          {([
+            ['why', t('为什么', 'Why')],
+            ['risk', t('风险', 'Risks')],
+            ['alternative', t('替代方案', 'Alternatives')],
+          ] as const).map(([value, label]) => (
+            <button key={value} type="button" onClick={() => setQueryType(value)} className={`rounded-lg border px-3 py-2 text-[12px] font-medium ${queryType === value ? 'border-brand-300 bg-brand-100 text-brand-800' : 'border-black/10 text-text-normal hover:bg-black/5'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <button type="button" onClick={() => setQueryType('custom')} className={`mt-2 text-[12px] ${queryType === 'custom' ? 'font-semibold text-brand-700' : 'text-text-muted hover:text-text-strong'}`}>
+          {t('自定义问题', 'Custom question')}
+        </button>
+        {queryType === 'custom' && (
+          <textarea value={customQuery} onChange={(event) => setCustomQuery(event.target.value)} autoFocus rows={3} className="mt-2 w-full resize-none rounded-lg border border-black/10 bg-bg-page/45 p-3 text-[13px] text-text-strong outline-none focus:border-brand-300" placeholder={t('输入你的问题', 'Write your question')} />
+        )}
+        {error && <p className="mt-3 text-[12px] text-red-600">{error}</p>}
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" onClick={onClose} disabled={isSubmitting} className="rounded-lg px-3 py-2 text-[12px] font-medium text-text-muted hover:bg-black/5">{t('取消', 'Cancel')}</button>
+          <button type="button" onClick={() => void submit()} disabled={isSubmitting || (queryType === 'custom' && !customQuery.trim())} className="rounded-lg bg-brand-600 px-3 py-2 text-[12px] font-semibold text-white hover:bg-brand-700 disabled:opacity-50">
+            {isSubmitting ? t('生成中...', 'Generating...') : t('开始追问', 'Ask')}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 

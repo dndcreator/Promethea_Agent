@@ -18,8 +18,10 @@ RUN_STATUS_PENDING = "pending"
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_PAUSED = "paused"
 RUN_STATUS_WAITING_HUMAN = "waiting_human"
+RUN_STATUS_RETRY_WAIT = "retry_wait"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_COMPLETED = "completed"
+RUN_STATUS_CANCELLED = "cancelled"
 
 STEP_STATUS_PENDING = "pending"
 STEP_STATUS_RUNNING = "running"
@@ -27,6 +29,7 @@ STEP_STATUS_WAITING_HUMAN = "waiting_human"
 STEP_STATUS_FAILED = "failed"
 STEP_STATUS_SKIPPED = "skipped"
 STEP_STATUS_SUCCEEDED = "succeeded"
+STEP_STATUS_RETRY_WAIT = "retry_wait"
 
 
 class WorkflowStep(BaseModel):
@@ -42,6 +45,12 @@ class WorkflowStep(BaseModel):
     timeout_policy: Dict[str, Any] = Field(default_factory=dict)
     depends_on: List[str] = Field(default_factory=list)
     artifact_targets: List[Dict[str, Any]] = Field(default_factory=list)
+    attempt_count: int = 0
+    active_attempt_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    attempt_started_at: Optional[datetime] = None
+    attempt_ended_at: Optional[datetime] = None
+    attempt_history: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class WorkflowDefinition(BaseModel):

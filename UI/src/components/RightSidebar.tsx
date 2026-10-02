@@ -4,25 +4,24 @@ import {
   AlertCircle,
   CheckCircle2,
   CircleDot,
-  Database,
-  GitBranch,
   Info,
   ListChecks,
+  Pause,
+  Play,
   Square,
-  Target,
-  Wrench,
 } from 'lucide-react'
 import {
   getActiveReasoning,
-  getMemoryRecallRuns,
-  getMemoryWriteProposals,
+  cancelTask,
   getReasoningHistory,
   getReasoningTree,
-  listPersonalWorkflowRuns,
-  listWorkflowRecovery,
+  pauseTask,
+  resumeTask,
   steerReasoningTree,
   stopReasoningTree,
+  watchWorkbenchSnapshots,
 } from '../services/api'
+import type { Task, WorkbenchSnapshot as RuntimeWorkbenchSnapshot } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
 
@@ -30,25 +29,36 @@ interface RightSidebarProps {
   sessionId: string | null
   treeId: string | null
   chatRunning?: boolean
+  onMemoryReviewChange?: (proposalId: string | null) => void
 }
 
-type WorkbenchSnapshot = {
+type WorkbenchView = {
   metrics: any | null
   memoryProposals: any[]
   recallRuns: any[]
   workflowRuns: any[]
   recoveryItems: any[]
+  task: Task | null
+  timeline: any[]
+  waitingActions: any[]
+  activeRuntimeRuns: string[]
 }
 
-const EMPTY_WORKBENCH: WorkbenchSnapshot = {
+type ActivityFilter = 'all' | 'tool' | 'memory' | 'decision' | 'error'
+
+const EMPTY_WORKBENCH: WorkbenchView = {
   metrics: null,
   memoryProposals: [],
   recallRuns: [],
   workflowRuns: [],
   recoveryItems: [],
+  task: null,
+  timeline: [],
+  waitingActions: [],
+  activeRuntimeRuns: [],
 }
 
-export default function RightSidebar({ sessionId, treeId, chatRunning = false }: RightSidebarProps) {
+export default function RightSidebar({ sessionId, treeId, chatRunning = false, onMemoryReviewChange }: RightSidebarProps) {
   const { t } = useLanguage()
   const { user } = useAuth()
   const [tree, setTree] = useState<any>(null)
@@ -56,7 +66,9 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
   const [historyOpen, setHistoryOpen] = useState(false)
   const [selectedTreeId, setSelectedTreeId] = useState<string | null>(null)
   const [steerNote, setSteerNote] = useState('')
-  const [workbench, setWorkbench] = useState<WorkbenchSnapshot>(EMPTY_WORKBENCH)
+  const [workbench, setWorkbench] = useState<WorkbenchView>(EMPTY_WORKBENCH)
+  const [taskControlPending, setTaskControlPending] = useState(false)
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>('all')
 
   useEffect(() => {
     if (treeId) setSelectedTreeId(null)
@@ -125,56 +137,90 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
 
     if (!user) {
       setWorkbench(EMPTY_WORKBENCH)
       return () => {
         cancelled = true
+        controller.abort()
       }
     }
 
-    const fetchWorkbench = async () => {
+    const consumeWorkbench = async () => {
       try {
-        const [proposals, recalls, workflowRuns, recovery] = await Promise.all([
-          readJson(getMemoryWriteProposals('pending')),
-          readJson(getMemoryRecallRuns()),
-          readJson(listPersonalWorkflowRuns(8)),
-          readJson(listWorkflowRecovery(8)),
-        ])
-        if (cancelled) return
-        setWorkbench({
-          metrics: null,
-          memoryProposals: extractItems(proposals, ['proposals', 'items', 'decisions']),
-          recallRuns: extractItems(recalls, ['runs', 'items']),
-          workflowRuns: extractItems(workflowRuns, ['runs', 'items']),
-          recoveryItems: extractItems(recovery, ['items', 'runs', 'recoveries']),
-        })
+        for await (const data of watchWorkbenchSnapshots(sessionId, null, null, controller.signal)) {
+          if (cancelled) return
+          const memoryProposals = Array.isArray(data.memory_proposals) ? data.memory_proposals : []
+          setWorkbench((previous) => workbenchView(data, previous))
+          const relevantProposals = sessionId
+            ? memoryProposals.filter((proposal: any) => String(proposal?.session_id || '') === sessionId)
+            : memoryProposals
+          const latestProposal = relevantProposals[relevantProposals.length - 1]
+          onMemoryReviewChange?.(latestProposal ? String(latestProposal.proposal_id || '') || null : null)
+        }
       } catch (error) {
-        if (!cancelled) console.error(error)
+        if (!cancelled && !controller.signal.aborted) console.error(error)
       }
     }
 
-    fetchWorkbench()
-    const interval = window.setInterval(fetchWorkbench, chatRunning ? 15000 : 60000)
+    consumeWorkbench()
     return () => {
       cancelled = true
-      window.clearInterval(interval)
+      controller.abort()
     }
-  }, [chatRunning, user])
+  }, [sessionId, user, onMemoryReviewChange])
 
   const currentTreeId = tree?.tree_id || tree?.id
-  const nodes = normalizeNodes(tree, t)
-  const isActive = ['running', 'active', 'pending'].includes(String(tree?.status || '').toLowerCase())
+  const reasoningNodes = normalizeNodes(tree, t)
+  const projectedNodes = normalizeActivities(workbench.timeline, t)
+  const nodes = projectedNodes.length > 0 ? projectedNodes : reasoningNodes
+  const taskStatus = String(workbench.task?.status || '').toLowerCase()
+  const isActive = ['running', 'active', 'pending', 'waiting_user'].includes(taskStatus || String(tree?.status || '').toLowerCase())
   const activeHistoryId = selectedTreeId || currentTreeId
   const summary = useMemo(
     () => summarizeWorkbench(tree, nodes, workbench, isActive, chatRunning, t),
     [tree, nodes, workbench, isActive, chatRunning, t],
   )
+  const filteredNodes = useMemo(
+    () => nodes.filter((node) => activityFilter === 'all' || activityCategory(node) === activityFilter),
+    [activityFilter, nodes],
+  )
+  const showControls = Boolean(
+    (tree && summary.live && !workbench.task)
+    || (workbench.task && ['running', 'paused', 'waiting_user'].includes(taskStatus)),
+  )
 
   const handleStop = async () => {
-    if (currentTreeId) {
-      await stopReasoningTree(currentTreeId, 'User stopped via UI')
-      setTree((prev: any) => ({ ...prev, status: 'stopped' }))
+    setTaskControlPending(true)
+    try {
+      if (workbench.task?.task_id) {
+        const task = await cancelTask(
+          String(workbench.task.task_id),
+          'user_cancelled',
+          workbench.task.revision,
+        )
+        setWorkbench((prev) => ({ ...prev, task }))
+      } else if (currentTreeId) {
+        await stopReasoningTree(currentTreeId, 'User stopped via UI')
+        setTree((prev: any) => ({ ...prev, status: 'stopped' }))
+      }
+    } finally {
+      setTaskControlPending(false)
+    }
+  }
+
+  const handlePauseResume = async () => {
+    const taskId = String(workbench.task?.task_id || '')
+    if (!taskId) return
+    setTaskControlPending(true)
+    try {
+      const task = taskStatus === 'paused'
+        ? await resumeTask(taskId, workbench.task?.revision)
+        : await pauseTask(taskId, workbench.task?.revision)
+      setWorkbench((prev) => ({ ...prev, task }))
+    } finally {
+      setTaskControlPending(false)
     }
   }
 
@@ -186,34 +232,50 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
   }
 
   return (
-    <aside className="relative flex h-full w-[322px] shrink-0 flex-col overflow-hidden rounded-[1.35rem] glass-panel">
-      <div className="z-10 flex shrink-0 items-center justify-between border-b border-white/55 bg-bg-card/58 px-5 py-4 backdrop-blur-md">
-        <h2 className="flex items-baseline gap-2 font-display text-[19px] font-semibold tracking-[-0.035em] text-text-strong">
+    <aside className="relative flex h-full w-full shrink-0 flex-col overflow-hidden rounded-lg glass-panel">
+      <div className="z-10 flex shrink-0 items-center justify-between border-b border-black/5 bg-bg-card/70 px-4 py-3">
+        <h2 className="flex items-baseline gap-2 font-display text-[17px] font-semibold text-text-strong">
           {t('任务工作台', 'Workbench')}
-          <span className="font-sans text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">Agent</span>
         </h2>
-        <div className="flex items-center gap-1 rounded-full bg-brand-100 px-2.5 py-1 text-[11px] font-semibold text-brand-700">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-text-muted">
           <span className={`h-1.5 w-1.5 rounded-full bg-brand-600 ${summary.live ? 'animate-pulse' : ''}`} />
           {summary.statusLabel}
         </div>
       </div>
 
-      <div className="z-10 border-b border-white/45 bg-bg-card/44 px-4 py-3">
-        <div className="mb-3 grid grid-cols-3 gap-2">
-          <WorkbenchMetric icon={<Target size={13} />} label={t('任务', 'Task')} value={summary.taskState} active={summary.live} />
-          <WorkbenchMetric icon={<Wrench size={13} />} label={t('工具', 'Tools')} value={String(summary.toolNodes.length)} />
-          <WorkbenchMetric icon={<AlertCircle size={13} />} label={t('待处理', 'Review')} value={String(summary.reviewCount)} active={summary.reviewCount > 0} />
+      <div className="z-10 border-b border-black/5 bg-bg-card/50 px-4 py-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h3 className="line-clamp-2 text-sm font-semibold leading-snug text-text-strong">{summary.title}</h3>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-text-muted">{summary.currentStep}</p>
+          </div>
+          {(workbench.task?.task_id || currentTreeId) && (
+            <span className="shrink-0 font-mono text-[10px] text-text-muted">
+              {String(workbench.task?.task_id || currentTreeId).slice(0, 8)}
+            </span>
+          )}
+        </div>
+        <div className="mt-2 flex items-center gap-2 text-[10px] text-text-muted">
+          <span>{summary.phaseLabel}</span>
+          <span>·</span>
+          <span>{nodes.length} {t('条活动', 'events')}</span>
+          {summary.reviewCount > 0 && (
+            <>
+              <span>·</span>
+              <span className="font-medium text-amber-700">{summary.reviewCount} {t('项待处理', 'need review')}</span>
+            </>
+          )}
         </div>
         <button
           type="button"
           onClick={() => setHistoryOpen((value) => !value)}
-          className="flex w-full items-center justify-between rounded-xl border border-white/60 bg-bg-card/70 px-3 py-2 text-left text-xs font-semibold text-text-strong shadow-sm transition-colors hover:bg-white/70"
+          className="mt-3 flex w-full items-center justify-between border-t border-black/5 pt-2 text-left text-xs font-medium text-text-normal transition-colors hover:text-brand-700"
         >
-          <span>{t('本轮运行记录', 'Run history')}</span>
+          <span className="flex items-center gap-2"><ListChecks size={13} />{t('运行记录', 'Run history')}</span>
           <span className="font-mono text-[10px] text-text-muted">{history.length}</span>
         </button>
         {historyOpen && (
-          <div className="mt-2 max-h-44 overflow-y-auto rounded-xl border border-white/55 bg-bg-card/78 p-1.5 shadow-sm">
+          <div className="mt-2 max-h-44 overflow-y-auto border-l border-black/10 pl-2">
             {history.length === 0 ? (
               <div className="px-2 py-3 text-center text-[11px] text-text-muted">
                 {t('暂无运行记录', 'No runs yet')}
@@ -232,8 +294,8 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
                       setTree(null)
                       setHistoryOpen(false)
                     }}
-                    className={`mb-1 w-full rounded-lg px-2.5 py-2 text-left text-[11px] transition-colors last:mb-0 ${
-                      selected ? 'bg-brand-100 text-brand-800' : 'text-text-normal hover:bg-white/65'
+                    className={`mb-1 w-full px-2 py-1.5 text-left text-[11px] transition-colors last:mb-0 ${
+                      selected ? 'bg-brand-50 text-brand-800' : 'text-text-normal hover:bg-black/[0.03]'
                     }`}
                   >
                     <div className="truncate font-semibold">{item.root_goal || t('未命名任务', 'Untitled run')}</div>
@@ -252,72 +314,37 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
         )}
       </div>
 
-      <div className="pointer-events-none absolute left-0 top-20 bottom-20 w-32 opacity-25" style={{
-        backgroundImage: 'radial-gradient(circle at 0 50%, rgba(112,111,104,0.55) 0%, transparent 70%)',
-        filter: 'blur(22px)',
-      }} />
-
-      <div className="relative z-10 flex-1 overflow-y-auto p-5">
-        <div className="flex flex-col gap-4">
-          <section className="rounded-[1.15rem] border border-white/65 bg-bg-card/74 p-4 shadow-sm">
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">
-                <ListChecks size={14} className="text-brand-600" />
-                {t('当前任务', 'Current work')}
-              </div>
-              {currentTreeId && <span className="rounded bg-brand-100 px-1.5 py-0.5 font-mono text-[10px] text-brand-700">{String(currentTreeId).slice(0, 6)}</span>}
-            </div>
-            <h3 className="text-[15px] font-semibold leading-snug text-text-strong">{summary.title}</h3>
-            <p className="mt-2 text-xs leading-6 text-text-muted">{summary.currentStep}</p>
-            <div className="mt-3 flex flex-wrap gap-1.5 text-[10px] font-medium">
-              <span className="rounded-full bg-brand-100 px-2 py-0.5 text-brand-700">{summary.phaseLabel}</span>
-              <span className={`rounded-full px-2 py-0.5 ${summary.live ? 'bg-brand-100 text-brand-700' : 'bg-bg-page text-text-muted'}`}>{summary.statusLabel}</span>
-              <span className="rounded-full bg-bg-page px-2 py-0.5 text-text-muted">{nodes.length} {t('步骤', 'steps')}</span>
-              <span className="rounded-full bg-bg-page px-2 py-0.5 text-text-muted">{summary.completedSteps} {t('完成', 'done')}</span>
-            </div>
-          </section>
-
-          <div className="grid grid-cols-1 gap-3">
-            <WorkbenchCard
-              icon={<Wrench size={15} />}
-              label={t('工具活动', 'Tool activity')}
-              value={summary.toolSummary}
-              meta={summary.latestTool}
-            />
-            <WorkbenchCard
-              icon={<Database size={15} />}
-              label={t('记忆活动', 'Memory activity')}
-              value={summary.memorySummary}
-              meta={summary.memoryMeta}
-            />
-            <WorkbenchCard
-              icon={<GitBranch size={15} />}
-              label={t('工作流活动', 'Workflow activity')}
-              value={summary.workflowSummary}
-              meta={summary.workflowMeta}
-            />
+      <div className="relative z-10 flex-1 overflow-y-auto px-4 py-3">
+        <div className="flex min-h-full flex-col">
+          <div className="mb-3 flex shrink-0 rounded-md bg-black/[0.035] p-0.5">
+            {activityFilters(t).map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                onClick={() => setActivityFilter(filter.id)}
+                className={`min-w-0 flex-1 px-1 py-1.5 text-[10px] font-medium transition-colors ${
+                  activityFilter === filter.id ? 'rounded bg-bg-card text-text-strong shadow-sm' : 'text-text-muted hover:text-text-normal'
+                }`}
+              >
+                {filter.label}
+              </button>
+            ))}
           </div>
 
-          {!tree && (
-            <div className="rounded-[1.15rem] border border-dashed border-white/70 bg-bg-card/52 p-5 text-center">
-              <Info size={30} className="mx-auto mb-2 text-brand-300" />
-              <p className="text-sm font-semibold text-brand-700">
+          {!tree && nodes.length === 0 && (
+            <div className="m-auto py-8 text-center">
+              <Info size={22} className="mx-auto mb-2 text-text-muted" />
+              <p className="text-sm font-medium text-text-normal">
                 {chatRunning ? t('等待运行态', 'Waiting for state') : t('空闲', 'Idle')}
-              </p>
-              <p className="mt-1 text-xs leading-6 text-text-muted">
-                {chatRunning ? t('等待可观察步骤。', 'Waiting for observable steps.') : t('任务开始后显示进展。', 'Progress appears when work starts.')}
               </p>
             </div>
           )}
 
-          {nodes.length > 0 && (
-            <div className="relative pt-2">
-              <div className="absolute left-[12px] top-4 bottom-2 w-px bg-brand-100" />
-              <div className="mb-3 ml-10 text-[10px] font-bold uppercase tracking-[0.18em] text-text-muted">
-                {t('执行时间线', 'Execution timeline')}
-              </div>
-              <div className="flex flex-col gap-5">
-                {nodes.map((node, index) => (
+          {filteredNodes.length > 0 && (
+            <div className="relative flex-1">
+              <div className="absolute bottom-3 left-[9px] top-3 w-px bg-black/10" />
+              <div className="flex flex-col">
+                {filteredNodes.map((node, index) => (
                   <TraceItem
                     id={node.id}
                     key={node.id}
@@ -328,17 +355,25 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
                     statusLabel={node.nodeStatus}
                     icon={
                       node.nodeStatus === 'succeeded'
-                        ? <CheckCircle2 size={13} />
-                        : <CircleDot size={13} className={index === nodes.length - 1 && summary.live ? 'animate-pulse' : ''} />
+                        ? <CheckCircle2 size={12} />
+                        : ['failed', 'error'].includes(node.nodeStatus)
+                          ? <AlertCircle size={12} />
+                          : <CircleDot size={12} className={index === filteredNodes.length - 1 && summary.live ? 'animate-pulse' : ''} />
                     }
-                    status={node.nodeStatus === 'running' || (index === nodes.length - 1 && summary.live) ? 'active' : 'done'}
+                    status={node.nodeStatus === 'running' || (index === filteredNodes.length - 1 && summary.live) ? 'active' : 'done'}
                   />
                 ))}
               </div>
             </div>
           )}
 
-          {tree && nodes.length === 0 && (
+          {nodes.length > 0 && filteredNodes.length === 0 && (
+            <div className="m-auto py-8 text-center text-xs text-text-muted">
+              {t('当前筛选下没有活动', 'No activity in this filter')}
+            </div>
+          )}
+
+          {(tree || workbench.task) && nodes.length === 0 && (
             <TraceItem
               id="initializing"
               time={new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -351,16 +386,9 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
         </div>
       </div>
 
-      <div className="z-10 shrink-0 border-t border-white/55 bg-bg-card/78 p-4 backdrop-blur-xl">
-        <h3 className="mb-3 flex items-center justify-between text-xs font-semibold text-text-strong">
-          <span className="flex items-center gap-2">
-            {t('任务干预', 'Task intervention')}
-            <span className="text-[10px] font-normal text-text-muted">Control</span>
-          </span>
-          {currentTreeId && <span className="rounded bg-brand-100 px-1.5 py-0.5 font-mono text-[10px] text-brand-700">{String(currentTreeId).slice(0, 6)}</span>}
-        </h3>
-
-        {tree && summary.live && (
+      {showControls && (
+        <div className="z-10 shrink-0 border-t border-black/5 bg-bg-card/80 p-3">
+        {tree && summary.live && !workbench.task && (
           <div className="mb-3 flex flex-col gap-2">
             <div className="flex gap-2">
               <input
@@ -368,13 +396,13 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
                 value={steerNote}
                 onChange={(e) => setSteerNote(e.target.value)}
                 placeholder={t('给当前任务一个方向...', 'Steer the current task...')}
-                className="flex-1 rounded-lg border border-white/70 bg-bg-card px-3 py-1.5 text-xs outline-none focus:ring-1 focus:ring-brand-500"
+                className="min-w-0 flex-1 rounded-md border border-black/10 bg-bg-card px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-brand-500"
               />
               <button
                 type="button"
                 onClick={handleSteer}
                 disabled={!steerNote.trim()}
-                className="rounded-lg bg-brand-100 px-3 py-1.5 text-xs font-semibold text-brand-700 hover:bg-brand-200 disabled:opacity-50"
+                className="rounded-md bg-brand-100 px-3 py-2 text-xs font-semibold text-brand-700 hover:bg-brand-200 disabled:opacity-50"
               >
                 {t('引导', 'Steer')}
               </button>
@@ -382,16 +410,31 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false }:
           </div>
         )}
 
+        <div className="flex gap-2">
+        {workbench.task && ['running', 'paused'].includes(taskStatus) && (
+          <button
+            type="button"
+            onClick={handlePauseResume}
+            disabled={taskControlPending}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-black/10 bg-bg-card px-3 py-2 text-xs font-medium text-text-normal transition-colors hover:bg-black/[0.03] disabled:opacity-50"
+          >
+            {taskStatus === 'paused' ? <Play size={14} /> : <Pause size={14} />}
+            {taskStatus === 'paused' ? t('继续', 'Resume') : t('暂停', 'Pause')}
+          </button>
+        )}
+
         <button
           type="button"
           onClick={handleStop}
-          disabled={!tree || !summary.live}
-          className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600 shadow-sm transition-colors hover:bg-red-100 disabled:grayscale disabled:opacity-50"
+          disabled={taskControlPending || (!workbench.task && (!tree || !summary.live)) || ['completed', 'failed', 'cancelled'].includes(taskStatus)}
+          className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
         >
           <Square size={14} />
           {t('停止任务', 'Stop task')}
         </button>
+        </div>
       </div>
+      )}
     </aside>
   )
 }
@@ -408,13 +451,13 @@ type NormalizedTraceNode = {
 function summarizeWorkbench(
   tree: any,
   nodes: NormalizedTraceNode[],
-  snapshot: WorkbenchSnapshot,
+  snapshot: WorkbenchView,
   isActive: boolean,
   chatRunning: boolean,
   t: (zh: string, en: string) => string,
 ) {
   const latest = nodes[nodes.length - 1]
-  const rootGoal = String(tree?.root_goal || tree?.goal || '').trim()
+  const rootGoal = String(snapshot.task?.title || snapshot.task?.objective || tree?.root_goal || tree?.goal || '').trim()
   const title = rootGoal || (chatRunning ? t('正在处理当前请求', 'Handling current request') : t('等待用户目标', 'Waiting for a user goal'))
   const completedSteps = nodes.filter((node) => ['succeeded', 'done', 'completed'].includes(node.nodeStatus)).length
   const live = isActive || chatRunning
@@ -472,9 +515,9 @@ function summarizeWorkbench(
     currentStep: compactText(currentStep, 180),
     phaseLabel,
     completedSteps,
-    live,
-    taskState,
-    statusLabel,
+    live: live || ['running', 'waiting_user'].includes(String(snapshot.task?.status || '').toLowerCase()),
+    taskState: String(snapshot.task?.status || taskState),
+    statusLabel: taskStatusLabel(snapshot.task?.status, statusLabel, t),
     toolNodes,
     toolSummary,
     latestTool,
@@ -486,51 +529,112 @@ function summarizeWorkbench(
   }
 }
 
-function WorkbenchMetric({
-  icon,
-  label,
-  value,
-  active = false,
-}: {
-  icon: ReactNode
-  label: string
-  value: string
-  active?: boolean
-}) {
-  return (
-    <div className={`rounded-xl border px-2.5 py-2 shadow-sm ${active ? 'border-brand-100 bg-brand-50 text-brand-700' : 'border-white/60 bg-bg-card/70 text-text-normal'}`}>
-      <div className="mb-1 flex items-center gap-1.5 text-[10px] text-text-muted">
-        {icon}
-        <span>{label}</span>
-      </div>
-      <div className="truncate text-xs font-semibold" title={value}>{value}</div>
-    </div>
-  )
+function workbenchView(snapshot: RuntimeWorkbenchSnapshot, previous: WorkbenchView): WorkbenchView {
+  const incoming = Array.isArray(snapshot.timeline) ? snapshot.timeline : []
+  const merged = new Map<number | string, any>()
+  for (const activity of [...previous.timeline, ...incoming]) {
+    const key = String(activity?.activity_id || activity?.event_id || activity?.seq || '')
+    const existing = merged.get(key)
+    merged.set(key, {
+      ...existing,
+      ...activity,
+      occurred_at: existing?.occurred_at || activity?.occurred_at,
+      subject: activity?.subject || existing?.subject || '',
+      summary: activity?.summary || existing?.summary || '',
+      detail: { ...(existing?.detail || {}), ...(activity?.detail || {}) },
+    })
+  }
+  const timeline = [...merged.values()]
+    .sort((left, right) => Number(left?.seq || 0) - Number(right?.seq || 0))
+    .slice(-160)
+  return {
+    metrics: null,
+    memoryProposals: Array.isArray(snapshot.memory_proposals) ? snapshot.memory_proposals : [],
+    recallRuns: Array.isArray(snapshot.recall_runs) ? snapshot.recall_runs : [],
+    workflowRuns: Array.isArray(snapshot.workflow_runs) ? snapshot.workflow_runs : [],
+    recoveryItems: Array.isArray(snapshot.recovery_items) ? snapshot.recovery_items : [],
+    task: snapshot.task || null,
+    timeline,
+    waitingActions: Array.isArray(snapshot.waiting_actions) ? snapshot.waiting_actions : [],
+    activeRuntimeRuns: Array.isArray(snapshot.active_runtime_runs) ? snapshot.active_runtime_runs : [],
+  }
 }
 
-function WorkbenchCard({
-  icon,
-  label,
-  value,
-  meta,
-}: {
-  icon: ReactNode
-  label: string
-  value: string
-  meta: string
-}) {
-  return (
-    <section className="rounded-[1.15rem] border border-white/62 bg-bg-card/64 p-3 shadow-sm">
-      <div className="mb-1.5 flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-text-muted">
-          <span className="text-brand-600">{icon}</span>
-          <span className="truncate">{label}</span>
-        </div>
-        <span className="shrink-0 rounded-full bg-bg-page px-2 py-0.5 text-[10px] font-medium text-text-muted">{meta}</span>
-      </div>
-      <p className="line-clamp-4 text-xs leading-6 text-text-normal">{value}</p>
-    </section>
-  )
+function taskStatusLabel(status: unknown, fallback: string, t: (zh: string, en: string) => string): string {
+  const value = String(status || '').toLowerCase()
+  if (value === 'running') return t('进行中', 'Live')
+  if (value === 'waiting_user') return t('等待确认', 'Waiting')
+  if (value === 'paused') return t('已暂停', 'Paused')
+  if (value === 'completed') return t('已完成', 'Completed')
+  if (value === 'failed') return t('失败', 'Failed')
+  if (value === 'cancelled') return t('已取消', 'Cancelled')
+  return fallback
+}
+
+function activityFilters(t: (zh: string, en: string) => string): Array<{ id: ActivityFilter; label: string }> {
+  return [
+    { id: 'all', label: t('全部', 'All') },
+    { id: 'tool', label: t('工具', 'Tools') },
+    { id: 'memory', label: t('记忆', 'Memory') },
+    { id: 'decision', label: t('决策', 'Decisions') },
+    { id: 'error', label: t('异常', 'Errors') },
+  ]
+}
+
+function activityCategory(node: NormalizedTraceNode): Exclude<ActivityFilter, 'all'> {
+  const status = node.nodeStatus.toLowerCase()
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) return 'error'
+
+  const kind = node.kind.toLowerCase()
+  if (['tool', 'search', 'action', 'mcp', 'browser', 'shell'].some((value) => kind.includes(value))) return 'tool'
+  if (['memory', 'recall'].some((value) => kind.includes(value))) return 'memory'
+  return 'decision'
+}
+
+function normalizeActivities(activities: any[], t: (zh: string, en: string) => string): NormalizedTraceNode[] {
+  return activities.map((activity: any, index: number) => {
+    const kind = String(activity?.kind || 'runtime').toLowerCase()
+    const status = String(activity?.status || 'observed').toLowerCase()
+    const subject = readableText(activity?.subject)
+    const summary = readableText(activity?.summary)
+    const detail = asRecord(activity?.detail)
+    const resultMetadata = asRecord(detail.result_metadata)
+    const presentationKind = String(resultMetadata.kind || '').toLowerCase()
+    const completed = ['completed', 'complete', 'finished', 'succeeded', 'success'].includes(status)
+    const failed = ['failed', 'error'].includes(status)
+    const labels: Record<string, [string, string]> = {
+      task: [completed ? '任务已完成' : failed ? '任务遇到问题' : '任务状态已更新', completed ? 'Task completed' : failed ? 'Task needs attention' : 'Task state updated'],
+      workflow: [completed ? '工作流步骤已完成' : failed ? '工作流步骤失败' : '正在推进工作流', completed ? 'Workflow step completed' : failed ? 'Workflow step failed' : 'Advancing workflow'],
+      tool: [completed ? '工具调用完成' : failed ? '工具调用失败' : '正在调用工具', completed ? 'Tool call completed' : failed ? 'Tool call failed' : 'Calling tool'],
+      memory: [completed ? '记忆处理完成' : failed ? '记忆处理失败' : '正在处理记忆', completed ? 'Memory operation completed' : failed ? 'Memory operation failed' : 'Processing memory'],
+      reasoning: [completed ? '分析完成' : failed ? '分析遇到问题' : '正在分析下一步', completed ? 'Reasoning completed' : failed ? 'Reasoning needs attention' : 'Reasoning about next step'],
+      artifact: [completed ? '工作成果已生成' : failed ? '工作成果生成失败' : '正在更新工作成果', completed ? 'Artifact produced' : failed ? 'Artifact failed' : 'Updating artifact'],
+      runtime: ['状态已更新', 'State updated'],
+    }
+    const label = presentationKind === 'web_search'
+      ? [completed ? '网页搜索完成' : failed ? '网页搜索失败' : '正在搜索网页', completed ? 'Web search completed' : failed ? 'Web search failed' : 'Searching the web']
+      : labels[kind] || labels.runtime
+    const timestamp = activity?.occurred_at ? new Date(activity.occurred_at) : new Date()
+    const sourceNames = Array.isArray(resultMetadata.sources)
+      ? resultMetadata.sources.map((source: any) => readableText(source?.title || source?.url)).filter(Boolean).slice(0, 2)
+      : []
+    const searchDescription = presentationKind === 'web_search'
+      ? compactText([
+          readableText(resultMetadata.query),
+          resultMetadata.count !== undefined ? t(`${resultMetadata.count} 个来源`, `${resultMetadata.count} sources`) : '',
+          resultMetadata.provider ? t(`经由 ${resultMetadata.provider}`, `via ${resultMetadata.provider}`) : '',
+          ...sourceNames,
+        ].filter(Boolean).join(' · '), 200)
+      : ''
+    return {
+      id: String(activity?.activity_id || activity?.event_id || activity?.seq || index),
+      title: t(label[0], label[1]),
+      desc: searchDescription || compactText([subject, summary].filter(Boolean).join(' · ') || t('状态已更新', 'State updated'), 200),
+      nodeStatus: status,
+      kind: presentationKind === 'web_search' ? 'search' : kind,
+      time: timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    }
+  })
 }
 
 function normalizeNodes(tree: any, t: (zh: string, en: string) => string): NormalizedTraceNode[] {
@@ -815,26 +919,6 @@ function isOpenRunStatus(status: unknown): boolean {
   return !['completed', 'succeeded', 'success', 'failed', 'cancelled', 'canceled', 'stopped', 'done'].includes(value)
 }
 
-async function readJson(responsePromise: Promise<Response>): Promise<any | null> {
-  try {
-    const response = await responsePromise
-    if (!response.ok) return null
-    return await response.json().catch(() => null)
-  } catch {
-    return null
-  }
-}
-
-function extractItems(data: any, keys: string[]): any[] {
-  if (Array.isArray(data)) return data
-  if (!data || typeof data !== 'object') return []
-  for (const key of keys) {
-    const value = data[key]
-    if (Array.isArray(value)) return value
-  }
-  return []
-}
-
 function readMetricHint(metrics: any, keys: string[]): string {
   if (!metrics || typeof metrics !== 'object') return ''
   for (const key of keys) {
@@ -887,25 +971,27 @@ type TraceItemProps = {
 }
 
 function TraceItem({ time, title, desc, icon, status, statusLabel, kind = 'thought' }: TraceItemProps) {
+  const failed = ['failed', 'error'].includes(String(statusLabel || '').toLowerCase())
   return (
-    <div className="relative pl-10 opacity-100">
-      <div className={`absolute left-0 top-1 z-10 flex h-6 w-6 items-center justify-center rounded-full border bg-bg-card shadow-sm ${
-        status === 'active' ? 'border-brand-500 shadow-[0_0_12px_rgba(94,90,83,0.28)]' : 'border-brand-100 text-xs font-bold text-brand-600'
+    <div className="relative border-b border-black/5 py-3 pl-8 last:border-b-0">
+      <div className={`absolute left-0 top-[15px] z-10 flex h-[19px] w-[19px] items-center justify-center rounded-full border bg-bg-card ${
+        failed
+          ? 'border-red-200 text-red-600'
+          : status === 'active'
+            ? 'border-brand-500 text-brand-700'
+            : 'border-black/10 text-text-muted'
       }`}>
         {icon}
       </div>
-      <div className="rounded-2xl border border-white/55 bg-bg-card/70 p-3 shadow-sm">
-        <div className="mb-1 flex items-start justify-between gap-2">
-          <h4 className={`min-w-0 flex-1 text-[13px] font-semibold leading-snug ${status === 'active' ? 'text-brand-700' : 'text-text-strong'}`}>
-            {title}
-          </h4>
-          <span className="shrink-0 font-mono text-[10px] text-text-muted">{time}</span>
-        </div>
-        <div className="mb-2 flex gap-1.5 text-[10px] font-medium text-text-muted">
-          <span className="rounded-full bg-bg-page px-2 py-0.5">{kind}</span>
-          <span className="rounded-full bg-bg-page px-2 py-0.5">{statusLabel || status}</span>
-        </div>
-        <p className="line-clamp-4 text-xs leading-relaxed text-text-muted">{desc}</p>
+      <div className="flex items-start justify-between gap-2">
+        <h4 className={`min-w-0 flex-1 text-[13px] font-semibold leading-snug ${failed ? 'text-red-700' : status === 'active' ? 'text-brand-700' : 'text-text-strong'}`}>
+          {title}
+        </h4>
+        <span className="shrink-0 font-mono text-[10px] text-text-muted">{time}</span>
+      </div>
+      <p className="mt-1 text-xs leading-5 text-text-muted">{desc}</p>
+      <div className="mt-1.5 text-[10px] text-text-muted">
+        {kind}{(status === 'active' || failed) ? ` · ${statusLabel || status}` : ''}
       </div>
     </div>
   )

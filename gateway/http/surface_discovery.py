@@ -8,15 +8,6 @@ from gateway.protocol_contracts import build_ws_method_contracts
 
 
 def _route_stability(path: str, methods: list[str]) -> str:
-    method_set = set(methods)
-    if path == "/api/user/config":
-        return "legacy"
-    if path == "/api/config" and "POST" in method_set:
-        return "compat"
-    if path.startswith("/api/ops/") or path.startswith("/api/config/"):
-        return "stable"
-    if path.startswith("/api/chat") or path.startswith("/api/memory/"):
-        return "stable"
     return "stable"
 
 
@@ -65,6 +56,8 @@ def build_surface_payload(routes: Iterable[Any]) -> Dict[str, Any]:
                 "event_type_count": len(ws_events),
             },
             "contracts": {
+                "openapi": "/openapi.json",
+                "public_schema": "/api/ops/schema",
                 "protocol": "/api/ops/protocol",
                 "abstractions": "/api/ops/abstractions",
                 "ws_methods": "/api/ops/methods",
@@ -77,8 +70,6 @@ def build_surface_payload(routes: Iterable[Any]) -> Dict[str, Any]:
             },
             "stability_levels": {
                 "stable": "recommended for long-term integrations",
-                "compat": "supported compatibility surface; canonical alternative exists",
-                "legacy": "deprecated compatibility surface",
             },
             "cli_reference": {
                 "ops.capabilities": {"command": "promethea ops capabilities", "http": "GET /api/ops/capabilities"},

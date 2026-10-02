@@ -8,7 +8,7 @@ import pytest
 
 from gateway.protocol import RequestType
 from gateway.server import GatewayServer
-from gateway.tool_service import ToolService
+from gateway.capability_service import CapabilityService
 from gateway.workflow_engine import WorkflowEngine
 from gateway.workspace_service import WorkspaceService
 
@@ -178,7 +178,10 @@ async def test_business_plus_chat_confirmation_roundtrip(monkeypatch):
 async def test_business_plus_workflow_pause_approve_resume(tmp_path: Path):
     server = GatewayServer()
     workspace = WorkspaceService(base_dir=str(tmp_path / "workspace"))
-    engine = WorkflowEngine(workspace_service=workspace)
+    engine = WorkflowEngine(
+        workspace_service=workspace,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     server.workspace_service = workspace
     server.workflow_engine = engine
 
@@ -248,12 +251,15 @@ async def test_business_plus_workflow_pause_approve_resume(tmp_path: Path):
 async def test_business_plus_batch_tool_and_workflow_visibility(tmp_path: Path):
     server = GatewayServer()
     workspace = WorkspaceService(base_dir=str(tmp_path / "workspace"))
-    engine = WorkflowEngine(workspace_service=workspace)
-    tools = ToolService(event_emitter=None)
+    engine = WorkflowEngine(
+        workspace_service=workspace,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
+    tools = CapabilityService(event_emitter=None)
     tools.register_tool(_EchoTool())
     server.workspace_service = workspace
     server.workflow_engine = engine
-    server.tool_service = tools
+    server.capability_service = tools
 
     define = await server.handle_http_request(
         method=RequestType.WORKFLOW_DEFINE,

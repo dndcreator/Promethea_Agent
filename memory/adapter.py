@@ -172,28 +172,16 @@ class MemoryAdapter:
                 0, int(getattr(warm, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
             )
 
-        hip = getattr(config.memory, "hippocampus", None)
-        if hip is not None and bool(getattr(hip, "enabled", True)):
-            self._maintenance_defaults['cluster_every_messages'] = max(
-                1, int(getattr(hip, 'cluster_every_messages', self._maintenance_defaults['cluster_every_messages']))
-            )
-            self._maintenance_defaults['cluster_min_interval_s'] = max(
-                0, int(getattr(hip, 'cluster_min_interval_s', self._maintenance_defaults['cluster_min_interval_s']))
-            )
-            self._maintenance_defaults['idle_cluster_delay_s'] = max(
-                10, int(getattr(hip, 'idle_cluster_delay_s', self._maintenance_defaults['idle_cluster_delay_s']))
-            )
-            self._maintenance_defaults['idle_cluster_min_messages'] = max(
-                1, int(getattr(hip, 'idle_cluster_min_messages', self._maintenance_defaults['idle_cluster_min_messages']))
-            )
-            self._maintenance_defaults['idle_cluster_min_interval_s'] = max(
-                0, int(getattr(hip, 'idle_cluster_min_interval_s', self._maintenance_defaults['idle_cluster_min_interval_s']))
-            )
+        cold = getattr(config.memory, "cold_layer", None)
+        if cold is not None:
             self._maintenance_defaults['summary_min_interval_s'] = max(
-                0, int(getattr(hip, 'summary_min_interval_s', self._maintenance_defaults['summary_min_interval_s']))
+                0, int(getattr(cold, 'summary_min_interval_s', self._maintenance_defaults['summary_min_interval_s']))
             )
+
+        forgetting = getattr(config.memory, "forgetting", None)
+        if forgetting is not None:
             self._maintenance_defaults['decay_interval_s'] = max(
-                60, int(getattr(hip, 'decay_interval_s', self._maintenance_defaults['decay_interval_s']))
+                60, int(getattr(forgetting, 'decay_interval_s', self._maintenance_defaults['decay_interval_s']))
             )
 
     def _init_raw_log_system(self, config):
@@ -895,6 +883,15 @@ class MemoryAdapter:
         if self.store is None:
             return {"ok": False, "reason": "store_unavailable", "imported": {"memory_items": 0, "nodes": 0, "edges": 0}}
         return self.store.import_mef(payload, merge=merge)
+
+    def replace_user_mef(self, payload: Dict[str, Any], *, user_id: str) -> Dict[str, Any]:
+        """Replace one user's memory scope without disturbing other users."""
+        if not self.store:
+            return {"ok": False, "reason": "store_unavailable"}
+        if not hasattr(self.store, "clear_user_data"):
+            return {"ok": False, "reason": "backend_does_not_support_scoped_replace"}
+        self.store.clear_user_data(user_id=user_id)
+        return self.store.import_mef(payload, merge=True)
 
     def list_memory_entries(
         self,

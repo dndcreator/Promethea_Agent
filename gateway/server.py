@@ -23,7 +23,7 @@ from channels.base import MessageType as ChannelMessageType
 from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
 from .connection import ConnectionManager, Connection
 from .events import EventEmitter
-from .tool_service import ToolService, ToolInvocationContext
+from .capability_service import CapabilityService, ToolInvocationContext
 from .tool_policy import ToolPolicyEngine
 from .memory_service import MemoryService
 from .conversation_service import ConversationService
@@ -88,14 +88,11 @@ class GatewayServer:
         self.message_manager = None
         self.mcp_manager = None
 
-        # Computer-control service, registered by GatewayIntegration
-        # (implements execute_computer_action / get_computer_status).
-        self.computer_service = None
-
-        # Four first-class subsystems: tools, memory, conversation, config.
+        # First-class runtime services. CapabilityService owns governed execution
+        # across tools, sandboxes, computer controllers, and environments.
         # They communicate over the event bus and are initialized via
         # GatewayIntegration.
-        self.tool_service: Optional[ToolService] = None
+        self.capability_service: Optional[CapabilityService] = None
         self.tool_policy_engine = ToolPolicyEngine()
         self.memory_service: Optional[MemoryService] = None
         self.reasoning_service: Optional[ReasoningService] = None
@@ -103,15 +100,35 @@ class GatewayServer:
         self.conversation_service: Optional[ConversationService] = None
         self.config_service: Optional[ConfigService] = None
         self.org_context_service: Optional[Any] = None
+        self.self_model_service: Optional[Any] = None
         self.self_evolve_module: Optional[Any] = None
         self.workspace_service: Optional[WorkspaceService] = None
         self.workflow_engine: Optional[Any] = None
+        self.task_service: Optional[Any] = None
+        self.task_runtime: Optional[Any] = None
+        self.workbench_projection: Optional[Any] = None
         
-        # Backward-compat compatibility: keep legacy attributes pointing to
-        # new services.
-        self.memory_system = None  # alias to memory_service.memory_adapter
-        self.conversation_core = None  # alias to conversation_service.conversation_core
-        
+    def ensure_capability_service(self) -> CapabilityService:
+        """Return the single governed capability runtime with current dependencies bound."""
+        if self.capability_service is None:
+            self.capability_service = CapabilityService(
+                event_emitter=self.event_emitter,
+                mcp_manager=self.mcp_manager,
+                config_provider=(
+                    self.config_service.get_merged_config if self.config_service is not None else None
+                ),
+                workspace_service=self.workspace_service,
+            )
+        else:
+            self.capability_service.event_emitter = self.event_emitter
+            if self.mcp_manager is not None:
+                self.capability_service.mcp_manager = self.mcp_manager
+            if self.workspace_service is not None:
+                self.capability_service.workspace_service = self.workspace_service
+            if self.config_service is not None:
+                self.capability_service.config_provider = self.config_service.get_merged_config
+        return self.capability_service
+
     def _register_default_handlers(self):
         """Register default request handlers."""
         self._handlers[RequestType.CONNECT] = self._handle_connect
@@ -373,7 +390,7 @@ class GatewayServer:
         elif "workflow" in msg:
             dependency = "workflow_engine"
         elif "tool" in msg:
-            dependency = "tool_service"
+            dependency = "capability_service"
         elif "mcp" in msg:
             dependency = "mcp_manager"
         elif "config" in msg:
@@ -427,15 +444,17 @@ class GatewayServer:
     def get_services_health(self) -> Dict[str, Any]:
         """Return service readiness/availability snapshot."""
         return {
-            "tool_service": bool(self.tool_service),
+            "capability_service": bool(self.capability_service),
             "memory_service": bool(self.memory_service and self.memory_service.is_enabled()),
             "reasoning_service": bool(self.reasoning_service and self.reasoning_service.is_enabled()),
             "conversation_service": bool(self.conversation_service),
             "config_service": bool(self.config_service),
             "org_context_service": bool(self.org_context_service),
+            "self_model_service": bool(self.self_model_service),
             "self_evolve_module": bool(self.self_evolve_module),
             "workspace_service": bool(self.workspace_service),
             "workflow_engine": bool(self.workflow_engine),
+            "task_service": bool(self.task_service),
             "message_manager": bool(self.message_manager),
             "agent_manager": bool(self.agent_manager),
             "mcp_manager": bool(self.mcp_manager),
@@ -552,17 +571,21 @@ class GatewayServer:
                     error="Missing 'action' parameter"
                 )
             
-            # Execute via injected computer_service to avoid circular imports.
-            integration = getattr(self, "computer_service", None)
-            
-            if not integration:
-                return GatewayProtocol.create_response(
-                    request.id,
-                    False,
-                    error="Computer control service not initialized"
+            from computer.execution_context import bind_workspace
+
+            user_id = self._resolve_request_user_id(connection, request)
+            session_id = request.params.get("session_id")
+            if session_id and not self._ensure_session_access(session_id, user_id):
+                raise PermissionError("forbidden session access")
+            if self.workspace_service is None:
+                raise RuntimeError("Workspace service is not initialized")
+            handle = self.workspace_service.resolve_workspace_handle(
+                user_id=user_id, workspace_id=request.params.get("workspace_id") or session_id or "default",
+            )
+            with bind_workspace(handle):
+                result = await self.ensure_capability_service().execute_computer_action(
+                    capability, action, params,
                 )
-            
-            result = await integration.execute_computer_action(capability, action, params)
             
             return GatewayProtocol.create_response(
                 request.id,
@@ -586,16 +609,7 @@ class GatewayServer:
     async def _handle_computer_status(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
         """Get current status of the computer-control service."""
         try:
-            integration = getattr(self, "computer_service", None)
-            
-            if not integration:
-                return GatewayProtocol.create_response(
-                    request.id,
-                    False,
-                    error="Computer control service not initialized"
-                )
-            
-            status = integration.get_computer_status()
+            status = self.ensure_capability_service().get_computer_status()
             
             return GatewayProtocol.create_response(
                 request.id,
@@ -1048,9 +1062,9 @@ class GatewayServer:
     def _enforce_tool_policy(self, *, entry_tool_name: str, params: Dict[str, Any], user_id: Optional[str]) -> None:
         if not self.tool_policy_engine:
             return
-        # Backward-compat: local tools are first-party extensions and should stay
-        # callable by default unless the runtime ToolService policy blocks later.
-        if self.tool_service and entry_tool_name in getattr(self.tool_service, "_registered_tools", {}):
+        # Local tools are first-party extensions and stay callable by default unless
+        # the runtime CapabilityService policy blocks them later.
+        if self.capability_service and entry_tool_name in getattr(self.capability_service, "_registered_tools", {}):
             return
         user_cfg = self.config_service.get_merged_config(user_id) if (self.config_service and user_id) else {}
         provider_id = self._resolve_provider_id(user_cfg)
@@ -1101,28 +1115,20 @@ class GatewayServer:
         run_context: Optional[Any] = None,
         user_config: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        agent_type = str(args.get("agentType", "mcp")).lower()
-        if agent_type == "agent":
-            if not self.agent_manager:
-                raise RuntimeError("agent manager not initialized")
-            agent_name = args.get("agent_name")
-            prompt = args.get("prompt")
-            if not agent_name or not prompt:
-                raise ValueError("missing agent_name or prompt for agent tool call")
-            result = await self.agent_manager.call_agent(agent_name, prompt, session_id)
-            if result.get("status") != "success":
-                raise RuntimeError(result.get("error") or "agent call failed")
-            return result.get("result", "")
-
-        if not self.tool_service:
-            self.tool_service = ToolService(self.event_emitter)
+        if not self.capability_service:
+            raise RuntimeError("tool service not initialized")
         ctx = ToolInvocationContext(
             session_id=session_id,
             user_id=user_id,
             source="chat",
-            metadata={"request_id": request_id, "connection_id": connection_id},
+            metadata={
+                "request_id": request_id,
+                "connection_id": connection_id,
+                "run_context": run_context,
+                "user_config": user_config,
+            },
         )
-        return await self.tool_service.call_tool(
+        return await self.capability_service.call_tool(
             tool_name=tool_name,
             params=args,
             ctx=ctx,
@@ -1291,15 +1297,14 @@ class GatewayServer:
     async def _handle_tools_list(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
         """Handle tool-list query.
 
-        External protocol remains stable; internally we route via ToolService:
+        External protocol remains stable; internally we route via CapabilityService:
         - Prefer listing MCP / Agent-handoff services first
         - Also include locally registered tools when present
         """
         try:
-            if not self.tool_service:
-                self.tool_service = ToolService(self.event_emitter)
+            capability_service = self.ensure_capability_service()
 
-            tools_payload = await self.tool_service.list_tools()
+            tools_payload = await capability_service.list_tools()
             try:
                 user_id = self._resolve_request_user_id(connection, request)
                 run_context = SimpleNamespace(
@@ -1314,12 +1319,12 @@ class GatewayServer:
                     if self.config_service and user_id
                     else None
                 )
-                catalog = await self.tool_service.get_tool_catalog(
+                catalog = await capability_service.get_tool_catalog(
                     run_context=run_context,
                     user_config=user_cfg if isinstance(user_cfg, dict) else None,
                 )
             except Exception:
-                catalog = await self.tool_service.get_tool_catalog()
+                catalog = await capability_service.get_tool_catalog()
             callable_now = sum(1 for row in catalog if bool((row or {}).get("callable_now")))
             tools_payload["catalog"] = catalog
             tools_payload["catalog_total"] = len(catalog)
@@ -1336,11 +1341,10 @@ class GatewayServer:
         - params.tool_name: tool / service name (required)
         - params.params:    concrete args (may include service_name / tool_name / business args)
 
-        Internally dispatch via ToolService and emit TOOL_CALL_* events.
+        Internally dispatch via CapabilityService and emit TOOL_CALL_* events.
         """
         try:
-            if not self.tool_service:
-                self.tool_service = ToolService(self.event_emitter)
+            capability_service = self.ensure_capability_service()
 
             tool_name = request.params.get("tool_name")
             tool_params = request.params.get("params", {})
@@ -1376,7 +1380,7 @@ class GatewayServer:
                 else None
             )
 
-            result = await self.tool_service.call_tool(
+            result = await capability_service.call_tool(
                 tool_name=tool_name,
                 params=tool_params,
                 ctx=ctx,
@@ -1921,6 +1925,22 @@ class GatewayServer:
                 user_id=user_id,
             )
             result = response.get("content", "")
+            followup = self.message_manager.add_followup(
+                params.session_id,
+                user_id=user_id,
+                message_id=params.message_id,
+                selected_text=params.selected_text,
+                start_offset=params.start_offset,
+                end_offset=params.end_offset,
+                query_type=params.query_type,
+                custom_query=params.custom_query,
+                query=user_query,
+                response=result,
+            )
+            if not followup:
+                return GatewayProtocol.create_response(
+                    request.id, False, error="Selected text is no longer available in this session"
+                )
 
             return GatewayProtocol.create_response(
                 request.id,
@@ -1928,6 +1948,7 @@ class GatewayServer:
                 {
                     "query": user_query,
                     "response": result,
+                    "followup": followup,
                 },
             )
         except Exception as e:
@@ -2192,6 +2213,19 @@ class GatewayServer:
             user_id = self._resolve_request_user_id(connection, request)
             session_id = str(params.get("session_id") or "default_session")
             workspace_id = str(params.get("workspace_id") or session_id)
+            detached = bool(params.get("detached", True))
+            if detached and self.task_runtime is not None:
+                metadata = dict(params.get("run_metadata") or {})
+                run = self.task_runtime.start_workflow(
+                    task_id=metadata.get("task_id"),
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    run_context=request.params,
+                    run_metadata=metadata,
+                )
+                return GatewayProtocol.create_response(request.id, True, payload={"run": run, "detached": True})
             run = await self.workflow_engine.start_workflow_async(
                 workflow_id=workflow_id,
                 session_id=session_id,
@@ -2200,7 +2234,7 @@ class GatewayServer:
                 run_context=request.params,
                 run_metadata=params.get("run_metadata") or {},
             )
-            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump()})
+            return GatewayProtocol.create_response(request.id, True, payload={"run": run.model_dump(), "detached": False})
         except Exception as e:
             logger.error(f"Error start workflow: {e}")
             return GatewayProtocol.create_response(request.id, False, error=str(e))

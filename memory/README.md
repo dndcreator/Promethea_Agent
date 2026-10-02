@@ -6,7 +6,7 @@ The `memory` module transforms raw conversation turns into long-lived structured
 
 - reliable writes
 - useful retrieval
-- sustainable maintenance through clustering, summarization, and forgetting
+- sustainable maintenance through clustering, summarization, forgetting, and reflective replay
 
 ## Key Files
 
@@ -15,6 +15,7 @@ The `memory` module transforms raw conversation turns into long-lived structured
 - `memory/warm_layer.py`: clustering and stabilization
 - `memory/cold_layer.py`: summarization and compression
 - `memory/forgetting.py`: decay and cleanup policy
+- `memory/hippocampus/replay.py`: durable, idle-time reflection over already accepted memory
 - `memory/auto_recall.py`: retrieval logic and layer ranking
 - `memory/llm_extractor.py`: fact/entity extraction
 - `memory/session_scope.py`: user/session scoping helpers
@@ -30,6 +31,7 @@ Write path:
 3. Hot-layer nodes are persisted.
 4. Warm clustering and cold summarization run asynchronously.
 5. Forgetting applies decay and cleanup policy.
+6. Hippocampus replay periodically rereads accepted memory and writes bounded, revisable insights through the same adapter.
 
 Recall path:
 
@@ -69,6 +71,10 @@ If write and recall are healthy, cross-session recall should retrieve age=26.
 - Isolation boundary is user-level, not session-level.
 - Recall should primarily solve long-horizon context gaps.
 - Extraction failures should not crash primary chat flow.
+- Hippocampus replay is maintenance, not a fourth storage layer. It does not replace the write gate, warm clustering, cold summarization, or forgetting.
+- Replay starts only while foreground runs and memory synchronization are idle. It is checkpointed, interruptible, restart-resumable, and backend-neutral.
+- A cycle becomes due after enough new memories, after the maximum wait for a smaller pending set, or on the low-frequency revisit schedule. `min_interval_s` still limits repeated work.
+- Replay-generated insights carry internal basis and fingerprint metadata so later cycles can revise them without overwriting source memories.
 
 ## Change Notes
 

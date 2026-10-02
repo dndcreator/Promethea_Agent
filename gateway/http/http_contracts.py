@@ -55,12 +55,6 @@ def _core_contracts() -> List[Dict[str, Any]]:
                 "options.hot_apply": "bool",
                 "validate": "bool",
             },
-            "compat_aliases": {
-                "config_data": "config",
-                "hot_reload": "options.hot_apply",
-                "hot_apply": "options.hot_apply",
-                "validate_config": "validate",
-            },
             "response": {
                 "success": "bool",
                 "message": "string",
@@ -158,6 +152,16 @@ def _core_contracts() -> List[Dict[str, Any]]:
             "auth_required": True,
             "request": {},
             "response": {"status": "success", "skills": "array"},
+        },
+        {
+            "id": "ops.schema",
+            "path": "/api/ops/schema",
+            "method": "GET",
+            "domain": "ops",
+            "stability": "stable",
+            "auth_required": False,
+            "request": {},
+            "response": {"$schema": "json-schema", "$defs": "public runtime objects"},
         },
         {
             "id": "ops.protocol",

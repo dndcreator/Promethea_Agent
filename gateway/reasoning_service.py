@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import time
@@ -18,7 +18,7 @@ from .reasoning_template_memory import ReasoningTemplateMemory
 from .reasoning_tree_store import ReasoningTreeHistoryStore
 from .reasoning_tree_runtime import ReasoningTreeRuntime
 from .reasoning_tool_runtime import ReasoningToolCatalogResolver, ReasoningToolQualityTracker
-from .tool_service import ToolInvocationContext
+from .capability_service import ToolInvocationContext
 from .tool_strategy import ToolStrategyEngine
 from .reasoning_models import ReasoningNode, ReasoningTree
 from .reasoning_utils import (
@@ -51,7 +51,7 @@ class ReasoningService:
         event_emitter: Optional[EventEmitter] = None,
         conversation_core: Optional[Any] = None,
         memory_service: Optional[Any] = None,
-        tool_service: Optional[Any] = None,
+        capability_service: Optional[Any] = None,
         workflow_engine: Optional[Any] = None,
         config_service: Optional[Any] = None,
         template_memory: Optional[ReasoningTemplateMemory] = None,
@@ -59,7 +59,7 @@ class ReasoningService:
         self.event_emitter = event_emitter
         self.conversation_core = conversation_core
         self.memory_service = memory_service
-        self.tool_service = tool_service
+        self.capability_service = capability_service
         self.workflow_engine = workflow_engine
         self.config_service = config_service
         if template_memory is not None:
@@ -539,6 +539,8 @@ class ReasoningService:
         if run_context is not None:
             trace_id = getattr(run_context, "trace_id", None)
             request_id = getattr(run_context, "request_id", None)
+            task_id = getattr(run_context, "task_id", None)
+            run_id = getattr(run_context, "run_id", None)
             session_value = getattr(run_context, "session_id", None)
             user_value = getattr(run_context, "user_id", None)
             session_state = getattr(run_context, "session_state", None)
@@ -552,6 +554,10 @@ class ReasoningService:
                 data["trace_id"] = str(trace_id)
             if request_id:
                 data["request_id"] = str(request_id)
+            if task_id:
+                data["task_id"] = str(task_id)
+            if run_id:
+                data["run_id"] = str(run_id)
             if session_value:
                 data["session_id"] = str(session_value)
             if user_value:
@@ -561,6 +567,33 @@ class ReasoningService:
         if user_id and "user_id" not in data:
             data["user_id"] = str(user_id)
         return data
+
+    @staticmethod
+    def _self_model_prompt(run_context: Optional[Any]) -> str:
+        if isinstance(run_context, dict):
+            context = run_context.get("self_model_context")
+            cognition = run_context.get("cognition_snapshot")
+        else:
+            context = getattr(run_context, "self_model_context", None) if run_context is not None else None
+            cognition = getattr(run_context, "cognition_snapshot", None) if run_context is not None else None
+        parts: List[str] = []
+        if isinstance(context, dict):
+            prompt_text = str(context.get("prompt_text") or "").strip()
+            if prompt_text:
+                parts.append(prompt_text)
+        if isinstance(cognition, dict):
+            synthesis = str(cognition.get("synthesis") or "").strip()
+            if synthesis:
+                parts.append(f"Active cognition:\n{synthesis}")
+            critical = cognition.get("critical_items") if isinstance(cognition.get("critical_items"), list) else []
+            critical_lines = [
+                str(item.get("content") or "").strip()
+                for item in critical[:6]
+                if isinstance(item, dict) and str(item.get("content") or "").strip()
+            ]
+            if critical_lines:
+                parts.append("Critical cognition:\n" + "\n".join(f"- {line}" for line in critical_lines))
+        return "\n\n".join(parts)
     async def _emit_node(self, tree: ReasoningTree, node: ReasoningNode, event: EventType) -> None:
         await self._emit(
             event,
@@ -596,12 +629,21 @@ class ReasoningService:
         ):
             return {"used_reasoning": False}
 
-        gate = await self._gate_reasoning(
-            user_message=user_message,
-            recent_messages=recent_messages,
-            user_config=user_config,
-            user_id=user_id,
-        )
+        if force_reasoning:
+            gate = {
+                "needs_reasoning": True,
+                "needs_memory": False,
+                "needs_tools": False,
+                "reason": "requested_by_main_model",
+                "source": "main_model_control_loop",
+            }
+        else:
+            gate = await self._gate_reasoning(
+                user_message=user_message,
+                recent_messages=recent_messages,
+                user_config=user_config,
+                user_id=user_id,
+            )
         template_match = {"matched": False, "score": 0.0, "template": None}
         strategy_hints: Dict[str, Any] = {}
         if self.template_memory:
@@ -615,12 +657,6 @@ class ReasoningService:
                 logger.debug("ReasoningService: template memory unavailable: {}", e)
 
         is_complex = self._to_bool(gate.get("needs_reasoning", False), default=False)
-        if force_reasoning and not is_complex:
-            gate = dict(gate)
-            gate["needs_reasoning"] = True
-            gate["reason"] = str(gate.get("reason") or "prompt_policy_requested_reasoning")
-            gate["source"] = "prompt_policy"
-            is_complex = True
         needs_memory = self._to_bool(gate.get("needs_memory", False), default=False)
         needs_tools = self._to_bool(gate.get("needs_tools", False), default=False)
         merged_hints = dict(strategy_hints or {})
@@ -692,6 +728,7 @@ class ReasoningService:
                         policy["plan_max_steps"],
                         policy["beam_width"] * policy["branch_factor"],
                     ),
+                    self_model_context=self._self_model_prompt(run_context),
                 )
                 steps = self._merge_steps(template_steps, generated_steps, policy["plan_max_steps"])
             else:
@@ -977,14 +1014,6 @@ class ReasoningService:
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
     ) -> Dict[str, Any]:
-        heuristic = self._heuristic_gate(user_message)
-        # Fast path: for clearly simple turns, skip the extra LLM gate call.
-        if (
-            not self._to_bool(heuristic.get("needs_reasoning"), default=False)
-            and not self._to_bool(heuristic.get("needs_memory"), default=False)
-            and not self._to_bool(heuristic.get("needs_tools"), default=False)
-        ):
-            return heuristic
         prompt = (
             "You are a reasoning gate. Decide whether the user task needs an explicit "
             "system-level reasoning tree before answering. Return strict JSON with keys: "
@@ -998,8 +1027,7 @@ class ReasoningService:
                     "role": "user",
                     "content": (
                         f"User message:\n{user_message}\n\n"
-                        f"Recent context:\n{recent_text}\n\n"
-                        f"Heuristic hint:\n{json.dumps(heuristic, ensure_ascii=False)}"
+                        f"Recent context:\n{recent_text}"
                     ),
                 },
             ],
@@ -1007,55 +1035,20 @@ class ReasoningService:
             user_id=user_id,
         )
         if not llm_result:
-            return heuristic
-        merged = dict(heuristic)
-        merged.update({k: v for k, v in llm_result.items() if v is not None})
-        merged["needs_reasoning"] = self._to_bool(
-            merged.get("needs_reasoning", heuristic["needs_reasoning"]),
-            default=heuristic["needs_reasoning"],
-        )
-        merged["needs_memory"] = self._to_bool(
-            merged.get("needs_memory", heuristic["needs_memory"]),
-            default=heuristic["needs_memory"],
-        )
-        merged["needs_tools"] = self._to_bool(
-            merged.get("needs_tools", heuristic["needs_tools"]),
-            default=heuristic["needs_tools"],
-        )
-        return merged
-
-    def _heuristic_gate(self, user_message: str) -> Dict[str, Any]:
-        text = (user_message or "").strip().lower()
-        multi_step_markers = (
-            "step by step",
-            "plan",
-            "debug",
-            "compare",
-            "decision",
-            "architecture",
-            "design",
-            "investigate",
-            "troubleshoot",
-            "tradeoff",
-            "implementation",
-        )
-        tool_markers = ("tool", "browser", "file", "command", "shell", "run", "search")
-        memory_markers = ("my preference", "remember", "history", "earlier", "before")
-        needs_reasoning = (
-            len(text) > 120
-            or any(marker in text for marker in multi_step_markers)
-            or text.count("\n") >= 2
-        )
+            return {
+                "needs_reasoning": False,
+                "complexity": "unknown",
+                "needs_memory": False,
+                "needs_tools": False,
+                "reason": "model_gate_unavailable",
+                "source": "neutral_default",
+            }
         return {
-            "needs_reasoning": needs_reasoning,
-            "complexity": "high"
-            if len(text) > 240
-            else "medium"
-            if needs_reasoning
-            else "low",
-            "needs_memory": any(marker in text for marker in memory_markers),
-            "needs_tools": any(marker in text for marker in tool_markers),
-            "reason": "heuristic",
+            **llm_result,
+            "needs_reasoning": self._to_bool(llm_result.get("needs_reasoning"), default=False),
+            "needs_memory": self._to_bool(llm_result.get("needs_memory"), default=False),
+            "needs_tools": self._to_bool(llm_result.get("needs_tools"), default=False),
+            "source": "model",
         }
 
     async def _plan_steps(
@@ -1070,8 +1063,14 @@ class ReasoningService:
         strategy_hints: Optional[Dict[str, Any]] = None,
         max_candidates: Optional[int] = None,
         observation_context: str = "",
+        self_model_context: str = "",
     ) -> List[Dict[str, Any]]:
         candidate_limit = max(1, int(max_candidates or policy["plan_max_steps"]))
+        self_model_section = (
+            f"Self model context:\n{self._truncate_text(self_model_context, 2400)}\n\n"
+            if self_model_context.strip()
+            else ""
+        )
         plan_prompt = (
             "Generate candidate Thought nodes for Tree-of-Thought reasoning. "
             "A Thought is a compact sub-goal that can be executed via ReAct. "
@@ -1089,6 +1088,7 @@ class ReasoningService:
                     "content": (
                         f"Task:\n{user_message}\n\n"
                         f"Recent context:\n{self._format_recent_messages(recent_messages)}\n\n"
+                        f"{self_model_section}"
                         f"Historical strategy hints:\n{json.dumps(strategy_hints or {}, ensure_ascii=False)}\n\n"
                         f"Current observations:\n{self._truncate_text(observation_context, 2500)}\n\n"
                         f"Current tree stats:\n{json.dumps(tree.stats, ensure_ascii=False)}"
@@ -1361,6 +1361,7 @@ class ReasoningService:
                     strategy_hints=merged_hints,
                     max_candidates=policy["branch_factor"],
                     observation_context="\n\n".join(observations),
+                    self_model_context=self._self_model_prompt(run_context),
                 )
                 extra_steps.extend(expanded)
 
@@ -1642,6 +1643,7 @@ class ReasoningService:
                 "workspace_id": session_id,
                 "run_metadata": {
                     "source": "reasoning_react",
+                    "task_mode": "ephemeral",
                     "tree_id": tree.tree_id,
                     "node_id": node.node_id,
                     "tool_type": tool_type,
@@ -1711,14 +1713,17 @@ class ReasoningService:
         policy: Optional[Dict[str, Any]] = None,
         run_context: Optional[Any] = None,
     ) -> str:
-        if not self.tool_service:
+        if not self.capability_service:
             return ""
         context_fields = self._extract_run_context_fields(
             run_context,
             session_id=session_id,
             user_id=user_id,
         )
-        catalog = await self.tool_service.get_tool_catalog()
+        catalog = await self.capability_service.get_tool_catalog(
+            run_context=run_context,
+            user_config=user_config,
+        )
         if not catalog:
             return ""
         replay_failure_observation = ""
@@ -2013,7 +2018,7 @@ class ReasoningService:
                 )
                 result = wf_payload.get("result")
             else:
-                result = await self.tool_service.call_tool(
+                result = await self.capability_service.call_tool(
                     tool_name=tool_name,
                     params={
                         "agentType": tool_type,
@@ -2761,7 +2766,7 @@ class ReasoningService:
     ) -> Optional[str]:
         if not policy.get("moirai_export_plan"):
             return None
-        if not self.tool_service:
+        if not self.capability_service:
             return None
 
         moirai_steps = self._map_plan_steps_to_moirai(steps)
@@ -2785,7 +2790,7 @@ class ReasoningService:
             metadata=ctx_metadata,
         )
         args = {
-            "agentType": "mcp",
+            "agentType": "tool",
             "service_name": "moirai",
             "tool_name": "create_flow",
             "name": flow_name,
@@ -2807,7 +2812,7 @@ class ReasoningService:
         }
 
         try:
-            result = await self.tool_service.call_tool(
+            result = await self.capability_service.call_tool(
                 tool_name="create_flow",
                 params=args,
                 ctx=ctx,

@@ -5,11 +5,9 @@ from typing import Any, Dict, List, Optional
 
 STAGE_NODE_ORDER = [
     ("input_normalization", "input"),
-    ("mode_detection", "mode"),
-    ("memory_recall", "memory"),
-    ("planning_reasoning", "reasoning"),
-    ("tool_execution", "tools"),
-    ("response_synthesis", "response"),
+    ("capability_discovery", "capabilities"),
+    ("model_control_loop", "control"),
+    ("response_finalize", "response"),
 ]
 
 

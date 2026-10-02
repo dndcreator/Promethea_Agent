@@ -3,7 +3,7 @@
   "label": "Computer Control",
   "version": "1.3.0",
   "description": "Unified control plane for browser/screen/filesystem/process plus content, runtime, scheduler, and graph operations.",
-  "serviceType": "mcp",
+  "serviceType": "internal_tool",
   "entryPoint": {
     "module": "agentkit.tools.computer.computer_control",
     "class": "ComputerControlService"
@@ -12,71 +12,121 @@
     "invocation_commands": [
       {
         "command": "browser_action",
+        "requiresCapability": "computer.browser",
+        "sideEffectLevel": "read_only",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "external_write",
+          "groups": {
+            "read_only": ["goto", "navigate", "content", "get_content", "get_url", "get_title", "screenshot", "snapshot", "wait", "wait_download", "download_wait", "tabs", "list_tabs", "workspace_state", "state", "back", "forward", "reload"],
+            "workspace_write": ["new_tab", "tab_open", "close_tab", "tab_close", "switch_tab", "tab_focus"]
+          }
+        },
         "description": "Browser operations (goto/click/type/content/get_url/get_title + snapshot/act/wait_download).",
         "example": "browser_action(action='snapshot', query='Download', max_nodes=30)"
       },
       {
         "command": "screen_action",
+        "requiresCapability": "computer.screen",
+        "sideEffectLevel": "privileged_host_action",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "privileged_host_action",
+          "groups": {
+            "read_only": ["screenshot", "locate", "locate_on_screen", "position", "get_mouse_position", "size", "get_screen_size"]
+          }
+        },
         "description": "Screen, mouse and keyboard operations.",
         "example": "screen_action(action='screenshot')"
       },
       {
         "command": "fs_action",
-        "description": "Filesystem operations via action (read, write, append, list, search, stat, exists, delete, move, copy, mkdir).",
+        "requiresCapability": "computer.filesystem",
+        "sideEffectLevel": "workspace_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "workspace_write",
+          "groups": {
+            "read_only": ["read", "list", "search", "exists", "stat"]
+          }
+        },
+        "description": "Filesystem operations via action. Prefer a semantic location advertised by the active provider instead of guessing platform paths.",
         "example": "fs_action(action='read', path='README.md')"
       },
       {
         "command": "process_action",
+        "requiresCapability": "computer.process",
+        "sideEffectLevel": "privileged_host_action",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "privileged_host_action",
+          "groups": {
+            "read_only": ["list", "get", "get_output", "system_info"]
+          }
+        },
         "description": "Process/runtime operations via action (run, run_async, list, get, kill, terminate, wait, get_output, system_info).",
         "example": "process_action(action='run', command='python --version')"
       },
       {
+        "command": "environment_action",
+        "requiresCapability": "computer.environment",
+        "sideEffectLevel": "workspace_write",
+        "sideEffectSelector": {
+          "parameter": "action",
+          "default": "privileged_host_action",
+          "groups": {
+            "read_only": ["list", "get"],
+            "workspace_write": ["register", "remove"]
+          }
+        },
+        "description": "Register, inspect, launch, stop, or remove a workspace canvas environment. Process commands are supplied only to the privileged launch action with the inspected revision.",
+        "example": "environment_action(action='register', name='Draft', root='draft', entrypoint='index.html')"
+      },
+      {
         "command": "perception_action",
+        "sideEffectLevel": "privileged_host_action",
+        "sideEffectSelector": {
+          "parameter": "mode",
+          "default": "privileged_host_action",
+          "groups": {
+            "read_only": ["observe", "find_browser_target", "locate_template", "ocr_screen", "find_text_on_screen", "suggest_next_action"]
+          }
+        },
         "description": "Perception helpers (observe/find/ocr/fallback execution).",
         "example": "perception_action(mode='find_text_on_screen', target_text='Download', max_candidates=5)"
       },
       {
-        "command": "content_action",
-        "description": "Content operations unified under control (web_fetch/pdf/image).",
-        "example": "content_action(action='web_fetch', url='https://example.com')"
-      },
-      {
-        "command": "runtime_action",
-        "description": "Gateway/runtime operations (sessions/agents/memory/message/plugins).",
-        "example": "runtime_action(action='sessions_list', user_id='default_user')"
-      },
-      {
-        "command": "schedule_action",
-        "description": "Persistent scheduler operations (create/list/pause/resume/run jobs).",
-        "example": "schedule_action(action='create_job', name='health', interval_seconds=60, service_name='runtime_tools', tool_name='gateway_action')"
-      },
-      {
-        "command": "graph_action",
-        "description": "Generic node graph operations (upsert/link/list/delete).",
-        "example": "graph_action(action='upsert_node', node_id='task_1', kind='task')"
-      },
-      {
         "command": "read_file",
+        "requiresCapability": "computer.filesystem",
+        "sideEffectLevel": "read_only",
         "description": "Read text file quickly.",
         "example": "read_file(path='gateway/server.py')"
       },
       {
         "command": "write_file",
+        "requiresCapability": "computer.filesystem",
+        "sideEffectLevel": "workspace_write",
         "description": "Write text file quickly.",
         "example": "write_file(path='notes/todo.txt', content='hello')"
       },
       {
         "command": "list_files",
+        "requiresCapability": "computer.filesystem",
+        "sideEffectLevel": "read_only",
         "description": "List directory contents quickly.",
         "example": "list_files(path='.', recursive=false)"
       },
       {
         "command": "delete_file",
+        "requiresCapability": "computer.filesystem",
+        "sideEffectLevel": "workspace_write",
         "description": "Delete file quickly.",
         "example": "delete_file(path='tmp.txt')"
       },
       {
         "command": "execute_command",
+        "requiresCapability": "computer.process",
+        "sideEffectLevel": "privileged_host_action",
         "description": "Run command and capture output.",
         "example": "execute_command(command='python -m pytest -q')"
       }
@@ -95,6 +145,7 @@
       "y": { "type": "integer" },
       "key": { "type": "string" },
       "path": { "type": "string" },
+      "location": { "type": "string", "description": "Semantic location advertised by the active filesystem provider" },
       "content": { "type": "string" },
       "recursive": { "type": "boolean" },
       "pattern": { "type": "string" },
@@ -123,15 +174,7 @@
       "agent_type": { "type": "string" },
       "channel": { "type": "string" },
       "receiver_id": { "type": "string" },
-      "job_id": { "type": "string" },
       "name": { "type": "string" },
-      "interval_seconds": { "type": "integer" },
-      "service_name": { "type": "string" },
-      "tool_name": { "type": "string" },
-      "args": { "type": "object" },
-      "enabled": { "type": "boolean" },
-      "enabled_only": { "type": "boolean" },
-      "max_jobs": { "type": "integer" },
       "node_id": { "type": "string" },
       "kind": { "type": "string" },
       "data": { "type": "object" },
@@ -141,6 +184,10 @@
       "target": { "type": "string" },
       "relation": { "type": "string" },
       "weight": { "type": "number" }
+      ,"environment_id": { "type": "string" }
+      ,"root": { "type": "string" }
+      ,"entrypoint": { "type": "string" }
+      ,"port": { "type": "integer" }
     }
   }
 }

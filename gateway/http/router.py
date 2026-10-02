@@ -24,7 +24,10 @@ from .routes.search import router as search_router
 from .routes.personal import router as personal_router
 from .routes.plugins import router as plugins_router
 from .routes.self_evolve import router as self_evolve_router
+from .routes.task import router as task_router
 from .routes.avatar import router as avatar_router
+from .routes.workbench import router as workbench_router
+from .routes.canvas import router as canvas_router
 
 router = APIRouter()
 
@@ -50,7 +53,10 @@ router.include_router(search_router)
 router.include_router(personal_router)
 router.include_router(plugins_router)
 router.include_router(self_evolve_router)
+router.include_router(task_router)
 router.include_router(avatar_router)
+router.include_router(workbench_router)
+router.include_router(canvas_router)
 
 
 

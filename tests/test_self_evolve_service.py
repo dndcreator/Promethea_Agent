@@ -1,167 +1,333 @@
-﻿import os
+import asyncio
+import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from agentkit.mcp.tool_call import parse_tool_calls
+from agentkit.mcp.invocation_context import bind_invocation_context
+from agentkit.security.approval import approval_scope
+from agentkit.security.sandbox import SandboxPolicy
 from agentkit.tools.self_evolve.self_evolve import SelfEvolveService
+from gateway.capability_service import CapabilityService, ToolInvocationContext
+from gateway.self_model_service import SelfModelService
 
 
-def test_parse_tool_calls_supports_nested_args_and_service_name():
-    content = '{"tool_name":"evolve_apply_patch","service_name":"self_evolve","args":{"task_id":"se_1","path":"a.txt","old":"x","new":"y"}}'
-    calls = parse_tool_calls(content)
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["name"] == "evolve_apply_patch"
-    assert call["args"]["service_name"] == "self_evolve"
-    assert call["args"]["task_id"] == "se_1"
+@pytest.fixture(autouse=True)
+def _authenticated_user():
+    with bind_invocation_context({"user_id": "u1"}):
+        yield
 
 
 def _make_workspace() -> Path:
     base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "self-evolve-work"
     if base.exists():
         shutil.rmtree(base, ignore_errors=True)
-    base.mkdir(parents=True, exist_ok=True)
+    (base / "extensions" / "community").mkdir(parents=True, exist_ok=True)
     return base.resolve()
 
 
+def _make_service(workspace: Path) -> SelfEvolveService:
+    service = SelfEvolveService(
+        workspace_root=str(workspace),
+        self_model_service=SelfModelService(workspace_root=str(workspace)),
+    )
+    capability_service = CapabilityService()
+    service.configure_extension_reloader(capability_service.reload_discovered_tools)
+    service._test_capability_service = capability_service
+    return service
+
+
+async def _create_echo_task(service: SelfEvolveService, *, version: str = "1.0.0") -> dict:
+    return await service.evolve_create_task(
+        goal="Add an isolated echo capability",
+        capability_id="echo_tool",
+        version=version,
+        description="Echo structured text",
+        commands=[
+            {
+                "command": "echo",
+                "description": "Return the supplied text",
+                "test_args": {"text": "hello"},
+            }
+        ],
+    )
+
+
 @pytest.mark.asyncio
-async def test_self_evolve_task_patch_and_validate(monkeypatch):
+async def test_self_evolve_writes_only_inside_capability_staging():
     ws = _make_workspace()
     try:
-        svc = SelfEvolveService(workspace_root=str(ws))
-        target = ws / "demo.txt"
-        target.write_text("hello world", encoding="utf-8")
-
-        created = await svc.evolve_create_task(
-            goal="replace world",
-            target_files=["demo.txt"],
-            acceptance_criteria=["text updated"],
-        )
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
         task_id = created["task"]["task_id"]
 
-        ctx = await svc.evolve_collect_context(task_id=task_id)
-        assert ctx["ok"] is True
-        assert ctx["context"][0]["exists"] is True
-
-        patch = await svc.evolve_apply_patch(
-            task_id=task_id,
-            path="demo.txt",
-            old="world",
-            new="agent",
-            count=1,
+        result = await service.evolve_write_file(
+            task_id,
+            "tool.py",
+            "async def handle(command, args):\n    return {'text': args.get('text', '')}\n",
         )
-        assert patch["ok"] is True
+        assert result["ok"] is True
+        assert (service._task_root(task_id) / "tool.py").is_file()
 
-        updated = target.read_text(encoding="utf-8")
-        assert updated == "hello agent"
+        with pytest.raises((ValueError, PermissionError)):
+            await service.evolve_write_file(task_id, "../../gateway/server.py", "broken")
+        with pytest.raises(PermissionError):
+            await service.evolve_write_file(task_id, "agent-manifest.json", "{}")
+        assert not (ws / "gateway" / "server.py").exists()
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
 
-        class _DummyProc:
-            returncode = 0
 
-            async def communicate(self):
-                return (b"ok\n", b"")
-
-        async def _fake_subprocess(*args, **kwargs):
-            return _DummyProc()
-
-        monkeypatch.setattr(
-            "agentkit.tools.self_evolve.self_evolve.asyncio.create_subprocess_shell",
-            _fake_subprocess,
+@pytest.mark.asyncio
+async def test_self_evolve_validates_publishes_and_invokes_generated_tool(monkeypatch):
+    ws = _make_workspace()
+    service_name = ""
+    try:
+        monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
+        service_name = service._service_name(created["task"])
+        task_id = created["task"]["task_id"]
+        await service.evolve_write_file(
+            task_id,
+            "tool.py",
+            "async def handle(command, args):\n"
+            "    if command != 'echo':\n"
+            "        raise ValueError(command)\n"
+            "    return {'text': args.get('text', '')}\n",
         )
 
-        validated = await svc.evolve_validate(
-            task_id=task_id,
-            command="python -m pytest -q tests/test_self_evolve_service.py",
-            timeout=30,
-        )
+        validated = await service.evolve_validate(task_id)
         assert validated["ok"] is True
+        assert validated["smoke_tests"] == [{"command": "echo", "ok": True, "result": {"text": "hello"}}]
 
-        task = await svc.evolve_get_task(task_id=task_id)
-        assert task["ok"] is True
-        assert task["task"]["changes"]
-        assert task["task"]["validations"]
-    finally:
-        shutil.rmtree(ws, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_self_evolve_self_model_becomes_task_baseline():
-    ws = _make_workspace()
-    try:
-        docs = ws / "docs" / "architecture"
-        docs.mkdir(parents=True, exist_ok=True)
-        (ws / "docs" / "runtime-overview.md").write_text("# Runtime\n- memory\n- tools\n", encoding="utf-8")
-        (docs / "runtime-io.md").write_text("# Runtime I/O\n- RuntimeBlock\n", encoding="utf-8")
-        (docs / "tool-runtime.md").write_text("# Tool Runtime\n- ToolRegistry\n", encoding="utf-8")
-        (docs / "memory-model.md").write_text("# Memory Model\n- recall\n", encoding="utf-8")
-        (docs / "conversation-pipeline.md").write_text("# Pipeline\n- route\n", encoding="utf-8")
-        (ws / "docs" / "ui-overview.md").write_text("# UI\n- trace\n", encoding="utf-8")
-        (ws / "target.py").write_text("print('x')\n", encoding="utf-8")
-
-        svc = SelfEvolveService(workspace_root=str(ws))
-        built = await svc.evolve_build_self_model(max_chars_per_file=1000)
-        assert built["ok"] is True
-        assert built["self_model"]["capability_inventory"]["self_evolve"]["status"] == "active"
-        assert built["self_model"]["improvement_backlog"]
-
-        created = await svc.evolve_create_task(goal="improve runtime", target_files=["target.py"])
-        task = created["task"]
-        assert task["self_model_snapshot"]["exists"] is True
-        assert "memory" in task["self_model_snapshot"]["capability_areas"]
-
-        ctx = await svc.evolve_collect_context(task_id=task["task_id"], max_chars_per_file=8000)
-        assert ctx["context"][0]["role"] == "self_evolution_baseline"
-        assert "capability_inventory" in ctx["context"][0]["content"]
-
-        (docs / "tool-runtime.md").write_text("# Tool Runtime\n- ToolRegistry\n- ToolPolicy\n", encoding="utf-8")
-        model = await svc.evolve_get_self_model()
-        assert model["self_model"]["freshness"]["stale"] is True
-        assert "docs/architecture/tool-runtime.md" in model["self_model"]["freshness"]["changed_sources"]
-    finally:
-        shutil.rmtree(ws, ignore_errors=True)
-
-
-@pytest.mark.asyncio
-async def test_self_evolve_rejects_undeclared_target_file():
-    ws = _make_workspace()
-    try:
-        svc = SelfEvolveService(workspace_root=str(ws))
-        (ws / "a.txt").write_text("a", encoding="utf-8")
-        (ws / "b.txt").write_text("b", encoding="utf-8")
-
-        created = await svc.evolve_create_task(goal="edit a", target_files=["a.txt"])
-        task_id = created["task"]["task_id"]
+        published = await service.evolve_publish(task_id)
+        assert published["ok"] is True
+        assert published["service_name"] == service_name
+        assert published["tool_ids"] == [f"{service_name}.echo"]
+        capability_service = service._test_capability_service
+        assert f"{service_name}.echo" in capability_service._registered_tools
+        params = {"text": "approved"}
+        with approval_scope(f"{service_name}.echo", params, confirmed=True):
+            result = await capability_service.call_tool(
+                f"{service_name}.echo",
+                params,
+                ctx=ToolInvocationContext(user_id="u1"),
+            )
+        assert result == {"text": "approved"}
 
         with pytest.raises(PermissionError):
-            await svc.evolve_apply_patch(
-                task_id=task_id,
-                path="b.txt",
-                old="b",
-                new="x",
+            await service.evolve_write_file(task_id, "tool.py", "changed")
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_rejects_unvalidated_and_conflicting_versions(monkeypatch):
+    ws = _make_workspace()
+    service_name = ""
+    try:
+        monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+        service = _make_service(ws)
+        first = await _create_echo_task(service)
+        service_name = service._service_name(first["task"])
+        first_id = first["task"]["task_id"]
+        with pytest.raises(ValueError):
+            await service.evolve_publish(first_id)
+
+        implementation = "async def handle(command, args):\n    return args\n"
+        await service.evolve_write_file(first_id, "tool.py", implementation)
+        assert (await service.evolve_validate(first_id))["ok"] is True
+        await service.evolve_publish(first_id)
+
+        second = await _create_echo_task(service)
+        second_id = second["task"]["task_id"]
+        await service.evolve_write_file(second_id, "tool.py", implementation + "# different\n")
+        assert (await service.evolve_validate(second_id))["ok"] is True
+        with pytest.raises(FileExistsError):
+            await service.evolve_publish(second_id)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_rejects_changes_after_validation(monkeypatch):
+    ws = _make_workspace()
+    try:
+        monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
+        task_id = created["task"]["task_id"]
+        entry = service._task_root(task_id) / "tool.py"
+        entry.write_text("async def handle(command, args):\n    return args\n", encoding="utf-8")
+        assert (await service.evolve_validate(task_id))["ok"] is True
+
+        entry.write_text("async def handle(command, args):\n    return {'changed': True}\n", encoding="utf-8")
+        with pytest.raises(ValueError, match="changed after validation"):
+            await service.evolve_publish(task_id)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_rejects_changes_during_validation(monkeypatch):
+    ws = _make_workspace()
+    try:
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
+        task_id = created["task"]["task_id"]
+        entry = service._task_root(task_id) / "tool.py"
+        entry.write_text("async def handle(command, args):\n    return args\n", encoding="utf-8")
+
+        async def _mutating_invoke(_self, _command, _args, *, require_approval=True):
+            _ = require_approval
+            entry.write_text("async def handle(command, args):\n    return {'changed': True}\n", encoding="utf-8")
+            return {}
+
+        monkeypatch.setattr(
+            "agentkit.tools.self_evolve.self_evolve.GeneratedCapabilityService.invoke",
+            _mutating_invoke,
+        )
+        result = await service.evolve_validate(task_id)
+        assert result["ok"] is False
+        assert "changed while validation" in result["errors"][0]
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_tasks_are_private_to_their_owner():
+    ws = _make_workspace()
+    try:
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
+        task_id = created["task"]["task_id"]
+
+        with bind_invocation_context({"user_id": "u2"}):
+            assert (await service.evolve_list_tasks())["tasks"] == []
+            with pytest.raises(FileNotFoundError):
+                await service.evolve_get_task(task_id)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_requires_smoke_test_arguments():
+    ws = _make_workspace()
+    try:
+        service = _make_service(ws)
+        with pytest.raises(ValueError, match="test_args"):
+            await service.evolve_create_task(
+                goal="Create a tool",
+                capability_id="missing_test",
+                version="1.0.0",
+                description="Missing smoke test",
+                commands=[{"command": "run", "description": "Run"}],
             )
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 
-@pytest.mark.asyncio
-async def test_self_evolve_validate_blocked_by_sandbox(monkeypatch):
+
+def test_self_evolve_task_store_updates_are_atomic_across_instances():
     ws = _make_workspace()
     try:
-        svc = SelfEvolveService(workspace_root=str(ws))
-        created = await svc.evolve_create_task(goal="validate", target_files=["a.txt"])
+        services = [_make_service(ws) for _ in range(2)]
+
+        def _create(index: int) -> str:
+            with bind_invocation_context({"user_id": "u1"}):
+                result = asyncio.run(
+                    services[index % 2].evolve_create_task(
+                        goal=f"Create tool {index}",
+                        capability_id=f"tool_{index}",
+                        version="1.0.0",
+                        description="Concurrency test",
+                        commands=[{"command": "run", "description": "Run", "test_args": {}}],
+                    )
+                )
+                return result["task"]["task_id"]
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            task_ids = list(executor.map(_create, range(8)))
+
+        assert len(set(task_ids)) == 8
+        with bind_invocation_context({"user_id": "u1"}):
+            rows = asyncio.run(services[0].evolve_list_tasks(limit=20))["tasks"]
+        assert {row["task_id"] for row in rows} == set(task_ids)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_publish_is_atomic(monkeypatch):
+    ws = _make_workspace()
+    try:
+        monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+        service = _make_service(ws)
+        created = await _create_echo_task(service)
         task_id = created["task"]["task_id"]
+        await service.evolve_write_file(
+            task_id,
+            "tool.py",
+            "async def handle(command, args):\n    return args\n",
+        )
+        assert (await service.evolve_validate(task_id))["ok"] is True
+        destination = service.publish_root / service._service_name(created["task"])
 
-        class _Policy:
-            def check_command(self, command, cwd=".", workspace_root=None):
-                class _D:
-                    allowed = False
-                    reason = "blocked by policy"
-                return _D()
+        monkeypatch.setattr("agentkit.tools.self_evolve.self_evolve.shutil.copy2", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("copy failed")))
+        with pytest.raises(OSError, match="copy failed"):
+            await service.evolve_publish(task_id)
+        assert not destination.exists()
+        assert not list(service.publish_root.glob(".*.tmp"))
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
 
-        svc._sandbox = _Policy()
 
-        with pytest.raises(PermissionError):
-            await svc.evolve_validate(task_id=task_id, command="python -V")
+@pytest.mark.asyncio
+async def test_generated_capability_cannot_read_outside_its_package(monkeypatch):
+    ws = _make_workspace()
+    try:
+        monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+        secret = ws / "private.txt"
+        secret.write_text("private", encoding="utf-8")
+        service = _make_service(ws)
+        created = await service.evolve_create_task(
+            goal="Try an out-of-scope read",
+            capability_id="unsafe_reader",
+            version="1.0.0",
+            description="Boundary test",
+            commands=[{"command": "read", "description": "Read", "test_args": {}}],
+        )
+        task_id = created["task"]["task_id"]
+        source = (
+            "async def handle(command, args):\n"
+            f"    return open({str(secret)!r}, encoding='utf-8').read()\n"
+        )
+        await service.evolve_write_file(task_id, "tool.py", source)
+        result = await service.evolve_validate(task_id)
+        assert result["ok"] is False
+        assert "file access denied" in result["errors"][0]
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_self_evolve_self_model_remains_available():
+    ws = _make_workspace()
+    try:
+        docs = ws / "docs" / "architecture"
+        docs.mkdir(parents=True, exist_ok=True)
+        (ws / "docs" / "runtime-overview.md").write_text("# Runtime\n", encoding="utf-8")
+        (docs / "runtime-io.md").write_text("# Runtime I/O\n", encoding="utf-8")
+        (docs / "tool-runtime.md").write_text("# Tool Runtime\n", encoding="utf-8")
+        (docs / "memory-model.md").write_text("# Memory Model\n", encoding="utf-8")
+        (docs / "conversation-pipeline.md").write_text("# Pipeline\n", encoding="utf-8")
+        (ws / "docs" / "ui-overview.md").write_text("# UI\n", encoding="utf-8")
+        service = _make_service(ws)
+        built = await service.evolve_build_self_model(max_chars_per_file=1000)
+        assert built["ok"] is True
+        current = await service.evolve_get_self_model()
+        assert current["exists"] is True
     finally:
         shutil.rmtree(ws, ignore_errors=True)

@@ -15,7 +15,7 @@ This project uses layered testing to balance speed, confidence, and product real
 - Goal: verify service APIs and response shapes.
 - Typical modules:
   - config service
-  - tool service
+  - capability service
   - workflow engine
   - protocol surface contracts
 

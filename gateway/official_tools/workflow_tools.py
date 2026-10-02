@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 from gateway.workflow_models import WorkflowDefinition, WorkflowStep
 
 
@@ -13,6 +13,28 @@ def _resolve_user_session(
     user_id = str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "default_user").strip() or "default_user"
     session_id = str((args or {}).get("session_id") or (ctx.session_id if ctx else "") or "default_session").strip() or "default_session"
     return user_id, session_id
+
+
+def _workflow_run_context(
+    args: Dict[str, Any],
+    ctx: Optional[ToolInvocationContext],
+) -> Dict[str, Any]:
+    """Persist only stable, serializable context needed by a detached workflow."""
+    out = dict(args or {})
+    runtime_context = (ctx.metadata or {}).get("run_context") if ctx else None
+    if runtime_context is None:
+        return out
+    for key in ("request_id", "trace_id", "task_id", "run_id"):
+        value = getattr(runtime_context, key, None)
+        if value:
+            out[key] = str(value)
+    self_model = getattr(runtime_context, "self_model_context", None)
+    if isinstance(self_model, dict) and self_model:
+        out["self_model_context"] = dict(self_model)
+    cognition = getattr(runtime_context, "cognition_snapshot", None)
+    if isinstance(cognition, dict) and cognition:
+        out["cognition_snapshot"] = dict(cognition)
+    return out
 
 
 class _WorkflowBaseTool:
@@ -31,6 +53,7 @@ class _WorkflowBaseTool:
 
 class WorkflowDefineTool(_WorkflowBaseTool):
     tool_id = "workflow.define"
+    side_effect_level = "workspace_write"
     name = "workflow.define"
     description = "Define a workflow (linear/dag/parallel/graph)."
 
@@ -77,6 +100,7 @@ class WorkflowDefineTool(_WorkflowBaseTool):
 
 class WorkflowListTool(_WorkflowBaseTool):
     tool_id = "workflow.list"
+    side_effect_level = "read_only"
     name = "workflow.list"
     description = "List workflows for current user."
 
@@ -90,6 +114,7 @@ class WorkflowListTool(_WorkflowBaseTool):
 
 class WorkflowStartTool(_WorkflowBaseTool):
     tool_id = "workflow.start"
+    side_effect_level = "workspace_write"
     name = "workflow.start"
     description = "Start a workflow run."
 
@@ -100,13 +125,27 @@ class WorkflowStartTool(_WorkflowBaseTool):
         user_id, session_id = _resolve_user_session(args, ctx)
         workspace_id = str((args or {}).get("workspace_id") or session_id).strip() or session_id
         engine = self._engine()
+        metadata = dict((args or {}).get("run_metadata") or {})
+        workflow_context = _workflow_run_context(args, ctx)
+        runtime = getattr(self.gateway_server, "task_runtime", None)
+        if runtime is not None and metadata.get("task_mode") != "ephemeral":
+            run = runtime.start_workflow(
+                task_id=metadata.get("task_id"),
+                workflow_id=workflow_id,
+                session_id=session_id,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                run_context=workflow_context,
+                run_metadata=metadata,
+            )
+            return {"run": run, "detached": True}
         kwargs = {
             "workflow_id": workflow_id,
             "session_id": session_id,
             "user_id": user_id,
             "workspace_id": workspace_id,
-            "run_context": args,
-            "run_metadata": dict((args or {}).get("run_metadata") or {}),
+            "run_context": workflow_context,
+            "run_metadata": metadata,
         }
         start_async = getattr(engine, "start_workflow_async", None)
         if callable(start_async):
@@ -118,6 +157,7 @@ class WorkflowStartTool(_WorkflowBaseTool):
 
 class WorkflowStatusTool(_WorkflowBaseTool):
     tool_id = "workflow.status"
+    side_effect_level = "read_only"
     name = "workflow.status"
     description = "Get workflow run status."
 
@@ -134,6 +174,7 @@ class WorkflowStatusTool(_WorkflowBaseTool):
 
 class WorkflowListRunsTool(_WorkflowBaseTool):
     tool_id = "workflow.list_runs"
+    side_effect_level = "read_only"
     name = "workflow.list_runs"
     description = "List workflow runs for current user."
 
@@ -147,6 +188,7 @@ class WorkflowListRunsTool(_WorkflowBaseTool):
 
 class WorkflowPauseTool(_WorkflowBaseTool):
     tool_id = "workflow.pause"
+    side_effect_level = "workspace_write"
     name = "workflow.pause"
     description = "Pause a workflow run."
 
@@ -161,6 +203,7 @@ class WorkflowPauseTool(_WorkflowBaseTool):
 
 class WorkflowResumeTool(_WorkflowBaseTool):
     tool_id = "workflow.resume"
+    side_effect_level = "workspace_write"
     name = "workflow.resume"
     description = "Resume a paused workflow run."
 
@@ -180,6 +223,7 @@ class WorkflowResumeTool(_WorkflowBaseTool):
 
 class WorkflowRetryStepTool(_WorkflowBaseTool):
     tool_id = "workflow.retry_step"
+    side_effect_level = "workspace_write"
     name = "workflow.retry_step"
     description = "Retry a failed workflow step."
 
@@ -200,6 +244,7 @@ class WorkflowRetryStepTool(_WorkflowBaseTool):
 
 class WorkflowApproveStepTool(_WorkflowBaseTool):
     tool_id = "workflow.approve_step"
+    side_effect_level = "workspace_write"
     name = "workflow.approve_step"
     description = "Approve a workflow step waiting for human approval."
 
@@ -221,6 +266,7 @@ class WorkflowApproveStepTool(_WorkflowBaseTool):
 
 class WorkflowCheckpointsTool(_WorkflowBaseTool):
     tool_id = "workflow.checkpoints"
+    side_effect_level = "read_only"
     name = "workflow.checkpoints"
     description = "List checkpoints of a workflow run."
 

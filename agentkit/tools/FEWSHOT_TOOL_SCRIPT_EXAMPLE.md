@@ -5,15 +5,15 @@ Use this file as a copy-paste prompt to ask an LLM to generate a new AgentKit to
 ## Copy-Paste Prompt Template
 
 ```text
-You are generating a new MCP tool service for my project.
+You are generating a new in-process extension tool for my project.
 
 Project conventions:
 1) Create two files:
-   - agentkit/tools/<tool_slug>/agent-manifest.json
-   - agentkit/tools/<tool_slug>/<tool_slug>.py
+   - extensions/community/<tool_slug>/agent-manifest.json
+   - extensions/community/<tool_slug>/service.py
 2) Manifest format must follow:
-   - name, label, version, description, serviceType="mcp"
-   - entryPoint.module = "agentkit.tools.<tool_slug>.<tool_slug>"
+   - name, label, version, description, serviceType="extension_tool"
+   - entryPoint.module = "extensions.community.<tool_slug>.service"
    - entryPoint.class = "<ClassName>"
    - capabilities.invocation_commands[] with command/description/example
    - inputSchema.type = "object"
@@ -39,7 +39,7 @@ Now generate tool:
 
 ## Concrete Few-Shot Example
 
-### File: `agentkit/tools/text_utils/agent-manifest.json`
+### File: `extensions/community/text_utils/agent-manifest.json`
 
 ```json
 {
@@ -47,9 +47,9 @@ Now generate tool:
     "label": "Text Utils",
     "version": "1.0.0",
     "description": "Simple text utility helpers for normalize and summarize.",
-    "serviceType": "mcp",
+    "serviceType": "extension_tool",
     "entryPoint": {
-        "module": "agentkit.tools.text_utils.text_utils",
+        "module": "extensions.community.text_utils.service",
         "class": "TextUtilsService"
     },
     "capabilities": {
@@ -76,7 +76,7 @@ Now generate tool:
 }
 ```
 
-### File: `agentkit/tools/text_utils/text_utils.py`
+### File: `extensions/community/text_utils/service.py`
 
 ```python
 """Minimal text utility tool service."""

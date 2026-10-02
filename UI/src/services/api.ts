@@ -1,3 +1,32 @@
+import {
+  PrometheaClient,
+  PrometheaError,
+  type Attachment,
+  type CognitionBundle,
+  type CanvasEnvironmentList,
+  type RunRequest,
+  type Task,
+  type UserFile,
+  type WorkbenchSnapshot,
+} from '@promethea/sdk'
+
+export type {
+  Event as RuntimeEvent,
+  ErrorDetail as RuntimeError,
+  RunRequest,
+  RunResponse,
+  Session,
+  ToolCall,
+  ToolResult,
+  Task,
+  WorkbenchActivity,
+  WorkbenchSnapshot,
+  CognitionItem,
+  CognitionBundle,
+  CanvasEnvironment,
+  CanvasEnvironmentList,
+} from '@promethea/sdk'
+
 const DEFAULT_API_BASE = ''
 
 function resolveApiBase(): string {
@@ -6,16 +35,30 @@ function resolveApiBase(): string {
   return String(fromWindow || fromStorage || DEFAULT_API_BASE).replace(/\/+$/, '')
 }
 
-function buildUrl(path: string): string {
-  if (/^https?:\/\//i.test(path)) return path
-  const base = resolveApiBase()
-  return `${base}${path.startsWith('/') ? path : `/${path}`}`
-}
-
 export function getAuthToken(): string {
   const sessionToken = sessionStorage.getItem('auth_token')
   if (sessionToken) return sessionToken
   return localStorage.getItem('auth_token') || ''
+}
+
+function createRuntimeClient(): PrometheaClient {
+  return new PrometheaClient({
+    baseUrl: resolveApiBase(),
+    token: getAuthToken,
+    credentials: 'include',
+  })
+}
+
+async function sdkCall<T>(operation: (client: PrometheaClient) => Promise<T>): Promise<T> {
+  try {
+    return await operation(createRuntimeClient())
+  } catch (error) {
+    if (error instanceof PrometheaError && error.status === 401) {
+      clearAuthToken()
+      window.dispatchEvent(new Event('auth-expired'))
+    }
+    throw error
+  }
 }
 
 export function setAuthToken(token: string, remember = true): void {
@@ -34,24 +77,14 @@ export function clearAuthToken(): void {
   localStorage.removeItem('auth_token')
 }
 
-export function buildAuthHeaders(headers?: HeadersInit): HeadersInit {
-  const out = new Headers(headers || {})
-  const token = getAuthToken()
-  if (token && !out.has('Authorization')) out.set('Authorization', `Bearer ${token}`)
-  return out
-}
-
 export type AuthFetchOptions = RequestInit & {
   suppressAuthExpired?: boolean
 }
 
 export async function authFetch(path: string, options: AuthFetchOptions = {}): Promise<Response> {
   const { suppressAuthExpired, ...fetchOptions } = options
-  const response = await fetch(buildUrl(path), {
-    ...fetchOptions,
-    headers: buildAuthHeaders(fetchOptions.headers),
-    credentials: fetchOptions.credentials || 'include',
-  })
+  const client = createRuntimeClient()
+  const response = await client.request(path, fetchOptions)
   if (response.status === 401 && !suppressAuthExpired) {
     clearAuthToken()
     window.dispatchEvent(new Event('auth-expired'))
@@ -61,6 +94,24 @@ export async function authFetch(path: string, options: AuthFetchOptions = {}): P
 
 export function getSession(sessionId: string): Promise<Response> {
   return authFetch(`/api/sessions/${encodeURIComponent(sessionId)}`)
+}
+
+export type FollowupRequest = {
+  selected_text: string
+  query_type: 'why' | 'risk' | 'alternative' | 'custom'
+  custom_query?: string
+  session_id: string
+  message_id: string
+  start_offset: number
+  end_offset: number
+}
+
+export function sendFollowup(data: FollowupRequest): Promise<Response> {
+  return authFetch('/api/followup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  })
 }
 
 export function getConfig(): Promise<Response> {
@@ -150,11 +201,24 @@ export function getSelfEvolveStatus(): Promise<Response> {
   return authFetch('/api/self-evolve/status')
 }
 
-export function createSelfEvolveTask(goal: string, targetFiles: string[], acceptanceCriteria: string[]): Promise<Response> {
+export type SelfEvolveCommandDraft = {
+  command: string
+  description: string
+  test_args: Record<string, unknown>
+}
+
+export function createSelfEvolveTask(payload: {
+  goal: string
+  capability_id: string
+  version: string
+  description: string
+  commands: SelfEvolveCommandDraft[]
+  acceptance_criteria?: string[]
+}): Promise<Response> {
   return authFetch('/api/self-evolve/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ goal, target_files: targetFiles, acceptance_criteria: acceptanceCriteria }),
+    body: JSON.stringify(payload),
   })
 }
 
@@ -172,6 +236,14 @@ export function getMemoryEntries(query = ''): Promise<Response> {
   return authFetch(`/api/memory/entries?${params.toString()}`)
 }
 
+export async function getCognitionBundle(): Promise<CognitionBundle> {
+  return sdkCall((client) => client.cognition.get(200))
+}
+
+export function listCanvasEnvironments(workspaceId = 'default'): Promise<CanvasEnvironmentList> {
+  return sdkCall((client) => client.canvas.list(workspaceId))
+}
+
 export function updateMemoryEntry(memoryId: string, content: string): Promise<Response> {
   return authFetch(`/api/memory/entries/${encodeURIComponent(memoryId)}`, {
     method: 'PATCH',
@@ -182,10 +254,6 @@ export function updateMemoryEntry(memoryId: string, content: string): Promise<Re
 
 export function deleteMemoryEntry(memoryId: string): Promise<Response> {
   return authFetch(`/api/memory/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' })
-}
-
-export function getMemoryWriteDecisions(): Promise<Response> {
-  return authFetch('/api/memory/write-decisions?limit=200')
 }
 
 export function getMemoryWriteProposals(status = 'pending'): Promise<Response> {
@@ -202,35 +270,16 @@ export function decideMemoryWriteProposal(proposalId: string, action: MemoryProp
   })
 }
 
-export function getMemoryRecallRuns(): Promise<Response> {
-  return authFetch('/api/memory/recall/runs?limit=120')
-}
-
-export function getMemoryRecallRun(requestId: string): Promise<Response> {
-  return authFetch(`/api/memory/recall/${encodeURIComponent(requestId)}`)
-}
-
-export function getMemoryGraph(sessionId?: string | null): Promise<Response> {
-  return authFetch(sessionId ? `/api/memory/graph/${encodeURIComponent(sessionId)}` : '/api/memory/graph')
-}
-
 export function searchMemoryEntries(query: string, limit = 30): Promise<Response> {
   const params = new URLSearchParams({ q: query, limit: String(limit) })
   return authFetch(`/api/memory/search?${params.toString()}`)
 }
 
-export function searchMemoryGraph(query: string, depth = 1, limitNodes = 80, limitEdges = 160): Promise<Response> {
-  const params = new URLSearchParams({
-    q: query,
-    depth: String(depth),
-    limit_nodes: String(limitNodes),
-    limit_edges: String(limitEdges),
-  })
-  return authFetch(`/api/memory/graph/search?${params.toString()}`)
-}
-
-export function uploadUserFile(formData: FormData): Promise<Response> {
-  return authFetch('/api/files/upload', { method: 'POST', body: formData })
+export function uploadUserFile(file: Blob, filename: string, sessionId?: string | null): Promise<UserFile> {
+  return sdkCall((client) => client.files.upload(file, {
+    filename,
+    sessionId: sessionId || undefined,
+  }))
 }
 
 export function listUserFiles(query = '', limit = 50): Promise<Response> {
@@ -269,6 +318,43 @@ export function resumeWorkflowRun(workflowRunId: string): Promise<Response> {
 
 export function getWorkflowCheckpoints(workflowRunId: string): Promise<Response> {
   return authFetch(`/api/workflow/checkpoints/${encodeURIComponent(workflowRunId)}`)
+}
+
+export function getWorkbenchSnapshot(sessionId?: string | null, taskId?: string | null, runId?: string | null): Promise<WorkbenchSnapshot> {
+  return sdkCall((client) => client.workbench.get({ sessionId, taskId, runId, limit: 160 }))
+}
+
+export async function* watchWorkbenchSnapshots(
+  sessionId?: string | null,
+  taskId?: string | null,
+  runId?: string | null,
+  signal?: AbortSignal,
+): AsyncGenerator<WorkbenchSnapshot> {
+  try {
+    yield* createRuntimeClient().workbench.watch(
+      { sessionId, taskId, runId, limit: 160 },
+      {},
+      signal,
+    )
+  } catch (error) {
+    if (error instanceof PrometheaError && error.status === 401) {
+      clearAuthToken()
+      window.dispatchEvent(new Event('auth-expired'))
+    }
+    throw error
+  }
+}
+
+export function pauseTask(taskId: string, expectedRevision?: number): Promise<Task> {
+  return sdkCall((client) => client.tasks.pause(taskId, { expected_revision: expectedRevision }))
+}
+
+export function resumeTask(taskId: string, expectedRevision?: number): Promise<Task> {
+  return sdkCall((client) => client.tasks.resume(taskId, { expected_revision: expectedRevision }))
+}
+
+export function cancelTask(taskId: string, reason = 'user_cancelled', expectedRevision?: number): Promise<Task> {
+  return sdkCall((client) => client.tasks.cancel(taskId, { reason, expected_revision: expectedRevision }))
 }
 
 export function getSoulConfig(): Promise<Response> {
@@ -347,6 +433,19 @@ export function getActiveReasoning(sessionId: string): Promise<Response> {
   return authFetch(`/api/reasoning/active?session_id=${encodeURIComponent(sessionId)}&limit=5`)
 }
 
+export function exportPersonalWorkspaceArchive(): Promise<Response> {
+  return authFetch('/api/personal/workspace/archive', { method: 'POST' })
+}
+
+export function restorePersonalWorkspaceArchive(file: File, merge = false): Promise<Response> {
+  const form = new FormData()
+  form.append('archive', file, file.name)
+  return authFetch(`/api/personal/workspace/restore?merge=${merge ? 'true' : 'false'}`, {
+    method: 'POST',
+    body: form,
+  })
+}
+
 export function getReasoningHistory(sessionId?: string | null, limit = 30): Promise<Response> {
   const params = new URLSearchParams({
     include_pending: 'true',
@@ -382,12 +481,7 @@ export function sendVoicePtt(formData: FormData): Promise<Response> {
 
 type StreamHandler = (event: string, data: unknown) => void
 
-export type ChatAttachment = {
-  file_id: string
-  filename?: string
-  modality?: string
-  text_extraction_status?: string
-}
+export type ChatAttachment = Attachment & { file_id: string }
 
 export async function streamChat(
   message: string,
@@ -398,45 +492,28 @@ export async function streamChat(
   signal?: AbortSignal,
 ): Promise<void> {
   try {
-    const response = await authFetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, session_id: sessionId, stream: true, attachments }),
-      signal,
-    })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-
-    const contentType = response.headers.get('content-type') || ''
-    if (!response.body || contentType.includes('application/json')) {
-      const data = await response.json().catch(() => ({}))
-      onEvent('text', { content: data.response || data.content || data.message || '' })
-      onEvent('done', data)
-      return
+    const runRequest: RunRequest = {
+      message,
+      session_id: sessionId,
+      stream: true,
+      attachments,
+      metadata: {
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      },
     }
-
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
+    const client = createRuntimeClient()
     let sawDone = false
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) {
-        let trimmed = line.trim()
-        if (!trimmed) continue
-        if (trimmed.startsWith('data:')) trimmed = trimmed.slice(5).trim()
-        if (!trimmed || trimmed === '[DONE]') continue
-        const data = JSON.parse(trimmed)
-        if (String(data.type || '') === 'done') sawDone = true
-        onEvent(String(data.type || 'message'), data)
-      }
+    for await (const event of client.runs.stream(runRequest, signal)) {
+      if (event.event_type === 'done') sawDone = true
+      onEvent(event.event_type, event.payload)
     }
     if (!sawDone) onEvent('done', { status: 'stream_closed' })
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return
+    if (error instanceof PrometheaError && error.status === 401) {
+      clearAuthToken()
+      window.dispatchEvent(new Event('auth-expired'))
+    }
     onError(error instanceof Error ? error : new Error(String(error)))
   }
 }

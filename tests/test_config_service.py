@@ -55,10 +55,9 @@ class TestConfigService:
         with patch('gateway.config_service.user_manager') as mock_user_manager:
             mock_user_manager.update_user_config_file.return_value = True
             
-            from gateway.protocol import ConfigUpdateParams
-            params = ConfigUpdateParams(config_data={"api": {"model": "gpt-4"}})
-            
-            result = await service.update_user_config(params, user_id="test_user")
+            result = await service.update_user_config(
+                "test_user", {"api": {"model": "gpt-4"}},
+            )
             assert result['success'] is True
     
     @pytest.mark.asyncio
@@ -147,20 +146,18 @@ class TestConfigService:
 
 
     @pytest.mark.asyncio
-    async def test_update_user_config_merges_canonical_and_legacy_param_shapes(self):
+    async def test_update_user_config_merges_canonical_updates(self):
         service = ConfigService(event_emitter=EventEmitter())
 
         with patch("gateway.config_service.user_manager") as mock_user_manager:
             mock_user_manager.get_user_config.return_value = {"agent_name": "Promethea"}
             mock_user_manager.update_user_config_file.return_value = True
 
-            from gateway.protocol import ConfigUpdateParams
-            params = ConfigUpdateParams(
-                config_data={"memory": {"enabled": False}},
-                config={"memory": {"profile": "balanced"}},
+            result = await service.update_user_config(
+                "test_user",
+                {"memory": {"enabled": False, "profile": "balanced"}},
+                validate=False,
             )
-
-            result = await service.update_user_config(params, user_id="test_user", validate=False)
             assert result["success"] is True
             persisted = mock_user_manager.update_user_config_file.call_args[0][1]
             assert persisted.get("memory", {}).get("enabled") is False

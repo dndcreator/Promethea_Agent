@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Activity, Beaker, ChevronLeft, Database, FileText, GitBranch, Menu, MessageSquare, Search, Settings } from 'lucide-react'
+import { Activity, Beaker, ChevronLeft, Database, FileText, GitBranch, Languages, Menu, MessageSquare, MonitorPlay, Search, Settings } from 'lucide-react'
 import { authFetch } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
@@ -14,7 +14,7 @@ interface NavigationSidebarProps {
 
 export default function NavigationSidebar({ open, onToggle, onOpenModal, onSelectSession }: NavigationSidebarProps) {
   const { user } = useAuth()
-  const { t } = useLanguage()
+  const { lang, setLang, t } = useLanguage()
   const [sessions, setSessions] = useState<any[]>([])
 
   useEffect(() => {
@@ -61,14 +61,16 @@ export default function NavigationSidebar({ open, onToggle, onOpenModal, onSelec
             <NavItem icon={<MessageSquare size={17} />} label={t('对话', 'Chat')} active />
             <NavItem icon={<Search size={17} />} label={t('搜索', 'Search')} onClick={() => onOpenModal('search')} locked={!user} />
             <NavItem icon={<FileText size={17} />} label={t('文件', 'Files')} onClick={() => onOpenModal('files')} locked={!user} />
+            <NavItem icon={<MonitorPlay size={17} />} label={t('画布', 'Canvas')} onClick={() => onOpenModal('canvas')} locked={!user} />
             <NavSection label={t('大脑', 'Brain')} />
-            <NavItem icon={<Database size={17} />} label={t('记忆库', 'Memory')} onClick={() => onOpenModal('memory')} locked={!user} />
+            <NavItem icon={<Database size={17} />} label={t('认知', 'Cognition')} onClick={() => onOpenModal('memory')} locked={!user} />
             <NavItem icon={<GitBranch size={17} />} label={t('工作流', 'Workflows')} onClick={() => onOpenModal('workflows')} locked={!user} />
             <NavSection label={t('运维', 'Ops')} />
             <NavItem icon={<Activity size={17} />} label={t('系统指标', 'Metrics')} onClick={() => onOpenModal('metrics')} />
             <NavItem icon={<Beaker size={17} />} label={t('自我进化', 'Self Evolve')} onClick={() => onOpenModal('evolve')} />
             <NavItem icon={<Search size={17} />} label={t('诊断中心', 'Doctor')} onClick={() => onOpenModal('doctor')} />
             <NavItem icon={<Settings size={17} />} label={t('设置', 'Settings')} onClick={() => onOpenModal('settings')} locked={!user} />
+            <NavItem icon={<Languages size={17} />} label={lang === 'zh' ? 'English' : '中文'} onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')} />
           </nav>
           <div className="rounded-2xl border border-white/55 bg-white/35 p-3">
             <h3 className="mb-2 px-1 text-[11px] font-semibold text-text-strong">{t('最近会话', 'Recent sessions')}</h3>

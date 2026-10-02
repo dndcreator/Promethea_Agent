@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from .memory_service import MemoryService
     from .reasoning_service import ReasoningService
     from .server import GatewayServer
-    from .tool_service import Tool, ToolInvocationContext, ToolService
+    from .capability_service import CapabilityService, Tool, ToolInvocationContext
     from .workflow_engine import WorkflowEngine, WorkflowError
     from .workflow_models import Checkpoint, WorkflowDefinition, WorkflowRun, WorkflowStep
 
@@ -25,7 +25,7 @@ __all__ = [
     "GatewayServer",
     "ConnectionManager",
     "EventEmitter",
-    "ToolService",
+    "CapabilityService",
     "ToolInvocationContext",
     "Tool",
     "MemoryService",
@@ -59,16 +59,16 @@ def __getattr__(name: str):
         from .events import EventEmitter
 
         return EventEmitter
-    if name == "ToolService":
-        from .tool_service import ToolService
+    if name == "CapabilityService":
+        from .capability_service import CapabilityService
 
-        return ToolService
+        return CapabilityService
     if name == "ToolInvocationContext":
-        from .tool_service import ToolInvocationContext
+        from .capability_service import ToolInvocationContext
 
         return ToolInvocationContext
     if name == "Tool":
-        from .tool_service import Tool
+        from .capability_service import Tool
 
         return Tool
     if name == "MemoryService":

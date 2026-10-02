@@ -6,17 +6,18 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 def _resolve_identity(
     args: Dict[str, Any],
     ctx: Optional[ToolInvocationContext],
 ) -> tuple[str, str]:
-    user_id = (
-        str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "default_user").strip()
-        or "default_user"
-    )
+    trusted_user_id = str(ctx.user_id or "").strip() if ctx else ""
+    requested_user_id = str((args or {}).get("user_id") or "").strip()
+    if trusted_user_id and requested_user_id and requested_user_id != trusted_user_id:
+        raise PermissionError("tool user_id differs from invocation context")
+    user_id = trusted_user_id or requested_user_id or "default_user"
     workspace_id = (
         str((args or {}).get("workspace_id") or (ctx.session_id if ctx else "") or "default").strip()
         or "default"
@@ -36,6 +37,7 @@ def _safe_path_under_root(root: Path, relative_path: str) -> Path:
 
 class WorkspaceListFilesTool:
     tool_id = "workspace.list_files"
+    side_effect_level = "read_only"
     name = "workspace.list_files"
     description = "List files in current workspace."
     official = True
@@ -64,6 +66,7 @@ class WorkspaceListFilesTool:
 
 class WorkspaceReadFileTool:
     tool_id = "workspace.read_file"
+    side_effect_level = "read_only"
     name = "workspace.read_file"
     description = "Read a text file from workspace."
     official = True
@@ -99,6 +102,7 @@ class WorkspaceReadFileTool:
 
 class WorkspaceWriteFileTool:
     tool_id = "workspace.write_file"
+    side_effect_level = "workspace_write"
     name = "workspace.write_file"
     description = "Create or update a text file in workspace."
     official = True
@@ -140,6 +144,7 @@ class WorkspaceWriteFileTool:
 
 class WorkspaceCopyFileTool:
     tool_id = "workspace.copy_file"
+    side_effect_level = "workspace_write"
     name = "workspace.copy_file"
     description = "Copy a file inside workspace."
     official = True
@@ -173,6 +178,7 @@ class WorkspaceCopyFileTool:
 
 class WorkspaceMoveFileTool:
     tool_id = "workspace.move_file"
+    side_effect_level = "workspace_write"
     name = "workspace.move_file"
     description = "Move or rename a file inside workspace."
     official = True
@@ -205,6 +211,7 @@ class WorkspaceMoveFileTool:
 
 class WorkspaceDeleteFileTool:
     tool_id = "workspace.delete_file"
+    side_effect_level = "workspace_write"
     name = "workspace.delete_file"
     description = "Delete a file from workspace."
     official = True
@@ -234,6 +241,7 @@ class WorkspaceDeleteFileTool:
 
 class WorkspaceSearchTextTool:
     tool_id = "workspace.search_text"
+    side_effect_level = "read_only"
     name = "workspace.search_text"
     description = "Search plain text across workspace files."
     official = True
@@ -291,6 +299,7 @@ class WorkspaceSearchTextTool:
 
 class WorkspaceEnsureDirTool:
     tool_id = "workspace.ensure_dir"
+    side_effect_level = "workspace_write"
     name = "workspace.ensure_dir"
     description = "Create a directory inside workspace if it does not exist."
     official = True
@@ -317,6 +326,7 @@ class WorkspaceEnsureDirTool:
 
 class WorkspaceGlobFilesTool:
     tool_id = "workspace.glob_files"
+    side_effect_level = "read_only"
     name = "workspace.glob_files"
     description = "List files by glob pattern in workspace."
     official = True
@@ -350,6 +360,7 @@ class WorkspaceGlobFilesTool:
 
 class WorkspaceReadFilesTool:
     tool_id = "workspace.read_files"
+    side_effect_level = "read_only"
     name = "workspace.read_files"
     description = "Read multiple text files from workspace in one call."
     official = True
@@ -395,6 +406,7 @@ class WorkspaceReadFilesTool:
 
 class WorkspaceFileInfoTool:
     tool_id = "workspace.file_info"
+    side_effect_level = "read_only"
     name = "workspace.file_info"
     description = "Return metadata and digest for a workspace file."
     official = True
@@ -431,6 +443,7 @@ class WorkspaceFileInfoTool:
 
 class WorkspaceTailFileTool:
     tool_id = "workspace.tail_file"
+    side_effect_level = "read_only"
     name = "workspace.tail_file"
     description = "Read tail lines from a text file."
     official = True
@@ -464,6 +477,7 @@ class WorkspaceTailFileTool:
 
 class WorkspaceReplaceTextTool:
     tool_id = "workspace.replace_text"
+    side_effect_level = "workspace_write"
     name = "workspace.replace_text"
     description = "Replace text or regex pattern in a workspace file."
     official = True
@@ -528,6 +542,7 @@ class WorkspaceReplaceTextTool:
 
 class WorkspaceDiffFileTool:
     tool_id = "workspace.diff_file"
+    side_effect_level = "read_only"
     name = "workspace.diff_file"
     description = "Create a unified diff between a workspace file and proposed content."
     official = True
@@ -565,6 +580,7 @@ class WorkspaceDiffFileTool:
 
 class WorkspaceApplyPatchTool:
     tool_id = "workspace.apply_patch"
+    side_effect_level = "workspace_write"
     name = "workspace.apply_patch"
     description = "Apply a simple text patch by replacing exact old text with new text in a workspace file."
     official = True

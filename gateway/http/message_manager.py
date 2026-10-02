@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 import logging
 import uuid
 import re
+from copy import deepcopy
 
 try:
     # pydantic v2
@@ -22,8 +23,24 @@ def _model_to_dict(model: BaseModel) -> Dict:
 
 
 class Message(BaseModel):
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     role: str
     content: str
+
+
+class FollowUp(BaseModel):
+    """A persistent question/answer thread attached to selected message text."""
+
+    id: str = Field(default_factory=lambda: uuid.uuid4().hex)
+    message_id: str
+    selected_text: str
+    start_offset: int = 0
+    end_offset: int = 0
+    query_type: str
+    custom_query: Optional[str] = None
+    query: str = ""
+    response: str = ""
+    created_at: float = Field(default_factory=time.time)
 
 
 class Session(BaseModel):
@@ -39,6 +56,7 @@ class Session(BaseModel):
     title: str = "New Chat"
     agent_type: str = "default"
     messages: List[Message] = Field(default_factory=list)
+    followups: List[FollowUp] = Field(default_factory=list)
 
     pending_confirmation: Optional[Dict] = None
     pending_turns: Dict[str, Dict] = Field(default_factory=dict)
@@ -237,7 +255,50 @@ class MessageManager:
             "title": session.title,
             "agent_type": session.agent_type,
             "messages": [_model_to_dict(m) for m in session.messages],
+            "followups": [_model_to_dict(item) for item in session.followups],
         }
+
+    def add_followup(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        message_id: str,
+        selected_text: str,
+        start_offset: int,
+        end_offset: int,
+        query_type: str,
+        custom_query: Optional[str],
+        query: str,
+        response: str,
+    ) -> Optional[Dict]:
+        """Persist an annotation only when it is anchored to this user's message."""
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key:
+            return None
+        session = self.session[key]
+        message = next((item for item in session.messages if item.id == message_id), None)
+        if message is None:
+            return None
+        text = (selected_text or "").strip()
+        start = max(0, int(start_offset or 0))
+        end = max(start, int(end_offset or start))
+        if not text or end > len(message.content) or message.content[start:end] != text:
+            return None
+        followup = FollowUp(
+            message_id=message_id,
+            selected_text=text,
+            start_offset=start,
+            end_offset=end,
+            query_type=query_type,
+            custom_query=custom_query,
+            query=query,
+            response=response,
+        )
+        session.followups.append(followup)
+        session.last_activity = time.time()
+        self.session_store.save_all(self.session)
+        return _model_to_dict(followup)
     
     def add_message(
         self,
@@ -620,6 +681,9 @@ class MessageManager:
             }
             if include_messages:
                 item["messages"] = self.get_messages(sid, user_id=user_id)
+            session = self.session.get(self._resolve_session_key(sid, user_id=user_id) or "")
+            if session:
+                item["followups"] = [_model_to_dict(followup) for followup in session.followups]
             rows.append(item)
         return rows
 
@@ -672,7 +736,17 @@ class MessageManager:
                     continue
                 role = str(msg.get("role") or "").strip() or "user"
                 content = str(msg.get("content") or "")
-                session.messages.append(Message(role=role, content=content))
+                message_id = str(msg.get("id") or "").strip()
+                session.messages.append(Message(id=message_id or uuid.uuid4().hex, role=role, content=content))
+            session.followups = []
+            known_message_ids = {message.id for message in session.messages}
+            for raw_followup in row.get("followups") if isinstance(row.get("followups"), list) else []:
+                if not isinstance(raw_followup, dict) or str(raw_followup.get("message_id") or "") not in known_message_ids:
+                    continue
+                try:
+                    session.followups.append(FollowUp(**raw_followup))
+                except Exception:
+                    continue
             self.session[key] = session
             imported += 1
             restored_ids.append(target_sid)
@@ -685,6 +759,14 @@ class MessageManager:
             "remapped_sessions": remapped,
             "session_ids": restored_ids,
         }
+
+    def replace_user_sessions(self, *, user_id: str, sessions: List[Dict]) -> Dict[str, Any]:
+        """Replace only one user's durable conversation records."""
+        prefix = f"{self._normalize_user_id(user_id)}{self._SESSION_KEY_SEP}"
+        for key in [key for key in self.session if key.startswith(prefix)]:
+            self.session.pop(key, None)
+        self.session_store.save_all(self.session)
+        return self.import_user_sessions(user_id=user_id, sessions=sessions, merge=False)
 
     def delete_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
         """Delete a session."""
@@ -738,7 +820,7 @@ class MessageManager:
         """Store pending tool confirmation data for a session."""
         key = self._resolve_session_key(session_id, user_id=user_id)
         if key in self.session:
-            self.session[key].pending_confirmation = confirmation_data
+            self.session[key].pending_confirmation = deepcopy(confirmation_data)
             self.session_store.save_all(self.session)
             return True
         return False
@@ -751,7 +833,7 @@ class MessageManager:
         """Get the current pending tool-call confirmation state for a session."""
         key = self._resolve_session_key(session_id, user_id=user_id)
         if key in self.session:
-            return self.session[key].pending_confirmation
+            return deepcopy(self.session[key].pending_confirmation)
         return None
 
     def clear_pending_confirmation(

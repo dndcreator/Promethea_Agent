@@ -1,19 +1,22 @@
-﻿from pathlib import Path
+from pathlib import Path
 from types import SimpleNamespace
+import asyncio
 
 import pytest
 
 from gateway.protocol import RequestMessage, RequestType
 from gateway.server import GatewayServer
-from gateway.tool_service import ToolService
+from gateway.capability_service import CapabilityService
 from gateway.workspace_service import WorkspaceService
 from gateway.workflow_engine import WorkflowEngine, WorkflowError
 from gateway.workflow_models import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
     RUN_STATUS_PAUSED,
+    RUN_STATUS_RETRY_WAIT,
     RUN_STATUS_WAITING_HUMAN,
     STEP_STATUS_FAILED,
+    STEP_STATUS_RETRY_WAIT,
     STEP_STATUS_SUCCEEDED,
     WorkflowDefinition,
     WorkflowStep,
@@ -117,7 +120,10 @@ def _parallel_artifact_definition(workflow_id: str = "wf.parallel") -> WorkflowD
 
 def _engine(tmp_path: Path) -> tuple[WorkflowEngine, WorkspaceService]:
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    engine = WorkflowEngine(workspace_service=ws)
+    engine = WorkflowEngine(
+        workspace_service=ws,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     return engine, ws
 
 
@@ -357,7 +363,10 @@ async def test_gateway_workflow_handlers(tmp_path: Path):
     server = GatewayServer()
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
     server.workspace_service = ws
-    server.workflow_engine = WorkflowEngine(workspace_service=ws)
+    server.workflow_engine = WorkflowEngine(
+        workspace_service=ws,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
 
     connection = SimpleNamespace(connection_id="c1", identity=SimpleNamespace(device_id="u1"))
 
@@ -397,9 +406,13 @@ async def test_gateway_workflow_handlers(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_workflow_engine_run_tool_action_executes_tool_and_records_observation(tmp_path: Path):
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    tool_service = ToolService(event_emitter=None)
-    tool_service.register_tool(_EchoTool())
-    engine = WorkflowEngine(workspace_service=ws, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=None)
+    capability_service.register_tool(_EchoTool())
+    engine = WorkflowEngine(
+        workspace_service=ws,
+        capability_service=capability_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     engine.define_workflow(_artifact_definition(workflow_id="wf.tools", path="outputs/x.md"))
     run = engine.start_workflow(workflow_id="wf.tools", session_id="s1", user_id="u1", workspace_id="w1")
 
@@ -424,9 +437,13 @@ async def test_workflow_engine_run_tool_action_executes_tool_and_records_observa
 
 def test_tool_step_executes_real_tool_in_workflow(tmp_path: Path):
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    tool_service = ToolService(event_emitter=None)
-    tool_service.register_tool(_EchoTool())
-    engine = WorkflowEngine(workspace_service=ws, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=None)
+    capability_service.register_tool(_EchoTool())
+    engine = WorkflowEngine(
+        workspace_service=ws,
+        capability_service=capability_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     definition = WorkflowDefinition(
         workflow_id="wf.tool_step",
         name="Tool Step",
@@ -447,9 +464,13 @@ def test_tool_step_executes_real_tool_in_workflow(tmp_path: Path):
     assert run.steps[0].outputs.get("result", {}).get("echo") == "from-step"
 
 
-def test_tool_step_without_tool_service_reports_structured_dependency_failure(tmp_path: Path):
+def test_tool_step_without_capability_service_reports_structured_dependency_failure(tmp_path: Path):
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    engine = WorkflowEngine(workspace_service=ws, tool_service=None)
+    engine = WorkflowEngine(
+        workspace_service=ws,
+        capability_service=None,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     definition = WorkflowDefinition(
         workflow_id="wf.no_tools",
         name="No Tool Service",
@@ -468,4 +489,37 @@ def test_tool_step_without_tool_service_reports_structured_dependency_failure(tm
     assert run.status == RUN_STATUS_FAILED
     assert run.steps[0].status == STEP_STATUS_FAILED
     assert run.steps[0].outputs.get("error_code") == "dependency_unavailable"
-    assert run.steps[0].outputs.get("dependency") == "tool_service"
+    assert run.steps[0].outputs.get("dependency") == "capability_service"
+
+
+def test_transient_tool_failure_enters_durable_retry_wait(tmp_path: Path):
+    engine = WorkflowEngine(storage_path=str(tmp_path / "workflow.json"), capability_service=object())
+    calls = 0
+
+    async def flaky(run, step, *, run_context=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("provider offline")
+        return {"result": "recovered"}
+
+    engine._execute_tool_step_async = flaky
+    engine.define_workflow(WorkflowDefinition(
+        workflow_id="wf.retry",
+        name="Retry",
+        owner_user_id="u1",
+        steps=[WorkflowStep(
+            step_id="s1", step_type="tool_step", name="Network call",
+            retry_policy={"max_attempts": 2, "backoff_seconds": 0.1},
+        )],
+    ))
+
+    waiting = engine.start_workflow(workflow_id="wf.retry", session_id="s1", user_id="u1")
+    assert waiting.status == RUN_STATUS_RETRY_WAIT
+    assert waiting.steps[0].status == STEP_STATUS_RETRY_WAIT
+    assert waiting.run_metadata["retry"]["next_retry_at"]
+
+    completed = asyncio.run(engine.resume_retry_wait_async(waiting.workflow_run_id))
+    assert completed.status == RUN_STATUS_COMPLETED
+    assert completed.steps[0].attempt_count == 2
+    assert [row["status"] for row in completed.steps[0].attempt_history] == ["retry_scheduled", "succeeded"]

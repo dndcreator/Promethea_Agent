@@ -74,12 +74,7 @@ export default function AvatarSettingsPanel() {
       <div className="grid grid-cols-[132px_1fr] gap-4">
         <AvatarSurface />
         <div className="flex min-w-0 flex-col gap-3">
-          <div>
-            <h4 className="text-sm font-semibold text-text-strong">{t('Agent 形象', 'Agent Avatar')}</h4>
-            <p className="mt-1 text-xs leading-5 text-text-muted">
-              {t('上传图片、GIF 或视频。VRM 和 Live2D 将通过独立驱动扩展。', 'Upload an image, GIF, or video. VRM and Live2D are added through separate drivers.')}
-            </p>
-          </div>
+          <h4 className="text-sm font-semibold text-text-strong">{t('Agent 形象', 'Agent Avatar')}</h4>
           <input
             type="file"
             accept=".png,.jpg,.jpeg,.webp,.gif,.webm,.mp4,image/*,video/webm,video/mp4"

@@ -3,7 +3,7 @@ from __future__ import annotations
 from gateway.conversation_service import ConversationService
 
 
-class _ToolService:
+class _CapabilityService:
     async def get_tool_catalog(self, *, run_context=None, user_config=None):
         _ = (run_context, user_config)
         return [
@@ -25,10 +25,10 @@ class _ToolService:
         ]
 
 
-async def test_prompt_policy_snapshot_preserves_structured_registered_tools():
-    service = ConversationService(tool_service=_ToolService())
+async def test_runtime_snapshot_preserves_structured_registered_tools():
+    service = ConversationService(capability_service=_CapabilityService())
 
-    tools = await service._build_prompt_policy_tool_snapshot(
+    tools = await service._build_runtime_tool_snapshot(
         run_context=None,
         user_config={},
     )

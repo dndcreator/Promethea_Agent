@@ -36,10 +36,13 @@ dependencies = [
     "pytesseract>=0.3.10",
     "pyperclip>=1.8.2",
     "psutil>=5.9.0",
+    "pywin32>=306; platform_system == 'Windows'",
     "passlib[bcrypt]>=1.7.4",
     "bcrypt>=4.0.1,<5.0.0",
     "python-jose[cryptography]>=3.3.0",
     "mcp>=1.0.0",
+    "tzdata>=2024.1; platform_system == 'Windows'",
+    "pytz>=2024.1",
 ]
 
 [project.scripts]

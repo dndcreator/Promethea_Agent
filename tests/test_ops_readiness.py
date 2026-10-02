@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from gateway.http import state
 from gateway.http.routes import ops
@@ -9,7 +9,7 @@ async def test_ops_readiness_no_go_when_critical_service_down(monkeypatch):
     class _DummyGateway:
         def get_services_health(self):
             return {
-                "tool_service": True,
+                "capability_service": True,
                 "conversation_service": False,
                 "config_service": True,
                 "memory_service": True,
@@ -38,7 +38,7 @@ async def test_ops_readiness_degraded_when_startup_is_degraded(monkeypatch):
     class _DummyGateway:
         def get_services_health(self):
             return {
-                "tool_service": True,
+                "capability_service": True,
                 "conversation_service": True,
                 "config_service": True,
                 "memory_service": True,

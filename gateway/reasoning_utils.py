@@ -109,7 +109,7 @@ def map_plan_steps_to_moirai(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 {
                     "id": f"plan_{i + 1}_tool_probe",
                     "name": f"Tool probe: {title}",
-                    "kind": "mcp_call",
+                    "kind": "tool_call",
                     "require_approval": True,
                     "continue_on_error": True,
                     "params": {

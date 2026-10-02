@@ -6,7 +6,9 @@ Expose low-level capabilities of the `computer` module to the MCP framework.
 
 import asyncio
 import base64
+import os
 import time
+from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
@@ -22,12 +24,20 @@ class ComputerControlService:
 
     def __init__(self):
         self.name = "computer_control"
-        self._browser_snapshot_refs: Dict[str, str] = {}
-        self._content_tools = None
-        self._runtime_tools = None
-        self._cron_tools = None
-        self._node_tools = None
+        self._snapshot_workspaces = OrderedDict()
         self._sandbox = get_sandbox_policy()
+
+    @property
+    def _browser_snapshot_refs(self) -> Dict[str, str]:
+        from computer.execution_context import current_workspace
+
+        scope = current_workspace()
+        if scope not in self._snapshot_workspaces:
+            if len(self._snapshot_workspaces) >= 64:
+                self._snapshot_workspaces.popitem(last=False)
+            self._snapshot_workspaces[scope] = {}
+        self._snapshot_workspaces.move_to_end(scope)
+        return self._snapshot_workspaces[scope]
 
     async def _execute_action_raw(
         self,
@@ -36,20 +46,34 @@ class ComputerControlService:
         params: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         try:
-            from gateway_integration import get_gateway_integration
+            from gateway.http.dispatcher import get_gateway_server
 
-            gateway = get_gateway_integration()
-            if not gateway:
-                return {"ok": False, "error": "gateway system is not initialized"}
+            capability_name = str(getattr(capability, "value", capability)).strip().lower()
+            if capability_name in {
+                ComputerCapability.SCREEN.value,
+                ComputerCapability.SCREENSHOT.value,
+                ComputerCapability.MOUSE.value,
+                ComputerCapability.KEYBOARD.value,
+                ComputerCapability.CLIPBOARD.value,
+            }:
+                decision = self._sandbox.check_desktop_action(action)
+                if not decision.allowed:
+                    return {"ok": False, "error": f"sandbox blocked desktop action: {decision.reason}"}
+
+            server = get_gateway_server()
+            capability_service = getattr(server, "capability_service", None)
+            if capability_service is None:
+                return {"ok": False, "error": "capability service is not initialized"}
 
             payload = params or {}
             logger.info(f"Executing computer action raw: {capability}.{action} params={payload}")
-            result = await gateway.execute_computer_action(capability, action, payload)
+            result = await capability_service.execute_computer_action(capability, action, payload)
             return {
                 "ok": bool(result.success),
                 "result": result.result,
                 "error": result.error,
                 "screenshot": result.screenshot,
+                "metadata": result.metadata,
             }
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -241,7 +265,7 @@ class ComputerControlService:
             return f"ERROR: snapshot failed: {data.get('error')}"
 
         rows = data.get("result") or []
-        self._browser_snapshot_refs = {}
+        self._browser_snapshot_refs.clear()
         out: List[Dict[str, Any]] = []
         for i, row in enumerate(rows, start=1):
             ref_id = f"n{i}"
@@ -276,8 +300,7 @@ class ComputerControlService:
             return await self.execute_action(ComputerCapability.BROWSER, "type", payload)
 
         if key:
-            await self.execute_action(ComputerCapability.BROWSER, "click", {"selector": target})
-            return await self.execute_action(ComputerCapability.KEYBOARD, "press", {"key": key})
+            return await self.execute_action(ComputerCapability.BROWSER, "press", {"selector": target, "key": key})
 
         payload = {"selector": target}
         if timeout:
@@ -290,7 +313,16 @@ class ComputerControlService:
         timeout: int = 30000,
         poll_interval_ms: int = 500,
     ) -> str:
-        base = Path(download_dir) if download_dir else Path.home() / "Downloads"
+        if not download_dir:
+            return await self.execute_action(ComputerCapability.BROWSER, "wait_download", {"timeout": timeout})
+        from computer.execution_context import current_workspace
+
+        scope = current_workspace()
+        root = scope.root if scope else Path.cwd()
+        base = (root / download_dir).resolve() if download_dir else root / ".promethea" / "downloads"
+        decision = self._sandbox.check_path(str(base), intent="write", workspace_root=root)
+        if not decision.allowed:
+            return f"ERROR: sandbox blocked download_dir: {decision.reason}"
         try:
             base.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -350,6 +382,7 @@ class ComputerControlService:
         self,
         action: str,
         path: str = "",
+        location: str = "",
         content: str = "",
         recursive: bool = False,
         pattern: str = "",
@@ -358,24 +391,15 @@ class ComputerControlService:
         encoding: str = "utf-8",
     ) -> str:
         """File system operations."""
-        normalized = (action or "").strip().lower()
-        write_ops = {"write", "append", "delete", "move", "copy", "mkdir"}
-        intent = "write" if normalized in write_ops else "read"
         if path:
-            p_decision = self._sandbox.check_path(path, intent=intent)
-            if not p_decision.allowed:
-                return f"ERROR: sandbox blocked path: {p_decision.reason}"
-        if src:
-            s_decision = self._sandbox.check_path(src, intent="write")
-            if not s_decision.allowed:
-                return f"ERROR: sandbox blocked src: {s_decision.reason}"
-        if dst:
-            d_decision = self._sandbox.check_path(dst, intent="write")
-            if not d_decision.allowed:
-                return f"ERROR: sandbox blocked dst: {d_decision.reason}"
+            path = os.path.expandvars(os.path.expanduser(path))
+        # The filesystem controller resolves semantic locations and authorizes
+        # the final paths, so the MCP wrapper must not apply a second policy.
         params: Dict[str, Any] = {}
         if path:
             params["path"] = path
+        if location:
+            params["location"] = location
         if content:
             params["content"] = content
         if recursive:
@@ -402,7 +426,10 @@ class ComputerControlService:
         """Process/runtime operations."""
         normalized = (action or "").strip().lower()
         if normalized in {"run", "run_async"} and command:
-            cmd_decision = self._sandbox.check_command(command, cwd=cwd or ".")
+            from computer.execution_context import current_workspace
+
+            scope = current_workspace()
+            cmd_decision = self._sandbox.check_command(command, cwd=cwd or ".", workspace_root=scope.root if scope else None)
             if not cmd_decision.allowed:
                 return f"ERROR: sandbox blocked command: {cmd_decision.reason}"
         params: Dict[str, Any] = {}
@@ -416,6 +443,38 @@ class ComputerControlService:
             params["pid"] = pid
         params["shell"] = bool(shell)
         return await self.execute_action(ComputerCapability.PROCESS, action, params)
+
+    async def environment_action(
+        self,
+        action: str,
+        environment_id: str = "",
+        name: str = "",
+        root: str = ".",
+        entrypoint: str = "",
+        kind: str = "",
+        command: str = "",
+        port: int = 0,
+        expected_revision: int = 0,
+    ) -> str:
+        """Register and manage a sandboxed workspace environment."""
+        params: Dict[str, Any] = {}
+        if environment_id:
+            params["environment_id"] = environment_id
+        if name:
+            params["name"] = name
+        if root:
+            params["root"] = root
+        if entrypoint:
+            params["entrypoint"] = entrypoint
+        if kind:
+            params["kind"] = kind
+        if command:
+            params["command"] = command
+        if port:
+            params["port"] = port
+        if expected_revision:
+            params["expected_revision"] = expected_revision
+        return await self.execute_action(ComputerCapability.ENVIRONMENT, action, params)
 
     async def _screen_ocr_scan(self, min_confidence: float = 40.0) -> Dict[str, Any]:
         shot = await self._execute_action_raw(ComputerCapability.SCREEN, "screenshot", {})
@@ -767,229 +826,4 @@ class ComputerControlService:
             timeout=timeout,
             shell=shell,
         )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    def _get_content_tools(self):
-        if self._content_tools is None:
-            from agentkit.tools.content_tools.content_tools import ContentToolsService
-
-            self._content_tools = ContentToolsService()
-        return self._content_tools
-
-    def _get_runtime_tools(self):
-        if self._runtime_tools is None:
-            from agentkit.tools.runtime_tools.runtime_tools import RuntimeToolsService
-
-            self._runtime_tools = RuntimeToolsService()
-        return self._runtime_tools
-
-    def _get_cron_tools(self):
-        if self._cron_tools is None:
-            from agentkit.tools.cron_tools.cron_tools import CronToolsService
-
-            self._cron_tools = CronToolsService()
-        return self._cron_tools
-
-    def _get_node_tools(self):
-        if self._node_tools is None:
-            from agentkit.tools.node_tools.node_tools import NodeToolsService
-
-            self._node_tools = NodeToolsService()
-        return self._node_tools
-
-    async def content_action(
-        self,
-        action: str = "web_fetch",
-        url: str = "",
-        path: str = "",
-        page: int = 0,
-        max_pages: int = 5,
-        max_chars: int = 12000,
-        timeout: int = 20,
-        include_links: bool = False,
-    ) -> Dict[str, Any]:
-        svc = self._get_content_tools()
-        mode = (action or "web_fetch").strip().lower()
-        if mode == "web_fetch":
-            url_decision = self._sandbox.check_url(url)
-            if not url_decision.allowed:
-                return {"ok": False, "error": f"sandbox blocked web_fetch: {url_decision.reason}"}
-            return await svc.web_fetch(
-                url=url,
-                max_chars=max_chars,
-                timeout=timeout,
-                include_links=include_links,
-            )
-        if mode in {"pdf", "pdf_action"}:
-            return await svc.pdf_action(
-                action="extract_text",
-                path=path,
-                page=page,
-                max_pages=max_pages,
-                max_chars=max_chars,
-            )
-        if mode == "pdf_metadata":
-            return await svc.pdf_action(action="metadata", path=path)
-        if mode in {"image", "image_action"}:
-            return await svc.image_action(action="metadata", path=path, max_chars=max_chars)
-        if mode == "image_ocr":
-            return await svc.image_action(action="ocr", path=path, max_chars=max_chars)
-        raise ValueError(f"unsupported content action: {action}")
-
-    async def runtime_action(
-        self,
-        action: str = "gateway_status",
-        session_id: str = "",
-        user_id: str = "default_user",
-        agent_name: str = "",
-        agent_type: str = "",
-        query: str = "",
-        channel: str = "",
-        receiver_id: str = "",
-        content: str = "",
-    ) -> Dict[str, Any]:
-        svc = self._get_runtime_tools()
-        mode = (action or "gateway_status").strip().lower()
-
-        if mode in {"gateway_status", "gateway_routes", "gateway_tools"}:
-            sub = {
-                "gateway_status": "status",
-                "gateway_routes": "routes",
-                "gateway_tools": "tools",
-            }[mode]
-            return await svc.gateway_action(action=sub)
-
-        if mode in {"sessions_list", "session_detail", "session_delete", "session_set_agent"}:
-            sub = {
-                "sessions_list": "list",
-                "session_detail": "detail",
-                "session_delete": "delete",
-                "session_set_agent": "set_agent_type",
-            }[mode]
-            return await svc.sessions_action(
-                action=sub,
-                session_id=session_id,
-                user_id=user_id,
-                agent_type=agent_type,
-            )
-
-        if mode in {"agents_list", "agent_get"}:
-            sub = "list" if mode == "agents_list" else "get"
-            return await svc.agents_action(action=sub, agent_name=agent_name)
-
-        if mode in {"memory_stats", "memory_search", "memory_cluster", "memory_summarize"}:
-            sub = {
-                "memory_stats": "stats",
-                "memory_search": "search",
-                "memory_cluster": "cluster",
-                "memory_summarize": "summarize",
-            }[mode]
-            return await svc.memory_action(action=sub, query=query, session_id=session_id, user_id=user_id)
-
-        if mode in {"channels_list", "message_send"}:
-            sub = "list_channels" if mode == "channels_list" else "send"
-            return await svc.message_action(
-                action=sub,
-                channel=channel,
-                receiver_id=receiver_id,
-                content=content,
-            )
-
-        if mode in {"plugins_list", "plugins_diagnostics"}:
-            sub = "list" if mode == "plugins_list" else "diagnostics"
-            return await svc.plugins_action(action=sub)
-
-        raise ValueError(f"unsupported runtime action: {action}")
-
-    async def schedule_action(
-        self,
-        action: str = "list_jobs",
-        job_id: str = "",
-        name: str = "",
-        interval_seconds: int = 60,
-        service_name: str = "",
-        tool_name: str = "",
-        args: Dict[str, Any] | None = None,
-        enabled: bool = True,
-        enabled_only: bool = False,
-        max_jobs: int = 10,
-    ) -> Dict[str, Any]:
-        svc = self._get_cron_tools()
-        mode = (action or "list_jobs").strip().lower()
-        if mode == "create_job":
-            return await svc.create_job(
-                name=name,
-                interval_seconds=interval_seconds,
-                service_name=service_name,
-                tool_name=tool_name,
-                args=args or {},
-                enabled=enabled,
-            )
-        if mode == "list_jobs":
-            return await svc.list_jobs(enabled_only=enabled_only)
-        if mode == "remove_job":
-            return await svc.remove_job(job_id=job_id)
-        if mode == "pause_job":
-            return await svc.pause_job(job_id=job_id)
-        if mode == "resume_job":
-            return await svc.resume_job(job_id=job_id)
-        if mode == "run_due_jobs":
-            return await svc.run_due_jobs(max_jobs=max_jobs)
-        raise ValueError(f"unsupported schedule action: {action}")
-
-    async def graph_action(
-        self,
-        action: str = "list_nodes",
-        node_id: str = "",
-        kind: str = "",
-        data: Dict[str, Any] | None = None,
-        tags: List[str] | None = None,
-        tag: str = "",
-        limit: int = 100,
-        source: str = "",
-        target: str = "",
-        relation: str = "related_to",
-        weight: float = 1.0,
-    ) -> Dict[str, Any]:
-        svc = self._get_node_tools()
-        mode = (action or "list_nodes").strip().lower()
-        if mode == "upsert_node":
-            return await svc.upsert_node(node_id=node_id, kind=kind or "generic", data=data or {}, tags=tags or [])
-        if mode == "get_node":
-            return await svc.get_node(node_id=node_id)
-        if mode == "list_nodes":
-            return await svc.list_nodes(kind=kind, tag=tag, limit=limit)
-        if mode == "delete_node":
-            return await svc.delete_node(node_id=node_id)
-        if mode == "link_nodes":
-            return await svc.link_nodes(source=source, target=target, relation=relation, weight=weight)
-        if mode == "list_links":
-            return await svc.list_links(node_id=node_id)
-        raise ValueError(f"unsupported graph action: {action}")
-
-
-
-
-
 

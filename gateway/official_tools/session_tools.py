@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 def _resolve_user_session(
@@ -16,6 +16,7 @@ def _resolve_user_session(
 
 class SessionRecentMessagesTool:
     tool_id = "session.recent_messages"
+    side_effect_level = "read_only"
     name = "session.recent_messages"
     description = "Get recent messages in current session."
     official = True
@@ -38,6 +39,7 @@ class SessionRecentMessagesTool:
 
 class SessionInfoTool:
     tool_id = "session.info"
+    side_effect_level = "read_only"
     name = "session.info"
     description = "Get summary info for a session."
     official = True
@@ -54,6 +56,7 @@ class SessionInfoTool:
 
 class SessionListTool:
     tool_id = "session.list"
+    side_effect_level = "read_only"
     name = "session.list"
     description = "List sessions for current user."
     official = True
@@ -69,4 +72,3 @@ class SessionListTool:
         rows = [x for x in rows if isinstance(x, dict)]
         rows.sort(key=lambda x: float(x.get("last_activity") or 0.0), reverse=True)
         return {"user_id": user_id, "count": len(rows), "sessions": rows}
-

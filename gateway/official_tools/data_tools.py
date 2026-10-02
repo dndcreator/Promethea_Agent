@@ -5,11 +5,12 @@ import io
 import json
 from typing import Any, Dict, List, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 class DataCsvToJsonTool:
     tool_id = "data.csv_to_json"
+    side_effect_level = "read_only"
     name = "data.csv_to_json"
     description = "Convert CSV text to JSON array."
     official = True
@@ -33,6 +34,7 @@ class DataCsvToJsonTool:
 
 class DataJsonToCsvTool:
     tool_id = "data.json_to_csv"
+    side_effect_level = "read_only"
     name = "data.json_to_csv"
     description = "Convert JSON array to CSV text."
     official = True
@@ -63,4 +65,3 @@ class DataJsonToCsvTool:
         for row in rows:
             writer.writerow(row)
         return {"count": len(rows), "csv": buf.getvalue(), "columns": fieldnames}
-

@@ -15,7 +15,10 @@ router = APIRouter(prefix="/self-evolve", tags=["self-evolve"])
 
 class SelfEvolveCreateTaskRequest(BaseModel):
     goal: str = Field(min_length=1)
-    target_files: List[str] = Field(min_length=1)
+    capability_id: str = Field(min_length=2, max_length=48)
+    version: str = Field(default="1.0.0", min_length=1, max_length=32)
+    description: str = Field(min_length=1, max_length=500)
+    commands: List[Dict[str, Any]] = Field(min_length=1)
     acceptance_criteria: Optional[List[str]] = None
 
 
@@ -27,18 +30,9 @@ class SelfEvolveSelfModelRequest(BaseModel):
     max_chars_per_file: Optional[int] = Field(default=None, ge=500, le=20000)
 
 
-class SelfEvolvePatchRequest(BaseModel):
+class SelfEvolveWriteFileRequest(BaseModel):
     path: str = Field(min_length=1)
-    old: str = Field(min_length=1)
-    new: str = ""
-    count: int = Field(default=1, ge=1, le=1000)
-    create_backup: bool = True
-
-
-class SelfEvolveValidateRequest(BaseModel):
-    command: str = Field(min_length=1)
-    cwd: str = "."
-    timeout: Optional[int] = Field(default=None, ge=5, le=1800)
+    content: str = Field(max_length=256000)
 
 
 def _get_self_evolve_service():
@@ -83,7 +77,7 @@ def _http_error_from_exception(exc: Exception) -> HTTPException:
 async def self_evolve_status(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
     svc, config_service = _get_self_evolve_service()
     merged = _merged_user_config(config_service, current_user_id)
-    snapshot = svc.status_snapshot(merged)
+    snapshot = svc.status_snapshot(merged, user_id=current_user_id)
     return {
         "status": "success",
         "user_id": current_user_id,
@@ -102,8 +96,12 @@ async def self_evolve_create_task(
     try:
         out = await svc.create_task(
             goal=request.goal,
-            target_files=list(request.target_files),
+            capability_id=request.capability_id,
+            version=request.version,
+            description=request.description,
+            commands=list(request.commands),
             acceptance_criteria=list(request.acceptance_criteria or []),
+            user_id=current_user_id,
         )
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
@@ -122,7 +120,7 @@ async def self_evolve_list_tasks(
     max_limit = int(profile.get("max_tasks_list") or 50)
     resolved_limit = max(1, min(int(limit), max_limit))
     try:
-        out = await svc.list_tasks(limit=resolved_limit, status=str(task_status or ""))
+        out = await svc.list_tasks(limit=resolved_limit, status=str(task_status or ""), user_id=current_user_id)
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
         raise _http_error_from_exception(exc) from exc
@@ -137,7 +135,7 @@ async def self_evolve_get_task(
     merged = _merged_user_config(config_service, current_user_id)
     _ensure_enabled(svc, merged)
     try:
-        out = await svc.get_task(task_id=task_id)
+        out = await svc.get_task(task_id=task_id, user_id=current_user_id)
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
         raise _http_error_from_exception(exc) from exc
@@ -154,7 +152,11 @@ async def self_evolve_collect_context(
     profile = _ensure_enabled(svc, merged)
     max_chars = int(request.max_chars_per_file or profile.get("max_context_chars_per_file") or 4000)
     try:
-        out = await svc.collect_context(task_id=task_id, max_chars_per_file=max_chars)
+        out = await svc.collect_context(
+            task_id=task_id,
+            max_chars_per_file=max_chars,
+            user_id=current_user_id,
+        )
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
         raise _http_error_from_exception(exc) from exc
@@ -188,23 +190,21 @@ async def self_evolve_refresh_self_model(
         raise _http_error_from_exception(exc) from exc
 
 
-@router.post("/tasks/{task_id}/patch")
-async def self_evolve_apply_patch(
+@router.put("/tasks/{task_id}/files")
+async def self_evolve_write_file(
     task_id: str,
-    request: SelfEvolvePatchRequest,
+    request: SelfEvolveWriteFileRequest,
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     svc, config_service = _get_self_evolve_service()
     merged = _merged_user_config(config_service, current_user_id)
     _ensure_enabled(svc, merged)
     try:
-        out = await svc.apply_patch(
+        out = await svc.write_file(
             task_id=task_id,
             path=request.path,
-            old=request.old,
-            new=request.new,
-            count=int(request.count),
-            create_backup=bool(request.create_backup),
+            content=request.content,
+            user_id=current_user_id,
         )
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
@@ -214,20 +214,28 @@ async def self_evolve_apply_patch(
 @router.post("/tasks/{task_id}/validate")
 async def self_evolve_validate(
     task_id: str,
-    request: SelfEvolveValidateRequest,
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
     svc, config_service = _get_self_evolve_service()
     merged = _merged_user_config(config_service, current_user_id)
-    profile = _ensure_enabled(svc, merged)
-    timeout = int(request.timeout or profile.get("max_validate_timeout_seconds") or 180)
+    _ensure_enabled(svc, merged)
     try:
-        out = await svc.validate(
-            task_id=task_id,
-            command=request.command,
-            cwd=request.cwd,
-            timeout=timeout,
-        )
+        out = await svc.validate(task_id=task_id, user_id=current_user_id)
+        return {"status": "success", "user_id": current_user_id, **out}
+    except Exception as exc:
+        raise _http_error_from_exception(exc) from exc
+
+
+@router.post("/tasks/{task_id}/publish")
+async def self_evolve_publish(
+    task_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_self_evolve_service()
+    merged = _merged_user_config(config_service, current_user_id)
+    _ensure_enabled(svc, merged)
+    try:
+        out = await svc.publish(task_id=task_id, user_id=current_user_id)
         return {"status": "success", "user_id": current_user_id, **out}
     except Exception as exc:
         raise _http_error_from_exception(exc) from exc

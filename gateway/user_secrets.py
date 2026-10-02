@@ -17,6 +17,9 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "API__BASE_URL",
     "API__MODEL",
     "API__FAILOVER_MODELS",
+    "MULTIMODAL__API_KEY",
+    "MULTIMODAL__BASE_URL",
+    "MULTIMODAL__MODEL",
     "MEMORY__ENABLED",
     "MEMORY__STORE_BACKEND",
     "MEMORY__SQLITE_GRAPH_PATH",
@@ -31,6 +34,8 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "MEMORY__NEO4J__PASSWORD",
     "MEMORY__NEO4J__DATABASE",
     "SEARCH__PROVIDER",
+    "SEARCH__FALLBACK_POLICY",
+    "SEARCH__PROVIDER_ORDER",
     "SEARCH__BRAVE_API_KEY",
     "SEARCH__TAVILY_API_KEY",
     "SEARCH__SERPAPI_API_KEY",
@@ -194,11 +199,31 @@ def resolve_memory_runtime_settings(
     }
 
 
+def resolve_multimodal_runtime_settings(
+    user_id: Optional[str],
+    *,
+    behavior_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    values = load_user_secrets(user_id, ensure=True) if user_id else {}
+    main = resolve_llm_runtime_settings(user_id, behavior_config=behavior_config)
+    model = _resolve_value(values, "MULTIMODAL__MODEL")
+    return {
+        "configured": bool(model),
+        "api_key": _resolve_value(values, "MULTIMODAL__API_KEY") or main.get("api_key", ""),
+        "base_url": _resolve_value(values, "MULTIMODAL__BASE_URL") or main.get("base_url", ""),
+        "model": model,
+        "temperature": main.get("temperature", 0.7),
+        "max_tokens": main.get("max_tokens", 2000),
+    }
+
+
 def resolve_search_runtime_settings(user_id: Optional[str]) -> Dict[str, str]:
     values = load_user_secrets(user_id, ensure=True) if user_id else {}
     provider = (_resolve_value(values, "SEARCH__PROVIDER") or "auto").strip().lower()
     return {
         "provider": provider or "auto",
+        "fallback_policy": (_resolve_value(values, "SEARCH__FALLBACK_POLICY") or "fallback").strip().lower(),
+        "provider_order": _resolve_value(values, "SEARCH__PROVIDER_ORDER"),
         "brave_api_key": _resolve_value(values, "SEARCH__BRAVE_API_KEY"),
         "tavily_api_key": _resolve_value(values, "SEARCH__TAVILY_API_KEY"),
         "serpapi_api_key": _resolve_value(values, "SEARCH__SERPAPI_API_KEY"),
@@ -215,10 +240,15 @@ def get_user_secrets_status(user_id: str) -> Dict[str, Any]:
     memory_api_key = str(values.get("MEMORY__API__API_KEY") or "").strip()
     neo4j_password = str(values.get("MEMORY__NEO4J__PASSWORD") or "").strip()
     search_provider = str(values.get("SEARCH__PROVIDER") or "auto").strip() or "auto"
+    search_fallback_policy = str(values.get("SEARCH__FALLBACK_POLICY") or "fallback").strip() or "fallback"
+    search_provider_order = str(values.get("SEARCH__PROVIDER_ORDER") or "").strip()
     brave_api_key = str(values.get("SEARCH__BRAVE_API_KEY") or "").strip()
     tavily_api_key = str(values.get("SEARCH__TAVILY_API_KEY") or "").strip()
     serpapi_api_key = str(values.get("SEARCH__SERPAPI_API_KEY") or "").strip()
     searxng_url = str(values.get("SEARCH__SEARXNG_URL") or "").strip()
+    multimodal_api_key = _resolve_value(values, "MULTIMODAL__API_KEY")
+    multimodal_base_url = _resolve_value(values, "MULTIMODAL__BASE_URL")
+    multimodal_model = _resolve_value(values, "MULTIMODAL__MODEL")
     return {
         "path": str(path),
         "exists": path.exists(),
@@ -233,8 +263,19 @@ def get_user_secrets_status(user_id: str) -> Dict[str, Any]:
             "api_key_configured": bool(memory_api_key),
             "neo4j_password_configured": bool(neo4j_password),
         },
+        "multimodal": {
+            "configured": bool(multimodal_model),
+            "api_key_configured": bool(multimodal_api_key),
+            "base_url_configured": bool(multimodal_base_url),
+            "base_url": multimodal_base_url,
+            "model": multimodal_model,
+            "inherits_main_api_key": bool(multimodal_model and not multimodal_api_key),
+            "inherits_main_base_url": bool(multimodal_model and not multimodal_base_url),
+        },
         "search": {
             "provider": search_provider,
+            "fallback_policy": search_fallback_policy,
+            "provider_order": search_provider_order,
             "brave_configured": bool(brave_api_key),
             "tavily_configured": bool(tavily_api_key),
             "serpapi_configured": bool(serpapi_api_key),

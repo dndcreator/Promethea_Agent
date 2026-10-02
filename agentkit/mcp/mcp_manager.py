@@ -1,5 +1,4 @@
-import asyncio
-import json
+import os
 import sys
 from contextlib import AsyncExitStack
 from datetime import datetime, timezone
@@ -50,25 +49,18 @@ class MCPToolDescriptor(BaseModel):
 
 class MCPManager:
     def __init__(self):
-        self.services: Dict[str, Any] = {}
+        self.mcp_sessions: Dict[str, ClientSession] = {}
         self.tools_cache: Dict[str, List[Any]] = {}
+        self._catalog_refresh_attempted = False
         self.health_cache: Dict[str, MCPServiceHealth] = {}
         self.exit_stack = AsyncExitStack()
-        self.handoffs = {}
-        self.handoff_filters = {}
-        self.handoff_callbacks = {}
         logger.info("MCPManager initialized")
 
     def _ensure_health(self, service_name: str, *, source: str = "registry") -> MCPServiceHealth:
         health = self.health_cache.get(service_name)
         if health is not None:
             return health
-        registry_entry = MCP_REGISTRY.get(service_name)
-        if registry_entry is not None and not isinstance(registry_entry, dict):
-            status = "ready"
-            source = "inprocess"
-        else:
-            status = "unknown"
+        status = "unknown"
         health = MCPServiceHealth(service_name=service_name, source=source, status=status)
         self.health_cache[service_name] = health
         return health
@@ -127,89 +119,6 @@ class MCPManager:
             summary["properties"] = sorted(list(props.keys()))
         return summary
 
-    def register_handoff(
-        self,
-        service_name: str,
-        tool_name: str,
-        tool_description: str,
-        input_schema: dict,
-        agent_name: str,
-        filters=None,
-        strict_schema: bool = False,
-    ):
-        if service_name in self.services:
-            logger.warning(f"Service {service_name} is already registered, skip")
-            return
-
-        self.services[service_name] = {
-            "tool_name": tool_name,
-            "tool_description": tool_description,
-            "input_schema": input_schema,
-            "agent_name": agent_name,
-            "filter_fn": filters,
-            "strict_schema": strict_schema,
-        }
-        logger.info(f"Registered handoff service: {service_name}")
-
-    async def _default_handoff_callback(ctx: Any, input_json: Optional[str] = None) -> Any:
-        return None
-
-    async def handoff(
-        self,
-        service_name: str,
-        task: dict,
-        input_history: Any = None,
-        pre_items: Any = None,
-        new_items: Any = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        try:
-            task_json = json.dumps(task, ensure_ascii=False)
-            logger.debug("Starting handoff: service={} task={}", service_name, task_json)
-
-            if service_name not in self.services:
-                raise ValueError(f"{service_name} is not registered")
-
-            service = self.services[service_name]
-            safe_info = {
-                "name": service.get("name", ""),
-                "description": service.get("description", ""),
-                "agent_name": service.get("agent_name", ""),
-                "strict_schema": service.get("strict_schema", False),
-            }
-            safe_info_json = json.dumps(safe_info, ensure_ascii=False)
-            logger.debug(f"Resolved service config: {safe_info_json}")
-
-            if service["strict_schema"]:
-                required_fields = service["input_schema"].get("required", [])
-                for field in required_fields:
-                    if field not in task:
-                        raise ValueError(f"Missing required field: {field}")
-            if "messages" in task and service.get("filter_fn"):
-                try:
-                    task["messages"] = service["filter_fn"](task["messages"])
-                except Exception as e:
-                    logger.error(f"Message filter failed: {e}")
-            from agentkit.mcp.mcpregistry import MCP_REGISTRY
-
-            agent_name = service["agent_name"]
-            agent = MCP_REGISTRY.get(agent_name)
-            if not agent:
-                raise ValueError(f"{agent_name} is not registered")
-            logger.info(f"Using registered Agent instance: {agent_name}")
-            logger.info("Starting Agent handoff")
-            result = await agent.handle_handoff(task)
-            logger.debug("Agent handoff completed: service={} agent={}", service_name, agent_name)
-
-            return result
-
-        except Exception as e:
-            error_report = f"Handoff execution failed: {str(e)}"
-            logger.error(error_report)
-            logger.exception(e)
-
-            return json.dumps({"status": "failure", "report": error_report}, ensure_ascii=False)
-
     async def connect_service(self, service_name: str) -> Optional[ClientSession]:
         if service_name not in MCP_REGISTRY:
             logger.warning(f"MCP service not found: {service_name}")
@@ -221,10 +130,9 @@ class MCPManager:
             )
             return None
 
-        if service_name in self.services:
+        if service_name in self.mcp_sessions:
             self._mark_health(service_name, status="online", touch_seen=True, last_error=None)
-            current = self.services[service_name]
-            return current if isinstance(current, ClientSession) else None
+            return self.mcp_sessions[service_name]
 
         if not MCP_CLIENT_AVAILABLE:
             logger.warning(f"MCP client unavailable, cannot connect service {service_name}")
@@ -238,36 +146,37 @@ class MCPManager:
             return None
 
         service_config = MCP_REGISTRY[service_name]
-        if not isinstance(service_config, dict):
-            # Registry entries are often in-process service instances.
-            self._mark_health(
-                service_name,
-                status="online",
-                source="inprocess",
-                touch_seen=True,
-                last_error=None,
-            )
-            return None
-
-        if "script_path" not in service_config:
+        command = str(service_config.get("command") or "").strip()
+        args = service_config.get("args") or []
+        if not command or not isinstance(args, list):
             self._mark_health(
                 service_name,
                 status="degraded",
                 source="runtime",
                 touch_seen=True,
-                last_error="missing script_path in service config",
+                last_error="invalid external MCP stdio config",
             )
             return None
-
-        command = "python" if service_config.get("type") == "python" else "node"
+        configured_env = service_config.get("env") or {}
+        resolved_env = dict(os.environ)
+        for key, value in configured_env.items():
+            text = str(value)
+            if text.startswith("${") and text.endswith("}"):
+                text = os.environ.get(text[2:-1], "")
+            resolved_env[str(key)] = text
         try:
             logger.info(f"Connecting MCP service: {service_name}")
-            server_parameters = StdioServerParameters(command=command, args=[service_config["script_path"]], env=None)
+            server_parameters = StdioServerParameters(
+                command=command,
+                args=[str(item) for item in args],
+                env=resolved_env,
+                cwd=service_config.get("cwd"),
+            )
             stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_parameters))
             stdio, write = stdio_transport
             session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
             await session.initialize()
-            self.services[service_name] = session
+            self.mcp_sessions[service_name] = session
             logger.info(f"MCP service {service_name} connected successfully")
             self._mark_health(
                 service_name,
@@ -303,25 +212,7 @@ class MCPManager:
 
         session = await self.connect_service(service_name)
         if not session:
-            try:
-                # Fallback for in-process registry-only services.
-                from agentkit.mcp.mcpregistry import get_available_tools
-
-                tools = get_available_tools(service_name)
-                self.tools_cache[service_name] = tools
-                current_health = self._ensure_health(service_name)
-                fallback_error = current_health.last_error or "service has no discoverable tools"
-                self._mark_health(
-                    service_name,
-                    status="online" if tools else "degraded",
-                    tool_count=len(tools),
-                    touch_seen=True,
-                    touch_sync=True,
-                    last_error=None if tools else fallback_error,
-                )
-                return tools
-            except Exception:
-                return []
+            return []
 
         try:
             response = await session.list_tools()
@@ -348,6 +239,37 @@ class MCPManager:
             )
             return []
 
+    async def refresh_registered_tools(self) -> None:
+        """Populate the cached catalog from every configured external provider."""
+        if self._catalog_refresh_attempted:
+            return
+        self._catalog_refresh_attempted = True
+        for service_name in list(MCP_REGISTRY):
+            await self.get_service_tools_async(service_name)
+
+    def invalidate_tool_catalog(self) -> None:
+        self.tools_cache.clear()
+        self._catalog_refresh_attempted = False
+
+    @staticmethod
+    def _catalog_tool(raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return {
+                "name": str(raw.get("name") or raw.get("tool_name") or ""),
+                "description": str(raw.get("description") or ""),
+                "input_schema": raw.get("input_schema") or raw.get("inputSchema") or {},
+                "side_effect_level": raw.get("side_effect_level"),
+                "side_effect_selector": raw.get("side_effect_selector") or {},
+                "requires_capability": raw.get("requires_capability"),
+                "requires_config": raw.get("requires_config"),
+                "owner_user_id": raw.get("owner_user_id"),
+            }
+        return {
+            "name": str(getattr(raw, "name", "") or ""),
+            "description": str(getattr(raw, "description", "") or ""),
+            "input_schema": getattr(raw, "inputSchema", {}) or getattr(raw, "input_schema", {}) or {},
+        }
+
     async def call_service_tool(self, service_name: str, tool_name: str, args: dict):
         session = await self.connect_service(service_name)
         if not session:
@@ -369,60 +291,6 @@ class MCPManager:
                 last_error=str(e),
             )
             return None
-
-    async def unified_call(self, service_name: str, tool_name: str, args: dict):
-        try:
-            if service_name in self.services:
-                return await self.handoff(service_name, args)
-
-            if service_name in MCP_REGISTRY:
-                agent = MCP_REGISTRY[service_name]
-                if hasattr(agent, "handle_handoff"):
-                    return await agent.handle_handoff(args)
-                if hasattr(agent, tool_name):
-                    method = getattr(agent, tool_name)
-                    if callable(method):
-                        filtered_args = {
-                            k: v
-                            for k, v in args.items()
-                            if k not in ["tool_name", "service_name", "agentType"]
-                        }
-                        out = (
-                            await method(**filtered_args)
-                            if asyncio.iscoroutinefunction(method)
-                            else method(**filtered_args)
-                        )
-                        self._mark_health(service_name, status="online", touch_seen=True, last_error=None)
-                        return out
-
-            return await self.call_service_tool(service_name, tool_name, args)
-        except Exception as e:
-            logger.error(f"Unified call failed for {service_name}.{tool_name}: {str(e)}")
-            logger.exception(e)
-            self._mark_health(
-                service_name,
-                status="degraded",
-                touch_seen=True,
-                last_error=str(e),
-            )
-            return f"Call failed: {str(e)}"
-
-    def get_available_services(self) -> list:
-        from agentkit.mcp.mcpregistry import get_all_services_info
-
-        services_info = get_all_services_info()
-        return [
-            {
-                "name": name,
-                "description": info.get("description", ""),
-                "label": info.get("label", name),
-                "version": info.get("version", "1.0.0"),
-                "available_tools": info.get("available_tools", []),
-                "id": name,
-                "health": self.get_service_health(name),
-            }
-            for name, info in services_info.items()
-        ]
 
     def list_service_health(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         from agentkit.mcp.mcpregistry import get_all_services_info
@@ -508,105 +376,40 @@ class MCPManager:
         from agentkit.mcp.mcpregistry import get_all_services_info
 
         mcp_services = []
-        agent_services = []
-
         services_info = get_all_services_info()
         for name, info in services_info.items():
+            cached_tools = [
+                self._catalog_tool(item)
+                for item in (self.tools_cache.get(name) or [])
+            ]
             service_info = {
                 "name": name,
                 "description": info.get("description", ""),
                 "label": info.get("label", name),
                 "version": info.get("version", "1.0.0"),
-                "available_tools": info.get("available_tools", []),
+                "available_tools": cached_tools or info.get("available_tools", []),
                 "id": name,
             }
             mcp_services.append(service_info)
 
-        for service_name, service_config in self.services.items():
-            if not isinstance(service_config, dict):
-                continue
-            agent_service_info = {
-                "name": service_name,
-                "description": service_config.get("tool_description", ""),
-                "tool_name": service_config.get("tool_name", ""),
-                "id": service_name,
-            }
-            agent_services.append(agent_service_info)
-
-        return {
-            "mcp_services": mcp_services,
-            "agent_services": agent_services,
-        }
+        return {"mcp_services": mcp_services}
 
     def query_service_by_name(self, service_name: str) -> Optional[Dict[str, Any]]:
         from agentkit.mcp.mcpregistry import get_service_info
 
         return get_service_info(service_name)
 
-    def query_services_by_capability(self, capability: str) -> List[Dict[str, Any]]:
-        from agentkit.mcp.mcpregistry import get_service_info, query_services_by_capability
-
-        matching_service_names = query_services_by_capability(capability)
-        matching_services = []
-        for service_name in matching_service_names:
-            service_info = get_service_info(service_name)
-            if service_info:
-                matching_services.append(
-                    {
-                        "name": service_name,
-                        "description": service_info.get("description", ""),
-                        "label": service_info.get("label", service_name),
-                        "version": service_info.get("version", "1.0.0"),
-                        "available_tools": service_info.get("available_tools", []),
-                    }
-                )
-
-        return matching_services
-
-    def get_service_statistics(self) -> Dict[str, Any]:
-        from agentkit.mcp.mcpregistry import get_service_statistics
-
-        return get_service_statistics()
-
-    def get_service_tools(self, service_name: str) -> List[Dict[str, Any]]:
-        from agentkit.mcp.mcpregistry import get_available_tools
-
-        return get_available_tools(service_name)
-
-    def format_available_services(self) -> str:
-        from agentkit.mcp.mcpregistry import get_all_services_info
-
-        services_info = get_all_services_info()
-        formatted_services = []
-        for name, info in services_info.items():
-            description = info.get("description", "")
-            tools = info.get("available_tools", [])
-            tool_names = [tool.get("name", "") for tool in tools]
-            if description:
-                formatted_services.append(f"- {name}: {description}")
-                if tool_names:
-                    formatted_services.append(f"  Available tools: {', '.join(tool_names)}")
-            else:
-                formatted_services.append(f"- {name}")
-        return "\n".join(formatted_services)
-
     async def clean_services(self):
         logger.info("Cleaning MCP service runtime")
         try:
             await self.exit_stack.aclose()
-            self.services.clear()
-            self.tools_cache.clear()
+            self.mcp_sessions.clear()
+            self.invalidate_tool_catalog()
+            self.exit_stack = AsyncExitStack()
             logger.info("MCP services cleaned up")
         except Exception as e:
             logger.error("Failed to clean MCP services: {}", e)
             logger.exception(e)
-
-    def get_mcp(self, name):
-        return MCP_REGISTRY.get(name)
-
-    def list_mcps(self):
-        return list(MCP_REGISTRY.keys())
-
 
 _MCP_MANAGER = None
 

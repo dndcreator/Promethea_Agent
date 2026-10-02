@@ -12,6 +12,8 @@ class MetricsCollector:
         self.stats = {
             'llm_calls': 0,
             'llm_total_time': 0.0,
+            'llm_first_token_total_time': 0.0,
+            'llm_first_token_count': 0,
             'prompt_tokens': 0,
             'completion_tokens': 0,
             'memory_recalls': 0,
@@ -39,6 +41,10 @@ class MetricsCollector:
         self.stats['memory_recalls'] += 1
         self.stats['memory_total_time'] += duration
         self.stats['memory_items_recalled'] += items_count
+
+    def record_llm_first_token(self, duration: float):
+        self.stats['llm_first_token_total_time'] += float(duration)
+        self.stats['llm_first_token_count'] += 1
     
     def record_message(self):
         """Record one message event."""
@@ -66,6 +72,10 @@ class MetricsCollector:
                 'total_calls': self.stats['llm_calls'],
                 'avg_time_ms': round(self.stats['llm_total_time'] * 1000 / max(1, self.stats['llm_calls'])),
                 'average_latency_ms': round(self.stats['llm_total_time'] * 1000 / max(1, self.stats['llm_calls'])),
+                'average_first_token_ms': round(
+                    self.stats['llm_first_token_total_time'] * 1000
+                    / max(1, self.stats['llm_first_token_count'])
+                ),
                 'total_tokens': total_tokens,
                 'prompt_tokens': self.stats['prompt_tokens'],
                 'completion_tokens': self.stats['completion_tokens'],

@@ -25,12 +25,18 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 
 ## Architecture
 - [Conversation Pipeline](./architecture/conversation-pipeline.md)
+- [Protocol Boundaries](./architecture/protocol-boundaries.md)
+- [Task Runtime](./architecture/task-runtime.md)
 - [Memory Model](./architecture/memory-model.md)
 - [Tool Runtime](./architecture/tool-runtime.md)
 - [Skill Layer](./architecture/skill-layer.md)
 - [Runtime IO](./architecture/runtime-io.md)
 - [Workflow Model](./architecture/workflow-model.md)
 - [Prompt Assembly](./architecture/prompt-assembly.md)
+- [Security Model](./architecture/security-model.md)
+- [Workspace Model](./architecture/workspace-model.md)
+- [Reasoning Model](./architecture/reasoning-model.md)
+- [Observability](./architecture/observability.md)
 
 ## Playbooks
 - [Add a Tool](./playbooks/how-to-add-a-tool.md)

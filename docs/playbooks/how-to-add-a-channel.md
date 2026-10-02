@@ -172,7 +172,7 @@ def test_ingest_message():
 
 - `gateway/conversation_pipeline.py`
 - `gateway/memory_service.py`
-- `gateway/tool_service.py`
+- `gateway/capability_service.py`
 - `gateway/protocol.py`
 - Any memory backend
 

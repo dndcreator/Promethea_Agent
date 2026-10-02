@@ -57,7 +57,7 @@ export default function LeftSidebar({ onSignIn, chatRunning }: LeftSidebarProps)
   }, [user, t])
 
   return (
-    <aside className="flex h-full w-[282px] shrink-0 flex-col overflow-hidden rounded-[1.35rem] p-4 glass-panel">
+    <aside className="flex h-full w-full shrink-0 flex-col overflow-hidden rounded-[1.35rem] p-4 glass-panel">
       <div className="mb-5 flex shrink-0 items-center gap-3 pl-11 pr-1">
         <div className="neural-surface fine-border flex h-9 w-9 items-center justify-center rounded-2xl">
           <Activity size={18} className="text-brand-600" />

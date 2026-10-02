@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
-from agentkit.tools.cron_tools.cron_tools import CronToolsService
+from gateway.temporal_scheduler import TemporalSchedulerService
 
 
 class KernelSchedulerService:
@@ -20,7 +20,8 @@ class KernelSchedulerService:
         tick_seconds: float = 5.0,
         max_jobs_per_tick: int = 10,
         enabled: bool = True,
-        cron_service: CronToolsService | None = None,
+        cron_service: TemporalSchedulerService | None = None,
+        capability_service: Any = None,
     ) -> None:
         root = Path(workspace_root).resolve() if workspace_root else Path.cwd().resolve()
         self.workspace_root = root
@@ -28,7 +29,12 @@ class KernelSchedulerService:
         self.max_jobs_per_tick = max(1, int(max_jobs_per_tick))
         self.enabled = bool(enabled)
 
-        self._cron = cron_service or CronToolsService(workspace_root=str(root))
+        self._cron = cron_service or TemporalSchedulerService(workspace_root=str(root))
+        if capability_service is not None:
+            self._cron.configure_tool_runtime(
+                executor=capability_service._execute_managed_tool,
+                confirmation_resolver=capability_service.requires_confirmation,
+            )
         self._task: Optional[asyncio.Task] = None
         self._running = False
         self._paused = False
@@ -91,7 +97,7 @@ class KernelSchedulerService:
             self._last_tick_at = ts
             self._total_ticks += 1
             try:
-                out = await self._cron.run_due_jobs(now_ts=ts, max_jobs=max_n)
+                out = await self._cron.run_due_jobs_internal(now_ts=ts, max_jobs=max_n)
                 self._last_result = dict(out or {})
                 self._last_error = ""
                 ran_count = int(self._last_result.get("count") or 0)

@@ -13,7 +13,7 @@
 
 ## Temporary Scope
 
-- A single test may cross 2 or more runtime modules, such as `gateway + tool_service + workflow_engine`.
+- A single test may cross 2 or more runtime modules, such as `gateway + capability_service + workflow_engine`.
 - The target is to validate business path reliability, not every internal boundary.
 
 ## Run

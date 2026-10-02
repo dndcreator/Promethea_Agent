@@ -6,8 +6,54 @@ on:
   pull_request:
 
 jobs:
-  test:
-    runs-on: windows-latest
+  python:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            coverage: true
+          - os: windows-latest
+            coverage: false
+          - os: macos-latest
+            coverage: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Linux sandbox provider
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Run tests
+        if: matrix.coverage == false
+        run: python -m pytest -q
+
+      - name: Run tests with coverage
+        if: matrix.coverage == true
+        run: python -m pytest --cov=. --cov-report=term-missing --cov-report=xml -q
+
+      - name: Upload coverage xml
+        if: matrix.coverage == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+
+  typescript:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,21 +63,29 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
-
-      - name: Run tests
-        run: |
-          python -m pytest -q
-
-      - name: Coverage gate
-        run: |
-          python -m pytest --cov=. --cov-report=term-missing --cov-report=xml -q
-
-      - name: Upload coverage xml
-        uses: actions/upload-artifact@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          name: coverage-xml
-          path: coverage.xml
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            sdk/typescript/package-lock.json
+            UI/package-lock.json
+
+      - name: Install contract generator dependencies
+        run: python -m pip install "pydantic>=2.5.0"
+
+      - name: Verify TypeScript SDK
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run generate:check
+          npm run typecheck
+          npm test
+
+      - name: Verify React UI
+        working-directory: UI
+        run: |
+          npm ci
+          npm run lint
+          npm run build

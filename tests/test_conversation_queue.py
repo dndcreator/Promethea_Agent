@@ -14,7 +14,17 @@ class _FakeConversationCore:
         self.call_order = []
         self.user_messages = []
 
-    async def run_chat_loop(self, messages, user_config=None, session_id=None):
+    async def run_chat_loop(
+        self,
+        messages,
+        user_config=None,
+        session_id=None,
+        user_id=None,
+        tool_executor=None,
+        confirmation_resolver=None,
+        max_recursion=None,
+    ):
+        _ = (user_config, user_id, tool_executor, confirmation_resolver, max_recursion)
         self.run_calls += 1
         self.call_order.append(session_id)
         if messages:

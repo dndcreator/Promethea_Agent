@@ -134,7 +134,11 @@ async def test_extensions_reload_route_refreshes_catalog(monkeypatch):
         return {"status": "success", "extensions": [], "total": 0}
 
     monkeypatch.setattr(plugins, "get_gateway_server", lambda: object())
-    monkeypatch.setattr(plugins, "reload_extensions", lambda: {"status": "success", "registered": ["demo"]})
+    async def _reload(gateway_server):
+        _ = gateway_server
+        return {"status": "success", "registered": ["demo"]}
+
+    monkeypatch.setattr(plugins, "reload_extensions", _reload)
     monkeypatch.setattr(plugins, "build_extension_catalog", _fake_catalog)
 
     out = await plugins.reload_extension_catalog(user_id="u1")

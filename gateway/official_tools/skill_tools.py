@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 from skills import build_default_skill_registry
 
 
 class SkillRunTool:
     tool_id = "skill.run"
+    side_effect_level = "privileged_host_action"
     name = "skill.run"
     description = "Load full instructions and runtime metadata for one skill on demand."
     official = True

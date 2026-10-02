@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
@@ -61,7 +61,7 @@ def _dependency_from_error(error: str | None) -> str:
     if "workflow" in msg:
         return "workflow_engine"
     if "tool" in msg:
-        return "tool_service"
+        return "capability_service"
     if "mcp" in msg:
         return "mcp_manager"
     if "config" in msg:

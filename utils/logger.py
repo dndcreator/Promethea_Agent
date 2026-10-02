@@ -2,7 +2,6 @@
 """
 import sys
 import logging
-import inspect
 from pathlib import Path
 from loguru import logger
 
@@ -20,10 +19,18 @@ class InterceptHandler(logging.Handler):
 
         logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
-def setup_logger(log_dir: str = "logs", level: str = "INFO"):
+def setup_logger(
+    log_dir: str = "logs",
+    level: str | None = None,
+    *,
+    include_model_payloads: bool = False,
+):
     """
     """
     logger.remove()
+    resolved_level = str(level or "INFO").strip().upper()
+    if resolved_level not in {"TRACE", "DEBUG", "INFO", "SUCCESS", "WARNING", "ERROR", "CRITICAL"}:
+        resolved_level = "INFO"
 
     # Ensure Windows console/file output keeps UTF-8 Chinese text readable.
     for stream in (sys.stdout, sys.stderr):
@@ -36,7 +43,7 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
     
     logger.add(
         sys.stderr,
-        level=level,
+        level=resolved_level,
         format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
     )
     
@@ -46,7 +53,7 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
         retention="10 days",
         compression="zip",
         enqueue=True,
-        level="DEBUG",         # Log all details
+        level=resolved_level,
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{line} | {extra} | {message}",
         encoding="utf-8",
     )
@@ -62,12 +69,18 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO"):
     )
 
     logging.basicConfig(handlers=[InterceptHandler()], level=0, force=True)
+
+    # Model payloads contain prompts, conversations, and recalled memory. Keep
+    # dependency wire logs opt-in even when Promethea's own log level is DEBUG.
+    dependency_level = logging.DEBUG if include_model_payloads else logging.WARNING
+    for logger_name in ("openai", "httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(dependency_level)
     
     for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error", "fastapi"):
         mod_logger = logging.getLogger(logger_name)
         mod_logger.handlers = [InterceptHandler()]
         mod_logger.propagate = False
 
-    logger.info("Logger initialized")
+    logger.info("Logger initialized (level={}, model_payloads={})", resolved_level, dependency_level == logging.DEBUG)
 
     return logger

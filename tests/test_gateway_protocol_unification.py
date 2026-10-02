@@ -1,4 +1,4 @@
-﻿from types import SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -198,12 +198,12 @@ async def test_server_chat_emits_canonical_gateway_events():
 
 
 @pytest.mark.asyncio
-async def test_tool_service_mirrors_canonical_tool_events():
-    from gateway.tool_service import ToolInvocationContext, ToolService
+async def test_capability_service_mirrors_canonical_tool_events():
+    from gateway.capability_service import ToolInvocationContext, CapabilityService
 
     event_emitter = MagicMock()
     event_emitter.emit = AsyncMock()
-    service = ToolService(event_emitter=event_emitter, mcp_manager=MagicMock())
+    service = CapabilityService(event_emitter=event_emitter, mcp_manager=MagicMock())
 
     class _LocalTool:
         tool_id = "local.echo"

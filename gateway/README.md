@@ -11,7 +11,10 @@ Its job is orchestration. Domain details should stay in the relevant service lay
 - `gateway/config_service.py`: config merge, update, and reset logic
 - `gateway/conversation_service.py`: conversation/session orchestration
 - `gateway/memory_service.py`: memory integration facade
-- `gateway/tool_service.py`: tool-call coordination
+- `gateway/capability_service.py`: governed execution boundary for tools, computer capabilities, policy, and approval
+- `gateway/task_service.py`: durable task and run state
+- `gateway/workbench_projection.py`: user-facing projection over runtime events
+- `gateway/public_contracts.py`: transport-neutral public contract source
 - `gateway/workflow_engine.py`: workflow definitions, runs, checkpoints, and recovery
 - `gateway/events.py`: event bus
 - `gateway/protocol.py`: protocol data structures

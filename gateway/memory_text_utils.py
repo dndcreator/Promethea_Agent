@@ -4,6 +4,19 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+MEMORY_MODALITIES = {"actual", "plan", "hypothetical"}
+MEMORY_PERSISTENCE_LEVELS = {"ephemeral", "bounded", "durable"}
+
+
+def normalize_memory_modality(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in MEMORY_MODALITIES else "unknown"
+
+
+def normalize_memory_persistence(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in MEMORY_PERSISTENCE_LEVELS else "unknown"
+
 
 def normalize_content(text: str) -> str:
     content = (text or "").strip().lower()
@@ -44,11 +57,15 @@ def build_semantic_keys(content: str, llm_keys: Optional[List[str]] = None) -> L
             norm = normalize_content(str(k))
             if norm:
                 keys.add(norm)
+        if keys:
+            return sorted(keys)
 
     tokens = extract_tokens(content)
-    for token in tokens:
-        if len(token) >= 2:
-            keys.add(token)
+    if len(tokens) == 1:
+        keys.add(tokens[0])
+    else:
+        for index in range(len(tokens) - 1):
+            keys.add(f"{tokens[index]} {tokens[index + 1]}")
 
     return sorted(keys)
 
@@ -81,6 +98,8 @@ def normalize_candidates(candidates: Any) -> List[Dict[str, Any]]:
                 "type": raw_type,
                 "content": content,
                 "semantic_keys": semantic_keys,
+                "modality": normalize_memory_modality(item.get("modality")),
+                "persistence": normalize_memory_persistence(item.get("persistence")),
             }
         )
     return result

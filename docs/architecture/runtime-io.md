@@ -42,7 +42,7 @@ image/OCR logic across routes, tools, memory, and reasoning.
 
 - `ConversationService`: owns LLM input/output compilation.
 - `Attachment/file store`: stores files and exposes text/blob data.
-- `ToolService`: executes tools and returns observations.
+- `CapabilityService`: executes governed capabilities and returns observations.
 - `ActionService`: owns action-run lifecycle and delegates execution to the
   existing tool-call loop.
 - `MemoryService`: owns recall and memory writes.
@@ -65,5 +65,5 @@ The first integrated path covers chat requests and uploaded attachments:
   and clear fallback text for text-only models.
 
 Tool observations already use OpenAI-style content blocks inside the existing
-tool-call loop. They remain under `ToolService` / tool runtime control and can
+tool-call loop. They remain under `CapabilityService` runtime control and can
 be lifted into RuntimeBlock producers without changing the public tool contract.

@@ -44,19 +44,22 @@ The official pack should cover common agent tasks without requiring custom plugi
 
 `web.search` is provider-backed. The tool name stays stable while
 `SEARCH__PROVIDER` selects the runtime backend (`auto`, `brave`, `tavily`,
-`serpapi`, `searxng`, or `duckduckgo`). In `auto`, configured API-backed or
-endpoint-backed providers are tried first, and DuckDuckGo is used as the
-key-free fallback. Provider keys and URLs live in `.env` or the current user's
+`serpapi`, `searxng`, or `duckduckgo`). `SEARCH__PROVIDER_ORDER` controls
+preference and `SEARCH__FALLBACK_POLICY` selects strict execution or observable
+fallback. Provider keys and URLs live in `.env` or the current user's
 `config/users/<user_id>/secrets.env`.
 
 This is intentionally a two-layer design:
 
-- `ToolService` registers and audits one official tool: `web.search`.
-- `WebSearchRuntime` selects the provider inside that tool.
+- `CapabilityService` registers and audits one official tool: `web.search`.
+- `WebSearchRuntime` registers and selects providers inside that tool.
+- Provider failures use stable codes and cancellation propagates through the
+  asynchronous search path.
+- Bounded source metadata is persisted with tool lifecycle events for replay.
 
-The router should not need to know whether Brave, Tavily, SerpAPI, SearXNG, or
-DuckDuckGo will serve the request. Provider choice is runtime configuration, not
-prompt policy.
+The main model only selects `web.search`; it does not need to know whether Brave,
+Tavily, SerpAPI, SearXNG, or DuckDuckGo will serve the request. Provider choice
+is owned by the search runtime.
 
 ### Runtime and Session
 
@@ -68,6 +71,17 @@ prompt policy.
 - `session.recent_messages`
 - `session.info`
 - `session.list`
+
+`workspace.*`, `code.run_python`, and `runtime.exec_command` use the same
+user/session workspace. An agent can write a program, execute it, inspect the
+command output and generated files, then revise and rerun it. Command `cwd`
+may select a directory inside that workspace, but cannot escape it. The caller
+identity comes from the trusted tool invocation context, not model-supplied
+`user_id` arguments. Command and code execution require confirmation by default,
+then run through the platform sandbox described in
+[Configuration](configuration.md). On Windows this executes native commands
+with restricted file-write permissions; desktop input remains a separate host
+capability.
 
 ### Workspace
 
@@ -141,9 +155,11 @@ promethea status tools
 
 Not all tools are equal risk.
 - read-only tools are usually callable by default
-- workspace/external write tools may require policy allow or confirmation
+- tool manifests and local registrations declare a structured side-effect level
+- external writes and privileged host actions require confirmation by default
 
-Always treat tool execution as policy-governed, not prompt-governed.
+`CapabilityService`, `ToolRegistry`, and `ToolPolicy` are the runtime authority for
+that decision. The model cannot grant approval through tool arguments.
 
 ## Example: General Task Pattern
 

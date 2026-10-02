@@ -29,7 +29,7 @@ def _default_catalog() -> List[Dict[str, Any]]:
         {"tool_type": "mcp", "service_name": "computer_control", "tool_name": "process_action", "description": "run process launch app"},
         {"tool_type": "mcp", "service_name": "computer_control", "tool_name": "content_action", "description": "fetch and parse web pdf image"},
         {"tool_type": "mcp", "service_name": "computer_control", "tool_name": "runtime_action", "description": "runtime status plugins memory"},
-        {"tool_type": "mcp", "service_name": "computer_control", "tool_name": "schedule_action", "description": "schedule cron recurring jobs"},
+        {"tool_type": "mcp", "service_name": "cron_tools", "tool_name": "create_job", "description": "schedule registered capabilities"},
         {"tool_type": "mcp", "service_name": "computer_control", "tool_name": "graph_action", "description": "graph node relation edges"},
         {"tool_type": "mcp", "service_name": "moirai", "tool_name": "flow_resume", "description": "workflow resume retry checkpoint"},
         {"tool_type": "mcp", "service_name": "self_evolve", "tool_name": "self_evolve", "description": "self evolve code patch test"},
@@ -92,7 +92,11 @@ async def run_capability_smoke(workspace_root: Path) -> Dict[str, Any]:
     emitter = EventEmitter()
     bench_workspace_root = workspace_root / ".benchmark-workspace"
     ws = WorkspaceService(event_emitter=emitter, base_dir=str(bench_workspace_root))
-    engine = WorkflowEngine(event_emitter=emitter, workspace_service=ws)
+    engine = WorkflowEngine(
+        event_emitter=emitter,
+        workspace_service=ws,
+        storage_path=str(bench_workspace_root / "workflow_state.json"),
+    )
     workflow = WorkflowDefinition(
         workflow_id="wf.benchmark.audit",
         name="Benchmark Workflow Audit",

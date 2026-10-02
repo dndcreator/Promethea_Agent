@@ -49,7 +49,7 @@ cp env.example .env
 ```bash
 pytest tests/test_reasoning_service.py \
        tests/test_memory_regressions.py \
-       tests/test_tool_service.py \
+       tests/test_capability_service.py \
        tests/test_workspace_sandbox.py \
        tests/test_workflow_engine_mvp.py
 ```
@@ -127,7 +127,7 @@ Startup script: `start_gateway_service.py`.
 Every PR must answer these questions in the description:
 
 1. **Which workstream does this belong to?**  
-   (Gateway / Memory / Workflow / Tool / Channel / Security / Observability / Config / Skill / Workspace)
+   (Gateway / Memory / Workflow / Capability / Channel / Security / Observability / Config / Skill / Workspace)
 
 2. **Does this change `user_id` boundary logic?**  
    If yes: explain which enforcement point is affected and how the audit is updated.

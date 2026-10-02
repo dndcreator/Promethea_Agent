@@ -5,6 +5,9 @@ GATEWAY_RUN_STARTED = "gateway.run.started"
 CONVERSATION_RUN_STARTED = "conversation.run.started"
 MEMORY_RECALL_STARTED = "memory.recall.started"
 MEMORY_RECALL_FINISHED = "memory.recall.finished"
+COGNITION_RECALL_STARTED = "cognition.recall.started"
+COGNITION_RECALL_FINISHED = "cognition.recall.finished"
+COGNITION_RECALL_FAILED = "cognition.recall.failed"
 REASONING_STARTED = "reasoning.started"
 REASONING_FINISHED = "reasoning.finished"
 TOOL_EXECUTION_STARTED = "tool.execution.started"
@@ -27,6 +30,9 @@ ALL_EVENT_TYPES = [
     CONVERSATION_RUN_STARTED,
     MEMORY_RECALL_STARTED,
     MEMORY_RECALL_FINISHED,
+    COGNITION_RECALL_STARTED,
+    COGNITION_RECALL_FINISHED,
+    COGNITION_RECALL_FAILED,
     REASONING_STARTED,
     REASONING_FINISHED,
     TOOL_EXECUTION_STARTED,

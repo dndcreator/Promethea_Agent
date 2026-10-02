@@ -49,6 +49,7 @@ class Neo4jConnector:
                 "CREATE CONSTRAINT concept_id IF NOT EXISTS FOR (n:Concept) REQUIRE n.id IS UNIQUE",
                 "CREATE CONSTRAINT summary_id IF NOT EXISTS FOR (n:Summary) REQUIRE n.id IS UNIQUE",
                 "CREATE CONSTRAINT user_id IF NOT EXISTS FOR (n:User) REQUIRE n.id IS UNIQUE",
+                "CREATE CONSTRAINT promethea_schema_component IF NOT EXISTS FOR (n:PrometheaSchema) REQUIRE n.component IS UNIQUE",
             ]
 
             indexes = [
@@ -73,6 +74,35 @@ class Neo4jConnector:
                     session.run(statement).consume()
                 except Exception as e:
                     logger.debug(f"Index create skipped/failed: {e}")
+
+            self._migrate_schema(session)
+
+    @staticmethod
+    def _migrate_schema(session: Any) -> None:
+        """Apply bounded, idempotent graph-shape migrations once per database."""
+        try:
+            record = session.run(
+                "MERGE (s:PrometheaSchema {component: 'memory'}) "
+                "ON CREATE SET s.version = 0 "
+                "RETURN coalesce(s.version, 0) AS version"
+            ).single()
+            version = int(record["version"] if record else 0)
+            if version < 1:
+                session.run(
+                    "MATCH (m:Message) "
+                    "SET m.target_memory_layer = coalesce(m.target_memory_layer, 'direct'), "
+                    "m.updated_at = coalesce(m.updated_at, m.created_at), "
+                    "m.status = coalesce(m.status, 'active')"
+                ).consume()
+                session.run(
+                    "MATCH (s:PrometheaSchema {component: 'memory'}) "
+                    "SET s.version = 1, s.updated_at = datetime()"
+                ).consume()
+                logger.info("Neo4j memory schema migrated to version 1")
+        except Exception as e:
+            # Compatibility reads still use coalesce; migration failure should
+            # be visible without making an older database unbootable.
+            logger.warning(f"Neo4j memory schema migration deferred: {e}")
 
     def create_node(self, node: Neo4jNode) -> str:
         with self.driver.session(database=self.config.database) as session:

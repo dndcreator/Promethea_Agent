@@ -17,9 +17,8 @@ class ActionService:
     Gateway first-class service for action-mode execution.
 
     It does not decide whether a user turn needs action, and it does not own
-    memory writes. ConversationService/PromptPolicyRouter decide when to enter
-    action mode; ActionService manages that action run's state, trace, service
-    delegation, and structured result.
+    memory writes. The main model selects direct answers or registered runtime
+    capabilities; ActionService manages the resulting control loop and trace.
     """
 
     def __init__(
@@ -43,8 +42,10 @@ class ActionService:
         user_id: Optional[str] = None,
         run_context: Optional[Any] = None,
         tool_executor: Optional[Any] = None,
+        confirmation_resolver: Optional[Any] = None,
         budget: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        initial_response: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         action_run = ActionRun(
             goal=str(goal or ""),
@@ -58,7 +59,12 @@ class ActionService:
             ),
             budget=budget,
         )
-        result = await self._run(action_run, tool_executor=tool_executor)
+        result = await self._run(
+            action_run,
+            tool_executor=tool_executor,
+            confirmation_resolver=confirmation_resolver,
+            initial_response=initial_response,
+        )
         return result.to_chat_loop_result()
 
     async def _run(
@@ -66,6 +72,8 @@ class ActionService:
         action_run: ActionRun,
         *,
         tool_executor: Optional[Any] = None,
+        confirmation_resolver: Optional[Any] = None,
+        initial_response: Optional[Dict[str, Any]] = None,
     ) -> ActionResult:
         action_run.status = "running"
         action_run.add_trace(
@@ -84,7 +92,12 @@ class ActionService:
         )
         started = time.perf_counter()
         try:
-            result = await self.planner.run(action_run, tool_executor=tool_executor)
+            result = await self.planner.run(
+                action_run,
+                tool_executor=tool_executor,
+                confirmation_resolver=confirmation_resolver,
+                initial_response=initial_response,
+            )
             action_run.status = result.status or "success"
             action_run.ended_at = time.time()
             action_run.add_trace(

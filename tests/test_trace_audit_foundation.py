@@ -1,4 +1,4 @@
-﻿from unittest.mock import MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -7,7 +7,7 @@ from gateway.models import RunContext, SessionState
 from gateway.observability.audit import AuditEvent
 from gateway.observability.trace import TraceEvent
 from gateway.protocol import EventType
-from gateway.tool_service import ToolInvocationContext, ToolService
+from gateway.capability_service import ToolInvocationContext, CapabilityService
 
 
 def _build_run_context() -> RunContext:
@@ -77,7 +77,7 @@ async def test_main_path_trace_fields_completeness():
 @pytest.mark.asyncio
 async def test_side_effect_tool_generates_audit_event():
     emitter = EventEmitter()
-    service = ToolService(event_emitter=emitter, mcp_manager=MagicMock())
+    service = CapabilityService(event_emitter=emitter, mcp_manager=MagicMock())
 
     class _WriteTool:
         tool_id = "local.write_file"

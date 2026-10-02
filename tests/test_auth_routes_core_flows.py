@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import HTTPException
@@ -9,7 +9,7 @@ from fastapi import Response
 from jose import JWTError
 
 from gateway.http.routes import auth
-from gateway.http.schemas import APIConfigUpdate, UserConfigUpdate, UserDeleteRequest, UserLogin, UserRegister
+from gateway.http.schemas import UserDeleteRequest, UserLogin, UserRegister
 
 
 @pytest.mark.asyncio
@@ -104,58 +104,6 @@ async def test_logout_clears_auth_cookie():
     out = await auth.logout(response)
     assert out["status"] == "success"
     assert auth.AUTH_COOKIE_NAME in response.headers.get("set-cookie", "")
-
-
-@pytest.mark.asyncio
-async def test_update_config_uses_config_service_and_scrubs_api_key(monkeypatch):
-    config_service = MagicMock()
-    config_service.update_user_config = AsyncMock(
-        return_value={
-            "success": True,
-            "message": "ok",
-            "config": {
-                "agent_name": "Updated",
-                "api": {"api_key": "secret", "model": "gpt-test"},
-            },
-        }
-    )
-    monkeypatch.setattr(auth, "_get_config_service", lambda: config_service)
-
-    out = await auth.update_config(
-        req=UserConfigUpdate(
-            agent_name="Updated",
-            api=APIConfigUpdate(api_key="new-key", model="gpt-test"),
-        ),
-        user_id="u1",
-    )
-    assert out["status"] == "success"
-    assert out["canonical_endpoint"] == "/api/config/update"
-    assert "api_key" not in out["config"]["api"]
-    assert "model" not in out["config"]["api"]
-    config_service.update_user_config.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_update_config_falls_back_to_legacy_when_gateway_unavailable(monkeypatch):
-    def _raise_503():
-        raise HTTPException(status_code=503, detail="Config service not initialized")
-
-    monkeypatch.setattr(auth, "_get_config_service", _raise_503)
-
-    graph_update = MagicMock(return_value=True)
-    file_update = MagicMock(return_value=True)
-    monkeypatch.setattr(auth.user_manager, "update_user_config", graph_update)
-    monkeypatch.setattr(auth.user_manager, "update_user_config_file", file_update)
-
-    out = await auth.update_config(
-        req=UserConfigUpdate(agent_name="A1", system_prompt="S1"),
-        user_id="u1",
-    )
-    assert out["status"] == "success"
-    assert out["graph_sync_ok"] is True
-    assert "legacy fallback" in out["message"]
-    graph_update.assert_called_once_with("u1", agent_name="A1", system_prompt="S1")
-    file_update.assert_called_once()
 
 
 @pytest.mark.asyncio

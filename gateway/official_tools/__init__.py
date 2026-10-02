@@ -4,6 +4,7 @@ from typing import Any
 
 from .archive_tools import ArchiveZipCreateTool, ArchiveZipExtractTool, ArchiveZipListTool
 from .code_tools import CodeRunPythonTool
+from .cognition_tools import CognitionRecallTool
 from .command_tools import RuntimeExecCommandTool, RuntimeReadEnvTool
 from .data_tools import DataCsvToJsonTool, DataJsonToCsvTool
 from .math_tools import MathCalculateTool
@@ -15,6 +16,7 @@ from .memory_tools import (
     MemorySummarizeSessionTool,
 )
 from .runtime_tools import RuntimeListToolsTool, RuntimeProcessingStatsTool, RuntimeServicesTool
+from .reasoning_tools import ReasoningRunTool
 from .skill_tools import SkillRunTool
 from .session_tools import SessionInfoTool, SessionListTool, SessionRecentMessagesTool
 from .text_tools import TextFindMatchesTool, TextNormalizeJsonTool, TextWordStatsTool
@@ -59,16 +61,18 @@ from .workspace_tools import (
 
 def register_official_tools(
     *,
-    tool_service: Any,
+    capability_service: Any,
     workspace_service: Any = None,
     memory_service: Any = None,
     message_manager: Any = None,
     gateway_server: Any = None,
 ) -> None:
-    """Register built-in local tools with the runtime ToolService."""
-    if tool_service is None:
+    """Register built-in local tools with the runtime CapabilityService."""
+    if capability_service is None:
         return
-    existing = getattr(tool_service, "_registered_tools", {}) or {}
+    if workspace_service is not None:
+        capability_service.workspace_service = workspace_service
+    existing = getattr(capability_service, "_registered_tools", {}) or {}
     tools = [
         DataCsvToJsonTool(),
         DataJsonToCsvTool(),
@@ -83,7 +87,6 @@ def register_official_tools(
         WebFetchJsonTool(),
         WebSearchTool(),
         WebExtractLinksTool(),
-        RuntimeExecCommandTool(),
         RuntimeReadEnvTool(),
         SkillRunTool(gateway_server=gateway_server),
     ]
@@ -113,6 +116,10 @@ def register_official_tools(
                 RuntimeListToolsTool(gateway_server=gateway_server),
             ]
         )
+        if getattr(gateway_server, "reasoning_service", None) is not None:
+            tools.append(ReasoningRunTool(gateway_server=gateway_server))
+        if getattr(gateway_server, "self_model_service", None) is not None:
+            tools.append(CognitionRecallTool(self_model_service=gateway_server.self_model_service))
         if getattr(gateway_server, "workflow_engine", None) is not None:
             tools.extend(
                 [
@@ -131,6 +138,7 @@ def register_official_tools(
     if workspace_service is not None:
         tools.extend(
             [
+                RuntimeExecCommandTool(workspace_service=workspace_service),
                 ArchiveZipCreateTool(workspace_service=workspace_service),
                 ArchiveZipExtractTool(workspace_service=workspace_service),
                 ArchiveZipListTool(workspace_service=workspace_service),
@@ -156,4 +164,5 @@ def register_official_tools(
     for tool in tools:
         if getattr(tool, "tool_id", None) in existing:
             continue
-        tool_service.register_tool(tool)
+        capability_service.register_tool(tool)
+    capability_service.ensure_discovered_tools()

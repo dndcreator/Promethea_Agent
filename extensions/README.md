@@ -6,11 +6,13 @@ This directory contains Promethea plugin extensions.
 
 | Type | Purpose | Where it lives |
 | --- | --- | --- |
-| Extension | Drop-in package that registers tools, channels, or services. | `extensions/*`, `extensions/community/*` |
-| Tool | Callable action exposed through `ToolService` and policy. | `gateway/official_tools/*`, `agentkit/tools/*`, or an extension |
+| Host plugin | Drop-in package that registers channels or non-tool services. | `extensions/*` |
+| Tool | Callable action exposed through `CapabilityService` and policy. | `gateway/official_tools/*`, `agentkit/tools/*`, or an extension |
 | Skill | Reusable task instruction and metadata, expanded on demand. | `skills/packs/official/*` |
 
-Extensions can contribute tools or channels, but they are not the same thing as skills. Use a skill for reusable guidance; use an extension when you need to add executable capabilities or integration surfaces.
+Host plugins and executable tools are separate. Use a skill for reusable guidance,
+an `agent-manifest.json` package under `extensions/community` for executable
+capabilities, and `promethea.plugin.json` for channels or host services.
 
 ## Layout
 

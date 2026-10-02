@@ -1,4 +1,4 @@
-﻿from types import SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -7,7 +7,7 @@ from gateway.memory_service import MemoryService
 from gateway.models import RunContext, SessionState
 from gateway.protocol import EventType
 from gateway.reasoning_service import ReasoningService
-from gateway.tool_service import ToolInvocationContext, ToolService
+from gateway.capability_service import ToolInvocationContext, CapabilityService
 
 
 class _DummyConversationCore:
@@ -17,7 +17,7 @@ class _DummyConversationCore:
 
 def _build_run_context() -> RunContext:
     state = SessionState(session_id="s1", user_id="u1", trace_id="t1")
-    return RunContext(request_id="r1", trace_id="t1", session_state=state)
+    return RunContext(request_id="r1", trace_id="t1", task_id="task1", run_id="run1", session_state=state)
 
 
 @pytest.mark.asyncio
@@ -47,6 +47,8 @@ async def test_memory_recall_event_includes_run_context_fields():
     assert payload["request_id"] == "r1"
     assert payload["session_id"] == "s1"
     assert payload["user_id"] == "u1"
+    assert payload["task_id"] == "task1"
+    assert payload["run_id"] == "run1"
 
 
 @pytest.mark.asyncio
@@ -54,7 +56,7 @@ async def test_tool_events_include_run_context_fields():
     event_emitter = MagicMock()
     event_emitter.emit = AsyncMock()
 
-    service = ToolService(event_emitter=event_emitter, mcp_manager=MagicMock())
+    service = CapabilityService(event_emitter=event_emitter, mcp_manager=MagicMock())
 
     class _LocalTool:
         tool_id = "local.echo"
@@ -81,6 +83,8 @@ async def test_tool_events_include_run_context_fields():
     assert payload["request_id"] == "r1"
     assert payload["session_id"] == "s1"
     assert payload["user_id"] == "u1"
+    assert payload["task_id"] == "task1"
+    assert payload["run_id"] == "run1"
 
 
 @pytest.mark.asyncio
@@ -137,3 +141,5 @@ async def test_reasoning_start_event_includes_run_context_fields(monkeypatch):
     assert start_payloads[0]["request_id"] == "r1"
     assert start_payloads[0]["session_id"] == "s1"
     assert start_payloads[0]["user_id"] == "u1"
+    assert start_payloads[0]["task_id"] == "task1"
+    assert start_payloads[0]["run_id"] == "run1"

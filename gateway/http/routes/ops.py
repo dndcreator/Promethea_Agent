@@ -12,9 +12,17 @@ from gateway.protocol_contracts import build_domain_contracts, build_ws_method_c
 from gateway.runtime_governance import build_runtime_governance_contract
 from ..http_contracts import build_http_contracts
 from gateway.protocol import RequestType
+from gateway.public_contracts import build_public_contract_schema
 
 
 router = APIRouter()
+
+
+@router.get("/ops/schema", operation_id="get_public_runtime_contracts")
+async def ops_schema() -> Dict[str, Any]:
+    """Transport-neutral public objects for SDK and plugin authors."""
+
+    return build_public_contract_schema()
 
 @router.get("/ops/capabilities")
 async def ops_capabilities() -> Dict[str, Any]:
@@ -116,6 +124,8 @@ async def ops_protocol() -> Dict[str, Any]:
                 "config_contract_endpoint": "/api/config/contract",
                 "config_template_endpoint": "/api/config/default-template",
                 "http_contracts_endpoint": "/api/ops/http-contracts",
+                "openapi_endpoint": "/openapi.json",
+                "public_schema_endpoint": "/api/ops/schema",
                 "surface_discovery_endpoint": "/api/ops/surfaces",
                 "governance_endpoint": "/api/ops/governance",
             },
@@ -135,7 +145,7 @@ async def ops_protocol() -> Dict[str, Any]:
             },
             "response_envelope": {
                 "required_fields": ["type", "id", "ok"],
-                "optional_fields": ["payload", "error", "timestamp"],
+                "optional_fields": ["payload", "error", "error_detail", "timestamp"],
             },
             "event_envelope": {
                 "required_fields": ["type", "event", "payload"],
@@ -159,6 +169,7 @@ async def ops_protocol() -> Dict[str, Any]:
                     "trace_id": "string",
                 },
                 "gateway_response_error_field": "string",
+                "gateway_response_error_detail_field": "Error",
                 "gateway_response_payload_error_detail": {
                     "code": "string",
                     "message": "string",
@@ -213,17 +224,11 @@ async def ops_protocol() -> Dict[str, Any]:
                     "memory.neo4j.password",
                     "memory.neo4j.database",
                 ],
-                "update_aliases": {
-                    "config_data": "config",
-                    "hot_reload": "options.hot_apply",
-                    "hot_apply": "options.hot_apply",
-                    "validate_config": "validate",
-                },
+                "update_shape": "config + options.hot_apply + validate",
             },
             "domains": build_domain_contracts(),
             "governance": {
-                "stability_levels": ["stable", "compat", "legacy"],
-                "deprecation_policy": "legacy endpoints remain available with canonical endpoint hints before removal",
+                "stability_levels": ["stable"],
                 "change_policy": "breaking changes require version bump and migration notes",
                 "runtime_contracts": {
                     "task_graph": "1.0",
@@ -251,7 +256,7 @@ async def ops_readiness() -> Dict[str, Any]:
     elif startup_status == "degraded" and level == "healthy":
         level = "degraded"
 
-    critical = {"conversation_service", "config_service", "tool_service"}
+    critical = {"conversation_service", "config_service", "capability_service"}
     critical_failed = sorted([name for name in failed if name in critical])
     go_no_go = "go"
     reason = "all critical services ready"
@@ -382,7 +387,7 @@ async def ops_runbook() -> Dict[str, Any]:
             "2) Check /api/ops/capabilities for feature toggles.",
             "3) Check /api/ops/abstractions for runtime/client boundaries.",
             "4) Check /api/ops/protocol for protocol contract details.",
-            "5) Check /api/ops/methods for WS method schemas and compatibility aliases.",
+            "5) Check /api/ops/methods for WebSocket method schemas.",
             "6) Check /api/ops/http-contracts for canonical HTTP request/response contracts.",
             "7) Check /api/ops/surfaces for full protocol surface discovery.",
             "8) Check /api/ops/governance for task-graph/context-budget contracts.",

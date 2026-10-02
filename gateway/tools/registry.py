@@ -24,14 +24,34 @@ class ToolRegistry:
         if "." in tool_id:
             service_name, tool_name = tool_id.split(".", 1)
         description = str(getattr(tool, "description", ""))
+        source = getattr(tool, "tool_source", ToolSource.LOCAL)
+        if not isinstance(source, ToolSource):
+            source = ToolSource(str(source))
         spec = ToolSpec(
             tool_name=tool_name,
             service_name=service_name,
             description=description,
-            side_effect_level=self._infer_side_effect(tool_id, description),
-            source=ToolSource.LOCAL,
-            capability_type="local",
-            metadata={"tool_id": tool_id},
+            input_schema=dict(getattr(tool, "input_schema", {}) or {}),
+            output_schema=dict(getattr(tool, "output_schema", {}) or {}),
+            side_effect_level=getattr(tool, "side_effect_level", None)
+            or SideEffectLevel.PRIVILEGED_HOST_ACTION,
+            timeout_ms=int(getattr(tool, "timeout_ms", 30000) or 30000),
+            retry_policy=dict(getattr(tool, "retry_policy", {}) or {"max_retries": 0}),
+            idempotency_hint=str(getattr(tool, "idempotency_hint", "unknown") or "unknown"),
+            source=source,
+            capability_type="extension" if source == ToolSource.EXTENSION else "local",
+            metadata={
+                "tool_id": tool_id,
+                "declared_side_effect": bool(getattr(tool, "side_effect_level", None)),
+                "side_effect_selector": dict(getattr(tool, "side_effect_selector", {}) or {}),
+                "requires_capability": str(getattr(tool, "requires_capability", "") or ""),
+                "requires_config": getattr(tool, "requires_config", None),
+                "owner_user_id": str(getattr(tool, "owner_user_id", "") or ""),
+                "manifest_path": str(getattr(tool, "manifest_path", "") or ""),
+                "extension_id": str(getattr(tool, "extension_id", "") or ""),
+                "extension_name": str(getattr(tool, "extension_name", "") or ""),
+                "extension_version": str(getattr(tool, "extension_version", "") or ""),
+            },
         )
         self.register_spec(spec)
         return spec
@@ -49,7 +69,7 @@ class ToolRegistry:
                     tool_name=service_name,
                     service_name=service_name,
                     description=service_desc,
-                    side_effect_level=self._infer_side_effect(service_name, service_desc),
+                    side_effect_level=SideEffectLevel.PRIVILEGED_HOST_ACTION,
                     source=ToolSource.MCP,
                     capability_type="mcp",
                 )
@@ -64,12 +84,28 @@ class ToolRegistry:
                     tool_name=action_name,
                     service_name=service_name,
                     description=action_desc,
-                    side_effect_level=self._infer_side_effect(full_name, action_desc),
+                    side_effect_level=(
+                        action.get("side_effect_level")
+                        or SideEffectLevel.PRIVILEGED_HOST_ACTION
+                    ),
                     source=ToolSource.MCP,
                     capability_type="mcp",
                     input_schema=action.get("input_schema") or {},
+                    metadata={
+                        "declared_side_effect": bool(action.get("side_effect_level")),
+                        "side_effect_selector": action.get("side_effect_selector") or {},
+                        "requires_capability": str(action.get("requires_capability") or ""),
+                        "requires_config": action.get("requires_config"),
+                        "owner_user_id": action.get("owner_user_id"),
+                    },
                 )
                 self.register_spec(spec)
+
+    def replace_mcp_services(self, services: Dict[str, Any]) -> None:
+        for full_name, spec in list(self._specs.items()):
+            if spec.source == ToolSource.MCP:
+                self._specs.pop(full_name, None)
+        self.register_mcp_services(services)
 
     def normalize_call(self, *, tool_name: str, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Normalize model-produced tool calls to a registered canonical tool id.
@@ -83,12 +119,15 @@ class ToolRegistry:
         raw_tool_name = str(tool_name or "").strip()
         service_name = str(params.get("service_name") or "").strip()
         actual_tool_name = str(params.get("tool_name") or params.get("command") or raw_tool_name).strip()
-        agent_type = str(params.get("agentType", "mcp")).lower()
+        agent_type = str(params.get("agentType") or "").lower()
 
         if agent_type == "agent":
             return raw_tool_name, params
 
-        if raw_tool_name in self._specs and self._specs[raw_tool_name].source == ToolSource.LOCAL:
+        if raw_tool_name in self._specs and self._specs[raw_tool_name].source in {
+            ToolSource.LOCAL,
+            ToolSource.EXTENSION,
+        }:
             return raw_tool_name, params
 
         candidates = []
@@ -109,7 +148,7 @@ class ToolRegistry:
             spec = self._specs.get(candidate)
             if spec is None:
                 continue
-            if spec.source == ToolSource.LOCAL:
+            if spec.source in {ToolSource.LOCAL, ToolSource.EXTENSION}:
                 return spec.full_name, params
             normalized = dict(params)
             normalized["agentType"] = "mcp"
@@ -139,7 +178,7 @@ class ToolRegistry:
         if tool_name in self._specs:
             return self._specs[tool_name]
 
-        agent_type = str(params.get("agentType", "mcp")).lower()
+        agent_type = str(params.get("agentType") or "").lower()
         if agent_type == "agent":
             agent_name = str(params.get("agent_name") or tool_name or "agent")
             full_name = f"agent.{agent_name}"
@@ -164,33 +203,40 @@ class ToolRegistry:
         if existing:
             return existing
 
-        # Fallback: create inferred MCP spec to keep call path resilient.
+        # Undeclared tools fail closed at the policy boundary. Risk must come
+        # from a manifest or an explicit local ToolSpec, never name heuristics.
         spec = ToolSpec(
             tool_name=actual_tool_name,
             service_name=service_name,
             description="",
             source=ToolSource.MCP,
             capability_type="mcp",
-            side_effect_level=self._infer_side_effect(full_name, ""),
-            metadata={"inferred": True},
+            side_effect_level=SideEffectLevel.PRIVILEGED_HOST_ACTION,
+            metadata={"inferred": True, "risk_metadata_missing": True},
         )
         self.register_spec(spec)
         return spec
 
+    def resolve_for_call(self, *, tool_name: str, params: Dict[str, Any]) -> ToolSpec:
+        """Resolve a spec and apply manifest-declared parameterized effects."""
+        spec = self.resolve(tool_name=tool_name, params=params)
+        selector = spec.metadata.get("side_effect_selector")
+        if not isinstance(selector, dict):
+            return spec
+        parameter = str(selector.get("parameter") or "").strip()
+        groups = selector.get("groups")
+        if not parameter or not isinstance(groups, dict):
+            return spec
+        selected = str(params.get(parameter) or "").strip().lower()
+        effect = selector.get("default")
+        for level, values in groups.items():
+            normalized = {str(value).strip().lower() for value in (values or [])}
+            if selected in normalized:
+                effect = level
+                break
+        if not effect:
+            return spec
+        return spec.model_copy(update={"side_effect_level": SideEffectLevel(str(effect))})
+
     def list_specs(self) -> List[ToolSpec]:
         return list(self._specs.values())
-
-    @staticmethod
-    def _infer_side_effect(name: str, description: str) -> SideEffectLevel:
-        text = f"{name} {description}".lower()
-        privileged_markers = ("execute", "process", "shell", "command", "sudo", "registry")
-        workspace_markers = ("write", "create", "delete", "patch", "rename", "save", "file")
-        external_markers = ("http", "post", "send", "publish", "deploy", "email", "webhook")
-
-        if any(m in text for m in privileged_markers):
-            return SideEffectLevel.PRIVILEGED_HOST_ACTION
-        if any(m in text for m in external_markers):
-            return SideEffectLevel.EXTERNAL_WRITE
-        if any(m in text for m in workspace_markers):
-            return SideEffectLevel.WORKSPACE_WRITE
-        return SideEffectLevel.READ_ONLY

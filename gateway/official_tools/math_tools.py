@@ -3,11 +3,12 @@ from __future__ import annotations
 import ast
 from typing import Any, Dict, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 class MathCalculateTool:
     tool_id = "math.calculate"
+    side_effect_level = "read_only"
     name = "math.calculate"
     description = "Safely evaluate arithmetic expressions."
     official = True
@@ -48,4 +49,3 @@ def _eval_node(node: ast.AST) -> float:
             return left**right
         return left % right
     raise ValueError("unsupported expression")
-

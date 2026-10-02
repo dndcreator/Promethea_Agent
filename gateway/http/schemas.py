@@ -3,24 +3,15 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 
-
-class ChatRequest(BaseModel):
-    message: str
-    stream: bool = False
-    session_id: Optional[str] = None
-    requested_mode: Optional[str] = None
-    requested_skill: Optional[str] = None
-    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+from gateway.public_contracts import RunRequest, RunResponse
 
 
-class ChatResponse(BaseModel):
-    response: str
-    session_id: Optional[str] = None
-    status: str = "success"
-    tool_call_id: Optional[str] = None
-    tool_name: Optional[str] = None
-    args: Optional[Dict] = None
-    memory_write_summary: Optional[Dict] = None
+class ChatRequest(RunRequest):
+    """HTTP binding of the transport-neutral run request."""
+
+
+class ChatResponse(RunResponse):
+    """HTTP binding of the transport-neutral run response."""
 
 
 class FollowUpRequest(BaseModel):
@@ -28,7 +19,9 @@ class FollowUpRequest(BaseModel):
     query_type: str  # why/risk/alternative/custom
     custom_query: Optional[str] = None
     session_id: str
-    context: Optional[List[Dict]] = None
+    message_id: str
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 class UserLogin(BaseModel):
@@ -41,20 +34,6 @@ class UserRegister(BaseModel):
     username: str
     password: str
     agent_name: Optional[str] = "Promethea"
-
-
-class APIConfigUpdate(BaseModel):
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-
-
-class UserConfigUpdate(BaseModel):
-    agent_name: Optional[str] = None
-    system_prompt: Optional[str] = None
-    api: Optional[APIConfigUpdate] = None
 
 
 class ChannelBindRequest(BaseModel):

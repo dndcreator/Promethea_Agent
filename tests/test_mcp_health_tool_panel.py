@@ -25,7 +25,13 @@ def isolated_mcp_registry():
 
 
 def _register_service(name: str, *, visibility=None):
-    MCP_REGISTRY[name] = object()
+    MCP_REGISTRY[name] = {
+        "transport": "stdio",
+        "command": "node",
+        "args": ["server.js"],
+        "cwd": None,
+        "env": {},
+    }
     MANIFEST_CACHE[name] = {
         "name": name,
         "label": name,
@@ -46,7 +52,7 @@ def _register_service(name: str, *, visibility=None):
 
 
 @pytest.mark.asyncio
-async def test_inprocess_service_health_snapshot_defaults_ready(isolated_mcp_registry):
+async def test_external_service_health_snapshot_defaults_unknown(isolated_mcp_registry):
     _register_service("svc_a")
     manager = MCPManager()
 
@@ -54,14 +60,14 @@ async def test_inprocess_service_health_snapshot_defaults_ready(isolated_mcp_reg
 
     assert len(rows) == 1
     assert rows[0]["service_name"] == "svc_a"
-    assert rows[0]["status"] == "ready"
-    assert rows[0]["source"] == "inprocess"
+    assert rows[0]["status"] == "unknown"
+    assert rows[0]["source"] == "registry"
     assert rows[0]["user_visibility"] == "visible"
 
 
 @pytest.mark.asyncio
 async def test_remote_service_health_snapshot_defaults_unknown(isolated_mcp_registry):
-    MCP_REGISTRY["svc_remote"] = {"type": "python", "script_path": "remote.py"}
+    MCP_REGISTRY["svc_remote"] = {"transport": "stdio", "command": "python", "args": ["remote.py"]}
     MANIFEST_CACHE["svc_remote"] = {
         "name": "svc_remote",
         "label": "svc_remote",
@@ -80,6 +86,7 @@ async def test_remote_service_health_snapshot_defaults_unknown(isolated_mcp_regi
 async def test_service_online_after_tool_sync(isolated_mcp_registry):
     _register_service("svc_a")
     manager = MCPManager()
+    manager.tools_cache["svc_a"] = [{"name": "echo", "description": "Echo text"}]
 
     tools = await manager.get_service_tools_async("svc_a")
     health = manager.get_service_health("svc_a", user_id="u1")
@@ -91,9 +98,41 @@ async def test_service_online_after_tool_sync(isolated_mcp_registry):
 
 
 @pytest.mark.asyncio
+async def test_external_provider_tools_are_discovered_into_catalog(isolated_mcp_registry, monkeypatch):
+    _register_service("svc_external")
+    manager = MCPManager()
+
+    class _Session:
+        async def list_tools(self):
+            return SimpleNamespace(
+                tools=[SimpleNamespace(
+                    name="lookup",
+                    description="Look up a record",
+                    inputSchema={"type": "object", "properties": {"id": {"type": "string"}}},
+                )]
+            )
+
+    async def _connect(service_name):
+        assert service_name == "svc_external"
+        return _Session()
+
+    monkeypatch.setattr(manager, "connect_service", _connect)
+    await manager.refresh_registered_tools()
+    services = manager.get_available_services_filtered()["mcp_services"]
+    tools = services[0]["available_tools"]
+    assert tools[0]["name"] == "lookup"
+    assert tools[0]["input_schema"]["properties"]["id"]["type"] == "string"
+
+
+@pytest.mark.asyncio
 async def test_tool_listing_builds_descriptor(isolated_mcp_registry):
     _register_service("svc_a")
     manager = MCPManager()
+    manager.tools_cache["svc_a"] = [{
+        "name": "echo",
+        "description": "Echo text",
+        "input_schema": MANIFEST_CACHE["svc_a"]["inputSchema"],
+    }]
 
     rows = await manager.list_tool_descriptors(service_name="svc_a", user_id="u1")
 
@@ -107,7 +146,7 @@ async def test_tool_listing_builds_descriptor(isolated_mcp_registry):
 
 @pytest.mark.asyncio
 async def test_last_error_persisted_in_health_snapshot(isolated_mcp_registry, monkeypatch):
-    MCP_REGISTRY["svc_remote"] = {"type": "python", "script_path": "missing_script.py"}
+    MCP_REGISTRY["svc_remote"] = {"transport": "stdio", "command": "python", "args": ["missing_script.py"]}
     MANIFEST_CACHE["svc_remote"] = {
         "name": "svc_remote",
         "label": "svc_remote",
@@ -129,6 +168,8 @@ async def test_user_visibility_filter(isolated_mcp_registry):
     _register_service("svc_public", visibility={"public": True})
     _register_service("svc_private", visibility={"users": ["u_allow"]})
     manager = MCPManager()
+    manager.tools_cache["svc_public"] = [{"name": "echo"}]
+    manager.tools_cache["svc_private"] = [{"name": "echo"}]
 
     rows_for_blocked = await manager.list_visible_tools_for_user("u_blocked")
     rows_for_allowed = await manager.list_visible_tools_for_user("u_allow")
@@ -145,6 +186,7 @@ async def test_user_visibility_filter(isolated_mcp_registry):
 async def test_gateway_mcp_panel_handlers(isolated_mcp_registry):
     _register_service("svc_panel")
     manager = MCPManager()
+    manager.tools_cache["svc_panel"] = [{"name": "echo"}]
     server = GatewayServer()
     server.mcp_manager = manager
 

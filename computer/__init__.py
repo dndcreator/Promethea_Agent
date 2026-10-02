@@ -5,6 +5,7 @@ from .browser import BrowserController
 from .screen import ScreenController
 from .filesystem import FileSystemController
 from .process import ProcessController
+from .environment import EnvironmentController
 
 __all__ = [
     'ComputerController',
@@ -14,4 +15,5 @@ __all__ = [
     'ScreenController',
     'FileSystemController',
     'ProcessController',
+    'EnvironmentController',
 ]

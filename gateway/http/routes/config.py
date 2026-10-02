@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import config as config_module
 from gateway.config_protocol import normalize_config_update_params
@@ -23,6 +23,9 @@ ENV_ONLY_SECRET_PATHS = [
     "api.base_url",
     "api.model",
     "api.failover_models",
+    "multimodal.api_key",
+    "multimodal.base_url",
+    "multimodal.model",
     "memory.api.api_key",
     "memory.api.base_url",
     "memory.api.model",
@@ -36,6 +39,8 @@ ENV_ONLY_SECRET_PATHS = [
     "memory.sqlite_graph_path",
     "memory.flat_memory_path",
     "search.provider",
+    "search.fallback_policy",
+    "search.provider_order",
     "search.brave_api_key",
     "search.tavily_api_key",
     "search.serpapi_api_key",
@@ -90,14 +95,12 @@ class ConfigUpdateOptions(BaseModel):
 
 
 class ConfigUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     user_id: Optional[str] = None
-    config: Optional[Dict[str, Any]] = None
-    config_data: Optional[Dict[str, Any]] = None
+    config: Dict[str, Any] = Field(default_factory=dict)
     options: Optional[ConfigUpdateOptions] = None
-    hot_apply: Optional[bool] = None
-    hot_reload: Optional[bool] = None
-    validate_config: Optional[bool] = None
-    validate_flag: Optional[bool] = Field(default=None, alias="validate")
+    should_validate: bool = Field(default=True, alias="validate")
 
 
 class ConfigResetRequest(BaseModel):
@@ -147,6 +150,9 @@ def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(sanitized.get("api"), dict):
         for key in ("api_key", "base_url", "model", "failover_models"):
             sanitized["api"].pop(key, None)
+    if isinstance(sanitized.get("multimodal"), dict):
+        for key in ("api_key", "base_url", "model"):
+            sanitized["multimodal"].pop(key, None)
     if isinstance(sanitized.get("memory"), dict):
         mem = sanitized["memory"]
         if isinstance(mem.get("api"), dict):
@@ -158,7 +164,10 @@ def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("store_backend", "sqlite_graph_path", "flat_memory_path"):
             mem.pop(key, None)
     if isinstance(sanitized.get("search"), dict):
-        for key in ("provider", "brave_api_key", "tavily_api_key", "serpapi_api_key", "searxng_url"):
+        for key in (
+            "provider", "fallback_policy", "provider_order", "brave_api_key",
+            "tavily_api_key", "serpapi_api_key", "searxng_url",
+        ):
             sanitized["search"].pop(key, None)
     return sanitized
 
@@ -232,10 +241,7 @@ def _resolve_user_id(requested: Optional[str], current_user_id: str) -> str:
 
 
 def _normalize_config_update_request(request: ConfigUpdateRequest) -> Dict[str, Any]:
-    raw = request.model_dump()
-    if raw.get("validate") is None and request.validate_flag is not None:
-        raw["validate"] = request.validate_flag
-    return normalize_config_update_params(raw)
+    return normalize_config_update_params(request.model_dump(by_alias=True))
 
 
 def _build_config_contract() -> Dict[str, Any]:
@@ -258,14 +264,7 @@ def _build_config_contract() -> Dict[str, Any]:
                     "config": "object",
                     "options": {"hot_apply": "bool"},
                 },
-                "compat_aliases_accepted": {
-                    "config_data": "alias_of_config",
-                    "updates": "alias_of_config",
-                    "hot_reload": "alias_of_options.hot_apply",
-                    "hot_apply": "alias_of_options.hot_apply",
-                    "validate_config": "alias_of_validate",
-                    "validate": "legacy_validate_flag",
-                },
+                "validate": "bool",
             },
             "template_api": {
                 "path": "/api/config/default-template",
@@ -450,32 +449,6 @@ async def get_config_ui_schema(
     if view in {"advanced", "both"}:
         profile_payload["advanced"] = {"fields": ADVANCED_CONFIG_FIELDS}
     return {"status": "success", "view": view, "profiles": profile_payload}
-
-
-@router.post("/config")
-async def update_config_legacy(
-    request: Dict[str, Any],
-    current_user_id: str = Depends(get_current_user_id),
-) -> Dict[str, Any]:
-    config_service = _get_config_service()
-    config_payload: Dict[str, Any] = {}
-    if isinstance(request.get("config_data"), dict):
-        _deep_update(config_payload, request.get("config_data") or {})
-    if isinstance(request.get("config"), dict):
-        _deep_update(config_payload, request.get("config") or {})
-    requested_user_id = request.get("user_id")
-    resolved_user_id = _resolve_user_id(requested_user_id, current_user_id)
-
-    result = await config_service.update_user_config(resolved_user_id, config_payload)
-    if not result.get("success"):
-        raise HTTPException(status_code=400, detail=result.get("message", "Update failed"))
-
-    return {
-        "status": "success",
-        "user_id": resolved_user_id,
-        "message": result.get("message", "Config updated"),
-        "config": _sanitize_config_for_client(result.get("config", {})),
-    }
 
 
 @router.post("/config/update")

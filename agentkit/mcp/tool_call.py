@@ -1,10 +1,12 @@
 import json
+import inspect
 import re
 from typing import List, Dict, Any, Tuple, Optional, Set, Callable, Awaitable
 from loguru import logger
 import asyncio
 import uuid
-from agentkit.security.policy import global_policy
+from copy import deepcopy
+from agentkit.security.approval import approval_scope
 from agentkit.mcp.action_protocol import (
     ACTION_MODE_CONTRACT_MARKER,
     build_observation_gate,
@@ -12,59 +14,29 @@ from agentkit.mcp.action_protocol import (
     iter_json_objects,
     parse_action_envelope,
 )
+from agentkit.mcp.tool_result import (
+    ToolExecutionResult,
+    failed_tool_result,
+    normalize_tool_result,
+)
 
 class ToolConfirmationRequired(Exception):
-    def __init__(self, tool_call_id: str, tool_name: str, args: dict, all_tool_calls: list):
+    def __init__(self, tool_call_id: str, tool_name: str, args: dict, all_tool_calls: list, approved_call_ids=None):
         self.tool_call_id = tool_call_id
         self.tool_name = tool_name
         # Do not assign payload to BaseException.args because CPython coerces
         # it to a tuple, which breaks downstream schema validation expecting dict.
-        self.tool_args = args
-        self.all_tool_calls = all_tool_calls
-
-
-def _tool_blocks_failed(blocks: List[Dict[str, Any]]) -> bool:
-    text = "\n".join(
-        str(block.get("text") or "")
-        for block in blocks
-        if isinstance(block, dict) and block.get("type") == "text"
-    )
-    if not text.strip():
-        return False
-    markers = [
-        "[Error]",
-        "Error executing tool",
-        "Call failed:",
-        "HTTP Error",
-        "Forbidden",
-        "Tool call returned HTTP",
-        "tool verification failed",
-    ]
-    return any(marker in text for marker in markers)
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(v) for v in value]
-    isoformat = getattr(value, "isoformat", None)
-    if callable(isoformat):
-        try:
-            return isoformat()
-        except Exception:
-            pass
-    return str(value)
+        self.tool_args = deepcopy(args)
+        self.all_tool_calls = deepcopy(all_tool_calls)
+        self.approved_call_ids = set(approved_call_ids or ())
 
 
 def _build_lightweight_react_gate(
     *,
-    tool_result_blocks: List[Dict[str, Any]],
+    tool_results: List[ToolExecutionResult],
     remaining_steps: int,
 ) -> str:
-    failed = _tool_blocks_failed(tool_result_blocks)
+    failed = any(not result.ok for result in tool_results)
     return build_observation_gate(failed=failed, remaining_steps=remaining_steps)
 
 
@@ -101,7 +73,7 @@ def _process_single_tool_call(tool_args: dict, tool_calls: list):
         if action and action != "tool_call":
             return
 
-        agent_type = str(tool_args.get("agentType", "mcp")).lower()
+        agent_type = str(tool_args.get("agentType") or "").lower()
         if agent_type == "agent":
             agent_name = tool_args.get("agent_name")
             prompt = tool_args.get("prompt")
@@ -135,11 +107,6 @@ def _process_single_tool_call(tool_args: dict, tool_calls: list):
                 continue
             effective_args[k] = v
 
-        if "service_name" not in effective_args:
-            effective_args["service_name"] = str(tool_name).split(".", 1)[0]
-        if "agentType" not in effective_args:
-            effective_args["agentType"] = "mcp"
-
         tool_call = {"name": tool_name, "args": effective_args}
         tool_calls.append(tool_call)
     except Exception as e:
@@ -147,23 +114,48 @@ def _process_single_tool_call(tool_args: dict, tool_calls: list):
 
 async def execute_tool_calls(
     tool_calls: list,
-    mcp_manager,
     session_id: str = None,
     approved_call_ids: Set[str] = None,
     tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
+    confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Execute all tool calls concurrently.
 
     Returns a flat list of content blocks; each block may be text or image data.
     """
+    results = await execute_tool_calls_detailed(
+        tool_calls,
+        session_id=session_id,
+        approved_call_ids=approved_call_ids,
+        tool_executor=tool_executor,
+        confirmation_resolver=confirmation_resolver,
+    )
+    return [block for result in results for block in result.content]
+
+
+async def execute_tool_calls_detailed(
+    tool_calls: list,
+    session_id: str = None,
+    approved_call_ids: Set[str] = None,
+    tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
+    confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+) -> List[ToolExecutionResult]:
+    """Execute tool calls concurrently and preserve structured outcomes."""
     if approved_call_ids is None:
         approved_call_ids = set()
+    if tool_calls and (tool_executor is None or confirmation_resolver is None):
+        raise RuntimeError("tool execution requires CapabilityService executor and confirmation resolver")
 
     # 0. Pre-process: ensure every tool call has a unique ID
     for tool_call in tool_calls:
         if 'id' not in tool_call:
             tool_call['id'] = str(uuid.uuid4())
+
+    ids = [call['id'] for call in tool_calls]
+    if len(set(ids)) != len(ids):
+        raise ValueError("tool call IDs must be unique within a batch")
+    tool_calls = deepcopy(tool_calls)
 
     # 1. Security check: scan all tool calls
     for tool_call in tool_calls:
@@ -175,17 +167,22 @@ async def execute_tool_calls(
         args = tool_call['args']
         
         # Check whether user confirmation is required
-        if global_policy.requires_confirmation(tool_name, args):
+        requires_confirmation = confirmation_resolver(tool_name, args)
+        if inspect.isawaitable(requires_confirmation):
+            requires_confirmation = await requires_confirmation
+        if requires_confirmation:
             logger.warning(f"Tool {tool_name} (ID: {tool_call['id']}) requires user confirmation")
             # Raise an exception to interrupt execution and carry all pending tool calls
-            raise ToolConfirmationRequired(tool_call['id'], tool_name, args, all_tool_calls=tool_calls)
+            raise ToolConfirmationRequired(tool_call['id'], tool_name, args, all_tool_calls=tool_calls,
+                                           approved_call_ids=approved_call_ids)
 
     tasks = []
 
     # 2. Create all async tasks
     for i, tool_call in enumerate(tool_calls):
         tasks.append(
-            _execute_single_tool(i, tool_call, mcp_manager, tool_executor=tool_executor)
+            _execute_with_approval(i, tool_call, tool_executor=tool_executor,
+                                   approved=tool_call['id'] in approved_call_ids)
         )
     
     if not tasks:
@@ -194,132 +191,53 @@ async def execute_tool_calls(
     # 3. Wait for all tasks in parallel
     results = await asyncio.gather(*tasks)
     
-    # 4. Flatten results (each tool may return multiple blocks such as text + image)
-    flat_results = []
-    for res_blocks in results:
-        flat_results.extend(res_blocks)
-        
-    return flat_results
+    return results
+
+
+async def _execute_with_approval(index, tool_call, *, tool_executor, approved):
+    with approval_scope(tool_call['name'], tool_call['args'], confirmed=approved):
+        return await _execute_single_tool(index, tool_call, tool_executor=tool_executor)
 
 async def _execute_single_tool(
     index: int,
     tool_call: dict,
-    mcp_manager,
-    tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
-) -> List[Dict[str, Any]]:
+    tool_executor: Callable[[str, Dict[str, Any]], Awaitable[Any]],
+) -> ToolExecutionResult:
     """
     Execute a single tool call.
 
     Returns:
-        List[Dict]: OpenAI-style content blocks.
+        A canonical structured result with a model-facing content projection.
     """
-    content_blocks = []
-    
     try:
         logger.debug(f"Starting tool call {index+1}: {tool_call['name']}")
         tool_name = tool_call['name']
         args = tool_call['args']
-        agent_type = args.get('agentType', 'mcp').lower()
-        
-        result_data = None
-        error_msg = None
-
-        if tool_executor is not None:
-            result_data = await tool_executor(tool_name, args)
-        elif agent_type == 'agent':
+        result_data = await tool_executor(tool_name, args)
+        if isinstance(result_data, str) and result_data.strip().startswith('{'):
             try:
-                from agentkit.mcp.agent_manager import get_agent_manager
-                agent_manager = get_agent_manager()
-                agent_name = args.get('agent_name')
-                prompt = args.get('prompt')
-
-                if not agent_name or not prompt:
-                    error_msg = "Agent call failed: missing agent_name or prompt parameter"
-                else:
-                    call_result = await agent_manager.call_agent(agent_name, prompt)
-                    if call_result.get("status") == "success":
-                        result_data = call_result.get("result", "")
-                    else:
-                        error_msg = f"Agent call failed: {call_result.get('error', 'unknown error')}"
+                result_data = json.loads(result_data)
             except Exception as e:
-                error_msg = f"Agent call failed: {str(e)}"
-        else:
-            service_name = args.get('service_name')
-            actual_tool_name = args.get('tool_name', tool_name)
-            tool_args = {k: v for k, v in args.items() 
-                        if k not in ['service_name', 'agentType']}
-
-            if not service_name:
-                error_msg = "MCP call failed: missing service_name parameter"
-            else:
-                result_data = await mcp_manager.unified_call(
-                    service_name=service_name,
-                    tool_name=actual_tool_name,
-                    args=tool_args
-                )
-        
-        # Format result header text
-        header_text = f"Result from tool \"{tool_name}\""
-        
-        if error_msg:
-            content_blocks.append({"type": "text", "text": f"{header_text}\n[Error] {error_msg}"})
-        else:
-            # If result_data is a string, heuristically try to parse JSON (some tools return JSON strings).
-            if isinstance(result_data, str):
-                try:
-                    # Some tools return JSON as a string; parse when possible.
-                    if result_data.strip().startswith('{'):
-                        result_data = json.loads(result_data)
-                except Exception as e:
-                    logger.debug("tool_call: failed to parse string result as JSON: {}", e)
-
-            text_output = ""
-            images = []
-            
-            if isinstance(result_data, dict):
-                # Extract screenshots/images
-                if 'screenshot' in result_data and result_data['screenshot']:
-                    images.append(result_data['screenshot'])
-                    # Remove large base64 blobs from text output to keep it readable.
-                    result_data['screenshot'] = "<image_base64_hidden>"
-                
-                if 'base64' in result_data and result_data['base64']:
-                    images.append(result_data['base64'])
-                    result_data['base64'] = "<image_base64_hidden>"
-                
-                # Convert remaining structure to pretty-printed JSON text.
-                text_output = json.dumps(_json_safe(result_data), ensure_ascii=False, indent=2)
-            else:
-                text_output = str(result_data)
-            
-            # Build text block
-            content_blocks.append({"type": "text", "text": f"{header_text}\n{text_output}"})
-            
-            for img_b64 in images:
-                # Ensure base64 prefix is correct; assume PNG by default.
-                content_blocks.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_b64}"
-                    }
-                })
+                logger.debug("tool_call: failed to parse string result as JSON: {}", e)
+        result = normalize_tool_result(tool_name, result_data)
 
         logger.debug(f"Tool call {index+1} completed")
-        return content_blocks
+        return result
         
     except Exception as e:
         error_result = f"Error executing tool {tool_call['name']}: {str(e)}"
         logger.error(error_result)
-        return [{"type": "text", "text": error_result}]
+        return failed_tool_result(str(tool_call["name"]), e)
 
 async def tool_call_loop(
     messages: List[Dict],
-    mcp_manager,
     llm_caller,
     is_streaming: bool = False,
     max_recursion: int = None,
     session_id: str = None,
     tool_executor: Optional[Callable[[str, Dict[str, Any]], Awaitable[Any]]] = None,
+    confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], Any]] = None,
+    initial_response: Optional[Dict[str, Any]] = None,
 ) -> Dict:
     if max_recursion is None:
         max_recursion = 5 if is_streaming else 5
@@ -330,10 +248,16 @@ async def tool_call_loop(
     final_usage = {'prompt_tokens': 0, 'completion_tokens': 0}
     action_mode = _is_action_mode(current_messages)
     action_protocol_retry_used = False
+    executed_tool_calls: List[Dict[str, Any]] = []
+    pending_response = dict(initial_response) if isinstance(initial_response, dict) else None
 
     while recursion_depth < max_recursion:
         try:
-            resp = await llm_caller(current_messages)
+            if pending_response is not None:
+                resp = pending_response
+                pending_response = None
+            else:
+                resp = await llm_caller(current_messages)
             current_ai_content = resp.get('content', '')
 
             # Aggregate usage across recursive LLM turns.
@@ -373,11 +297,11 @@ async def tool_call_loop(
             try:
                 # Execute tools and get multimodal result blocks.
                 # Pass session_id so state can be recorded when needed (even though we mostly rely on exceptions).
-                tool_result_blocks = await execute_tool_calls(
+                tool_results = await execute_tool_calls_detailed(
                     tool_calls,
-                    mcp_manager,
                     session_id,
                     tool_executor=tool_executor,
+                    confirmation_resolver=confirmation_resolver,
                 )
             except ToolConfirmationRequired as e:
                 # Capture confirmation requests and return a special status
@@ -390,9 +314,24 @@ async def tool_call_loop(
                     'args': e.tool_args,
                     'current_messages': current_messages, # Save current conversation state
                     'pending_tool_calls': e.all_tool_calls, # Save the full batch of pending tool calls
-                    'content': current_ai_content          # Save the AI reply content
+                    'content': current_ai_content,         # Save the AI reply content
+                    'tool_calls': executed_tool_calls,
                 }
 
+            for call, result in zip(tool_calls, tool_results):
+                executed_tool_calls.append(
+                    {
+                        "tool_name": str(call.get("name") or ""),
+                        "tool_call_id": str(call.get("id") or ""),
+                        "ok": bool(result.ok),
+                    }
+                )
+
+            tool_result_blocks = [
+                block
+                for result in tool_results
+                for block in result.content
+            ]
             current_messages.append({'role': 'assistant', 'content': current_ai_content})
             
             # Build a new user message (Observation) that includes
@@ -406,7 +345,7 @@ async def tool_call_loop(
             # verification step without starting the full reasoning tree.
             remaining_steps = max(0, int(max_recursion) - recursion_depth - 1)
             continuation_text = _build_lightweight_react_gate(
-                tool_result_blocks=tool_result_blocks,
+                tool_results=tool_results,
                 remaining_steps=remaining_steps,
             )
             tool_result_blocks.append({
@@ -487,6 +426,7 @@ async def tool_call_loop(
         'status': 'success',
         'content': current_ai_content,
         'recursion_depth': recursion_depth,
+        'tool_calls': executed_tool_calls,
         'messages': current_messages,
         'usage': final_usage if final_usage['prompt_tokens'] > 0 else None
     }

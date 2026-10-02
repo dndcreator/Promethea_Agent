@@ -8,7 +8,7 @@ from gateway.events import EventEmitter
 from gateway.models import RunContext, SessionState
 from gateway.protocol import EventType
 from gateway.security.audit import SecurityAuditService
-from gateway.tool_service import ToolPolicyViolationError, ToolService, ToolInvocationContext
+from gateway.capability_service import ToolPolicyViolationError, CapabilityService, ToolInvocationContext
 from gateway.workspace_service import WorkspaceService, WorkspaceSandboxError
 
 
@@ -70,7 +70,7 @@ async def test_workspace_cross_user_access_blocked_and_audited(tmp_path):
 @pytest.mark.asyncio
 async def test_tool_cross_user_access_blocked_and_audited():
     emitter = EventEmitter()
-    service = ToolService(event_emitter=emitter, mcp_manager=MagicMock())
+    service = CapabilityService(event_emitter=emitter, mcp_manager=MagicMock())
 
     class _AnyTool:
         tool_id = "local.any"

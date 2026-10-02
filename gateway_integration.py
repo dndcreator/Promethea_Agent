@@ -1,4 +1,4 @@
-﻿"""
+"""
 Gateway integration module.
 
 Wires gateway runtime, services, channels, and plugin system.
@@ -19,6 +19,7 @@ from channels import ChannelRegistry, MessageRouter
 from computer import (
     BrowserController,
     FileSystemController,
+    EnvironmentController,
     ProcessController,
     ScreenController,
 )
@@ -32,6 +33,7 @@ from gateway.memory_service import MemoryService
 from gateway.org_context_service import OrgContextService
 from gateway.reasoning_service import ReasoningService
 from gateway.self_evolve_module import SelfEvolveModule
+from gateway.self_model_service import SelfModelService
 from gateway.workspace_service import WorkspaceService
 from gateway.workflow_engine import WorkflowEngine
 
@@ -53,7 +55,22 @@ class GatewayIntegration:
             "screen": ScreenController(),
             "filesystem": FileSystemController(),
             "process": ProcessController(),
+            "environment": EnvironmentController(),
         }
+        from computer.runtime import ComputerRuntime
+        from config import config as global_config
+
+        self.computer_runtime = ComputerRuntime(
+            {"browser": BrowserController, "screen": ScreenController,
+             "filesystem": FileSystemController, "process": ProcessController,
+             "environment": EnvironmentController},
+            max_workspaces=global_config.sandbox.computer_max_workspaces,
+            capability_aliases={
+                capability.value: name
+                for name, controller in self.computer_controllers.items()
+                for capability in controller.supported_capabilities
+            },
+        )
 
         # External dependencies (injected later)
         self.agent_manager = None
@@ -274,18 +291,32 @@ class GatewayIntegration:
         self.gateway_server.agent_manager = agent_manager
         self.gateway_server.message_manager = message_manager
         self.gateway_server.mcp_manager = mcp_manager
-        self.gateway_server.computer_service = self
-
         event_emitter = self.gateway_server.event_emitter
+        from gateway.runtime_event_log import RuntimeEventLog
+        event_emitter.attach_event_log(RuntimeEventLog())
         self.gateway_server.config_service = ConfigService(event_emitter=event_emitter)
         self.gateway_server.workspace_service = WorkspaceService(event_emitter=event_emitter)
 
         from gateway.official_tools import register_official_tools
 
-        if not self.gateway_server.tool_service:
-            from gateway.tool_service import ToolService
+        if not self.gateway_server.capability_service:
+            from gateway.capability_service import CapabilityService
 
-            self.gateway_server.tool_service = ToolService(event_emitter=event_emitter, mcp_manager=self.gateway_server.mcp_manager)
+            self.gateway_server.capability_service = CapabilityService(
+                event_emitter=event_emitter,
+                mcp_manager=self.gateway_server.mcp_manager,
+                capability_provider=self.get_computer_status,
+                config_provider=self.gateway_server.config_service.get_merged_config,
+                computer_runtime=self.computer_runtime,
+                workspace_service=self.gateway_server.workspace_service,
+            )
+        else:
+            self.gateway_server.capability_service.set_capability_provider(self.get_computer_status)
+            self.gateway_server.capability_service.config_provider = (
+                self.gateway_server.config_service.get_merged_config
+            )
+            self.gateway_server.capability_service.computer_runtime = self.computer_runtime
+            self.gateway_server.capability_service.workspace_service = self.gateway_server.workspace_service
 
         memory_adapter = memory_system
         self.gateway_server.memory_service = MemoryService(
@@ -295,12 +326,11 @@ class GatewayIntegration:
             config_service=self.gateway_server.config_service,
             message_manager=message_manager,
         )
-        self.gateway_server.memory_system = memory_adapter
         self.gateway_server.reasoning_service = ReasoningService(
             event_emitter=event_emitter,
             conversation_core=conversation_core,
             memory_service=self.gateway_server.memory_service,
-            tool_service=self.gateway_server.tool_service,
+            capability_service=self.gateway_server.capability_service,
             config_service=self.gateway_server.config_service,
         )
         self.gateway_server.org_context_service = OrgContextService(
@@ -308,8 +338,20 @@ class GatewayIntegration:
             memory_service=self.gateway_server.memory_service,
             llm_client=conversation_core,
         )
+        from gateway.task_service import TaskService
+        self.gateway_server.task_service = TaskService(event_emitter=event_emitter)
+        self.gateway_server.self_model_service = SelfModelService(
+            memory_service=self.gateway_server.memory_service,
+            task_service=self.gateway_server.task_service,
+            capability_service=self.gateway_server.capability_service,
+            config_service=self.gateway_server.config_service,
+            event_emitter=event_emitter,
+            llm_client=conversation_core,
+            workspace_root=str(Path(__file__).resolve().parent),
+        )
         self.gateway_server.self_evolve_module = SelfEvolveModule(
             config_service=self.gateway_server.config_service,
+            self_model_service=self.gateway_server.self_model_service,
             workspace_root=str(Path(__file__).resolve().parent),
         )
 
@@ -318,7 +360,23 @@ class GatewayIntegration:
             workspace_service=self.gateway_server.workspace_service,
             reasoning_service=self.gateway_server.reasoning_service,
             memory_service=self.gateway_server.memory_service,
-            tool_service=self.gateway_server.tool_service,
+            capability_service=self.gateway_server.capability_service,
+            task_service=self.gateway_server.task_service,
+        )
+        from gateway.task_runtime import TaskRuntime
+        from gateway.workbench_projection import WorkbenchProjection
+
+        self.gateway_server.task_runtime = TaskRuntime(
+            task_service=self.gateway_server.task_service,
+            workflow_engine=self.gateway_server.workflow_engine,
+        )
+        self.gateway_server.workbench_projection = WorkbenchProjection(
+            task_service=self.gateway_server.task_service,
+            workflow_engine=self.gateway_server.workflow_engine,
+            event_log=event_emitter.event_log,
+            memory_service=self.gateway_server.memory_service,
+            task_runtime=self.gateway_server.task_runtime,
+            event_emitter=event_emitter,
         )
         self.gateway_server.reasoning_service.workflow_engine = self.gateway_server.workflow_engine
         self.gateway_server.action_service = ActionService(
@@ -336,14 +394,13 @@ class GatewayIntegration:
             message_manager=message_manager,
             config_service=self.gateway_server.config_service,
             org_context_service=self.gateway_server.org_context_service,
-            tool_service=self.gateway_server.tool_service,
+            capability_service=self.gateway_server.capability_service,
+            self_model_service=self.gateway_server.self_model_service,
         )
-        self.gateway_server.conversation_core = conversation_core
-
         # Re-register official tools after all dependent services are fully wired.
         # This closes initialization-order gaps (memory/workflow/runtime dependent tools).
         register_official_tools(
-            tool_service=self.gateway_server.tool_service,
+            capability_service=self.gateway_server.capability_service,
             workspace_service=self.gateway_server.workspace_service,
             memory_service=self.gateway_server.memory_service,
             message_manager=message_manager,
@@ -376,6 +433,20 @@ class GatewayIntegration:
             self.gateway_server.channels = {}
 
             await self._init_channels()
+
+            memory_service = self.gateway_server.memory_service
+            if memory_service is not None:
+                replayed = await memory_service.replay_pending_runtime_events()
+                if replayed:
+                    logger.info("Re-enqueued {} committed interaction event(s) for memory", replayed)
+                await memory_service.start_background_services()
+
+            task_runtime = self.gateway_server.task_runtime
+            if task_runtime is not None:
+                recovered = await task_runtime.recover_incomplete()
+                if recovered:
+                    logger.info("Recovered {} detached task run(s)", recovered)
+                task_runtime.start_supervisor()
 
             computer_cfg = self.config.get("computer", {})
             enabled = computer_cfg.get(
@@ -475,10 +546,13 @@ class GatewayIntegration:
         """Shutdown gateway system."""
         try:
             logger.info("Shutting down gateway system...")
+            if self.gateway_server and self.gateway_server.task_runtime:
+                await self.gateway_server.task_runtime.shutdown()
             if self.gateway_server and self.gateway_server.memory_service:
                 drained = await self.gateway_server.memory_service.shutdown()
                 if not drained:
                     logger.warning("MemoryService did not drain fully before shutdown timeout")
+            await self.computer_runtime.close()
             for name, controller in self.computer_controllers.items():
                 try:
                     await controller.cleanup()
@@ -503,21 +577,6 @@ class GatewayIntegration:
     def get_message_router(self) -> MessageRouter:
         """Return message router."""
         return self.message_router
-
-    async def execute_computer_action(self, capability: str, action: str, params: Dict[str, Any]):
-        """Execute computer control action."""
-        from computer.base import ComputerResult
-
-        if capability not in self.computer_controllers:
-            return ComputerResult(success=False, error=f"Unknown capability: {capability}")
-
-        controller = self.computer_controllers[capability]
-        if not controller.is_initialized:
-            return ComputerResult(
-                success=False,
-                error=f"Controller '{capability}' is not initialized",
-            )
-        return await controller.execute(action, params)
 
     def get_computer_status(self) -> Dict[str, Any]:
         """Return status for all computer controllers."""

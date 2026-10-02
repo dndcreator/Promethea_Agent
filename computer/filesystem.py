@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
 from agentkit.security.sandbox import get_sandbox_policy
+from .locations import build_default_location_registry
 
 logger = logging.getLogger("Computer.FileSystem")
 
@@ -19,9 +20,9 @@ class FileSystemController(ComputerController):
         super().__init__("FileSystem", ComputerCapability.FILESYSTEM)
         # Workspace root used to constrain the scope of file operations.
         self.workspace_root = Path(workspace_root) if workspace_root else Path.cwd()
-        # Backward-compatible default: unrestricted unless workspace_root is explicitly provided
-        self.restricted_mode = workspace_root is not None
         self.sandbox = get_sandbox_policy()
+        self.restricted_mode = workspace_root is not None or self.sandbox.is_enforced()
+        self.locations = build_default_location_registry(workspace_root=self.workspace_root)
     
     async def initialize(self) -> bool:
         """Initialise file system control."""
@@ -41,23 +42,27 @@ class FileSystemController(ComputerController):
         self.is_initialized = False
         logger.info("FileSystem controller cleaned up")
         return True
+
+    def get_status(self) -> Dict[str, Any]:
+        status = super().get_status()
+        status["available_locations"] = self.locations.available_names()
+        return status
     
-    def _resolve_path(self, path_str: str) -> Path:
-        """Resolve and validate a path inside the workspace (if restricted)."""
-        path = Path(path_str)
+    def _resolve_path(self, path_str: str, *, intent: str = "read") -> Path:
+        """Resolve a path under the controller's read/write policy."""
+        path = Path(os.path.expandvars(os.path.expanduser(str(path_str))))
         
         # If the path is relative, interpret it relative to the workspace root.
         if not path.is_absolute():
             path = self.workspace_root / path
         
-        # Restricted mode: only allow access to paths inside the workspace.
         if self.restricted_mode:
-            try:
-                path.resolve().relative_to(self.workspace_root.resolve())
-            except ValueError:
-                raise PermissionError(
-                    f"Access denied: {path} is outside workspace {self.workspace_root}"
-                )
+            decision = self.sandbox.check_path(
+                str(path), intent=intent, workspace_root=self.workspace_root,
+                read_roots=self.locations.host_readable_roots(),
+            )
+            if not decision.allowed:
+                raise PermissionError(f"Access denied: {decision.reason}")
         
         return path
     
@@ -70,6 +75,37 @@ class FileSystemController(ComputerController):
             )
         
         try:
+            params = dict(params or {})
+            location = str(params.pop("location", "") or "").strip()
+            if location:
+                child = Path(os.path.expandvars(os.path.expanduser(str(params.get("path") or "."))))
+                if child.is_absolute():
+                    raise ValueError("path must be relative when location is provided")
+                base = self.locations.resolve(location)
+                params["path"] = str(base if str(child) in {"", "."} else base / child)
+            resolved_path = str(params.get("path") or "").strip()
+            if resolved_path:
+                intent = "write" if action in {"write", "append", "delete", "move", "copy", "mkdir"} else "read"
+                decision = self.sandbox.check_path(
+                    resolved_path,
+                    intent=intent,
+                    workspace_root=self.workspace_root,
+                    read_roots=self.locations.host_readable_roots(),
+                )
+                if not decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked path: {decision.reason}")
+            for field, intent in self._secondary_path_intents(action).items():
+                value = str(params.get(field) or "").strip()
+                if not value:
+                    continue
+                decision = self.sandbox.check_path(
+                    value,
+                    intent=intent,
+                    workspace_root=self.workspace_root,
+                    read_roots=self.locations.host_readable_roots(),
+                )
+                if not decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked {field}: {decision.reason}")
             action_map = {
                 'read': self._read_file,
                 'write': self._write_file,
@@ -100,6 +136,14 @@ class FileSystemController(ComputerController):
         except Exception as e:
             logger.error(f"Error executing {action}: {e}")
             return ComputerResult(success=False, error=str(e))
+
+    @staticmethod
+    def _secondary_path_intents(action: str) -> Dict[str, str]:
+        if action == "copy":
+            return {"src": "read", "dst": "write"}
+        if action == "move":
+            return {"src": "move", "dst": "write"}
+        return {}
     
     def get_available_actions(self) -> List[Dict[str, Any]]:
         """Return a list of supported file-system actions."""
@@ -146,7 +190,7 @@ class FileSystemController(ComputerController):
         if not path_str or content is None:
             raise ValueError("Missing required parameters: path, content")
         
-        path = self._resolve_path(path_str)
+        path = self._resolve_path(path_str, intent="write")
         
         # Ensure the parent directory exists
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +207,7 @@ class FileSystemController(ComputerController):
         if not path_str or content is None:
             raise ValueError("Missing required parameters: path, content")
         
-        path = self._resolve_path(path_str)
+        path = self._resolve_path(path_str, intent="write")
         
         with open(path, 'a', encoding=encoding) as f:
             f.write(content)
@@ -180,7 +224,7 @@ class FileSystemController(ComputerController):
         if not path_str:
             raise ValueError("Missing required parameter: path")
         
-        path = self._resolve_path(path_str)
+        path = self._resolve_path(path_str, intent="delete")
         
         if not path.exists():
             raise FileNotFoundError(f"Path not found: {path}")
@@ -204,8 +248,8 @@ class FileSystemController(ComputerController):
         if not src_str or not dst_str:
             raise ValueError("Missing required parameters: src, dst")
         
-        src = self._resolve_path(src_str)
-        dst = self._resolve_path(dst_str)
+        src = self._resolve_path(src_str, intent="move")
+        dst = self._resolve_path(dst_str, intent="write")
         
         if not src.exists():
             raise FileNotFoundError(f"Source not found: {src}")
@@ -222,7 +266,7 @@ class FileSystemController(ComputerController):
             raise ValueError("Missing required parameters: src, dst")
         
         src = self._resolve_path(src_str)
-        dst = self._resolve_path(dst_str)
+        dst = self._resolve_path(dst_str, intent="write")
         
         if not src.exists():
             raise FileNotFoundError(f"Source not found: {src}")
@@ -231,7 +275,11 @@ class FileSystemController(ComputerController):
             shutil.copy2(str(src), str(dst))
             return f"Copied file {src} to {dst}"
         elif src.is_dir():
-            shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
+            try:
+                src.resolve().relative_to(self.workspace_root.resolve())
+            except ValueError as exc:
+                raise PermissionError("Copying a host directory is not allowed; read individual files") from exc
+            shutil.copytree(str(src), str(dst), dirs_exist_ok=True, symlinks=True)
             return f"Copied directory {src} to {dst}"
     
     async def _mkdir(self, params: Dict[str, Any]) -> str:
@@ -242,7 +290,7 @@ class FileSystemController(ComputerController):
         if not path_str:
             raise ValueError("Missing required parameter: path")
         
-        path = self._resolve_path(path_str)
+        path = self._resolve_path(path_str, intent="mkdir")
         path.mkdir(parents=parents, exist_ok=True)
         return f"Created directory: {path}"
     
@@ -263,9 +311,17 @@ class FileSystemController(ComputerController):
         
         if recursive:
             for item in path.rglob('*'):
+                try:
+                    self._resolve_path(str(item))
+                except PermissionError:
+                    continue
                 items.append(self._get_item_info(item))
         else:
             for item in path.iterdir():
+                try:
+                    self._resolve_path(str(item))
+                except PermissionError:
+                    continue
                 items.append(self._get_item_info(item))
         
         return items
@@ -323,6 +379,10 @@ class FileSystemController(ComputerController):
         
         results = []
         for item in path.rglob(pattern):
+            try:
+                self._resolve_path(str(item))
+            except PermissionError:
+                continue
             results.append(self._get_item_info(item))
         
         return results

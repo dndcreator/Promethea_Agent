@@ -5,15 +5,32 @@ import pytest
 from gateway.conversation_service import ConversationService
 from gateway.protocol import ConversationRunInput, RequestType
 from gateway.server import GatewayServer
-from gateway.tool_service import ToolService
+from gateway.capability_service import CapabilityService
 from gateway.workflow_engine import WorkflowEngine
 from gateway.workflow_models import WorkflowDefinition, WorkflowStep
 from gateway.workspace_service import WorkspaceService
 
 
 class _DummyCore:
-    async def run_chat_loop(self, messages, user_config=None, session_id=None, user_id=None, tool_executor=None):
-        _ = (messages, user_config, session_id, user_id, tool_executor)
+    async def run_chat_loop(
+        self,
+        messages,
+        user_config=None,
+        session_id=None,
+        user_id=None,
+        tool_executor=None,
+        confirmation_resolver=None,
+        max_recursion=None,
+    ):
+        _ = (
+            messages,
+            user_config,
+            session_id,
+            user_id,
+            tool_executor,
+            confirmation_resolver,
+            max_recursion,
+        )
         return {"status": "success", "content": "ok"}
 
     async def call_llm(self, messages, user_config=None, user_id=None):
@@ -47,7 +64,7 @@ async def test_business_smoke_conversation_returns_capability_state():
 
 @pytest.mark.asyncio
 async def test_business_smoke_tool_catalog_has_callable_now():
-    service = ToolService(event_emitter=None)
+    service = CapabilityService(event_emitter=None)
     service.register_tool(_EchoTool())
     catalog = await service.get_tool_catalog()
     row = next((x for x in catalog if x.get("service_name") == "utils.echo"), None)
@@ -60,8 +77,8 @@ async def test_business_smoke_tool_catalog_has_callable_now():
 @pytest.mark.asyncio
 async def test_business_smoke_gateway_http_tool_flow():
     server = GatewayServer()
-    server.tool_service = ToolService(event_emitter=None)
-    server.tool_service.register_tool(_EchoTool())
+    server.capability_service = CapabilityService(event_emitter=None)
+    server.capability_service.register_tool(_EchoTool())
 
     listed = await server.handle_http_request(
         method=RequestType.TOOLS_LIST,
@@ -83,9 +100,13 @@ async def test_business_smoke_gateway_http_tool_flow():
 
 def test_business_smoke_workflow_runs_tool_step(tmp_path: Path):
     ws = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    tool_service = ToolService(event_emitter=None)
-    tool_service.register_tool(_EchoTool())
-    engine = WorkflowEngine(workspace_service=ws, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=None)
+    capability_service.register_tool(_EchoTool())
+    engine = WorkflowEngine(
+        workspace_service=ws,
+        capability_service=capability_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     definition = WorkflowDefinition(
         workflow_id="wf.business.smoke",
         workflow_type="parallel",

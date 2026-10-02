@@ -11,7 +11,7 @@ class _DummyCronService:
     def __init__(self):
         self.calls = 0
 
-    async def run_due_jobs(self, now_ts=None, max_jobs=10):
+    async def run_due_jobs_internal(self, now_ts=None, max_jobs=10):
         self.calls += 1
         return {"ok": True, "count": 1, "ran": [{"job_id": f"job_{self.calls}"}]}
 

@@ -4,7 +4,7 @@ import pytest
 
 from gateway.protocol import RequestMessage, RequestType
 from gateway.server import GatewayServer
-from gateway.tool_service import ToolService
+from gateway.capability_service import CapabilityService
 
 
 class _EchoTool:
@@ -20,9 +20,9 @@ class _EchoTool:
 @pytest.mark.asyncio
 async def test_gateway_tools_list_includes_catalog_callable_fields():
     server = GatewayServer()
-    service = ToolService(event_emitter=server.event_emitter)
+    service = CapabilityService(event_emitter=server.event_emitter)
     service.register_tool(_EchoTool())
-    server.tool_service = service
+    server.capability_service = service
     connection = SimpleNamespace(connection_id="c1", identity=SimpleNamespace(device_id="u1"))
     req = RequestMessage(id="r1", method=RequestType.TOOLS_LIST, params={"user_id": "u1"})
 

@@ -20,7 +20,7 @@ Promethea runtime enforces four namespace layers:
 
 - `gateway/memory_service.py`: drops cross-user recall candidates and emits `security.boundary.violation`
 - `gateway/workspace_service.py`: blocks cross-user workspace access through owner assertion
-- `gateway/tool_service.py`: blocks mismatched `RunContext.user_id` and invocation identity
+- `gateway/capability_service.py`: blocks mismatched `RunContext.user_id` and invocation identity
 - `gateway/http/routes/config.py`: rejects cross-user config access in HTTP layer
 - `gateway/server.py`: workflow ownership checks and workspace access guard
 

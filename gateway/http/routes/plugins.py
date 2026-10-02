@@ -199,8 +199,7 @@ async def get_extensions_catalog(user_id: str = Depends(get_current_user_id)) ->
 
 @router.post("/extensions/reload")
 async def reload_extension_catalog(user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
-    _ = user_id
-    result = reload_extensions()
     gateway_server = get_gateway_server()
+    result = await reload_extensions(gateway_server)
     await build_extension_catalog(gateway_server=gateway_server, user_id=user_id, include_tools=False)
     return result

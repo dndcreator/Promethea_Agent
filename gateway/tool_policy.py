@@ -19,18 +19,17 @@ TOOLS_GROUPS: Dict[str, Set[str]] = {
         "computer_control.delete_file",
         "self_evolve.evolve_create_task",
         "self_evolve.evolve_collect_context",
-        "self_evolve.evolve_apply_patch",
+        "self_evolve.evolve_write_file",
     },
     "runtime": {
         "computer_control.process_action",
         "computer_control.execute_command",
         "self_evolve.evolve_validate",
+        "self_evolve.evolve_publish",
         "moirai.*",
     },
     "network": {
-        "websearch.search",
-        "websearch.quick_answer",
-        "websearch.news_search",
+        "web.search",
     },
     "memory": {
         "memory.*",
@@ -40,9 +39,7 @@ TOOLS_GROUPS: Dict[str, Set[str]] = {
 TOOLS_POLICY_PROFILES: Dict[str, Set[str]] = {
     # Conservative profile for general Q&A and low-risk operations.
     "minimal": {
-        "websearch.search",
-        "websearch.quick_answer",
-        "websearch.news_search",
+        "web.search",
         "computer_control.read_file",
         "computer_control.list_files",
         "self_evolve.evolve_collect_context",

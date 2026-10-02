@@ -6,17 +6,26 @@ from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
 import base64
 from io import BytesIO
+from pathlib import Path
+from agentkit.security.sandbox import get_sandbox_policy
 
 logger = logging.getLogger("Computer.Screen")
 
 
 class ScreenController(ComputerController):
     """Screen + mouse + keyboard controller."""
+
+    @property
+    def supported_capabilities(self) -> tuple[ComputerCapability, ...]:
+        return (ComputerCapability.SCREEN, ComputerCapability.MOUSE, ComputerCapability.KEYBOARD,
+                ComputerCapability.SCREENSHOT, ComputerCapability.CLIPBOARD)
     
-    def __init__(self):
+    def __init__(self, workspace_root: Optional[str] = None):
         super().__init__("Screen", ComputerCapability.SCREEN)
         self.pyautogui = None
         self.pil_image = None
+        self.sandbox = get_sandbox_policy()
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root else Path.cwd()
     
     async def initialize(self) -> bool:
         """Initialize screen controller (PyAutoGUI + Pillow)."""
@@ -58,6 +67,24 @@ class ScreenController(ComputerController):
             )
         
         try:
+            decision = self.sandbox.check_desktop_action(action)
+            if not decision.allowed:
+                return ComputerResult(success=False, error=f"Sandbox blocked desktop action: {decision.reason}")
+
+            path = str(params.get("path") or "").strip()
+            if path:
+                intent = "write" if action == "screenshot" else "read"
+                path_decision = self.sandbox.check_path(path, intent=intent, workspace_root=self.workspace_root)
+                if not path_decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked path: {path_decision.reason}")
+                params = {**params, "path": str((self.workspace_root / path).resolve())}
+
+            if action == "locate" and params.get("image_path"):
+                path_decision = self.sandbox.check_path(str(params["image_path"]), intent="read", workspace_root=self.workspace_root)
+                if not path_decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked image path: {path_decision.reason}")
+                params = {**params, "image_path": str((self.workspace_root / params["image_path"]).resolve())}
+
             action_map = {
                 # Mouse actions
                 'move': self._move_mouse,

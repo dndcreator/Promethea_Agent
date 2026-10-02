@@ -14,9 +14,8 @@ def test_strategy_benchmark_score_threshold():
 
 
 @pytest.mark.asyncio
-async def test_capability_smoke_checks():
-    root = Path(__file__).resolve().parent.parent
-    out = await run_capability_smoke(root)
+async def test_capability_smoke_checks(tmp_path: Path):
+    out = await run_capability_smoke(tmp_path)
     assert out["moirai_template_gate"] is True
     assert out["sandbox_guard"] is True
     assert out["workflow_artifact_audit"] is True

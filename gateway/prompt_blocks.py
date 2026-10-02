@@ -12,6 +12,7 @@ class PromptBlockType(str, Enum):
     SKILL = "skill_block"
     POLICY = "policy_block"
     MEMORY = "memory_block"
+    SELF_MODEL = "self_model_block"
     TOOLS = "tools_block"
     WORKSPACE = "workspace_block"
     REASONING = "reasoning_block"

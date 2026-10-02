@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import tempfile
 import time
@@ -122,6 +123,34 @@ class AvatarService:
             return None
         path = self._asset_dir(user_id) / stored_name
         return path if path.is_file() else None
+
+    def export_user_bundle(self, *, user_id: str) -> Dict[str, Any]:
+        manifest = self.get_current(user_id=user_id)
+        path = self.get_asset_path(user_id=user_id, avatar_id=str(manifest.get("avatar_id") or ""))
+        payload = {"manifest": manifest}
+        if path:
+            payload["content_b64"] = base64.b64encode(path.read_bytes()).decode("ascii")
+        return payload
+
+    def import_user_bundle(self, *, user_id: str, bundle: Dict[str, Any]) -> Dict[str, Any]:
+        source = bundle if isinstance(bundle, dict) else {}
+        manifest = source.get("manifest") if isinstance(source.get("manifest"), dict) else {}
+        encoded = str(source.get("content_b64") or "")
+        if not manifest.get("avatar_id") or not encoded:
+            return self.clear(user_id=user_id)
+        try:
+            content = base64.b64decode(encoded.encode("ascii"), validate=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="invalid avatar archive payload") from exc
+        restored = self.save_upload(
+            user_id=user_id,
+            filename=str(manifest.get("filename") or "avatar"),
+            content=content,
+            content_type=str(manifest.get("content_type") or ""),
+        )
+        if not bool(manifest.get("enabled", True)):
+            restored = self.set_enabled(user_id=user_id, enabled=False)
+        return restored
 
     def _remove_previous_asset(self, *, user_id: str, previous: Dict[str, Any], keep: str = "") -> None:
         stored_name = Path(str(previous.get("stored_name") or "")).name

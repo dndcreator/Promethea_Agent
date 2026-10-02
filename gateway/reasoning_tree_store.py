@@ -102,3 +102,35 @@ class ReasoningTreeHistoryStore:
         except Exception as e:
             logger.debug("ReasoningTreeHistoryStore: list completed trees failed: {}", e)
             return []
+
+    def export_user_history(self, *, user_id: str) -> List[Dict[str, Any]]:
+        path = self.path_for_user(user_id)
+        if not path.exists():
+            return []
+        rows: List[Dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if str(row.get("user_id") or "") == str(user_id):
+                rows.append(row)
+        return sorted(rows, key=lambda item: (str(item.get("tree_id") or ""), float(item.get("timestamp") or 0.0)))
+
+    def import_user_history(self, *, user_id: str, rows: List[Dict[str, Any]], merge: bool = True) -> Dict[str, int]:
+        path = self.path_for_user(user_id)
+        existing = self.export_user_history(user_id=user_id) if merge else []
+        by_tree_id = {str(row.get("tree_id") or ""): row for row in existing if row.get("tree_id")}
+        imported = 0
+        for row in rows or []:
+            if not isinstance(row, dict) or str(row.get("user_id") or "") != str(user_id):
+                continue
+            tree_id = str(row.get("tree_id") or "")
+            if not tree_id or tree_id in by_tree_id:
+                continue
+            by_tree_id[tree_id] = row
+            imported += 1
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ordered = sorted(by_tree_id.values(), key=lambda item: (str(item.get("tree_id") or ""), float(item.get("timestamp") or 0.0)))
+        path.write_text("".join(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n" for row in ordered), encoding="utf-8")
+        return {"imported": imported, "total": len(ordered)}

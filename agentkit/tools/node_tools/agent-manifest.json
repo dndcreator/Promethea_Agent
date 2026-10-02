@@ -3,7 +3,7 @@
   "label": "Node Tools",
   "version": "1.0.0",
   "description": "Persistent generic node graph operations for agent workflows.",
-  "serviceType": "mcp",
+  "serviceType": "internal_tool",
   "entryPoint": {
     "module": "agentkit.tools.node_tools.node_tools",
     "class": "NodeToolsService"
@@ -12,31 +12,37 @@
     "invocation_commands": [
       {
         "command": "upsert_node",
+        "sideEffectLevel": "workspace_write",
         "description": "Create or update a node.",
         "example": "upsert_node(node_id='task_1', kind='task', data={'title':'Do X'}, tags=['todo'])"
       },
       {
         "command": "get_node",
+        "sideEffectLevel": "read_only",
         "description": "Get a node by id.",
         "example": "get_node(node_id='task_1')"
       },
       {
         "command": "list_nodes",
+        "sideEffectLevel": "read_only",
         "description": "List nodes with optional filters.",
         "example": "list_nodes(kind='task', tag='todo', limit=20)"
       },
       {
         "command": "delete_node",
+        "sideEffectLevel": "workspace_write",
         "description": "Delete a node and related links.",
         "example": "delete_node(node_id='task_1')"
       },
       {
         "command": "link_nodes",
+        "sideEffectLevel": "workspace_write",
         "description": "Create or update relation between nodes.",
         "example": "link_nodes(source='task_1', target='task_2', relation='depends_on')"
       },
       {
         "command": "list_links",
+        "sideEffectLevel": "read_only",
         "description": "List links globally or for one node.",
         "example": "list_links(node_id='task_1')"
       }

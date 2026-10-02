@@ -28,15 +28,7 @@ export default function PluginCapabilitiesPanel() {
   return (
     <section className="mt-4 flex flex-col gap-4 border-t border-black/5 pt-4">
       <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="font-semibold text-text-strong">{t('扩展与工具', 'Extensions & Tools')}</h3>
-          <p className="mt-1 text-xs leading-relaxed text-text-muted">
-            {t(
-              'Official 和 Community 扩展使用同一张能力表。Community 扩展放入后端 extensions/community 后可热重载。',
-              'Official and Community extensions share one capability catalog. Drop Community extensions into backend extensions/community and hot-reload them.',
-            )}
-          </p>
-        </div>
+        <h3 className="font-semibold text-text-strong">{t('扩展与工具', 'Extensions & Tools')}</h3>
         <div className="flex shrink-0 gap-2">
           <button type="button" onClick={load} className="rounded-lg bg-gray-100 px-3 py-1.5 text-sm">{t('刷新', 'Refresh')}</button>
           <button type="button" onClick={reload} className="rounded-lg bg-slate-800 px-3 py-1.5 text-sm text-white">{t('热重载', 'Hot Reload')}</button>

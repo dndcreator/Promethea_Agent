@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from gateway.tool_service import ToolInvocationContext
+from gateway.capability_service import ToolInvocationContext
 
 
 class RuntimeServicesTool:
     tool_id = "runtime.services"
+    side_effect_level = "read_only"
     name = "runtime.services"
     description = "Return gateway service health snapshot."
     official = True
@@ -24,6 +25,7 @@ class RuntimeServicesTool:
 
 class RuntimeProcessingStatsTool:
     tool_id = "runtime.processing_stats"
+    side_effect_level = "read_only"
     name = "runtime.processing_stats"
     description = "Return conversation processing stats."
     official = True
@@ -42,6 +44,7 @@ class RuntimeProcessingStatsTool:
 
 class RuntimeListToolsTool:
     tool_id = "runtime.list_tools"
+    side_effect_level = "read_only"
     name = "runtime.list_tools"
     description = "List registered tools and optionally filter official-only."
     official = True
@@ -53,11 +56,11 @@ class RuntimeListToolsTool:
     async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
         _ = ctx
         official_only = bool((args or {}).get("official_only", False))
-        tool_service = getattr(self.gateway_server, "tool_service", None)
-        if tool_service is None:
-            return {"ok": False, "reason": "tool_service_unavailable", "count": 0, "tools": []}
+        capability_service = getattr(self.gateway_server, "capability_service", None)
+        if capability_service is None:
+            return {"ok": False, "reason": "capability_service_unavailable", "count": 0, "tools": []}
         rows = []
-        for tool_id, tool in (getattr(tool_service, "_registered_tools", {}) or {}).items():
+        for tool_id, tool in (getattr(capability_service, "_registered_tools", {}) or {}).items():
             if official_only and not bool(getattr(tool, "official", False)):
                 continue
             rows.append(

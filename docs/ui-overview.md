@@ -23,6 +23,7 @@ UI entrypoint:
   - Personal workspace and plugin capabilities live under the advanced foldout.
 - View metrics panel (token/cost/runtime counters).
 - Run doctor checks and basic diagnostics.
+- Export or restore a portable personal workspace archive from Settings. A restore replaces the current user's durable records by default, making it suitable for moving between devices.
 
 ## Configuration UX model
 
@@ -44,14 +45,16 @@ Use this map when rebuilding the Web UI. Layout can change, but these function s
 | Chat console | Stream chat, continue or create sessions, show tool events and confirmation requests. | `POST /api/chat`, `GET /api/sessions/{session_id}`, `POST /api/chat/confirm` |
 | File panel | Upload a user file into the backend file store; list, search, and attach extracted text to the next chat turn. | `POST /api/files/upload`, `GET /api/files?q=&limit=` |
 | Global search | Search conversations and uploaded files; selecting a session reopens it. | `GET /api/search?q=&limit_sessions=&limit_files=` |
-| Memory inspector | Inspect memory entries, write decisions, recall runs, and graph data; edit/delete entries where supported. | `/api/memory/entries`, `/api/memory/write-decisions`, `/api/memory/recall/*`, `/api/memory/graph` |
+| Cognition Workbench | Explore the user-scoped Cognition Bundle as a calm space or grouped list, inspect/edit stored memory, and resolve pending write proposals. | SDK over `/api/memory/cognition`, plus `/api/memory/entries` and `/api/memory/write-proposals/*` |
 | Workflow inspector | Inspect definitions, personal runs, recoverable runs, and pause/resume existing runs. | `/api/workflow/list`, `/api/workflow/run/{workflow_run_id}`, `/api/workflow/pause/{workflow_run_id}`, `/api/workflow/resume/{workflow_run_id}`, `/api/personal/workflow/*` |
 | Settings | Edit basic runtime config, keep advanced options folded, control enterprise brain visibility, and show read-only soul state. | `/api/config`, `/api/config/update`, `/api/config/soul`, `/api/org-brain/status`, `/api/plugins/catalog`, `/api/personal/templates/catalog` |
+| Personal workspace | Export or restore one portable user-record archive. | `POST /api/personal/workspace/archive`, `POST /api/personal/workspace/restore` |
 | Extensions & tools | Inspect official/community extensions in one catalog, view callable tools, and hot-reload community manifests dropped into `extensions/community`. | `GET /api/extensions/catalog`, `POST /api/extensions/reload` |
 | Metrics | Show runtime counters and operational signals. | `GET /api/metrics` |
 | Doctor | Run health diagnostics and config migration helper. | `GET /api/doctor`, `POST /api/doctor/migrate-config` |
-| Self-evolve | Show enabled/disabled state, task audit stats, store path, and create explicitly targeted evolution tasks. | `/api/self-evolve/status`, `/api/self-evolve/tasks` |
+| Self-evolve | Show capability evolution status and create versioned capability drafts. | `/api/self-evolve/status`, `/api/self-evolve/tasks` |
 | Reasoning side panel | Show active reasoning tree, inspect tree details, stop or steer active reasoning. | `/api/reasoning/active`, `/api/reasoning/tree/{tree_id}`, `/api/reasoning/tree/{tree_id}/stop`, `/api/reasoning/tree/{tree_id}/steer` |
+| Agent Workbench | Follow the Task/Run projection in real time, inspect normalized activity, and issue revision-aware pause, resume, or cancel commands. | SDK over `GET /api/workbench/stream`, `/api/workbench/snapshot`, and `/api/tasks/{task_id}/*` |
 | Voice input | Experimental/provider-dependent only; not a supported preview UI feature. DeepSeek-only chat configuration does not provide STT/audio transcription. | `POST /api/voice/ptt` |
 
 ## Memory-related behavior in UI
@@ -59,6 +62,9 @@ Use this map when rebuilding the Web UI. Layout can change, but these function s
 - Memory can be enabled/disabled from settings.
 - Backend selection is exposed (`neo4j`, `sqlite_graph`, `flat_memory`).
 - If memory backend is unavailable (for example Neo4j down), chat still works but memory-dependent features degrade.
+- The Cognition Workbench deliberately exposes only `Cognition`, `Memory`, and `Review`.
+- Cognition is a Self Model projection over real memory and pending proposals; it is not a separate store.
+- Write-decision audit, recall-run, and raw graph endpoints remain available to backend diagnostics but are not product tabs.
 
 ## Attachment and multimodal behavior
 
@@ -76,6 +82,8 @@ curl "http://127.0.0.1:8000/api/health/memory"
 ```
 
 ## Current limitations
+
+- Personal workspace archives contain user records: portable preferences, sessions and text-anchored follow-ups, memory and its user-visible write audit, uploaded file originals, avatar assets, workflow history, and completed reasoning history. They exclude API keys, passwords, tokens, deployment endpoints, browser profiles, running processes, and raw service logs. Restored in-progress workflows are paused because their original process/tool state does not exist on the new device.
 
 - No full parity with all low-level API and internal debug endpoints by design.
 - Voice input is not a supported preview feature. The current route is experimental and provider-dependent.

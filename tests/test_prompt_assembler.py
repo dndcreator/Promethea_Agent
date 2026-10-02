@@ -67,6 +67,31 @@ def test_user_customization_block_is_separate_from_identity():
     assert customization.priority < identity.priority
 
 
+def test_self_model_context_is_a_distinct_dynamic_prompt_block():
+    assembler = PromptAssembler()
+    run_context = SimpleNamespace(
+        self_model_context={
+            "revision": "abc123",
+            "prompt_text": "Self model context:\n- [user] Prefers concise answers.",
+        }
+    )
+
+    blocks = assembler.collect_blocks(
+        run_context=run_context,
+        mode=ModeDecision(mode="fast", reason="test"),
+        plan=PlanResult(used_reasoning=False, base_system_prompt="You are Promethea."),
+        memory_bundle=MemoryRecallBundle(recalled=False),
+        tools=ToolExecutionBundle(enabled=False),
+        user_config={},
+    )
+
+    block = next(item for item in blocks if item.block_id == "self_model")
+    assert block.block_type == PromptBlockType.SELF_MODEL
+    assert block.source == "self_model_service"
+    assert block.metadata["revision"] == "abc123"
+    assert block.metadata["runtime_stability"] == "dynamic"
+
+
 def test_user_customization_not_injected_for_empty_default_identity():
     assembler = PromptAssembler()
     blocks = assembler.collect_blocks(

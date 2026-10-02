@@ -1,22 +1,29 @@
 ﻿"""Process-control implementation for the computer-control layer."""
+import asyncio
 import subprocess
 import signal
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
 import logging
 from agentkit.security.sandbox import get_sandbox_policy
+from agentkit.security.process_sandbox import SandboxedProcessRunner
 
 logger = logging.getLogger("Computer.Process")
 
 
 class ProcessController(ComputerController):
     """Run, inspect, and stop local processes through the sandbox policy."""
+
+    def has_background_activity(self) -> bool:
+        return any(process.poll() is None for process in self.active_processes.values())
     
-    def __init__(self):
+    def __init__(self, workspace_root: Optional[str] = None):
         super().__init__("Process", ComputerCapability.PROCESS)
         self.psutil = None
         self.active_processes: Dict[int, Any] = {}  # pid -> subprocess.Popen
         self.sandbox = get_sandbox_policy()
+        self.workspace_root = Path(workspace_root).resolve() if workspace_root else Path.cwd()
     
     async def initialize(self) -> bool:
         try:
@@ -39,7 +46,11 @@ class ProcessController(ComputerController):
             for pid, proc in list(self.active_processes.items()):
                 try:
                     proc.terminate()
-                    proc.wait(timeout=3)
+                    try:
+                        await asyncio.to_thread(proc.wait, timeout=3)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        await asyncio.to_thread(proc.wait, timeout=3)
                 except Exception as e:
                     logger.warning(f"Failed to terminate process {pid}: {e}")
             
@@ -59,6 +70,19 @@ class ProcessController(ComputerController):
             )
         
         try:
+            pid = params.get("pid")
+            managed = isinstance(pid, int) and pid in self.active_processes
+            action_decision = self.sandbox.check_process_action(action, managed=managed)
+            if not action_decision.allowed:
+                return ComputerResult(success=False, error=f"Sandbox blocked process action: {action_decision.reason}")
+            if action in {"run", "run_async"}:
+                command_decision = self.sandbox.check_command(
+                    str(params.get("command") or ""),
+                    cwd=str(params.get("cwd") or "."),
+                    workspace_root=self.workspace_root,
+                )
+                if not command_decision.allowed:
+                    return ComputerResult(success=False, error=f"Sandbox blocked command: {command_decision.reason}")
             action_map = {
                 'run': self._run_command,
                 'run_async': self._run_async,
@@ -79,7 +103,13 @@ class ProcessController(ComputerController):
                 )
             
             result = await handler(params)
-            return ComputerResult(success=True, result=result)
+            succeeded = not isinstance(result, dict) or result.get("success", True)
+            metadata = {"sandbox": result["sandbox"]} if isinstance(result, dict) and "sandbox" in result else {}
+            error = None if succeeded else (result.get("error") or result.get("stderr") or f"Process exited with code {result.get('returncode')}")
+            return ComputerResult(
+                success=bool(succeeded), result=result,
+                error=error, metadata=metadata,
+            )
             
         except Exception as e:
             logger.error(f"Error executing {action}: {e}")
@@ -108,29 +138,28 @@ class ProcessController(ComputerController):
         
         if not command:
             raise ValueError("Missing required parameter: command")
+
+        decision = self.sandbox.check_command(str(command), cwd=str(cwd or "."), workspace_root=self.workspace_root)
+        if not decision.allowed:
+            return {"error": f"sandbox blocked command: {decision.reason}", "success": False}
         
         try:
-            result = subprocess.run(
-                command,
-                shell=shell,
-                cwd=cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+            result = await SandboxedProcessRunner(sandbox=self.sandbox).run_async(
+                command, shell=shell, cwd=cwd or ".", workspace_root=self.workspace_root, env=env, timeout=timeout,
             )
             
             return {
                 "returncode": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
-                "success": result.returncode == 0
+                "success": result.returncode == 0,
+                "sandbox": result.sandbox,
             }
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, asyncio.TimeoutError):
             return {
                 "returncode": -1,
                 "error": f"Command timed out after {timeout}s",
-                "success": False
+                "success": False,
             }
         except Exception as e:
             return {
@@ -148,18 +177,12 @@ class ProcessController(ComputerController):
         if not command:
             raise ValueError("Missing required parameter: command")
         
-        decision = self.sandbox.check_command(str(command), cwd=str(cwd or "."))
+        decision = self.sandbox.check_command(str(command), cwd=str(cwd or "."), workspace_root=self.workspace_root)
         if not decision.allowed:
             return {"error": f"sandbox blocked command: {decision.reason}", "success": False}
 
-        proc = subprocess.Popen(
-            command,
-            shell=shell,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+        proc = SandboxedProcessRunner(sandbox=self.sandbox).popen(
+            command, shell=shell, cwd=cwd or ".", workspace_root=self.workspace_root, env=env,
         )
         
         self.active_processes[proc.pid] = proc
@@ -167,7 +190,8 @@ class ProcessController(ComputerController):
         return {
             "pid": proc.pid,
             "command": command,
-            "status": "running"
+            "status": "running",
+            "sandbox": proc.sandbox,
         }
     
     
@@ -227,6 +251,9 @@ class ProcessController(ComputerController):
             raise ValueError("Missing required parameter: pid")
         
         try:
+            if pid in self.active_processes:
+                self.active_processes.pop(pid).kill()
+                return f"Process {pid} killed"
             proc = self.psutil.Process(pid)
             proc.kill()
             
@@ -246,6 +273,9 @@ class ProcessController(ComputerController):
             raise ValueError("Missing required parameter: pid")
         
         try:
+            if pid in self.active_processes:
+                self.active_processes.pop(pid).terminate()
+                return f"Process {pid} terminated"
             proc = self.psutil.Process(pid)
             proc.terminate()
             

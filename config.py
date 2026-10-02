@@ -22,6 +22,8 @@ class SystemConfig(BaseSettings):
     stream_mode: bool = Field(default=True)
     debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
+    log_model_payloads: bool = Field(default=False)
+    timezone: str = Field(default="auto")
     session_ttl_hours: int = Field(default=0, ge=0)
 
     @field_validator("log_level")
@@ -113,6 +115,11 @@ class ColdLayerConfig(BaseSettings):
     summary_model: str = Field(default="")
     max_summary_length: int = Field(default=500, ge=1)
     compression_threshold: int = Field(default=50, ge=1)
+    summary_min_interval_s: int = Field(default=600, ge=0)
+
+
+class ForgettingConfig(BaseSettings):
+    decay_interval_s: int = Field(default=24 * 3600, ge=60)
 
 
 class MemoryRecallFilterConfig(BaseSettings):
@@ -172,13 +179,28 @@ class MemoryRawLogConfig(BaseSettings):
 
 class HippocampusConfig(BaseSettings):
     enabled: bool = Field(default=True)
-    cluster_every_messages: int = Field(default=12, ge=1)
-    cluster_min_interval_s: int = Field(default=300, ge=0)
-    idle_cluster_delay_s: int = Field(default=120, ge=10)
-    idle_cluster_min_messages: int = Field(default=2, ge=1)
-    idle_cluster_min_interval_s: int = Field(default=60, ge=0)
-    summary_min_interval_s: int = Field(default=600, ge=0)
-    decay_interval_s: int = Field(default=24 * 3600, ge=60)
+    state_path: str = Field(default="memory/hippocampus/replay_state.json")
+    new_memory_threshold: int = Field(default=24, ge=1)
+    min_interval_s: int = Field(default=6 * 3600, ge=0)
+    max_interval_s: int = Field(default=24 * 3600, ge=60)
+    revisit_interval_s: int = Field(default=7 * 24 * 3600, ge=60)
+    idle_delay_s: int = Field(default=300, ge=10)
+    poll_interval_s: int = Field(default=30, ge=1)
+    batch_size: int = Field(default=24, ge=2, le=200)
+    max_insights_per_cycle: int = Field(default=4, ge=1, le=20)
+    cognition_hint_threshold: int = Field(default=4, ge=1, le=50)
+    max_pending_cognition_hints: int = Field(default=24, ge=1, le=200)
+    max_cognition_hint_chars: int = Field(default=2000, ge=200, le=10000)
+    retry_delay_s: int = Field(default=300, ge=10)
+    # Accepted for compatibility with pre-replay configs. Layer maintenance no
+    # longer reads these values; warm/cold/forgetting own their cadence.
+    cluster_every_messages: Optional[int] = Field(default=None, ge=1)
+    cluster_min_interval_s: Optional[int] = Field(default=None, ge=0)
+    idle_cluster_delay_s: Optional[int] = Field(default=None, ge=10)
+    idle_cluster_min_messages: Optional[int] = Field(default=None, ge=1)
+    idle_cluster_min_interval_s: Optional[int] = Field(default=None, ge=0)
+    summary_min_interval_s: Optional[int] = Field(default=None, ge=0)
+    decay_interval_s: Optional[int] = Field(default=None, ge=60)
 
 
 class MemoryConfig(BaseSettings):
@@ -192,6 +214,7 @@ class MemoryConfig(BaseSettings):
     hot_layer: HotLayerConfig = Field(default_factory=HotLayerConfig)
     warm_layer: WarmLayerConfig = Field(default_factory=WarmLayerConfig)
     cold_layer: ColdLayerConfig = Field(default_factory=ColdLayerConfig)
+    forgetting: ForgettingConfig = Field(default_factory=ForgettingConfig)
     gating: MemoryGatingConfig = Field(default_factory=MemoryGatingConfig)
     migration: MemoryMigrationConfig = Field(default_factory=MemoryMigrationConfig)
     raw_log: MemoryRawLogConfig = Field(default_factory=MemoryRawLogConfig)
@@ -244,6 +267,26 @@ class ReasoningConfig(BaseSettings):
         if value not in {"react_tot"}:
             raise ValueError("reasoning.mode must be 'react_tot'")
         return value
+
+
+class SelfModelRecallConfig(BaseSettings):
+    enabled: bool = Field(default=True)
+    candidate_pool_limit: int = Field(default=60, ge=4, le=100)
+    fast_candidate_limit: int = Field(default=12, ge=1, le=50)
+    fast_input_chars: int = Field(default=6000, ge=1000, le=50000)
+    deep_candidate_threshold: int = Field(default=36, ge=4, le=100)
+    max_channels: int = Field(default=3, ge=1, le=5)
+    max_depth: int = Field(default=2, ge=1, le=3)
+    max_parallel_calls: int = Field(default=4, ge=1, le=12)
+    max_kernel_calls: int = Field(default=8, ge=1, le=24)
+    kernel_input_chars: int = Field(default=16000, ge=2000, le=60000)
+    max_skip_chars: int = Field(default=5000, ge=500, le=20000)
+    skip_score_threshold: float = Field(default=0.82, ge=0.0, le=1.0)
+    deadline_ms: int = Field(default=6000, ge=250, le=30000)
+
+
+class SelfModelConfig(BaseSettings):
+    recall: SelfModelRecallConfig = Field(default_factory=SelfModelRecallConfig)
 
 
 class OrgBrainConfig(BaseSettings):
@@ -307,10 +350,14 @@ class OrgBrainConfig(BaseSettings):
 
 
 class SandboxConfig(BaseSettings):
-    enabled: bool = Field(default=False)
-    profile: str = Field(default="off")
+    enabled: bool = Field(default=True)
+    profile: str = Field(default="strict")
     workspace_access: str = Field(default="rw")  # rw|ro|none
-    command_mode: str = Field(default="allowlist")  # allowlist|audit
+    command_mode: str = Field(default="approval")  # deny|approval|allowlist|audit
+    desktop_mode: str = Field(default="approval")  # observe_only|approval|host_control
+    process_mode: str = Field(default="managed_only")  # managed_only|host_control
+    browser_disable_chromium_sandbox: bool = Field(default=False)
+    computer_max_workspaces: int = Field(default=8, ge=1, le=64)
     allowed_commands: list[str] = Field(default_factory=lambda: [
         "python",
         "pytest",
@@ -356,8 +403,24 @@ class SandboxConfig(BaseSettings):
     @classmethod
     def validate_command_mode(cls, v: str) -> str:
         value = (v or "allowlist").strip().lower()
-        if value not in {"allowlist", "audit"}:
-            raise ValueError("sandbox.command_mode must be one of: allowlist, audit")
+        if value not in {"deny", "approval", "allowlist", "audit"}:
+            raise ValueError("sandbox.command_mode must be one of: deny, approval, allowlist, audit")
+        return value
+
+    @field_validator("desktop_mode")
+    @classmethod
+    def validate_desktop_mode(cls, v: str) -> str:
+        value = (v or "observe_only").strip().lower()
+        if value not in {"observe_only", "approval", "host_control"}:
+            raise ValueError("sandbox.desktop_mode must be one of: observe_only, approval, host_control")
+        return value
+
+    @field_validator("process_mode")
+    @classmethod
+    def validate_process_mode(cls, v: str) -> str:
+        value = (v or "managed_only").strip().lower()
+        if value not in {"managed_only", "host_control"}:
+            raise ValueError("sandbox.process_mode must be one of: managed_only, host_control")
         return value
 
     @field_validator("network_mode")
@@ -389,6 +452,7 @@ class PrometheaConfig(BaseSettings):
     api: APIConfig = Field(default_factory=APIConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    self_model: SelfModelConfig = Field(default_factory=SelfModelConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
     org_brain: OrgBrainConfig = Field(default_factory=OrgBrainConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)

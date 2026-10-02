@@ -5,10 +5,26 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .state_machine import RuntimeActionStateMachine
+
+
+DEFAULT_ACTION_BUDGET = 5
+MAX_ACTION_BUDGET = 50
+
+
+def resolve_action_budget(user_config: Optional[Dict[str, Any]]) -> int:
+    config = user_config if isinstance(user_config, dict) else {}
+    action_config = config.get("action") if isinstance(config.get("action"), dict) else {}
+    try:
+        value = int(action_config.get("max_steps", DEFAULT_ACTION_BUDGET))
+    except (TypeError, ValueError):
+        value = DEFAULT_ACTION_BUDGET
+    return min(MAX_ACTION_BUDGET, max(1, value))
+
 
 @dataclass
 class ActionContext:
-    """Context for an already-classified action turn."""
+    """Context for one main-model control-loop turn."""
 
     session_id: Optional[str] = None
     user_id: Optional[str] = None
@@ -30,6 +46,7 @@ class ActionRun:
     trace: List[Dict[str, Any]] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
+    machine: RuntimeActionStateMachine = field(default_factory=RuntimeActionStateMachine)
 
     def add_trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         self.trace.append(

@@ -1,49 +1,40 @@
-﻿# Conversation Pipeline (Backlog 003)
+# Conversation Pipeline
 
 ## Goal
 
-Define a stable, explicit six-stage runtime pipeline for one conversation turn, with structured stage IO objects and stage-level trace events.
+Keep one conversation turn observable without running a separate model router or
+representing capabilities that were never used as completed work.
 
 ## Stage Order
 
 1. `input_normalization`
-2. `mode_detection`
-3. `memory_recall`
-4. `planning_reasoning`
-5. `tool_execution`
-6. `response_synthesis`
+2. `capability_discovery`
+3. `model_control_loop`
+4. `response_finalize`
 
-## Stage IO Objects
+The pipeline emits `conversation.stage.started`, `conversation.stage.finished`,
+and `conversation.stage.failed` events. Its public result remains
+`ConversationRunOutput`.
 
-- `NormalizedInput`
-- `ModeDecision`
-- `MemoryRecallBundle`
-- `PlanResult`
-- `ToolExecutionBundle`
-- `ResponseDraft`
+## Main-Model Control
 
-All objects are defined in `gateway/protocol.py`.
+`ConversationService` compiles identity, runtime context, attachments, active
+skills, workspace state, and the structured CapabilityService catalog. The first main
+model turn then chooses one of two paths:
 
-## Runtime Flow
+- return an `answer` action and finish without another model request;
+- invoke a registered capability and continue from its runtime observation.
 
-Pipeline entry is `run_staged_pipeline` in `gateway/conversation_pipeline.py`, and `ConversationService.run_conversation` delegates to it.
+Memory recall (`memory.get_context`), deeper reasoning (`reasoning.run`), and
+workflow operations are capabilities in the same catalog. Their implementation,
+policy, persistence, and budgets remain owned by their Python services. The
+control loop does not duplicate those decisions.
 
-`ConversationService` also owns LLM input/output compilation. User text,
-attachments, and module-provided runtime context are normalized into
-`RuntimeBlock` values and compiled by `ContextCompiler` before reaching the
-model. This keeps multimodal and observation handling in one place while
-leaving memory, reasoning, tools, actions, and workflows in their own services.
+## Runtime Boundaries
 
-For each stage:
-
-- emit `conversation.stage.started`
-- execute stage logic
-- emit `conversation.stage.finished`
-- on exception emit `conversation.stage.failed` and re-raise
-
-## Current Integration Notes
-
-- `RunContext` fields (`trace_id`, `request_id`, `session_id`, `user_id`) are propagated into stage events.
-- `fast` mode can skip explicit reasoning.
-- memory recall and tool execution are both represented as explicit stages even when no-op.
-- pipeline output remains compatible with existing `ConversationRunOutput`.
+- `PromptAssembler` and `ContextCompiler` own model input construction.
+- `CapabilityService` and `ToolPolicy` own capability discovery, authorization, and execution.
+- `MemoryService`, `ReasoningService`, and Workflow services retain their existing business logic.
+- `SelfModelService` reads their public state projections and adds one bounded context to `RunContext`; it does not own or mutate their state.
+- The fixed control-loop budget limits recursion; it does not interpret user language.
+- `RunContext` identity fields are propagated into stage and tool events.

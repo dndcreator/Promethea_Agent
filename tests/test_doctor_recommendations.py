@@ -99,6 +99,7 @@ async def test_doctor_migrate_config_applies_schema_and_clears_secrets(monkeypat
     (tmp_path / "config").mkdir(parents=True, exist_ok=True)
     (tmp_path / "config" / "default.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(doctor.config_module, "load_config", lambda: _Cfg(), raising=False)
+    monkeypatch.setattr(doctor.config_module, "config", _Cfg(), raising=False)
 
     out = await doctor.migrate_config()
     assert out["status"] == "success"

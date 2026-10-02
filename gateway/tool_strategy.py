@@ -97,26 +97,14 @@ class ToolStrategyEngine:
                 if service == "moirai":
                     score += 0.40
                     reasons.append("workflow_intent")
-            if any(k in text for k in ("fetch", "web page", "pdf", "image", "ocr")):
-                if service == "computer_control" and tool == "content_action":
-                    score += 0.35
-                    reasons.append("content_intent")
-            if any(k in text for k in ("session", "agent", "plugin", "memory", "channel", "gateway status")):
-                if service == "computer_control" and tool == "runtime_action":
-                    score += 0.35
-                    reasons.append("runtime_intent")
             if any(k in text for k in ("schedule", "cron", "job", "periodic", "recurring")):
-                if service == "computer_control" and tool == "schedule_action":
+                if service == "cron_tools" and tool == "create_job":
                     score += 0.35
                     reasons.append("schedule_intent")
             if any(k in text for k in ("self evolve", "self-evolve", "self modify", "modify your code", "modify yourself", "self improvement", "agent evolves", "自我进化", "修改自己的代码")):
                 if service == "self_evolve":
                     score += 0.55
                     reasons.append("self_evolve_intent")
-            if any(k in text for k in ("graph", "node", "link", "relation", "depends on")):
-                if service == "computer_control" and tool == "graph_action":
-                    score += 0.35
-                    reasons.append("graph_intent")
 
             if (service, tool) in preferred:
                 score += 0.20
@@ -266,7 +254,7 @@ class ToolStrategyEngine:
     def _default_cost_level(*, service_name: str, tool_name: str) -> str:
         s = str(service_name).strip().lower()
         t = str(tool_name).strip().lower()
-        if s == "computer_control" and t in {"perception_action", "content_action"}:
+        if s == "computer_control" and t == "perception_action":
             return "high"
         if s == "computer_control" and t in {"browser_action", "process_action"}:
             return "medium"

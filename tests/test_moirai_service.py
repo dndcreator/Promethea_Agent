@@ -143,23 +143,25 @@ async def test_moirai_verify_file_exists_step():
 
 
 @pytest.mark.asyncio
-async def test_moirai_mcp_call_step(monkeypatch):
+async def test_moirai_tool_call_step():
     ws = _make_workspace()
     try:
         svc = MoiraiService(workspace_root=str(ws))
 
-        class DummyManager:
-            async def unified_call(self, service_name, tool_name, args):
-                return {'service': service_name, 'tool': tool_name, 'args': args, 'ok': True}
+        async def execute(tool_name, params, **kwargs):
+            return {'tool': tool_name, 'params': params, 'source': kwargs.get('source'), 'ok': True}
 
-        monkeypatch.setattr('agentkit.mcp.mcp_manager.get_mcp_manager', lambda: DummyManager())
+        svc.configure_tool_runtime(
+            executor=execute,
+            confirmation_resolver=lambda _name, _params: False,
+        )
 
         run = await svc.create_flow(
-            name='mcp-flow',
-            goal='call mcp',
+            name='tool-flow',
+            goal='call tool',
             steps=[
                 {
-                    'kind': 'mcp_call',
+                    'kind': 'tool_call',
                     'params': {
                         'service_name': 'computer_control',
                         'tool_name': 'fs_action',
@@ -174,11 +176,12 @@ async def test_moirai_mcp_call_step(monkeypatch):
         out = run['steps'][0]['output']
         assert out['ok'] is True
         assert out['service_name'] == 'computer_control'
+        assert out['result']['source'] == 'workflow'
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 
 @pytest.mark.asyncio
-async def test_moirai_auto_risk_gate_for_mcp_process_call():
+async def test_moirai_accepts_legacy_mcp_call_at_persistence_boundary():
     ws = _make_workspace()
     try:
         svc = MoiraiService(workspace_root=str(ws))
@@ -197,6 +200,7 @@ async def test_moirai_auto_risk_gate_for_mcp_process_call():
             ],
         )
         assert run['steps'][0]['require_approval'] is True
+        assert run['steps'][0]['kind'] == 'tool_call'
     finally:
         shutil.rmtree(ws, ignore_errors=True)
 
@@ -216,7 +220,7 @@ async def test_moirai_create_download_pipeline_template():
         )
         assert run['name'] == 'ubuntu-download'
         assert run['status'] == 'paused'
-        assert any(s['kind'] == 'mcp_call' for s in run['steps'])
+        assert any(s['kind'] == 'tool_call' for s in run['steps'])
         assert any(s['kind'] == 'verify_command' for s in run['steps'])
     finally:
         shutil.rmtree(ws, ignore_errors=True)

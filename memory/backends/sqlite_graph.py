@@ -527,6 +527,16 @@ class SqliteGraphMemoryStore(MemoryStore):
                 imported["memory_items"] += 1
         return {"ok": True, "imported": imported, "merge": bool(merge)}
 
+    def clear_user_data(self, *, user_id: str) -> None:
+        with self._lock, self._conn:
+            node_ids = [row[0] for row in self._conn.execute("SELECT id FROM nodes WHERE user_id = ?", (user_id,)).fetchall()]
+            if node_ids:
+                placeholders = ",".join("?" for _ in node_ids)
+                self._conn.execute(f"DELETE FROM edges WHERE src_node_id IN ({placeholders}) OR dst_node_id IN ({placeholders})", node_ids * 2)
+            self._conn.execute("DELETE FROM memory_links WHERE memory_id IN (SELECT id FROM memory_items WHERE user_id = ?)", (user_id,))
+            self._conn.execute("DELETE FROM memory_items WHERE user_id = ?", (user_id,))
+            self._conn.execute("DELETE FROM nodes WHERE user_id = ?", (user_id,))
+
     def list_memory_entries(
         self,
         *,

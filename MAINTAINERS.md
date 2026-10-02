@@ -16,7 +16,7 @@ This file describes maintainer responsibilities and review ownership.
 - Memory system:
   - `memory/`, `gateway/memory_service.py`
 - Tooling and sandbox:
-  - `agentkit/`, `gateway/tool_service.py`, `gateway/tools/`
+  - `agentkit/`, `computer/`, `gateway/capability_service.py`, `gateway/tools/`
 - Channels and clients:
   - `channels/`, `promethea_cli/`, `UI/`
 - Documentation and governance:

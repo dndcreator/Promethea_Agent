@@ -47,7 +47,7 @@
       "id": "schedule_job",
       "user_message": "Create a recurring cron job every hour",
       "step": {"goal": "configure schedule"},
-      "expect": {"service_name": "computer_control", "tool_name": "schedule_action"}
+      "expect": {"service_name": "cron_tools", "tool_name": "create_job"}
     },
     {
       "id": "graph_relations",

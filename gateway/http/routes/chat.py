@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+from agentkit.mcp.action_protocol import parse_action_envelope
+from agentkit.mcp.tool_call import parse_tool_calls
+from gateway.action.models import resolve_action_budget
 from gateway.protocol import EventType, RequestType
 
 from ..dispatcher import dispatch_gateway_method, get_gateway_server
@@ -16,6 +21,48 @@ from .auth import get_current_user_id
 
 
 router = APIRouter()
+
+
+def _is_incomplete_routing_envelope(text: str) -> bool:
+    """Return whether a stream prefix can still be a runtime routing object."""
+    candidate = str(text or "").lstrip()
+    if not candidate:
+        return True
+    if candidate.startswith("```"):
+        line_end = candidate.find("\n")
+        if line_end < 0:
+            return True
+        candidate = candidate[line_end + 1 :].lstrip()
+        if not candidate:
+            return True
+    if not candidate.startswith("{"):
+        return False
+
+    tail = candidate[1:].lstrip()
+    if not tail:
+        return True
+    if not tail.startswith('"'):
+        return False
+
+    escaped = False
+    closing_quote = None
+    for index, char in enumerate(tail[1:], start=1):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            closing_quote = index
+            break
+    if closing_quote is None:
+        return True
+    try:
+        first_key = json.loads(tail[: closing_quote + 1])
+    except json.JSONDecodeError:
+        return False
+    return first_key in {"action", "tool_name", "agentType", "service_name"}
 
 
 def _normalize_tool_args(value):
@@ -100,6 +147,10 @@ async def chat(
     user_id: str = Depends(get_current_user_id),
 ):
     try:
+        attachments = [
+            item.model_dump(exclude_none=True, exclude_defaults=True)
+            for item in request.attachments
+        ]
         if request.stream:
             gateway_server = get_gateway_server()
             if not gateway_server.message_manager:
@@ -111,19 +162,64 @@ async def chat(
             if not user_text:
                 raise HTTPException(status_code=400, detail="message is required")
 
-            def _sse(payload: dict) -> str:
-                return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
             async def _stream():
                 session_id = request.session_id
                 message_manager = gateway_server.message_manager
                 turn_id = uuid.uuid4().hex
+                request_id = f"http_stream_{turn_id}"
+                stream_seq = 0
+
+                def _sse(payload: dict) -> str:
+                    nonlocal stream_seq
+                    stream_seq += 1
+                    event_type = str(payload.get("type") or "message")
+                    event_id = f"{request_id}:{stream_seq}"
+                    body = dict(payload)
+                    body.setdefault("event_id", event_id)
+                    body.setdefault("event_type", event_type)
+                    body.setdefault("occurred_at", datetime.now(timezone.utc).isoformat())
+                    body.setdefault("seq", stream_seq)
+                    body.setdefault("request_id", request_id)
+                    body.setdefault("source", "gateway.http.chat")
+                    return (
+                        f"id: {event_id}\n"
+                        f"event: {event_type}\n"
+                        f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+                    )
+
                 try:
                     if session_id:
                         if not message_manager.get_session(session_id, user_id=user_id):
                             message_manager.create_session(session_id=session_id, user_id=user_id)
                     else:
                         session_id = message_manager.create_session(user_id=user_id)
+                    run_params = {
+                        "message": user_text,
+                        "session_id": session_id,
+                        "stream": True,
+                        "requested_mode": request.requested_mode,
+                        "requested_skill": request.requested_skill,
+                        "requested_workflow": request.requested_workflow,
+                        "metadata": dict(request.metadata or {}),
+                        "attachments": attachments,
+                    }
+                    run_context = gateway_server._build_run_context(
+                        request=SimpleNamespace(id=request_id, params=run_params),
+                        session_id=session_id,
+                        user_id=user_id,
+                        channel_id="web",
+                        input_payload=run_params,
+                    )
+                    merged_config = (
+                        gateway_server.config_service.get_merged_config(user_id)
+                        if gateway_server.config_service
+                        else {}
+                    )
+                    gateway_server._apply_skill_runtime_context(
+                        run_context=run_context,
+                        requested_skill=request.requested_skill,
+                        user_config=merged_config if isinstance(merged_config, dict) else {},
+                    )
                     yield _sse({"type": "session_started", "session_id": session_id})
 
                     began = message_manager.begin_turn(
@@ -144,7 +240,8 @@ async def chat(
                             user_message=user_text,
                             channel="web",
                             include_recent=True,
-                            attachments=request.attachments,
+                            run_context=run_context,
+                            attachments=attachments,
                         )
                     )
                     discovered_tree_id = None
@@ -153,7 +250,7 @@ async def chat(
                             "type": "reasoning_meta",
                             "session_id": session_id,
                             "status": "preparing",
-                            "message": "Preparing prompt policy and runtime context.",
+                            "message": "Preparing runtime context and capabilities.",
                         }
                     )
                     while not prepared_task.done():
@@ -195,7 +292,7 @@ async def chat(
                     tool_budget = int(
                         (prepared.get("execution_budget") or {}).get("tool_budget")
                         or (prompt_policy.get("tool_budget") if isinstance(prompt_policy, dict) else 0)
-                        or (5 if needs_tools else 0)
+                        or (resolve_action_budget(user_config) if needs_tools else 0)
                     )
                     reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
                     tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
@@ -213,33 +310,76 @@ async def chat(
                     full_text = ""
                     memory_write_summary = None
                     stream_failed = False
+                    text_already_streamed = False
                     run_chat_loop_result = {}
                     if needs_tools:
-                        yield _sse(
-                            {
-                                "type": "tool_meta",
-                                "session_id": session_id,
-                                "status": "executing",
-                                "message": "Tool-capable turn is using the runtime tool loop.",
-                            }
-                        )
-                        run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
-                            messages,
-                            user_config=user_config,
-                            session_id=session_id,
-                            user_id=user_id,
-                            max_recursion=tool_budget,
-                            tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
-                                name,
-                                payload,
-                                session_id=session_id,
-                                user_id=user_id,
-                                request_id=f"http_stream_{turn_id}",
-                                connection_id=f"http_stream_{turn_id}",
-                                user_config=user_config,
-                            ),
-                        )
-                        full_text = run_chat_loop_result.get("content", "")
+                        buffered = ""
+                        direct_stream = False
+                        async for chunk in gateway_server.conversation_service.call_llm_stream(
+                            messages, user_config=user_config, user_id=user_id
+                        ):
+                            if isinstance(chunk, str) and chunk.startswith("[error]"):
+                                stream_failed = True
+                                break
+                            if not chunk:
+                                continue
+                            buffered += chunk
+                            if not direct_stream:
+                                prefix = buffered.lstrip()
+                                if _is_incomplete_routing_envelope(prefix):
+                                    continue
+                                direct_stream = True
+                                full_text = buffered
+                                yield _sse({"type": "text", "content": buffered})
+                                text_already_streamed = True
+                            else:
+                                full_text += chunk
+                                yield _sse({"type": "text", "content": chunk})
+                                text_already_streamed = True
+
+                        if not stream_failed and not direct_stream:
+                            action = parse_action_envelope(buffered)
+                            if action is not None and action.action == "answer":
+                                full_text = action.content or ""
+                                run_chat_loop_result = {"status": "success", "content": full_text}
+                                if full_text:
+                                    yield _sse({"type": "text", "content": full_text})
+                                    text_already_streamed = True
+                            elif parse_tool_calls(buffered):
+                                yield _sse(
+                                    {
+                                        "type": "tool_meta",
+                                        "session_id": session_id,
+                                        "status": "executing",
+                                        "message": "The main model selected a runtime capability.",
+                                    }
+                                )
+                                run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
+                                    messages,
+                                    user_config=user_config,
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    run_context=run_context,
+                                    max_recursion=tool_budget,
+                                    initial_response={"content": buffered},
+                                    tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
+                                        name,
+                                        payload,
+                                        session_id=session_id,
+                                        user_id=user_id,
+                                        request_id=request_id,
+                                        connection_id=request_id,
+                                        run_context=run_context,
+                                        user_config=user_config,
+                                    ),
+                                )
+                                full_text = run_chat_loop_result.get("content", "")
+                            else:
+                                full_text = buffered
+                                run_chat_loop_result = {"status": "success", "content": full_text}
+                                if full_text:
+                                    yield _sse({"type": "text", "content": full_text})
+                                    text_already_streamed = True
                     else:
                         async for chunk in gateway_server.conversation_service.call_llm_stream(
                             messages, user_config=user_config, user_id=user_id
@@ -251,24 +391,26 @@ async def chat(
                                 full_text += chunk
                                 yield _sse({"type": "text", "content": chunk})
 
-                        if stream_failed:
-                            run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
-                                messages,
-                                user_config=user_config,
+                    if stream_failed:
+                        run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
+                            messages,
+                            user_config=user_config,
+                            session_id=session_id,
+                            user_id=user_id,
+                            run_context=run_context,
+                            max_recursion=tool_budget or None,
+                            tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
+                                name,
+                                payload,
                                 session_id=session_id,
                                 user_id=user_id,
-                                max_recursion=tool_budget or None,
-                                tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
-                                    name,
-                                    payload,
-                                    session_id=session_id,
-                                    user_id=user_id,
-                                    request_id=f"http_stream_{turn_id}",
-                                    connection_id=f"http_stream_{turn_id}",
-                                    user_config=user_config,
-                                ),
-                            )
-                            full_text = run_chat_loop_result.get("content", "")
+                                request_id=request_id,
+                                connection_id=request_id,
+                                run_context=run_context,
+                                user_config=user_config,
+                            ),
+                        )
+                        full_text = run_chat_loop_result.get("content", "")
 
                     confirmation_payload = None
                     if isinstance(run_chat_loop_result, dict) and run_chat_loop_result.get("status") == "needs_confirmation":
@@ -288,7 +430,7 @@ async def chat(
                         }
                         full_text = f"Tool `{run_chat_loop_result.get('tool_name')}` requires confirmation."
 
-                    if (needs_tools or stream_failed) and full_text:
+                    if (needs_tools or stream_failed) and full_text and not text_already_streamed:
                         yield _sse({"type": "text", "content": full_text})
 
                     committed = message_manager.commit_turn(
@@ -324,7 +466,7 @@ async def chat(
                                 "user_input": user_text,
                                 "assistant_output": full_text,
                                 "interaction_context": interaction_context,
-                                "attachments": request.attachments,
+                                "attachments": attachments,
                             },
                         )
                         if interaction_task is not None:
@@ -411,7 +553,9 @@ async def chat(
                     "stream": False,
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
-                    "attachments": request.attachments,
+                    "requested_workflow": request.requested_workflow,
+                    "metadata": dict(request.metadata or {}),
+                    "attachments": attachments,
                 },
                 user_id=user_id,
                 request=raw_request,
@@ -424,7 +568,11 @@ async def chat(
                     "session_id": request.session_id,
                     "message": request.message,
                     "user_id": user_id,
-                    "attachments": request.attachments,
+                    "attachments": attachments,
+                    "requested_mode": request.requested_mode,
+                    "requested_skill": request.requested_skill,
+                    "requested_workflow": request.requested_workflow,
+                    "metadata": dict(request.metadata or {}),
                 }
             )
             perm = adapter.permission_check(adapter.normalize_identity({"user_id": user_id}))
@@ -439,7 +587,9 @@ async def chat(
                     "channel": gateway_request.channel_id,
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
-                    "attachments": request.attachments,
+                    "requested_workflow": request.requested_workflow,
+                    "metadata": dict(request.metadata or {}),
+                    "attachments": attachments,
                 },
                 user_id=gateway_request.user_id,
                 request=raw_request,

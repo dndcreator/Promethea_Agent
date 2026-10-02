@@ -181,6 +181,13 @@ class FlatMemoryStore(MemoryStore):
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
         return {"ok": True, "imported": {"memory_items": imported, "nodes": 0, "edges": 0}, "merge": bool(merge)}
 
+    def clear_user_data(self, *, user_id: str) -> None:
+        with self._lock:
+            rows = [row for row in self._load_rows() if str(row.get("user_id") or "") != str(user_id)]
+            with open(self.file_path, "w", encoding="utf-8") as handle:
+                for row in rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
     def list_memory_entries(
         self,
         *,

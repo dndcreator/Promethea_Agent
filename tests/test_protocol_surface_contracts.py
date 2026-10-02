@@ -1,19 +1,16 @@
 ﻿from types import SimpleNamespace
 
 from gateway.config_protocol import normalize_config_update_params
-from gateway.http.config_compat import build_user_config_payload
 from gateway.http.surface_discovery import (
     build_surface_payload,
     collect_http_surface_from_routes,
 )
-from gateway.http.schemas import APIConfigUpdate, UserConfigUpdate
 
 
-def test_ws_config_update_normalization_accepts_canonical_and_legacy():
+def test_ws_config_update_normalization_accepts_canonical_shape():
     normalized = normalize_config_update_params(
         {
-            "config_data": {"memory": {"enabled": False}},
-            "config": {"memory": {"profile": "balanced"}},
+            "config": {"memory": {"enabled": False, "profile": "balanced"}},
             "options": {"hot_apply": "true"},
             "validate": "false",
         }
@@ -24,28 +21,14 @@ def test_ws_config_update_normalization_accepts_canonical_and_legacy():
     assert normalized["validate"] is False
 
 
-def test_ws_config_update_normalization_prefers_options_hot_apply_even_when_false():
+def test_ws_config_update_normalization_respects_false_hot_apply():
     normalized = normalize_config_update_params(
         {
             "config": {"system": {"stream_mode": True}},
             "options": {"hot_apply": False},
-            "hot_reload": True,
         }
     )
     assert normalized["hot_apply"] is False
-
-
-def test_build_user_config_payload_includes_optional_api_fields():
-    req = UserConfigUpdate(
-        agent_name="Promethea",
-        system_prompt="You are helpful.",
-        api=APIConfigUpdate(model="gpt-4.1-mini", temperature=0.2),
-    )
-    payload = build_user_config_payload(req)
-    assert payload["agent_name"] == "Promethea"
-    assert payload["system_prompt"] == "You are helpful."
-    assert payload["api"]["model"] == "gpt-4.1-mini"
-    assert payload["api"]["temperature"] == 0.2
 
 
 def test_collect_http_surface_filters_api_routes_and_methods():
@@ -72,6 +55,8 @@ def test_ops_surfaces_includes_contract_endpoints():
     payload = build_surface_payload(fake_request.app.routes)
     assert payload["status"] == "success"
     assert payload["surfaces"]["contracts"]["protocol"] == "/api/ops/protocol"
+    assert payload["surfaces"]["contracts"]["openapi"] == "/openapi.json"
+    assert payload["surfaces"]["contracts"]["public_schema"] == "/api/ops/schema"
     assert payload["surfaces"]["contracts"]["http_contracts"] == "/api/ops/http-contracts"
     assert payload["surfaces"]["contracts"]["framework_check"] == "/api/ops/framework-check"
     assert payload["surfaces"]["contracts"]["readiness"] == "/api/ops/readiness"
@@ -85,14 +70,10 @@ def test_ops_surfaces_includes_contract_endpoints():
     assert payload["surfaces"]["cli_reference"]["ops.governance"]["command"] == "promethea ops governance"
 
 
-def test_collect_http_surface_marks_legacy_and_compat_routes():
+def test_collect_http_surface_marks_canonical_route_stable():
     fake_routes = [
-        SimpleNamespace(path="/api/user/config", methods={"POST"}, name="user_config"),
-        SimpleNamespace(path="/api/config", methods={"POST"}, name="config_legacy"),
         SimpleNamespace(path="/api/config/update", methods={"POST"}, name="config_update"),
     ]
     rows = collect_http_surface_from_routes(fake_routes)
     stability = {row["path"]: row["stability"] for row in rows}
-    assert stability["/api/user/config"] == "legacy"
-    assert stability["/api/config"] == "compat"
     assert stability["/api/config/update"] == "stable"

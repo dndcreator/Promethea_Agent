@@ -294,67 +294,6 @@ async def test_perception_execute_target_with_fallback_uses_ocr(monkeypatch):
     assert "'path': 'ocr'" in out
 
 @pytest.mark.asyncio
-async def test_content_action_delegates_web_fetch(monkeypatch):
-    svc = ComputerControlService()
-
-    class Dummy:
-        async def web_fetch(self, **kwargs):
-            return {"ok": True, "kind": "web_fetch", "kwargs": kwargs}
-
-    monkeypatch.setattr(svc, "_get_content_tools", lambda: Dummy())
-    out = await svc.content_action(action="web_fetch", url="https://example.com")
-    assert out["ok"] is True
-    assert out["kind"] == "web_fetch"
-
-
-@pytest.mark.asyncio
-async def test_runtime_action_delegates_sessions_list(monkeypatch):
-    svc = ComputerControlService()
-
-    class Dummy:
-        async def sessions_action(self, **kwargs):
-            return {"ok": True, "kind": "sessions", "kwargs": kwargs}
-
-    monkeypatch.setattr(svc, "_get_runtime_tools", lambda: Dummy())
-    out = await svc.runtime_action(action="sessions_list", user_id="u1")
-    assert out["ok"] is True
-    assert out["kind"] == "sessions"
-
-
-@pytest.mark.asyncio
-async def test_schedule_action_delegates_create_job(monkeypatch):
-    svc = ComputerControlService()
-
-    class Dummy:
-        async def create_job(self, **kwargs):
-            return {"ok": True, "kind": "create_job", "kwargs": kwargs}
-
-    monkeypatch.setattr(svc, "_get_cron_tools", lambda: Dummy())
-    out = await svc.schedule_action(
-        action="create_job",
-        name="h",
-        interval_seconds=60,
-        service_name="runtime_tools",
-        tool_name="gateway_action",
-    )
-    assert out["ok"] is True
-    assert out["kind"] == "create_job"
-
-
-@pytest.mark.asyncio
-async def test_graph_action_delegates_upsert(monkeypatch):
-    svc = ComputerControlService()
-
-    class Dummy:
-        async def upsert_node(self, **kwargs):
-            return {"ok": True, "kind": "upsert", "kwargs": kwargs}
-
-    monkeypatch.setattr(svc, "_get_node_tools", lambda: Dummy())
-    out = await svc.graph_action(action="upsert_node", node_id="n1", kind="task")
-    assert out["ok"] is True
-    assert out["kind"] == "upsert"
-
-@pytest.mark.asyncio
 async def test_process_action_blocked_by_sandbox():
     svc = ComputerControlService()
 
@@ -373,31 +312,23 @@ async def test_process_action_blocked_by_sandbox():
 @pytest.mark.asyncio
 async def test_fs_action_blocked_by_sandbox():
     svc = ComputerControlService()
+    async def fake_execute(capability, action, params=None):
+        return "ERROR: operation failed: Sandbox blocked path: blocked"
 
-    class _Policy:
-        def check_path(self, path, intent="read", workspace_root=None):
-            class _D:
-                allowed = False
-                reason = "blocked"
-            return _D()
-
-    svc._sandbox = _Policy()
+    svc.execute_action = fake_execute
     out = await svc.fs_action(action="write", path="a.txt", content="x")
-    assert out.startswith("ERROR: sandbox blocked path")
+    assert out.startswith("ERROR: operation failed: Sandbox blocked path")
 
 
 @pytest.mark.asyncio
-async def test_content_action_web_fetch_blocked_by_sandbox():
+async def test_fs_read_is_authorized_by_filesystem_controller(monkeypatch):
     svc = ComputerControlService()
+    seen = []
 
-    class _Policy:
-        def check_url(self, url):
-            class _D:
-                allowed = False
-                reason = "blocked"
-            return _D()
+    async def fake_execute(capability, action, params=None):
+        seen.append((action, params))
+        return "SUCCESS"
 
-    svc._sandbox = _Policy()
-    out = await svc.content_action(action="web_fetch", url="https://example.com")
-    assert out.get("ok") is False
-    assert "sandbox blocked web_fetch" in out.get("error", "")
+    monkeypatch.setattr(svc, "execute_action", fake_execute)
+    assert await svc.fs_action(action="read", location="desktop", path="note.txt") == "SUCCESS"
+    assert seen == [("read", {"path": "note.txt", "location": "desktop", "encoding": "utf-8"})]

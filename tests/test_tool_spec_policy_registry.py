@@ -18,12 +18,12 @@ class _DummyLocalTool:
 
 def test_toolspec_create():
     spec = ToolSpec(
-        tool_name="search",
-        service_name="websearch",
-        description="search web",
+        tool_name="lookup",
+        service_name="catalog",
+        description="look up a catalog entry",
         source=ToolSource.MCP,
     )
-    assert spec.full_name == "websearch.search"
+    assert spec.full_name == "catalog.lookup"
     assert spec.side_effect_level == SideEffectLevel.READ_ONLY
 
 
@@ -39,12 +39,12 @@ def test_registry_register_and_resolve_local():
 def test_policy_allow_deny():
     policy = ToolPolicy()
     spec = ToolSpec(
-        tool_name="search",
-        service_name="websearch",
+        tool_name="lookup",
+        service_name="catalog",
         source=ToolSource.MCP,
         side_effect_level=SideEffectLevel.READ_ONLY,
     )
-    run_context = SimpleNamespace(tool_policy={"deny": {"websearch.search"}})
+    run_context = SimpleNamespace(tool_policy={"deny": {"catalog.lookup"}})
 
     decision = policy.evaluate(spec=spec, run_context=run_context, user_config=None)
     assert isinstance(decision, ToolPolicyDecision)
@@ -86,20 +86,102 @@ def test_mcp_registry_mapping():
         {
             "mcp_services": [
                 {
-                    "name": "websearch",
-                    "description": "web tools",
+                    "name": "catalog",
+                    "description": "catalog tools",
                     "available_tools": [
-                        {"name": "search", "description": "search web"},
-                        {"name": "news", "description": "news search"},
+                        {"name": "lookup", "description": "look up entries"},
+                        {"name": "list", "description": "list entries"},
                     ],
                 }
             ]
         }
     )
 
-    spec = registry.resolve(tool_name="websearch", params={"service_name": "websearch", "tool_name": "search"})
-    assert spec.full_name == "websearch.search"
+    spec = registry.resolve(tool_name="catalog", params={"service_name": "catalog", "tool_name": "lookup"})
+    assert spec.full_name == "catalog.lookup"
     assert spec.source == ToolSource.MCP
+
+
+def test_mcp_registry_preserves_manifest_config_requirement():
+    registry = ToolRegistry()
+    requirement = {"path": "feature.enabled", "equals": True}
+    registry.register_mcp_services(
+        {
+            "mcp_services": [
+                {
+                    "name": "optional",
+                    "available_tools": [
+                        {"name": "run", "description": "run", "requires_config": requirement}
+                    ],
+                }
+            ]
+        }
+    )
+    spec = registry.resolve(tool_name="optional.run", params={})
+    assert spec.metadata["requires_config"] == requirement
+
+
+def test_mcp_registry_preserves_private_tool_owner():
+    registry = ToolRegistry()
+    registry.register_mcp_services(
+        {
+            "mcp_services": [
+                {
+                    "name": "private_tool",
+                    "available_tools": [
+                        {"name": "run", "description": "run", "owner_user_id": "u1"}
+                    ],
+                }
+            ]
+        }
+    )
+    spec = registry.resolve(tool_name="private_tool.run", params={})
+    assert spec.metadata["owner_user_id"] == "u1"
+
+
+def test_manifest_side_effect_selector_resolves_per_action():
+    registry = ToolRegistry()
+    registry.register_mcp_services(
+        {
+            "mcp_services": [
+                {
+                    "name": "computer",
+                    "available_tools": [
+                        {
+                            "name": "screen_action",
+                            "side_effect_level": "privileged_host_action",
+                            "side_effect_selector": {
+                                "parameter": "action",
+                                "default": "privileged_host_action",
+                                "groups": {"read_only": ["screenshot"]},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    observed = registry.resolve_for_call(
+        tool_name="computer.screen_action",
+        params={"action": "screenshot"},
+    )
+    mutated = registry.resolve_for_call(
+        tool_name="computer.screen_action",
+        params={"action": "click"},
+    )
+    assert observed.side_effect_level == SideEffectLevel.READ_ONLY
+    assert mutated.side_effect_level == SideEffectLevel.PRIVILEGED_HOST_ACTION
+
+
+def test_undeclared_tool_risk_fails_closed_without_name_heuristics():
+    registry = ToolRegistry()
+    spec = registry.resolve(
+        tool_name="unknown.harmless_sounding_name",
+        params={"service_name": "unknown", "tool_name": "harmless_sounding_name"},
+    )
+    assert spec.side_effect_level == SideEffectLevel.PRIVILEGED_HOST_ACTION
+    assert spec.metadata["risk_metadata_missing"] is True
 
 
 def test_registry_normalizes_swapped_mcp_tool_call():

@@ -7,6 +7,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from gateway.protocol import RequestType
+from gateway.public_contracts import CognitionResponse
 from ..dispatcher import get_gateway_server, dispatch_gateway_method
 from .auth import get_current_user_id
 
@@ -37,6 +38,14 @@ def _get_runtime_components():
     if not memory_service:
         raise HTTPException(status_code=503, detail="Memory service not initialized")
     return memory_service
+
+
+def _get_self_model_service():
+    gateway_server = get_gateway_server()
+    service = getattr(gateway_server, "self_model_service", None)
+    if service is None:
+        raise HTTPException(status_code=503, detail="Self model service not initialized")
+    return service
 
 
 def _resolve_owned_memory_session(session_id: str, user_id: str) -> str:
@@ -295,6 +304,22 @@ async def get_memory_capabilities(user_id: str = Depends(get_current_user_id)):
         "user_id": user_id,
         "enabled": bool(payload.get("enabled", False)),
         "capabilities": payload.get("capabilities") or {},
+    }
+
+
+@router.get("/memory/cognition", response_model=CognitionResponse)
+async def get_cognition_bundle(
+    limit: int = 200,
+    user_id: str = Depends(get_current_user_id),
+):
+    service = _get_self_model_service()
+    result = service.build_cognition_bundle(user_id=user_id, limit=max(1, min(500, int(limit))))
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=str(result.get("reason") or "cognition_unavailable"))
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "cognition": result.get("cognition") or {},
     }
 
 

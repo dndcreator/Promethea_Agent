@@ -76,7 +76,7 @@ def parse_action_envelope(content: str) -> Optional[ActionEnvelope]:
 def build_action_mode_contract() -> str:
     return (
         f"{ACTION_MODE_CONTRACT_MARKER}\n"
-        "- This turn has already been routed to action mode by the gateway.\n"
+        "- Decide on every turn whether to answer directly or invoke one registered runtime tool.\n"
         "- Every assistant action turn in this lifecycle must be exactly one strict JSON action object and no prose.\n"
         '- Use {"action":"tool_call","tool_name":"<registered tool>","args":{...}} if an available runtime tool can advance the user\'s concrete goal.\n'
         '- Use {"action":"answer","content":"..."} if no tool should be called or the action budget is exhausted.\n'
@@ -151,9 +151,7 @@ def build_tool_prompt_protocol(
         "- The runtime registered-tools snapshot below is the source of truth for this turn. Invoke only entries with callable_now=true.\n"
         '- In action mode, every assistant action turn must use the standard action envelope: {"action":"tool_call","tool_name":"<registered tool>","args":{...}} or {"action":"answer","content":"..."}.\n'
         "- Do not mix prose with an action envelope.\n"
-        "- For normal tool-call loop compatibility outside action mode, the runtime still accepts the registered tool JSON shape with tool_name, agentType, service_name, and args.\n"
-        '- Local official tool JSON shape: {"tool_name":"<tool id>","agentType":"local","service_name":"<tool id>","args":{...}}.\n'
-        '- MCP/extension tool JSON shape: {"tool_name":"<service>.<action>","agentType":"mcp","service_name":"<service>","args":{"tool_name":"<action>", ...}}.\n'
+        '- Outside action mode, use the same registered identifier: {"tool_name":"<registered tool>","args":{...}}.\n'
         "- Never write invented function-call syntax or claim an unregistered tool invocation.\n"
         "- Never claim a tool ran, returned data, searched the web, read a file, or created a file unless a runtime observation/result has been provided in the conversation.\n"
         "- After a tool result is provided, answer with an action answer envelope in action mode, or normal prose outside action mode.\n"

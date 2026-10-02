@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from skills import build_default_skill_registry
@@ -12,6 +13,8 @@ from gateway.workflow_models import WorkflowDefinition, WorkflowStep
 from ..dispatcher import get_gateway_server
 from ..user_file_store import user_file_store
 from ..user_manager import user_manager
+from ...avatar_service import avatar_service
+from ..personal_workspace_archive import build_archive, read_archive, rebind_user_scope
 from .auth import get_current_user_id
 
 
@@ -41,6 +44,92 @@ class PersonalImportRequest(BaseModel):
     restore_sessions: bool = True
     restore_memory: bool = True
     restore_files: bool = True
+
+
+def _portable_config(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep user preference records, never deployment credentials or endpoints."""
+    forbidden = {"api_key", "password", "token", "secret", "base_url", "uri", "url", "model"}
+    if isinstance(raw, list):
+        return [_portable_config(item) for item in raw]  # type: ignore[arg-type]
+    if not isinstance(raw, dict):
+        return raw  # type: ignore[return-value]
+    clean: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if str(key).lower() in forbidden:
+            continue
+        clean[str(key)] = _portable_config(value) if isinstance(value, (dict, list)) else value
+    return clean
+
+
+def _build_workspace_payload(*, gateway_server: Any, user_id: str) -> Dict[str, Any]:
+    message_manager = getattr(gateway_server, "message_manager", None)
+    if message_manager is None:
+        raise HTTPException(status_code=503, detail="Message manager not initialized")
+    memory_service = getattr(gateway_server, "memory_service", None)
+    adapter = getattr(memory_service, "memory_adapter", None) if memory_service else None
+    mef = adapter.export_mef(user_id=user_id) if adapter else {}
+    workflow_engine = getattr(gateway_server, "workflow_engine", None)
+    task_service = getattr(gateway_server, "task_service", None)
+    reasoning_service = getattr(gateway_server, "reasoning_service", None)
+    return {
+        "schema_version": 2,
+        "config": _portable_config(user_manager.get_user_config(user_id)),
+        "sessions": message_manager.export_user_sessions(user_id=user_id, include_messages=True),
+        "memory": {"mef": mef},
+        "memory_audit": memory_service.export_user_audit_records(user_id=user_id) if memory_service else {},
+        "files": user_file_store.export_user_bundle(user_id=user_id, include_content=True, limit=5000),
+        "avatar": avatar_service.export_user_bundle(user_id=user_id),
+        "workflows": workflow_engine.export_user_state(user_id=user_id) if workflow_engine else {},
+        "tasks": task_service.export_user_state(user_id=user_id) if task_service else {},
+        "reasoning_history": reasoning_service.tree_history.export_user_history(user_id=user_id) if reasoning_service else [],
+    }
+
+
+async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any, user_id: str, payload: Dict[str, Any], merge: bool) -> Dict[str, Any]:
+    source_user_id = str(payload.get("source_user_id") or user_id)
+    scoped = rebind_user_scope(payload, source_user_id=source_user_id, target_user_id=user_id)
+    message_manager = getattr(gateway_server, "message_manager", None)
+    memory_service = getattr(gateway_server, "memory_service", None)
+    adapter = getattr(memory_service, "memory_adapter", None) if memory_service else None
+    workflow_engine = getattr(gateway_server, "workflow_engine", None)
+    task_service = getattr(gateway_server, "task_service", None)
+    reasoning_service = getattr(gateway_server, "reasoning_service", None)
+    result: Dict[str, Any] = {"status": "success", "user_id": user_id, "mode": "merge" if merge else "replace", "applied": {}}
+    config = scoped.get("config") if isinstance(scoped.get("config"), dict) else {}
+    if config:
+        updated = await config_service.update_user_config(user_id, config, validate=False)
+        result["applied"]["config"] = {"success": bool(updated.get("success")), "message": updated.get("message")}
+    sessions = scoped.get("sessions") if isinstance(scoped.get("sessions"), list) else []
+    result["applied"]["sessions"] = (
+        message_manager.import_user_sessions(user_id=user_id, sessions=sessions, merge=True)
+        if merge else message_manager.replace_user_sessions(user_id=user_id, sessions=sessions)
+    )
+    files = scoped.get("files") if isinstance(scoped.get("files"), dict) else {}
+    if not merge:
+        user_file_store.clear_user_bundle(user_id=user_id)
+    result["applied"]["files"] = user_file_store.import_user_bundle(user_id=user_id, bundle=files, merge=merge)
+    try:
+        result["applied"]["avatar"] = avatar_service.import_user_bundle(user_id=user_id, bundle=scoped.get("avatar") or {})
+    except Exception as exc:
+        result["applied"]["avatar"] = {"ok": False, "reason": str(exc)}
+    memory = scoped.get("memory") if isinstance(scoped.get("memory"), dict) else {}
+    mef = memory.get("mef") if isinstance(memory.get("mef"), dict) else {}
+    if adapter and mef:
+        result["applied"]["memory"] = adapter.import_mef(mef, merge=True) if merge else adapter.replace_user_mef(mef, user_id=user_id)
+    else:
+        result["applied"]["memory"] = {"ok": False, "reason": "memory adapter unavailable or mef missing"}
+    if memory_service:
+        audit = scoped.get("memory_audit") if isinstance(scoped.get("memory_audit"), dict) else {}
+        result["applied"]["memory_audit"] = memory_service.import_user_audit_records(user_id=user_id, payload=audit, merge=merge)
+    workflows = scoped.get("workflows") if isinstance(scoped.get("workflows"), dict) else {}
+    if workflow_engine:
+        result["applied"]["workflows"] = workflow_engine.import_user_state(user_id=user_id, payload=workflows, merge=merge)
+    tasks = scoped.get("tasks") if isinstance(scoped.get("tasks"), dict) else {}
+    if task_service:
+        result["applied"]["tasks"] = task_service.import_user_state(user_id=user_id, payload=tasks, merge=merge)
+    if reasoning_service:
+        result["applied"]["reasoning_history"] = reasoning_service.tree_history.import_user_history(user_id=user_id, rows=scoped.get("reasoning_history") or [], merge=merge)
+    return result
 
 
 def _require_runtime():
@@ -340,6 +429,48 @@ async def export_personal_bundle(
         },
     }
     return {"status": "success", "bundle": bundle}
+
+
+@router.post("/personal/workspace/archive")
+async def export_personal_workspace_archive(
+    user_id: str = Depends(get_current_user_id),
+):
+    gateway_server, _config_service = _require_runtime()
+    archive = build_archive(
+        user_id=user_id,
+        payload=_build_workspace_payload(gateway_server=gateway_server, user_id=user_id),
+    )
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return Response(
+        content=archive,
+        media_type="application/vnd.promethea.workspace+zip",
+        headers={"Content-Disposition": f'attachment; filename="promethea-workspace-{stamp}.promethea-workspace"'},
+    )
+
+
+@router.post("/personal/workspace/restore")
+async def restore_personal_workspace_archive(
+    archive: UploadFile = File(...),
+    merge: bool = False,
+    user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    gateway_server, config_service = _require_runtime()
+    raw = await archive.read()
+    try:
+        manifest, payload = read_archive(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    payload = dict(payload)
+    payload["source_user_id"] = str(manifest.get("source_user_id") or "")
+    result = await _restore_workspace_payload(
+        gateway_server=gateway_server,
+        config_service=config_service,
+        user_id=user_id,
+        payload=payload,
+        merge=bool(merge),
+    )
+    result["archive"] = {"format": manifest.get("format"), "exported_at": manifest.get("exported_at")}
+    return result
 
 
 @router.post("/personal/import")

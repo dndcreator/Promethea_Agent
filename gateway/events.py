@@ -5,6 +5,7 @@ from typing import Dict, List, Callable, Any, Optional
 from collections import defaultdict
 from .protocol import EventType, EventMessage
 from .observability import TraceEvent, AuditEvent, infer_audit_event
+from .runtime_event_log import RuntimeEventLog
 
 logger = logging.getLogger("Gateway.Events")
 
@@ -12,15 +13,20 @@ logger = logging.getLogger("Gateway.Events")
 class EventEmitter:
     """Async event emitter with listener registry and bounded history."""
 
-    def __init__(self):
+    def __init__(self, event_log: Optional[RuntimeEventLog] = None):
         self._listeners: Dict[EventType, List[Callable]] = defaultdict(list)
-        self._seq_counter = 0
+        self._seq_counter = max(0, (event_log.next_seq - 1) if event_log else 0)
         self._event_history: List[EventMessage] = []
         self._max_history = 1000
         self._trace_history: List[TraceEvent] = []
         self._audit_history: List[AuditEvent] = []
         self._max_trace_history = 5000
         self._max_audit_history = 5000
+        self.event_log = event_log
+
+    def attach_event_log(self, event_log: RuntimeEventLog) -> None:
+        self.event_log = event_log
+        self._seq_counter = max(self._seq_counter, event_log.next_seq - 1)
 
     def on(self, event: EventType, handler: Callable) -> None:
         """Register a listener for an event."""
@@ -45,11 +51,32 @@ class EventEmitter:
 
     async def emit(self, event: EventType, payload: Dict[str, Any]) -> None:
         """Emit event to all listeners."""
-        self._seq_counter += 1
+        persisted = None
+        requires_commit = event == EventType.INTERACTION_COMPLETED
+        if self.event_log is not None:
+            try:
+                persisted = await asyncio.to_thread(
+                    self.event_log.append,
+                    event_type=event.value,
+                    payload=payload,
+                    durable=requires_commit,
+                )
+            except Exception as exc:
+                logger.error(f"Runtime event log append failed: {exc}")
+                if requires_commit:
+                    return
+
+        if persisted is not None:
+            event_seq = int(persisted["seq"])
+            self._seq_counter = max(self._seq_counter, event_seq)
+        else:
+            self._seq_counter += 1
+            event_seq = self._seq_counter
         event_msg = EventMessage(
             event=event,
             payload=payload,
-            seq=self._seq_counter,
+            event_id=str(persisted.get("event_id")) if persisted else None,
+            seq=event_seq,
         )
 
         # Keep bounded event history for diagnostics.
@@ -61,7 +88,7 @@ class EventEmitter:
         trace_event = TraceEvent.from_emission(
             event_type=event.value,
             payload=payload,
-            seq=self._seq_counter,
+            seq=event_seq,
         )
         self._trace_history.append(trace_event)
         if len(self._trace_history) > self._max_trace_history:

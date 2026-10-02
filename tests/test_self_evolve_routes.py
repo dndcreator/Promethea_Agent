@@ -23,10 +23,9 @@ class _Svc:
             "enabled": self._enabled,
             "max_tasks_list": 10,
             "max_context_chars_per_file": 4000,
-            "max_validate_timeout_seconds": 180,
         }
 
-    def status_snapshot(self, _merged):
+    def status_snapshot(self, _merged, *, user_id: str):
         return {
             "enabled": self._enabled,
             "profile": self.resolve_profile(_merged),
@@ -36,13 +35,12 @@ class _Svc:
         }
 
     async def create_task(self, **kwargs):
-        _ = kwargs
-        return {"ok": True, "task": {"task_id": "se_demo", "status": "planned"}}
+        return {"ok": True, "task": {"task_id": "se_demo", "status": "draft", **kwargs}}
 
-    async def list_tasks(self, *, limit: int, status: str = ""):
+    async def list_tasks(self, *, limit: int, status: str = "", user_id: str):
         return {"ok": True, "total": 1, "limit_used": limit, "status_filter": status, "tasks": [{"task_id": "se_1"}]}
 
-    async def get_task(self, *, task_id: str):
+    async def get_task(self, *, task_id: str, user_id: str):
         if task_id == "missing":
             raise FileNotFoundError("task not found: missing")
         return {"ok": True, "task": {"task_id": task_id}}
@@ -70,7 +68,13 @@ async def test_self_evolve_create_task_requires_enabled_feature(monkeypatch):
     )
     with pytest.raises(HTTPException) as ei:
         await self_evolve.self_evolve_create_task(
-            self_evolve.SelfEvolveCreateTaskRequest(goal="improve", target_files=["a.py"]),
+            self_evolve.SelfEvolveCreateTaskRequest(
+                goal="improve",
+                capability_id="demo_tool",
+                version="1.0.0",
+                description="Demo tool",
+                commands=[{"command": "run", "description": "Run demo"}],
+            ),
             current_user_id="u1",
         )
     assert ei.value.status_code == 400

@@ -48,8 +48,12 @@ class WorkspaceService:
         uid = str(user_id or "default_user").strip() or "default_user"
         safe_uid = self._safe_segment(uid)
         safe_wid = self._safe_segment(wid)
-        root = self.base_dir / safe_uid / safe_wid
+        root = self.base_dir.resolve() / safe_uid / safe_wid
+        if root.resolve() != root:
+            raise WorkspaceSandboxError("workspace root must not redirect through a link")
         root.mkdir(parents=True, exist_ok=True)
+        if root.resolve(strict=True) != root:
+            raise WorkspaceSandboxError("workspace root must not redirect through a link")
         return WorkspaceHandle(
             workspace_id=safe_wid,
             user_id=safe_uid,
@@ -304,7 +308,10 @@ class WorkspaceService:
                 keep.append(ch)
             else:
                 keep.append("_")
-        return "".join(keep)[:80] or "default"
+        segment = "".join(keep)[:80] or "default"
+        if segment in {".", ".."}:
+            raise WorkspaceSandboxError("workspace identity cannot be a path traversal segment")
+        return segment
 
     def dumps_handle(self, handle: WorkspaceHandle) -> str:
         return json.dumps(handle.model_dump(), ensure_ascii=False)

@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional
 
 from agentkit.mcp.mcp_manager import get_mcp_manager
-from agentkit.mcp.mcpregistry import MANIFEST_CACHE, MANIFEST_SOURCES, reload_mcp_registry
+from agentkit.mcp.mcpregistry import reload_mcp_registry
 
 from .official_tools import register_official_tools
-from .tool_service import ToolService
 
 
-OFFICIAL_MCP_ROOT = (Path(__file__).resolve().parents[1] / "agentkit" / "tools").resolve()
+OFFICIAL_TOOL_ROOT = (Path(__file__).resolve().parents[1] / "agentkit" / "tools").resolve()
 COMMUNITY_EXTENSION_ROOT = (Path(__file__).resolve().parents[1] / "extensions" / "community").resolve()
 
 
@@ -18,37 +18,16 @@ def ensure_extension_roots() -> None:
     COMMUNITY_EXTENSION_ROOT.mkdir(parents=True, exist_ok=True)
 
 
-def ensure_tool_service(gateway_server: Any) -> Any:
-    if getattr(gateway_server, "tool_service", None) is None:
-        gateway_server.tool_service = ToolService(getattr(gateway_server, "event_emitter", None))
+def ensure_capability_service(gateway_server: Any) -> Any:
+    capability_service = gateway_server.ensure_capability_service()
     register_official_tools(
-        tool_service=gateway_server.tool_service,
+        capability_service=capability_service,
         workspace_service=getattr(gateway_server, "workspace_service", None),
         memory_service=getattr(gateway_server, "memory_service", None),
         message_manager=getattr(gateway_server, "message_manager", None),
         gateway_server=gateway_server,
     )
-    return gateway_server.tool_service
-
-
-def _source_path(service_name: str) -> str:
-    return str(MANIFEST_SOURCES.get(service_name) or "")
-
-
-def _provider_for_manifest(service_name: str) -> str:
-    raw = _source_path(service_name)
-    if raw == "builtin":
-        return "official"
-    if not raw:
-        return "community"
-    try:
-        source = Path(raw).resolve()
-        if source.is_relative_to(OFFICIAL_MCP_ROOT):
-            return "official"
-        return "community"
-    except Exception:
-        return "community"
-
+    return capability_service
 
 def _normalize_tool(
     *,
@@ -119,82 +98,89 @@ async def build_extension_catalog(
     include_tools: bool = True,
 ) -> Dict[str, Any]:
     ensure_extension_roots()
-    tool_service = ensure_tool_service(gateway_server)
-    catalog = await tool_service.get_tool_catalog()
+    capability_service = ensure_capability_service(gateway_server)
+    user_config = None
+    config_service = getattr(gateway_server, "config_service", None)
+    if config_service is not None and user_id:
+        merged = config_service.get_merged_config(user_id)
+        user_config = merged if isinstance(merged, dict) else None
+    catalog = await capability_service.get_tool_catalog(
+        run_context=SimpleNamespace(user_id=user_id) if user_id else None,
+        user_config=user_config,
+    )
 
     rows: List[Dict[str, Any]] = []
-    official_registered = getattr(tool_service, "_registered_tools", {}) or {}
-    for tool_id, tool in official_registered.items():
-        if not bool(getattr(tool, "official", False)):
-            continue
-        domain = str(getattr(tool, "official_domain", "misc") or "misc")
-        rows.append(
-            {
-                "extension_id": f"official.{domain}",
-                "extension_name": f"Official {domain}",
-                "provider": "official",
-                "source_type": "official_tools",
-                "extension_description": f"Built-in {domain} tools.",
-                "status": "ready",
-                "tool": _normalize_tool(
-                    tool_id=str(tool_id),
-                    name=str(getattr(tool, "name", tool_id)),
-                    description=str(getattr(tool, "description", "")),
-                    service_name=str(tool_id),
-                    tool_type="local",
-                    domain=domain,
-                ),
-            }
-        )
-
     by_key = {
         (str(item.get("service_name") or ""), str(item.get("tool_name") or "")): item
         for item in catalog
     }
-    health_by_service = {
-        str(row.get("service_name") or ""): row
-        for row in (get_mcp_manager().list_service_health(user_id=user_id) or [])
-        if isinstance(row, dict)
-    }
-    for service_name, manifest in MANIFEST_CACHE.items():
-        if service_name == "builtin":
+    registered = getattr(capability_service, "_registered_tools", {}) or {}
+    for tool_id, tool in registered.items():
+        spec = capability_service.tool_registry.resolve(tool_name=str(tool_id), params={})
+        metadata = dict(spec.metadata or {})
+        is_extension = str(spec.source.value) == "extension"
+        domain = str(getattr(tool, "official_domain", "misc") or "misc")
+        extension_id = str(metadata.get("extension_id") or (f"official.{domain}" if not is_extension else domain))
+        service_name = str(spec.service_name or tool_id)
+        tool_name = str(spec.tool_name or tool_id)
+        catalog_row = by_key.get((service_name, tool_name)) or by_key.get((str(tool_id), str(tool_id))) or {}
+        rows.append(
+            {
+                "extension_id": extension_id,
+                "extension_name": str(metadata.get("extension_name") or (f"Official {domain}" if not is_extension else extension_id)),
+                "provider": "community" if is_extension else "official",
+                "source_type": "manifest_tool" if metadata.get("manifest_path") else "official_tools",
+                "extension_description": str(getattr(tool, "description", "")),
+                "version": str(metadata.get("extension_version") or ""),
+                "source_path": str(metadata.get("manifest_path") or ""),
+                "status": "ready" if bool(catalog_row.get("callable_now", True)) else "degraded",
+                "tool": _normalize_tool(
+                    tool_id=str(tool_id),
+                    name=tool_name,
+                    description=str(getattr(tool, "description", "")),
+                    service_name=service_name,
+                    tool_type=str(spec.source.value),
+                    domain=domain,
+                    callable_now=bool(catalog_row.get("callable_now", True)),
+                    callable_reason=str(catalog_row.get("callable_reason") or "callable"),
+                    requires_confirmation=bool(catalog_row.get("requires_confirmation", False)),
+                    input_schema=dict(spec.input_schema or {}),
+                ),
+            }
+        )
+
+    manager = get_mcp_manager()
+    for spec in capability_service.tool_registry.list_specs():
+        if str(spec.source.value) != "mcp" or bool(spec.metadata.get("inferred")):
             continue
-        provider = _provider_for_manifest(service_name)
-        source_path = _source_path(service_name)
-        health = health_by_service.get(str(service_name), {})
-        status = str(health.get("status") or "ready")
-        commands = (((manifest or {}).get("capabilities") or {}).get("invocation_commands") or [])
-        if not commands:
-            commands = [{"command": service_name, "description": str((manifest or {}).get("description") or "")}]
-        for command in commands:
-            if not isinstance(command, dict):
-                continue
-            command_name = str(command.get("command") or service_name)
-            catalog_row = by_key.get((str(service_name), command_name), {})
-            rows.append(
-                {
-                    "extension_id": str(service_name),
-                    "extension_name": str((manifest or {}).get("label") or service_name),
-                    "provider": provider,
-                    "source_type": "mcp_manifest",
-                    "extension_description": str((manifest or {}).get("description") or ""),
-                    "version": str((manifest or {}).get("version") or ""),
-                    "source_path": source_path,
-                    "status": status,
-                    "tool": _normalize_tool(
-                        tool_id=f"{service_name}.{command_name}",
-                        name=command_name,
-                        description=str(command.get("description") or (manifest or {}).get("description") or ""),
-                        service_name=str(service_name),
-                        tool_type="mcp",
-                        domain=str((manifest or {}).get("category") or "mcp"),
-                        callable_now=bool(catalog_row.get("callable_now", status not in {"offline", "hidden"})),
-                        callable_reason=str(catalog_row.get("callable_reason") or status or "callable"),
-                        requires_confirmation=bool(catalog_row.get("requires_confirmation", False)),
-                        input_schema=dict((manifest or {}).get("inputSchema") or {}),
-                    ),
-                }
-            )
+        service_name = str(spec.service_name or spec.tool_name)
+        tool_name = str(spec.tool_name)
+        provider_info = manager.query_service_by_name(service_name) or {}
+        catalog_row = by_key.get((service_name, tool_name), {})
+        rows.append(
+            {
+                "extension_id": service_name,
+                "extension_name": str(provider_info.get("label") or service_name),
+                "provider": "external",
+                "source_type": "mcp",
+                "extension_description": str(provider_info.get("description") or spec.description),
+                "version": str(provider_info.get("version") or ""),
+                "source_path": "",
+                "status": "ready" if bool(catalog_row.get("callable_now", False)) else "degraded",
+                "tool": _normalize_tool(
+                    tool_id=spec.full_name,
+                    name=tool_name,
+                    description=spec.description,
+                    service_name=service_name,
+                    tool_type="mcp",
+                    domain="mcp",
+                    callable_now=bool(catalog_row.get("callable_now", False)),
+                    callable_reason=str(catalog_row.get("callable_reason") or "provider_unavailable"),
+                    requires_confirmation=bool(catalog_row.get("requires_confirmation", True)),
+                    input_schema=dict(spec.input_schema or {}),
+                ),
+            }
+        )
 
     extensions = _grouped_extensions(rows)
     if not include_tools:
@@ -203,7 +189,7 @@ async def build_extension_catalog(
     return {
         "status": "success",
         "roots": {
-            "official": str(OFFICIAL_MCP_ROOT),
+            "official": str(OFFICIAL_TOOL_ROOT),
             "community": str(COMMUNITY_EXTENSION_ROOT),
         },
         "total": len(extensions),
@@ -211,14 +197,17 @@ async def build_extension_catalog(
     }
 
 
-def reload_extensions() -> Dict[str, Any]:
+async def reload_extensions(gateway_server: Any) -> Dict[str, Any]:
     ensure_extension_roots()
-    roots = [str(OFFICIAL_MCP_ROOT), str(COMMUNITY_EXTENSION_ROOT)]
-    registered = reload_mcp_registry(roots)
+    roots = [str(OFFICIAL_TOOL_ROOT), str(COMMUNITY_EXTENSION_ROOT)]
+    capability_service = ensure_capability_service(gateway_server)
+    registered = capability_service.reload_discovered_tools(roots, reload_modules=True)
     manager = get_mcp_manager()
-    manager.tools_cache.clear()
+    await manager.clean_services()
+    external = reload_mcp_registry(roots)
     return {
         "status": "success",
         "registered": registered,
+        "external_mcp": external,
         "roots": {"official": roots[0], "community": roots[1]},
     }

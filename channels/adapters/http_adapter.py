@@ -55,6 +55,7 @@ class HttpApiChannelAdapter(ChannelAdapter):
             metadata=dict(raw_input.get("metadata") or {}),
             requested_mode=raw_input.get("requested_mode"),
             requested_skill=raw_input.get("requested_skill"),
+            requested_workflow=raw_input.get("requested_workflow"),
         )
 
     def emit_response(self, gateway_response: GatewayResponse | Dict[str, Any]) -> Dict[str, Any]:

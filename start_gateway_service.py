@@ -11,6 +11,7 @@ from pathlib import Path
 
 import uvicorn
 
+from config import config
 from utils.logger import setup_logger
 
 
@@ -107,7 +108,11 @@ def _stop_process(process: subprocess.Popen | None, logger) -> None:
 
 
 if __name__ == "__main__":
-    logger = setup_logger()
+    logger = setup_logger(
+        log_dir=str(config.system.log_dir),
+        level=config.system.log_level,
+        include_model_payloads=config.system.log_model_payloads,
+    )
     ui_process = None
 
     logger.info("=" * 60)

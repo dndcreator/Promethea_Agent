@@ -16,6 +16,7 @@ class ComputerCapability(str, Enum):
     MOUSE = "mouse"              # Mouse control
     FILESYSTEM = "filesystem"
     PROCESS = "process"
+    ENVIRONMENT = "environment"
     CLIPBOARD = "clipboard"      # Clipboard access
     SCREENSHOT = "screenshot"
 
@@ -68,3 +69,10 @@ class ComputerController(ABC):
             "capability": self.capability.value,
             "initialized": self.is_initialized
         }
+
+    @property
+    def supported_capabilities(self) -> tuple[ComputerCapability, ...]:
+        return (self.capability,)
+
+    def has_background_activity(self) -> bool:
+        return False

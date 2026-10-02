@@ -38,6 +38,7 @@ async def handle_chat(self, connection, request):
             "message": request.params.get("message"),
             "requested_mode": request.params.get("requested_mode"),
             "requested_skill": request.params.get("requested_skill"),
+            "requested_workflow": request.params.get("requested_workflow"),
             "metadata": request.params.get("metadata") or {},
             "attachments": request.params.get("attachments") or [],
             "runtime_blocks": request.params.get("runtime_blocks") or [],
@@ -72,6 +73,7 @@ async def handle_chat(self, connection, request):
         run_context_payload["session_id"] = session_id
         run_context_payload["requested_mode"] = gateway_request.requested_mode
         run_context_payload["requested_skill"] = gateway_request.requested_skill
+        run_context_payload["requested_workflow"] = gateway_request.requested_workflow
         run_context = self._build_run_context(
             request=request,
             session_id=session_id,
@@ -163,6 +165,8 @@ async def handle_chat(self, connection, request):
                     user_config=user_config,
                     session_id=session_id,
                     user_id=user_id,
+                    user_message=user_text,
+                    include_recent=False,
                     tool_executor=tool_executor,
                     run_context=run_context,
                     attachments=request.params.get("attachments") or [],
@@ -452,6 +456,9 @@ async def handle_chat_confirm(self, connection, request):
                 request.id, False, error="action must be approve or reject"
             )
 
+        # Consume before execution so concurrent confirmation requests cannot
+        # replay the same saved tool batch.
+        self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
         current_messages = pending.get("current_messages", [])
         turn_id = pending.get("turn_id")
         tool_result_blocks = []
@@ -468,11 +475,20 @@ async def handle_chat_confirm(self, connection, request):
 
             if not self.mcp_manager:
                 raise RuntimeError("mcp manager not initialized")
+            capability_service = getattr(self, "capability_service", None)
+            user_config = self.config_service.get_merged_config(user_id) if self.config_service else None
+            confirmation_resolver = None
+            if callable(getattr(capability_service, "requires_confirmation", None)):
+                confirmation_resolver = lambda name, payload: capability_service.requires_confirmation(
+                    name,
+                    payload,
+                    run_context=run_context,
+                    user_config=user_config,
+                )
             tool_result_blocks = await execute_tool_calls(
                 all_tool_calls,
-                self.mcp_manager,
                 session_id=session_id,
-                approved_call_ids={tool_call_id},
+                approved_call_ids=set(pending.get("approved_call_ids") or ()) | {tool_call_id},
                 tool_executor=lambda name, payload: self._execute_tool_for_chat(
                     name,
                     payload,
@@ -481,7 +497,9 @@ async def handle_chat_confirm(self, connection, request):
                     request_id=request.id,
                     connection_id=connection.connection_id,
                     run_context=run_context,
+                    user_config=user_config,
                 ),
+                confirmation_resolver=confirmation_resolver,
             )
         except Exception as e:
             if isinstance(e, ToolConfirmationRequired):
@@ -492,6 +510,7 @@ async def handle_chat_confirm(self, connection, request):
                     "args": e.tool_args,
                     "current_messages": current_messages,
                     "pending_tool_calls": e.all_tool_calls,
+                    "approved_call_ids": sorted(e.approved_call_ids),
                     "content": pending.get("content", ""),
                     "turn_id": turn_id,
                 }
@@ -523,9 +542,7 @@ async def handle_chat_confirm(self, connection, request):
         messages.append({"role": "assistant", "content": pending.get("content", "")})
         messages.append(observation_message)
 
-        user_config = None
-        if self.config_service:
-            user_config = self.config_service.get_merged_config(user_id)
+        user_config = self.config_service.get_merged_config(user_id) if self.config_service else None
         self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
 
         conversation_input = ConversationRunInput(

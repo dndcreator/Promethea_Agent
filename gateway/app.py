@@ -1,14 +1,13 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
-import json
 import os
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Dict, List
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,31 +24,6 @@ from gateway.http.routes.auth import router as auth_router
 from gateway.kernel_scheduler_service import KernelSchedulerService
 
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def send_user_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-
-    async def broadcast(self, message: str):
-        for connection in list(self.active_connections):
-            try:
-                await connection.send_text(message)
-            except Exception:
-                if connection in self.active_connections:
-                    self.active_connections.remove(connection)
-
-
-manager = ConnectionManager()
 gateway_integration = None
 Promethea_agent = None
 
@@ -142,18 +116,13 @@ async def lifespan(app: FastAPI):
 
         logger.info("Initializing MCP registry...")
         try:
-            from agentkit.mcp.mcpregistry import (
-                ensure_builtin_service,
-                reload_mcp_registry,
-            )
+            from agentkit.mcp.mcpregistry import reload_mcp_registry
 
             registered_services = reload_mcp_registry(
                 ["agentkit", "extensions/community"]
             )
-            if not registered_services:
-                registered_services = ensure_builtin_service()
             logger.info(
-                f"MCP initialized with {len(registered_services)} services: {registered_services}"
+                f"External MCP initialized with {len(registered_services)} providers: {registered_services}"
             )
             _mark_component("mcp_registry", "ok", f"services={len(registered_services)}")
         except Exception as e:
@@ -187,14 +156,18 @@ async def lifespan(app: FastAPI):
             scheduler_max_jobs = _env_int("KERNEL_SCHEDULER__MAX_JOBS_PER_TICK", 10)
             scheduler_start_paused = _env_bool("KERNEL_SCHEDULER__START_PAUSED", False)
 
+            gateway_server = (
+                gateway_integration.get_gateway_server() if gateway_integration else None
+            )
             state.kernel_scheduler = KernelSchedulerService(
                 workspace_root=str(os.getcwd()),
                 enabled=scheduler_enabled,
                 tick_seconds=scheduler_tick,
                 max_jobs_per_tick=scheduler_max_jobs,
+                capability_service=getattr(gateway_server, "capability_service", None),
             )
-            if gateway_integration and gateway_integration.get_gateway_server():
-                gateway_integration.get_gateway_server().kernel_scheduler = state.kernel_scheduler
+            if gateway_server:
+                gateway_server.kernel_scheduler = state.kernel_scheduler
             started = await state.kernel_scheduler.start(paused=scheduler_start_paused)
             if started:
                 _mark_component(
@@ -339,34 +312,6 @@ async def ui_cache_control(request: Request, call_next):
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
     return response
-
-
-@app.websocket("/ws/mcplog")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    try:
-        await manager.send_user_message(
-            json.dumps(
-                {"type": "connection_check", "message": "WebSocket connected"},
-                ensure_ascii=False,
-            ),
-            websocket,
-        )
-        while True:
-            try:
-                await websocket.receive_text()
-                await manager.send_user_message(
-                    json.dumps(
-                        {"type": "heartbeat", "message": "pong"}, ensure_ascii=False
-                    ),
-                    websocket,
-                )
-            except WebSocketDisconnect:
-                manager.disconnect(websocket)
-                break
-    except Exception as e:
-        logger.error(f"WebSocket error: {e}")
-        manager.disconnect(websocket)
 
 
 @app.websocket("/gateway/ws")

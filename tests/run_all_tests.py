@@ -27,7 +27,7 @@ SUITE_FILES: dict[str, list[str]] = {
     "core": [
         "tests/test_conversation_pipeline_staging.py",
         "tests/test_reasoning_service.py",
-        "tests/test_tool_service.py",
+        "tests/test_capability_service.py",
         "tests/test_workflow_engine_mvp.py",
     ],
     "contracts": [

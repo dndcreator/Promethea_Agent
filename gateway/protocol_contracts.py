@@ -80,15 +80,6 @@ def build_ws_method_contracts() -> List[Dict[str, Any]]:
             required = list(schema.get("required", []))
             properties = dict(schema.get("properties", {}))
 
-        aliases: Dict[str, str] = {}
-        if method == RequestType.CONFIG_UPDATE:
-            aliases = {
-                "config_data": "config",
-                "hot_reload": "options.hot_apply",
-                "hot_apply": "options.hot_apply",
-                "validate_config": "validate",
-            }
-
         rows.append(
             {
                 "method": method.value,
@@ -97,7 +88,6 @@ def build_ws_method_contracts() -> List[Dict[str, Any]]:
                 "params_model": model.__name__ if model else None,
                 "required_fields": required,
                 "properties": properties,
-                "aliases": aliases,
             }
         )
     return rows
@@ -132,12 +122,6 @@ def build_domain_contracts() -> Dict[str, Any]:
             "http": ["/api/config/update", "/api/config/contract", "/api/config/default-template"],
             "ws_methods": ws_by_domain.get("config", []),
             "canonical_update": {"config": "object", "options": {"hot_apply": "bool"}, "validate": "bool"},
-            "compat_aliases": {
-                "config_data": "config",
-                "hot_reload": "options.hot_apply",
-                "hot_apply": "options.hot_apply",
-                "validate_config": "validate",
-            },
         },
         "memory": {
             "http": ["/api/memory/entries", "/api/memory/graph", "/api/memory/recall/runs"],
@@ -176,6 +160,7 @@ def build_domain_contracts() -> Dict[str, Any]:
         },
         "ops": {
             "http": [
+                "/api/ops/schema",
                 "/api/ops/protocol",
                 "/api/ops/methods",
                 "/api/ops/http-contracts",

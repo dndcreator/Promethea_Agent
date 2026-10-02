@@ -35,8 +35,11 @@ from .memory_text_utils import (
     extract_tokens,
     normalize_candidates,
     normalize_content,
+    normalize_memory_modality,
+    normalize_memory_persistence,
 )
 from .protocol import EventType
+from memory.hippocampus import HippocampusReplayPolicy, HippocampusReplayService
 from memory.session_scope import ensure_session_owned, scoped_session_id
 from memory.session_scope import user_node_id
 
@@ -84,7 +87,12 @@ class MemoryService:
         self._sync_last_error = ""
         self._sync_last_activity_ts = 0.0
         self._sync_current_item: Optional[Dict[str, Any]] = None
+        self._sync_retry_item: Optional[Dict[str, Any]] = None
         self._sync_shutdown_requested = False
+        self._event_consumer_name = "memory.interaction.v1"
+        self._runtime_event_log = getattr(event_emitter, "event_log", None) if event_emitter else None
+        if self._runtime_event_log is not None:
+            self._runtime_event_log.ensure_consumer(self._event_consumer_name, start_at_tail=True)
 
         # Backlog 011: recall inspector in-memory history.
         self._recall_runs: List[Dict[str, Any]] = []
@@ -114,6 +122,7 @@ class MemoryService:
                 logger.info("MemoryService: Memory adapter available but disabled")
 
         self._refresh_thresholds()
+        self.hippocampus = self._create_hippocampus_service()
 
         if self.event_emitter:
             self._subscribe_events()
@@ -126,7 +135,87 @@ class MemoryService:
         )
         self.event_emitter.on(EventType.CONFIG_CHANGED, self._on_config_changed)
         self.event_emitter.on(EventType.CONFIG_RELOADED, self._on_config_reloaded)
+        self.event_emitter.on(EventType.CONVERSATION_RUN_STARTED, self._on_foreground_run_started)
+        self.event_emitter.on(EventType.GATEWAY_RUN_FINISHED, self._on_foreground_run_finished)
+        self.event_emitter.on(EventType.TASK_RUN_STARTED, self._on_foreground_run_started)
+        self.event_emitter.on(EventType.TASK_RUN_UPDATED, self._on_task_run_updated)
         logger.debug("MemoryService: Subscribed to event bus")
+
+    def _create_hippocampus_service(self) -> Optional[HippocampusReplayService]:
+        if not self.enabled or not self.memory_adapter:
+            return None
+        try:
+            from config import load_config
+
+            return HippocampusReplayService(
+                policy=HippocampusReplayPolicy.from_config(load_config()),
+                select_memories=self._select_replay_memories,
+                reflect=self._reflect_replay_memories,
+                commit_insight=self._commit_replay_insight,
+                idle_probe=self._memory_resources_idle,
+                publish_event=self._publish_replay_event,
+            )
+        except Exception as exc:
+            logger.warning("MemoryService: hippocampus replay unavailable: {}", exc)
+            return None
+
+    async def start_background_services(self) -> None:
+        if self.hippocampus:
+            await self.hippocampus.start()
+
+    async def offer_cognition_snapshot(self, *, user_id: str, snapshot: Dict[str, Any]) -> bool:
+        """Offer a grounded temporary cognition as a replay hint, never as memory evidence."""
+        if not self.hippocampus or not isinstance(snapshot, dict):
+            return False
+        metrics = snapshot.get("metrics") if isinstance(snapshot.get("metrics"), dict) else {}
+        if int(metrics.get("llm_calls") or 0) <= 0 or bool(metrics.get("degraded")):
+            return False
+        synthesis = " ".join(str(snapshot.get("synthesis") or "").split()).strip()
+        basis_memory_ids = list(dict.fromkeys(
+            str(value).strip()
+            for value in snapshot.get("basis_memory_ids") or []
+            if str(value).strip()
+        ))
+        if not synthesis or not basis_memory_ids:
+            return False
+        return await self.hippocampus.offer_cognition_hint(
+            user_id,
+            {"content": synthesis, "basis_memory_ids": basis_memory_ids},
+        )
+
+    async def _on_foreground_run_started(self, event_msg) -> None:
+        if self.hippocampus:
+            await self.hippocampus.foreground_started(self._foreground_run_key(event_msg))
+
+    async def _on_foreground_run_finished(self, event_msg) -> None:
+        if self.hippocampus:
+            await self.hippocampus.foreground_finished(self._foreground_run_key(event_msg))
+
+    async def _on_task_run_updated(self, event_msg) -> None:
+        payload = dict(getattr(event_msg, "payload", {}) or {})
+        if str(payload.get("status") or "").lower() in {
+            "completed",
+            "succeeded",
+            "success",
+            "failed",
+            "cancelled",
+            "canceled",
+            "stopped",
+        }:
+            await self._on_foreground_run_finished(event_msg)
+
+    @staticmethod
+    def _foreground_run_key(event_msg: Any) -> str:
+        payload = dict(getattr(event_msg, "payload", {}) or {})
+        return str(payload.get("run_id") or payload.get("request_id") or payload.get("trace_id") or "")
+
+    def _memory_resources_idle(self) -> bool:
+        queue_size = self._sync_queue.qsize() if self._sync_queue else 0
+        return queue_size + self._sync_active + (1 if self._sync_retry_item else 0) == 0
+
+    async def _publish_replay_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if self.event_emitter:
+            await self.event_emitter.emit(EventType(event_type), payload)
 
     async def _on_config_changed(self, event_msg) -> None:
         try:
@@ -294,6 +383,8 @@ class MemoryService:
             row["verify_reason"] = "fallback_overlap"
             row["verify_evidence"] = ""
             row["verify_attribution"] = "user"
+            row["modality"] = normalize_memory_modality(row.get("modality"))
+            row["persistence"] = normalize_memory_persistence(row.get("persistence"))
             accepted.append(row)
         return accepted
 
@@ -313,16 +404,26 @@ class MemoryService:
             return []
         prompt = (
             "You are a memory write verifier.\n"
-            "Given RECENT_CONTEXT, USER_INPUT, ASSISTANT_OUTPUT and candidate memories, decide whether each candidate can be safely written.\n"
+            "Given RECENT_CONTEXT, USER_INPUT, ASSISTANT_OUTPUT, candidate memories, and their RELATED_MEMORIES, "
+            "decide whether each candidate can be safely written.\n"
             "Acceptance requirements:\n"
             "1) Candidate meaning is supported by the current interaction or by immediate conversational context.\n"
             "2) Attribution is correct: should not convert assistant explanation into user preference.\n"
-            "3) It looks durable (not temporary tool/runtime artifact).\n"
-            "4) Short answers may be valid when they answer a direct prior question in RECENT_CONTEXT.\n"
+            "3) Short answers may be valid when they answer a direct prior question in RECENT_CONTEXT.\n"
+            "For every accepted candidate, verify its semantic scope:\n"
+            "- modality: actual for asserted state, plan for committed intention, hypothetical for possibilities, examples, roleplay, or uncommitted conditions.\n"
+            "- persistence: ephemeral for the current moment/turn/operation, bounded for state useful across turns but expected to expire or change, durable for long-lived state.\n"
+            "For each accepted candidate, classify its relationship to RELATED_MEMORIES as one of: "
+            "new, equivalent, compatible, updates, contradicts, unclear. "
+            "Shared topics are not contradictions. Contradicts means both statements cannot be true in the same scope and time.\n"
             "Return strict JSON:\n"
             "{\"decisions\":[{\"index\":0,\"accept\":true|false,\"confidence\":0..1,"
-            "\"reason\":\"...\",\"evidence\":\"...\",\"attribution\":\"user|assistant|project|unclear\"}]}\n"
-            "Prefer rejecting uncertain candidates."
+            "\"reason\":\"...\",\"evidence\":\"...\",\"attribution\":\"user|assistant|project|unclear\","
+            "\"modality\":\"actual|plan|hypothetical\","
+            "\"persistence\":\"ephemeral|bounded|durable\","
+            "\"relationship\":\"new|equivalent|compatible|updates|contradicts|unclear\","
+            "\"related_indexes\":[0]}]}\n"
+            "Reject unsupported candidates, but let the deterministic write gate handle modality and persistence policy."
         )
         cands_json = json.dumps(candidates, ensure_ascii=False)
         context_json = json.dumps(interaction_context or [], ensure_ascii=False)
@@ -358,13 +459,37 @@ class MemoryService:
             accept = bool(d.get("accept", False))
             conf = float(d.get("confidence", 0.0) or 0.0)
             attribution = str(d.get("attribution", "unclear")).strip().lower()
-            if (not accept) or conf < 0.55 or attribution in {"assistant", "unclear"}:
+            if (not accept) or conf < 0.5 or attribution in {"assistant", "unclear"}:
                 continue
             row = dict(c)
             row["verify_confidence"] = round(conf, 3)
             row["verify_reason"] = str(d.get("reason", "")).strip()[:300]
             row["verify_evidence"] = str(d.get("evidence", "")).strip()[:500]
             row["verify_attribution"] = attribution
+            row["modality"] = normalize_memory_modality(d.get("modality") or row.get("modality"))
+            row["persistence"] = normalize_memory_persistence(d.get("persistence") or row.get("persistence"))
+            related = row.get("related_memories") if isinstance(row.get("related_memories"), list) else []
+            relationship = str(d.get("relationship") or "").strip().lower()
+            allowed_relationships = {
+                "new",
+                "equivalent",
+                "compatible",
+                "updates",
+                "contradicts",
+                "unclear",
+            }
+            if relationship not in allowed_relationships:
+                relationship = "unclear" if related else "new"
+            related_indexes: List[int] = []
+            for value in d.get("related_indexes") or []:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < len(related) and index not in related_indexes:
+                    related_indexes.append(index)
+            row["memory_relationship"] = relationship
+            row["relationship_indexes"] = related_indexes
             accepted.append(row)
         return accepted
 
@@ -484,6 +609,199 @@ class MemoryService:
             logger.debug("MemoryService: dedicated memory classify client failed: {}", e)
             return None
 
+    async def _select_replay_memories(
+        self,
+        user_id: str,
+        batch_size: int,
+        cognition_hints: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        adapter = self.memory_adapter
+        if not adapter:
+            return []
+        basis_ids = {
+            str(memory_id)
+            for hint in cognition_hints or []
+            if isinstance(hint, dict)
+            for memory_id in hint.get("basis_memory_ids") or []
+            if str(memory_id)
+        }
+        rows = await asyncio.to_thread(
+            adapter.list_memory_entries,
+            user_id=user_id,
+            limit=max(2, min(500, max(int(batch_size), len(basis_ids)) * 4)),
+            offset=0,
+        )
+        active = [
+            dict(row)
+            for row in rows
+            if isinstance(row, dict) and str(row.get("status") or "active").lower() == "active"
+        ]
+        active.sort(key=lambda row: str(row.get("memory_id") or "") not in basis_ids)
+        return active[: max(2, min(200, int(batch_size)))]
+
+    async def _reflect_replay_memories(
+        self,
+        user_id: str,
+        memories: List[Dict[str, Any]],
+        max_insights: int,
+        cognition_hints: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        compact_memories = []
+        memory_by_id: Dict[str, Dict[str, Any]] = {}
+        raw_memory_ids: set[str] = set()
+        for row in memories:
+            memory_id = str(row.get("memory_id") or "").strip()
+            if not memory_id:
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            replay_generated = str(metadata.get("memory_source") or "") == "hippocampus.replay"
+            memory_by_id[memory_id] = row
+            if not replay_generated:
+                raw_memory_ids.add(memory_id)
+            compact_memories.append(
+                {
+                    "memory_id": memory_id,
+                    "type": str(row.get("memory_type") or "project_state"),
+                    "content": str(row.get("content") or "")[:1200],
+                    "source_layer": str(row.get("source_layer") or ""),
+                    "replay_generated": replay_generated,
+                }
+            )
+        if len(compact_memories) < 2 or not raw_memory_ids:
+            return []
+
+        compact_hints = [
+            {
+                "content": str(hint.get("content") or ""),
+                "basis_memory_ids": [
+                    str(memory_id)
+                    for memory_id in hint.get("basis_memory_ids") or []
+                    if str(memory_id) in memory_by_id
+                ],
+            }
+            for hint in cognition_hints or []
+            if isinstance(hint, dict) and str(hint.get("content") or "").strip()
+        ]
+        prompt = (
+            "You organize an agent's existing long-term memories during idle replay. "
+            "Do not extract conversation turns and do not invent facts. Re-read the supplied memory records, "
+            "identify a more precise durable understanding, and revise an earlier replay insight when appropriate.\n"
+            "Cognition hints are prior temporary interpretations provided only to avoid repeating exploratory work. "
+            "They are not evidence. Verify, revise, or reject them using the supplied memory records.\n"
+            "Return strict JSON: {\"insights\":[{\"content\":string,\"type\":"
+            "\"goal|preference|constraint|identity|project_state\",\"basis_memory_ids\":[string],"
+            "\"target_memory_id\":string|null}]}.\n"
+            f"Return at most {max(1, int(max_insights))} insights. Every insight must be supported by at least one "
+            "supplied non-replay memory. Use target_memory_id only to revise a supplied replay-generated memory. "
+            "Prefer no insight over a weak, repetitive, or speculative one."
+        )
+        response = await self._call_memory_classifier_llm(
+            user_id,
+            prompt,
+            json.dumps(
+                {"memories": compact_memories, "cognition_hints": compact_hints},
+                ensure_ascii=False,
+            ),
+        )
+        parsed = self._extract_json(response or "") or {}
+        proposed = parsed.get("insights") if isinstance(parsed.get("insights"), list) else []
+        allowed_types = {"goal", "preference", "constraint", "identity", "project_state"}
+        accepted: List[Dict[str, Any]] = []
+        seen_fingerprints: set[str] = set()
+        for item in proposed:
+            if not isinstance(item, dict):
+                continue
+            content = self._normalize_content(str(item.get("content") or ""))
+            memory_type = str(item.get("type") or "project_state").strip().lower()
+            basis = [
+                str(memory_id)
+                for memory_id in (item.get("basis_memory_ids") or [])
+                if str(memory_id) in memory_by_id
+            ]
+            if not content or memory_type not in allowed_types or not set(basis).intersection(raw_memory_ids):
+                continue
+            fingerprint = hashlib.sha256(f"{memory_type}:{content.lower()}".encode("utf-8")).hexdigest()
+            if fingerprint in seen_fingerprints:
+                continue
+            target_id = str(item.get("target_memory_id") or "").strip()
+            target = memory_by_id.get(target_id)
+            target_metadata = target.get("metadata") if isinstance(target, dict) else {}
+            if target_id and str((target_metadata or {}).get("memory_source") or "") != "hippocampus.replay":
+                target_id = ""
+            accepted.append(
+                {
+                    "content": content,
+                    "memory_type": memory_type,
+                    "basis_memory_ids": list(dict.fromkeys(basis)),
+                    "target_memory_id": target_id or None,
+                    "fingerprint": fingerprint,
+                }
+            )
+            seen_fingerprints.add(fingerprint)
+            if len(accepted) >= max(1, int(max_insights)):
+                break
+        return accepted
+
+    async def _commit_replay_insight(self, user_id: str, insight: Dict[str, Any], cycle: int) -> bool:
+        adapter = self.memory_adapter
+        if not adapter:
+            raise RuntimeError("memory adapter unavailable")
+        fingerprint = str(insight.get("fingerprint") or "").strip()
+        target_id = str(insight.get("target_memory_id") or "").strip()
+        entries = await asyncio.to_thread(
+            adapter.list_memory_entries,
+            user_id=user_id,
+            limit=500,
+            offset=0,
+        )
+        replay_entries: Dict[str, Dict[str, Any]] = {}
+        fingerprint_target = ""
+        for row in entries:
+            if not isinstance(row, dict):
+                continue
+            metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+            if str(metadata.get("memory_source") or "") != "hippocampus.replay":
+                continue
+            memory_id = str(row.get("memory_id") or "")
+            replay_entries[memory_id] = row
+            if fingerprint and str(metadata.get("replay_fingerprint") or "") == fingerprint:
+                fingerprint_target = memory_id
+        target_id = target_id if target_id in replay_entries else fingerprint_target
+        metadata = {
+            "memory_source": "hippocampus.replay",
+            "replay_fingerprint": fingerprint,
+            "replay_cycle": int(cycle),
+            "basis_memory_ids": list(insight.get("basis_memory_ids") or []),
+            "replay_status": "tentative",
+        }
+        if target_id:
+            result = await asyncio.to_thread(
+                adapter.update_memory_entry,
+                user_id=user_id,
+                memory_id=target_id,
+                content=str(insight.get("content") or ""),
+                memory_type=str(insight.get("memory_type") or "project_state"),
+                metadata=metadata,
+            )
+            if not bool((result or {}).get("ok")):
+                raise RuntimeError(f"replay insight update failed: {(result or {}).get('reason') or 'unknown'}")
+            return True
+        saved = await asyncio.to_thread(
+            adapter.add_message,
+            session_id="hippocampus",
+            role="assistant",
+            content=str(insight.get("content") or ""),
+            user_id=user_id,
+            metadata={
+                **metadata,
+                "memory_type": str(insight.get("memory_type") or "project_state"),
+                "source_layer": "hippocampus",
+            },
+        )
+        if not saved:
+            raise RuntimeError("replay insight write failed")
+        return True
+
     async def _classify_interaction(
         self,
         user_input: str,
@@ -497,17 +815,21 @@ class MemoryService:
         prompt = (
             "You are a strict memory classifier. Input is one completed interaction "
             "(recent context + user input + assistant output). Ignore tool logs and execution traces. "
-            "Find only durable user or project state worth long-term memory.\n"
+            "Extract user or project state that may be relevant to memory policy; the write gate decides whether it belongs in long-term memory.\n"
             "Allowed types: goal, preference, constraint, identity, project_state.\n"
             "Return strict JSON with this schema:\n"
             "{\"has_long_term_state\": true|false, "
-            "\"candidates\": [{\"type\": \"...\", \"content\": \"...\", \"semantic_keys\": [\"...\"]}]}\n"
+            "\"candidates\": [{\"type\": \"...\", \"content\": \"...\", \"semantic_keys\": [\"...\"], "
+            "\"modality\": \"actual|plan|hypothetical\", \"persistence\": \"ephemeral|bounded|durable\"}]}\n"
             "Rules:\n"
-            "- If no durable state, return has_long_term_state=false and empty candidates.\n"
+            "- If no memory-relevant state exists, return has_long_term_state=false and empty candidates.\n"
             "- Keep each content concise and factual.\n"
+            "- modality describes whether the state is asserted, a committed plan, or merely hypothetical/example/roleplay.\n"
+            "- persistence describes whether it lasts only for the current moment, for a bounded period, or is genuinely durable.\n"
             "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
             "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
-            "- Do not include temporary tool/output details.\n"
+            "- Do not infer semantic scope from particular English words; interpret the interaction in its own language and context.\n"
+            "- Ignore raw tool/output details that do not describe user or project state.\n"
             "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference.\n"
             "- If the current user input is a short answer to an immediate prior assistant question, use RECENT_CONTEXT to resolve what it means."
         )
@@ -629,7 +951,7 @@ class MemoryService:
             )
             return True
 
-    def _find_conflict_candidates(
+    def _find_related_memory_candidates(
         self,
         *,
         user_id: str,
@@ -661,15 +983,43 @@ class MemoryService:
             )
         except Exception:
             return []
-        conflicts: List[str] = []
+        related: List[str] = []
+        seen: set[str] = set()
         for row in rows or []:
             prev = str((row or {}).get("content", "")).strip()
             if not prev:
                 continue
-            if self._normalize_content(prev) == normalized:
+            normalized_prev = self._normalize_content(prev)
+            if normalized_prev == normalized or normalized_prev in seen:
                 continue
-            conflicts.append(prev)
-        return conflicts[: max(1, int(limit))]
+            seen.add(normalized_prev)
+            related.append(prev)
+        return related[: max(1, int(limit))]
+
+    @staticmethod
+    def _relationship_for_candidate(item: Dict[str, Any]) -> str:
+        related = item.get("related_memories") if isinstance(item.get("related_memories"), list) else []
+        relationship = str(item.get("memory_relationship") or "").strip().lower()
+        allowed = {"new", "equivalent", "compatible", "updates", "contradicts", "unclear"}
+        if relationship in allowed:
+            return relationship
+        return "unclear" if related else "new"
+
+    def _conflicts_for_candidate(self, item: Dict[str, Any]) -> List[str]:
+        related = [str(value) for value in (item.get("related_memories") or []) if str(value).strip()]
+        if not related:
+            return []
+        relationship = self._relationship_for_candidate(item)
+        memory_type = str(item.get("type") or "").strip().lower()
+        requires_confirmation = self._memory_write_gate.relationship_requires_confirmation(
+            memory_type,
+            relationship,
+        )
+        if not requires_confirmation:
+            return []
+        indexes = item.get("relationship_indexes") if isinstance(item.get("relationship_indexes"), list) else []
+        selected = [related[index] for index in indexes if isinstance(index, int) and 0 <= index < len(related)]
+        return selected or related
 
     async def _emit_memory_write_decision(
         self,
@@ -687,6 +1037,9 @@ class MemoryService:
         conflict_candidates: Optional[List[str]] = None,
         persisted: bool = False,
         proposal_id: Optional[str] = None,
+        relationship: str = "",
+        modality: str = "",
+        persistence: str = "",
     ) -> None:
         row = {
             "decision_id": f"mwd_{int(time.time() * 1000)}_{abs(hash((session_id, user_id, memory_type, decision))) % 100000}",
@@ -706,6 +1059,9 @@ class MemoryService:
             "persisted": bool(persisted),
             "source": "interaction.completed",
             "proposal_id": proposal_id,
+            "relationship": str(relationship or ""),
+            "modality": str(modality or ""),
+            "persistence": str(persistence or ""),
         }
         self._write_decisions.append(row)
         if len(self._write_decisions) > self._write_decision_limit:
@@ -809,6 +1165,8 @@ class MemoryService:
         semantic_keys: List[str],
         conflict_candidates: Optional[List[str]] = None,
         reason: str = "conflict_detected",
+        modality: str = "",
+        persistence: str = "",
     ) -> str:
         proposal_id = f"mwp_{int(time.time() * 1000)}_{abs(hash((session_id, user_id, memory_type, content))) % 100000}"
         row = {
@@ -824,6 +1182,8 @@ class MemoryService:
             "semantic_keys": list(semantic_keys or []),
             "conflict_candidates": list(conflict_candidates or []),
             "reason": reason,
+            "modality": str(modality or ""),
+            "persistence": str(persistence or ""),
         }
         self._write_proposals.append(row)
         self._write_proposal_by_id[proposal_id] = row
@@ -843,6 +1203,12 @@ class MemoryService:
             return
 
         payload = dict(getattr(event_msg, "payload", {}) or {})
+        event_seq = int(getattr(event_msg, "seq", 0) or 0)
+        event_id = str(getattr(event_msg, "event_id", "") or "")
+        if self._runtime_event_log is not None:
+            cursor = self._runtime_event_log.get_consumer_cursor(self._event_consumer_name)
+            if event_seq and event_seq <= cursor:
+                return
         session_id = payload.get("session_id")
         user_id = payload.get("user_id") or "default_user"
         user_input = (payload.get("user_input") or "").strip()
@@ -858,10 +1224,17 @@ class MemoryService:
             "user_input": user_input,
             "assistant_output": assistant_output,
             "interaction_context": list(payload.get("interaction_context") or []),
+            "event_id": event_id,
+            "event_seq": event_seq,
             "queued_at": time.time(),
         }
 
         if queue.full():
+            if event_seq and self._runtime_event_log is not None:
+                await queue.put(item)
+                self._sync_enqueued += 1
+                self._sync_last_activity_ts = time.time()
+                return
             self._sync_dropped += 1
             self._sync_last_activity_ts = time.time()
             self._sync_last_error = "memory sync queue full"
@@ -883,28 +1256,72 @@ class MemoryService:
                 queue = self._sync_queue
                 if queue is None:
                     return
-                item = await queue.get()
+                from_queue = self._sync_retry_item is None
+                if from_queue:
+                    item = await queue.get()
+                else:
+                    item = self._sync_retry_item
+                    self._sync_retry_item = None
                 self._sync_active += 1
                 self._sync_current_item = item
                 self._sync_last_activity_ts = time.time()
                 try:
                     await self._process_interaction_completed(item)
+                    event_seq = int(item.get("event_seq") or 0)
+                    if event_seq and self._runtime_event_log is not None:
+                        await asyncio.to_thread(
+                            self._runtime_event_log.commit_consumer_cursor,
+                            self._event_consumer_name,
+                            event_seq,
+                        )
                     self._sync_completed += 1
                     self._sync_last_error = ""
                 except Exception as e:
                     self._sync_failed += 1
                     self._sync_last_error = str(e)
+                    if int(item.get("event_seq") or 0) and self._runtime_event_log is not None:
+                        self._sync_retry_item = item
                     logger.error("MemoryService: background memory sync failed: {}", e)
+                    if self._sync_retry_item is not None:
+                        return
                 finally:
                     self._sync_active = max(0, self._sync_active - 1)
                     self._sync_current_item = None
                     self._sync_last_activity_ts = time.time()
-                    queue.task_done()
+                    if from_queue:
+                        queue.task_done()
         except asyncio.CancelledError:
             logger.info("MemoryService: memory sync worker cancelled")
             raise
         finally:
             self._sync_worker = None
+
+    async def replay_pending_runtime_events(self, *, limit: int = 1000) -> int:
+        """Re-enqueue committed interactions after the memory consumer cursor."""
+        if self._runtime_event_log is None or not self.enabled:
+            return 0
+        cursor = self._runtime_event_log.get_consumer_cursor(self._event_consumer_name)
+        rows = await asyncio.to_thread(
+            self._runtime_event_log.query,
+            event_type=EventType.INTERACTION_COMPLETED.value,
+            after_seq=cursor,
+            limit=max(1, int(limit)),
+            oldest_first=True,
+        )
+        queued = 0
+        for row in rows:
+            event_msg = type(
+                "PersistedEvent",
+                (),
+                {
+                    "payload": dict(row.get("payload") or {}),
+                    "event_id": row.get("event_id"),
+                    "seq": row.get("seq"),
+                },
+            )()
+            await self._enqueue_interaction_completed(event_msg)
+            queued += 1
+        return queued
 
     async def _process_interaction_completed(self, payload: Dict[str, Any]) -> None:
         """
@@ -922,6 +1339,8 @@ class MemoryService:
         user_input = (payload.get("user_input") or "").strip()
         assistant_output = (payload.get("assistant_output") or "").strip()
         interaction_context = list(payload.get("interaction_context") or [])
+        source_event_id = str(payload.get("event_id") or "")
+        source_event_seq = int(payload.get("event_seq") or 0)
 
         if not session_id or (not user_input and not assistant_output):
             return
@@ -935,7 +1354,15 @@ class MemoryService:
         if not classification.get("has_long_term_state", False):
             return
 
-        raw_candidates = classification.get("candidates", [])
+        raw_candidates = []
+        for candidate in classification.get("candidates", []):
+            row = dict(candidate)
+            row["related_memories"] = self._find_related_memory_candidates(
+                user_id=user_id,
+                content=str(row.get("content") or ""),
+                semantic_keys=row.get("semantic_keys") or [],
+            )
+            raw_candidates.append(row)
         candidates = await self._verify_candidates_with_llm(
             user_id=user_id,
             user_input=user_input,
@@ -948,6 +1375,9 @@ class MemoryService:
             memory_type = item["type"]
             content = item["content"]
             semantic_keys = item.get("semantic_keys", [])
+            relationship = self._relationship_for_candidate(item)
+            modality = normalize_memory_modality(item.get("modality"))
+            persistence = normalize_memory_persistence(item.get("persistence"))
             write_key = self._make_write_key(user_id, memory_type, content)
 
             gate_request = MemoryWriteRequest(
@@ -959,18 +1389,18 @@ class MemoryService:
                 proposed_memory_type=memory_type,
                 extracted_content=content,
                 confidence=float(item.get("verify_confidence") or 0.8),
+                modality=modality,
+                persistence=persistence,
                 related_entities=list(semantic_keys or []),
                 session_id=session_id,
                 user_id=user_id,
                 metadata={
                     "verify_reason": item.get("verify_reason", ""),
                     "verify_attribution": item.get("verify_attribution", ""),
+                    "source_event_id": source_event_id,
+                    "source_event_seq": source_event_seq,
                 },
-                conflict_candidates=self._find_conflict_candidates(
-                    user_id=user_id,
-                    content=content,
-                    semantic_keys=semantic_keys,
-                ),
+                conflict_candidates=self._conflicts_for_candidate(item),
             )
             gate_decision = self._memory_write_gate.evaluate(gate_request)
             if self._is_suppressed_by_feedback(
@@ -990,6 +1420,9 @@ class MemoryService:
                     reason="suppressed_by_user_feedback",
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
                 )
                 continue
             if gate_decision.decision != "allow":
@@ -1004,6 +1437,8 @@ class MemoryService:
                         semantic_keys=semantic_keys,
                         conflict_candidates=gate_decision.conflict_candidates,
                         reason=gate_decision.reason,
+                        modality=modality,
+                        persistence=persistence,
                     )
                 await self._emit_memory_write_decision(
                     session_id=session_id,
@@ -1019,6 +1454,28 @@ class MemoryService:
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
                     proposal_id=proposal_id,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
+                )
+                continue
+
+            if relationship == "equivalent":
+                await self._emit_memory_write_decision(
+                    session_id=session_id,
+                    user_id=user_id,
+                    channel=channel,
+                    memory_type=memory_type,
+                    content=content,
+                    semantic_keys=semantic_keys,
+                    decision="deny",
+                    target_memory_layer=gate_decision.target_memory_layer,
+                    reason="semantic_duplicate",
+                    conflict_candidates=[],
+                    persisted=False,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
                 )
                 continue
 
@@ -1035,6 +1492,9 @@ class MemoryService:
                     reason="duplicate_or_too_short",
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
                 )
                 continue
 
@@ -1056,6 +1516,9 @@ class MemoryService:
                     reason="graph_duplicate",
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
                 )
                 continue
 
@@ -1068,11 +1531,16 @@ class MemoryService:
                     "memory_type": memory_type,
                     "semantic_keys": semantic_keys,
                     "memory_source": "interaction.completed",
+                    "source_event_id": source_event_id,
+                    "source_event_seq": source_event_seq,
                     "target_memory_layer": gate_decision.target_memory_layer,
                     "verify_confidence": item.get("verify_confidence"),
                     "verify_reason": item.get("verify_reason", ""),
                     "verify_evidence": item.get("verify_evidence", ""),
                     "verify_attribution": item.get("verify_attribution", ""),
+                    "memory_relationship": relationship,
+                    "memory_modality": modality,
+                    "memory_persistence": persistence,
                 },
             )
             if not success:
@@ -1088,6 +1556,9 @@ class MemoryService:
                     reason="adapter_write_failed",
                     conflict_candidates=gate_decision.conflict_candidates,
                     persisted=False,
+                    relationship=relationship,
+                    modality=modality,
+                    persistence=persistence,
                 )
                 continue
 
@@ -1107,6 +1578,9 @@ class MemoryService:
                 reason=gate_decision.reason,
                 conflict_candidates=gate_decision.conflict_candidates,
                 persisted=True,
+                relationship=relationship,
+                modality=modality,
+                persistence=persistence,
             )
 
             if self.event_emitter:
@@ -1124,6 +1598,8 @@ class MemoryService:
                 )
 
         if saved_count:
+            if self.hippocampus:
+                await self.hippocampus.notify_memory_saved(user_id, saved_count)
             logger.info(
                 "MemoryService: Saved {} memory item(s) from interaction, session={}",
                 saved_count,
@@ -1132,7 +1608,7 @@ class MemoryService:
 
     def get_sync_stats(self) -> Dict[str, Any]:
         queue_size = self._sync_queue.qsize() if self._sync_queue else 0
-        pending = queue_size + self._sync_active
+        pending = queue_size + self._sync_active + (1 if self._sync_retry_item else 0)
         stats = {
             "enabled": self.enabled and self.memory_adapter is not None,
             "pending": pending,
@@ -1158,6 +1634,8 @@ class MemoryService:
                 stats["pipeline"] = adapter.get_pipeline_status()
         except Exception as e:
             logger.debug("MemoryService: get_pipeline_status failed: {}", e)
+        if self.hippocampus:
+            stats["hippocampus"] = self.hippocampus.get_status()
         return stats
 
     async def wait_until_idle(self, timeout_s: Optional[float] = None) -> bool:
@@ -1171,6 +1649,8 @@ class MemoryService:
 
     async def shutdown(self) -> bool:
         timeout_s = self._resolve_sync_policy().get("drain_timeout_s", 20.0)
+        if self.hippocampus:
+            await self.hippocampus.stop()
         drained = await self.wait_until_idle(timeout_s=timeout_s)
         self._sync_shutdown_requested = True
         worker = self._sync_worker
@@ -1199,6 +1679,8 @@ class MemoryService:
             return {}
         trace_id = getattr(run_context, "trace_id", None)
         request_id = getattr(run_context, "request_id", None)
+        task_id = getattr(run_context, "task_id", None)
+        run_id = getattr(run_context, "run_id", None)
         session_value = getattr(run_context, "session_id", None)
         user_value = getattr(run_context, "user_id", None)
         if session_value is None:
@@ -1213,6 +1695,10 @@ class MemoryService:
             data["trace_id"] = str(trace_id)
         if request_id:
             data["request_id"] = str(request_id)
+        if task_id:
+            data["task_id"] = str(task_id)
+        if run_id:
+            data["run_id"] = str(run_id)
         if session_value:
             data["session_id"] = str(session_value)
         if user_value:
@@ -1300,8 +1786,122 @@ class MemoryService:
                     "source_session": str(source_session) if source_session else None,
                     "owner_user_id": request.user_id,
                     "via": item.get("via"),
+                    "metadata": {
+                        key: item.get(key)
+                        for key in (
+                            "semantic_keys",
+                            "community_id",
+                            "cluster_id",
+                            "revision_chain_id",
+                            "memory_relationship",
+                            "conflict_flag",
+                            "supersedes",
+                            "superseded_by",
+                        )
+                        if item.get(key) is not None
+                    },
                 })
         return rows
+
+    def retrieve_candidates(
+        self,
+        *,
+        query: str,
+        session_id: str,
+        user_id: str,
+        limit: int = 60,
+        run_context: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Return a broad, governed candidate pool without interpreting cognition.
+
+        The pool is intentionally wider than normal recall. SelfModelService owns
+        subsequent cognition selection and reduction; MemoryService remains the
+        authority for namespace isolation and memory retrieval.
+        """
+        if not self.enabled or not self.memory_adapter:
+            return {"ok": False, "reason": "memory_not_enabled", "candidates": []}
+
+        resolved = self._extract_run_context_fields(run_context)
+        resolved_user = str(resolved.get("user_id") or user_id or "default_user")
+        resolved_session = str(resolved.get("session_id") or session_id or "default")
+        normalized_query = self._normalize_query_text(query)
+        request = MemoryRecallRequest(
+            request_id=str(resolved.get("request_id") or f"cognition_{int(time.time() * 1000)}"),
+            trace_id=str(resolved.get("trace_id") or f"cognition_trace_{int(time.time() * 1000)}"),
+            session_id=resolved_session,
+            user_id=resolved_user,
+            query_text=str(query or ""),
+            normalized_query=normalized_query,
+            mode="deep",
+            top_k=max(1, min(100, int(limit or 60))),
+        )
+        rows = self._collect_recall_candidates(request)
+        query_tokens = set(self._tokenize_text(normalized_query))
+        seen: set[str] = set()
+        candidates: List[Dict[str, Any]] = []
+        for index, raw in enumerate(rows):
+            if not isinstance(raw, dict):
+                continue
+            content = str(raw.get("content") or "").strip()
+            normalized_content = self._normalize_content(content)
+            if not content or normalized_content in seen:
+                continue
+            owner = str(raw.get("owner_user_id") or resolved_user)
+            if owner != resolved_user:
+                continue
+            seen.add(normalized_content)
+            content_tokens = set(self._tokenize_text(content))
+            overlap = len(query_tokens.intersection(content_tokens)) / max(1, len(query_tokens))
+            importance = max(0.0, min(1.0, float(raw.get("importance") or 0.0)))
+            relevance = max(0.0, min(1.0, (overlap * 0.75) + (importance * 0.25)))
+            metadata = dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {}
+            for key in (
+                "semantic_keys",
+                "community_id",
+                "cluster_id",
+                "revision_chain_id",
+                "memory_relationship",
+                "conflict_flag",
+                "supersedes",
+                "superseded_by",
+            ):
+                if raw.get(key) is not None and key not in metadata:
+                    metadata[key] = raw.get(key)
+            candidates.append(
+                {
+                    "memory_id": str(raw.get("memory_id") or f"candidate_{index + 1}"),
+                    "content": content,
+                    "memory_type": str(raw.get("memory_type") or self._source_layer_to_memory_type(str(raw.get("source_layer") or ""))),
+                    "source_layer": str(raw.get("source_layer") or ""),
+                    "importance": importance,
+                    "relevance_score": round(relevance, 4),
+                    "created_at": raw.get("created_at"),
+                    "updated_at": raw.get("updated_at") or raw.get("created_at"),
+                    "status": str(raw.get("status") or "active"),
+                    "metadata": {
+                        **metadata,
+                        "via": raw.get("via"),
+                        "source_session": raw.get("source_session"),
+                    },
+                }
+            )
+
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("relevance_score") or 0.0),
+                -float(item.get("importance") or 0.0),
+                str(item.get("updated_at") or ""),
+            )
+        )
+        bounded = candidates[: max(1, min(100, int(limit or 60)))]
+        return {
+            "ok": True,
+            "query": str(query or ""),
+            "user_id": resolved_user,
+            "session_id": resolved_session,
+            "candidates": bounded,
+            "total": len(bounded),
+        }
 
     @staticmethod
     def _parse_candidate_datetime(raw_value: Optional[str]) -> Optional[datetime]:
@@ -1376,6 +1976,46 @@ class MemoryService:
             rows = [x for x in rows if str(x.get("status") or "").lower() == str(status).lower()]
         lim = max(1, min(300, int(limit or 100)))
         return rows[-lim:]
+
+    def export_user_audit_records(self, *, user_id: str) -> Dict[str, List[Dict[str, Any]]]:
+        """Export user-visible memory decisions, not raw transport/service logs."""
+        return {
+            "write_decisions": self.list_write_decisions(user_id=user_id, limit=self._write_decision_limit),
+            "write_proposals": self.list_write_proposals(user_id=user_id, status="", limit=self._write_proposal_limit),
+        }
+
+    def import_user_audit_records(self, *, user_id: str, payload: Dict[str, Any], merge: bool = True) -> Dict[str, int]:
+        source = payload if isinstance(payload, dict) else {}
+        decisions = [row for row in (source.get("write_decisions") or []) if isinstance(row, dict) and str(row.get("user_id") or "") == str(user_id)]
+        proposals = [row for row in (source.get("write_proposals") or []) if isinstance(row, dict) and str(row.get("user_id") or "") == str(user_id)]
+        if not merge:
+            self._write_decisions = [row for row in self._write_decisions if str(row.get("user_id") or "") != str(user_id)]
+            self._write_proposals = [row for row in self._write_proposals if str(row.get("user_id") or "") != str(user_id)]
+            self._write_proposal_by_id = {key: row for key, row in self._write_proposal_by_id.items() if str(row.get("user_id") or "") != str(user_id)}
+        known_decisions = {str(row.get("decision_id") or "") for row in self._write_decisions}
+        known_proposals = {str(row.get("proposal_id") or "") for row in self._write_proposals}
+        added_decisions = 0
+        added_proposals = 0
+        for row in decisions:
+            record_id = str(row.get("decision_id") or "")
+            if record_id and record_id in known_decisions:
+                continue
+            self._write_decisions.append(dict(row))
+            known_decisions.add(record_id)
+            added_decisions += 1
+        for row in proposals:
+            proposal_id = str(row.get("proposal_id") or "")
+            if not proposal_id or proposal_id in known_proposals:
+                continue
+            copied = dict(row)
+            self._write_proposals.append(copied)
+            self._write_proposal_by_id[proposal_id] = copied
+            known_proposals.add(proposal_id)
+            added_proposals += 1
+        self._write_decisions = self._write_decisions[-self._write_decision_limit :]
+        self._write_proposals = self._write_proposals[-self._write_proposal_limit :]
+        self._write_proposal_by_id = {str(row.get("proposal_id") or ""): row for row in self._write_proposals if row.get("proposal_id")}
+        return {"write_decisions": added_decisions, "write_proposals": added_proposals}
 
     def get_capabilities_snapshot(self) -> Dict[str, Any]:
         adapter = self.memory_adapter
@@ -2167,6 +2807,8 @@ class MemoryService:
                     "memory_source": "user.confirmed",
                     "target_memory_layer": str(row.get("target_memory_layer") or ""),
                     "user_confirmed": True,
+                    "memory_modality": str(row.get("modality") or ""),
+                    "memory_persistence": str(row.get("persistence") or ""),
                 },
             )
             if not ok:
@@ -2218,6 +2860,8 @@ class MemoryService:
                 ),
                 persisted=True,
                 proposal_id=str(proposal_id),
+                modality=str(row.get("modality") or ""),
+                persistence=str(row.get("persistence") or ""),
             )
             return {"ok": True, "proposal": row}
 
@@ -2240,6 +2884,8 @@ class MemoryService:
             reason="user_declined_conflict_write" if action_norm == "ignore_once" else "user_reduce_similar_writes",
             persisted=False,
             proposal_id=str(proposal_id),
+            modality=str(row.get("modality") or ""),
+            persistence=str(row.get("persistence") or ""),
         )
         return {"ok": True, "proposal": row}
 
@@ -2254,6 +2900,11 @@ class MemoryService:
         request.session_id = str(resolved.get("session_id") or request.session_id)
         request.user_id = str(resolved.get("user_id") or request.user_id)
         request.normalized_query = request.normalized_query or self._normalize_query_text(request.query_text)
+        correlation = {
+            key: resolved[key]
+            for key in ("task_id", "run_id")
+            if resolved.get(key)
+        }
 
         policy = self._resolve_recall_policy(
             mode=request.mode,
@@ -2271,6 +2922,7 @@ class MemoryService:
                     "user_id": request.user_id,
                     "query": request.query_text,
                     "mode": policy.get("mode"),
+                    **correlation,
                 },
             )
 
@@ -2326,6 +2978,7 @@ class MemoryService:
                             "memory_id": memory_id,
                             "reason": "cross_user_memory_access",
                             "outcome": "blocked",
+                            **correlation,
                         },
                     )
                 continue
@@ -2416,6 +3069,7 @@ class MemoryService:
                 "context_length": len(result.formatted_context or ""),
                 "selected": len(result.memory_records),
                 "dropped": len(result.dropped_candidates),
+                **correlation,
             }
             await self.event_emitter.emit(EventType.MEMORY_RECALL_FINISHED, payload)
             await self.event_emitter.emit(EventType.MEMORY_RECALLED, payload)
@@ -2461,6 +3115,11 @@ class MemoryService:
                             "context_length": len(str(legacy_text or "")),
                             "selected": 1 if legacy_text else 0,
                             "dropped": 0,
+                            **{
+                                key: resolved[key]
+                                for key in ("task_id", "run_id")
+                                if resolved.get(key)
+                            },
                         },
                     )
                 return str(legacy_text or "")

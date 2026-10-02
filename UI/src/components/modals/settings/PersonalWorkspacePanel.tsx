@@ -1,5 +1,5 @@
 ﻿import { useRef, useState } from 'react'
-import { applyPersonalTemplate, exportPersonalBundle, getPersonalTemplates, importPersonalBundle } from '../../../services/api'
+import { applyPersonalTemplate, exportPersonalWorkspaceArchive, getPersonalTemplates, restorePersonalWorkspaceArchive } from '../../../services/api'
 import { useLanguage } from '../../../store/LanguageContext'
 import ResultCard from './ResultCard'
 
@@ -16,24 +16,25 @@ export default function PersonalWorkspacePanel() {
   }
 
   const downloadBundle = async () => {
-    const data = await exportPersonalBundle().then((res) => res.json())
-    const bundle = data.bundle || data
-    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
+    const response = await exportPersonalWorkspaceArchive()
+    if (!response.ok) throw new Error(`workspace export failed: ${response.status}`)
+    const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `personal_bundle_${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+    a.download = `promethea-workspace-${new Date().toISOString().replace(/[:.]/g, '-')}.promethea-workspace`
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
-    setResult({ status: 'exported', bundle_version: bundle.bundle_version })
+    setResult({ status: 'exported', format: 'promethea-workspace.v2' })
   }
 
   const uploadBundle = async () => {
     const file = fileRef.current?.files?.[0]
     if (!file) return
-    setResult(await importPersonalBundle(JSON.parse(await file.text()), true).then((res) => res.json()))
+    const response = await restorePersonalWorkspaceArchive(file, false)
+    setResult(await response.json())
   }
 
   return (
@@ -48,8 +49,8 @@ export default function PersonalWorkspacePanel() {
           {template.kind || 'template'} :: {template.name || template.template_id}
         </button>
       ))}
-      <input ref={fileRef} type="file" accept=".json,application/json" className="text-sm" />
-      <button type="button" onClick={uploadBundle} className="self-start rounded-lg bg-brand-50 px-3 py-1.5 text-sm text-brand-600">{t('导入包', 'Import Bundle')}</button>
+      <input ref={fileRef} type="file" accept=".promethea-workspace,application/vnd.promethea.workspace+zip,application/zip" className="text-sm" />
+      <button type="button" onClick={uploadBundle} className="self-start rounded-lg bg-brand-50 px-3 py-1.5 text-sm text-brand-600">{t('恢复个人工作区', 'Restore Workspace')}</button>
       <ResultCard payload={result} />
     </section>
   )

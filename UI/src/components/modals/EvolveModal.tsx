@@ -6,7 +6,8 @@ import ResultCard from './settings/ResultCard'
 export default function EvolveModal({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState<any>({})
   const [goal, setGoal] = useState('')
-  const [targetFiles, setTargetFiles] = useState('')
+  const [capabilityId, setCapabilityId] = useState('')
+  const [command, setCommand] = useState('')
   const [result, setResult] = useState<unknown>(null)
   const { t } = useLanguage()
 
@@ -28,12 +29,15 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
 
   const createTask = async () => {
     if (!goal.trim()) return
-    const files = targetFiles.split(',').map((item) => item.trim()).filter(Boolean)
-    if (files.length === 0) {
-      setResult({ status: 'missing_target_files', message: t('请先填写要试验的目标文件路径。', 'Please provide at least one target file path first.') })
-      return
-    }
-    const data = await createSelfEvolveTask(goal.trim(), files, ['User-approved evolution task is tracked and reviewable.'])
+    if (!capabilityId.trim() || !command.trim()) return
+    const data = await createSelfEvolveTask({
+      goal: goal.trim(),
+      capability_id: capabilityId.trim(),
+      version: '1.0.0',
+      description: goal.trim(),
+      commands: [{ command: command.trim(), description: goal.trim(), test_args: {} }],
+      acceptance_criteria: [],
+    })
       .then((res) => res.json())
     setResult(data)
     reloadStatus()
@@ -54,9 +58,6 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
             <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded">{t('实验性', 'Experimental')}</span>
           </h2>
           <button type="button" onClick={onClose} className="text-2xl leading-none text-text-muted hover:text-text-strong">&times;</button>
-        </div>
-        <div className="p-4 text-xs text-orange-700 bg-orange-50 border-b border-orange-100">
-          {t('实验性功能，可能引入不稳定行为。建议使用独立账号和记忆试验。', 'Experimental feature. It may introduce unstable behavior. Use an isolated account and memory for trials.')}
         </div>
         <div className="flex-1 p-6 overflow-y-auto grid grid-cols-2 gap-6 bg-bg-page">
           <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm">
@@ -107,10 +108,16 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
                 className="flex-1 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
               />
               <input
-                value={targetFiles}
-                onChange={(event) => setTargetFiles(event.target.value)}
-                placeholder={t('目标文件，逗号分隔', 'Target files, comma separated')}
-                className="w-64 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
+                value={capabilityId}
+                onChange={(event) => setCapabilityId(event.target.value)}
+                placeholder={t('能力 ID', 'Capability ID')}
+                className="w-40 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
+              />
+              <input
+                value={command}
+                onChange={(event) => setCommand(event.target.value)}
+                placeholder={t('命令', 'Command')}
+                className="w-40 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
               />
               <button type="button" onClick={createTask} className="px-4 py-2 bg-brand-500 text-white rounded-lg text-sm font-medium">
                 {t('创建', 'Create')}
@@ -118,7 +125,7 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
             </div>
             {!enabled && (
               <p className="mt-3 rounded-lg bg-orange-50 px-3 py-2 text-xs leading-5 text-orange-700">
-                {t('当前用户未开启 self_evolve.enabled。请先在用户配置中开启，并建议使用独立账号试验。', 'self_evolve.enabled is disabled for this user. Enable it in user config first, preferably in an isolated test account.')}
+                {t('Self Evolve 未开启。', 'Self Evolve is disabled.')}
               </p>
             )}
             <div className="mt-3">

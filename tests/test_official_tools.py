@@ -1,19 +1,24 @@
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+from agentkit.security.sandbox import SandboxPolicy
 from gateway.events import EventEmitter
 from gateway.official_tools import register_official_tools
-from gateway.tool_service import ToolInvocationContext, ToolService
+from gateway.capability_service import ToolInvocationContext, CapabilityService
 from gateway.workflow_engine import WorkflowEngine
-from gateway.workspace_service import WorkspaceService
+from gateway.workspace_service import WorkspaceSandboxError, WorkspaceService
 
 
-def _build_services(tmp_path: Path) -> tuple[ToolService, WorkspaceService]:
+def _build_services(tmp_path: Path) -> tuple[CapabilityService, WorkspaceService]:
     workspace_service = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    tool_service = ToolService(event_emitter=EventEmitter())
-    register_official_tools(tool_service=tool_service, workspace_service=workspace_service)
-    return tool_service, workspace_service
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    register_official_tools(capability_service=capability_service, workspace_service=workspace_service)
+    return capability_service, workspace_service
 
 
 class _DummyMessageManager:
@@ -55,19 +60,58 @@ class _DummyConversationService:
 
 
 class _DummyGatewayServer:
-    def __init__(self, *, workflow_engine=None, tool_service=None):
+    def __init__(self, *, workflow_engine=None, capability_service=None):
         self.conversation_service = _DummyConversationService()
         self.workflow_engine = workflow_engine
-        self.tool_service = tool_service
+        self.capability_service = capability_service
 
     def get_services_health(self):
-        return {"tool_service": True, "memory_service": True, "conversation_service": True}
+        return {"capability_service": True, "memory_service": True, "conversation_service": True}
+
+
+@pytest.mark.asyncio
+async def test_workspace_program_execution_observation_and_isolation(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+    capability_service, _ = _build_services(tmp_path)
+    ctx = ToolInvocationContext(session_id="session", user_id="alice")
+    script = "from pathlib import Path\nPath('result.txt').write_text('observed', encoding='utf-8')\nprint('done')\n"
+    await capability_service.call_tool("workspace.write_file", {"path": "program.py", "content": script}, ctx=ctx)
+    command = (subprocess.list2cmdline([sys.executable, "program.py"])
+               if os.name == "nt" else shlex.join([sys.executable, "program.py"]))
+    result = await capability_service.call_tool("runtime.exec_command", {"command": command}, ctx=ctx)
+    assert result["ok"] is True
+    assert result["stdout"].strip() == "done"
+    artifact = await capability_service.call_tool("workspace.read_file", {"path": "result.txt"}, ctx=ctx)
+    assert artifact["content"] == "observed"
+
+    with pytest.raises(PermissionError):
+        await capability_service.call_tool("runtime.exec_command", {"command": command, "cwd": ".."}, ctx=ctx)
+    with pytest.raises(PermissionError):
+        await capability_service.call_tool(
+            "runtime.exec_command", {"command": command, "user_id": "bob"}, ctx=ctx,
+        )
+    with pytest.raises(PermissionError):
+        await capability_service.call_tool(
+            "workspace.read_file", {"path": "result.txt", "user_id": "bob"}, ctx=ctx,
+        )
+    with pytest.raises(WorkspaceSandboxError):
+        await capability_service.call_tool(
+            "runtime.exec_command", {"command": command, "workspace_id": ".."}, ctx=ctx,
+        )
+    with pytest.raises(WorkspaceSandboxError):
+        await capability_service.call_tool(
+            "workspace.read_file", {"path": "result.txt", "workspace_id": ".."}, ctx=ctx,
+        )
+    other = await capability_service.call_tool(
+        "workspace.list_files", {}, ctx=ToolInvocationContext(session_id="session", user_id="bob"),
+    )
+    assert other["count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_official_tools_registered(tmp_path: Path):
-    tool_service, _ = _build_services(tmp_path)
-    catalog = await tool_service.get_tool_catalog()
+    capability_service, _ = _build_services(tmp_path)
+    catalog = await capability_service.get_tool_catalog()
     assert any(row.get("tool_name") == "data.csv_to_json" for row in catalog)
     assert any(row.get("tool_name") == "data.json_to_csv" for row in catalog)
     assert any(row.get("tool_name") == "math.calculate" for row in catalog)
@@ -80,6 +124,7 @@ async def test_official_tools_registered(tmp_path: Path):
     assert any(row.get("tool_name") == "workspace.list_files" for row in catalog)
     assert any(row.get("tool_name") == "workspace.read_file" for row in catalog)
     assert any(row.get("tool_name") == "workspace.write_file" for row in catalog)
+    assert any(row.get("tool_name") == "computer_control.browser_action" for row in catalog)
     assert any(row.get("tool_name") == "workspace.search_text" for row in catalog)
     assert any(row.get("tool_name") == "workspace.ensure_dir" for row in catalog)
     assert any(row.get("tool_name") == "workspace.read_files" for row in catalog)
@@ -107,25 +152,29 @@ async def test_official_tools_registered(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_official_tools_workspace_roundtrip(tmp_path: Path):
-    tool_service, _ = _build_services(tmp_path)
+async def test_official_tools_workspace_roundtrip(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agentkit.security.sandbox._SANDBOX_POLICY",
+        SandboxPolicy(enabled=False),
+    )
+    capability_service, _ = _build_services(tmp_path)
     ctx = ToolInvocationContext(session_id="s1", user_id="u1")
 
-    write_res = await tool_service.call_tool(
+    write_res = await capability_service.call_tool(
         "workspace.write_file",
         {"path": "notes/today.txt", "content": "alpha\nbeta\ngamma"},
         ctx=ctx,
     )
     assert write_res["operation"] in {"create", "update"}
 
-    read_res = await tool_service.call_tool(
+    read_res = await capability_service.call_tool(
         "workspace.read_file",
         {"path": "notes/today.txt"},
         ctx=ctx,
     )
     assert "alpha" in read_res["content"]
 
-    search_res = await tool_service.call_tool(
+    search_res = await capability_service.call_tool(
         "workspace.search_text",
         {"query": "beta"},
         ctx=ctx,
@@ -133,94 +182,95 @@ async def test_official_tools_workspace_roundtrip(tmp_path: Path):
     assert search_res["count"] >= 1
     assert search_res["hits"][0]["path"] == "notes/today.txt"
 
-    list_res = await tool_service.call_tool(
+    list_res = await capability_service.call_tool(
         "workspace.list_files",
         {},
         ctx=ctx,
     )
     assert any(item.get("path") == "notes/today.txt" for item in list_res["files"])
 
-    copy_res = await tool_service.call_tool(
+    copy_res = await capability_service.call_tool(
         "workspace.copy_file",
         {"src_path": "notes/today.txt", "dst_path": "notes/today_copy.txt"},
         ctx=ctx,
     )
     assert copy_res["path"] == "notes/today_copy.txt"
 
-    move_res = await tool_service.call_tool(
+    move_res = await capability_service.call_tool(
         "workspace.move_file",
         {"src_path": "notes/today_copy.txt", "dst_path": "notes/today_moved.txt"},
         ctx=ctx,
     )
     assert move_res["path"] == "notes/today_moved.txt"
 
-    del_res = await tool_service.call_tool(
+    del_res = await capability_service.call_tool(
         "workspace.delete_file",
         {"path": "notes/today_moved.txt"},
         ctx=ctx,
     )
     assert del_res["deleted"] is True
 
-    await tool_service.call_tool("workspace.ensure_dir", {"path": "logs/archive"}, ctx=ctx)
-    await tool_service.call_tool(
+    await capability_service.call_tool("workspace.ensure_dir", {"path": "logs/archive"}, ctx=ctx)
+    await capability_service.call_tool(
         "workspace.write_file",
         {"path": "logs/archive/run.log", "content": "l1\nl2\nl3"},
         ctx=ctx,
     )
-    tail = await tool_service.call_tool(
+    tail = await capability_service.call_tool(
         "workspace.tail_file",
         {"path": "logs/archive/run.log", "lines": 2},
         ctx=ctx,
     )
     assert tail["lines"] == 2
-    repl = await tool_service.call_tool(
+    repl = await capability_service.call_tool(
         "workspace.replace_text",
         {"path": "logs/archive/run.log", "pattern": "l2", "replacement": "L2"},
         ctx=ctx,
     )
     assert repl["replacements"] >= 1
-    info = await tool_service.call_tool("workspace.file_info", {"path": "logs/archive/run.log"}, ctx=ctx)
+    info = await capability_service.call_tool("workspace.file_info", {"path": "logs/archive/run.log"}, ctx=ctx)
     assert info["size"] > 0
-    reads = await tool_service.call_tool(
+    reads = await capability_service.call_tool(
         "workspace.read_files",
         {"paths": ["logs/archive/run.log", "missing.txt"]},
         ctx=ctx,
     )
     assert reads["count"] == 2
-    globs = await tool_service.call_tool("workspace.glob_files", {"pattern": "logs/**/*.log"}, ctx=ctx)
+    globs = await capability_service.call_tool("workspace.glob_files", {"pattern": "logs/**/*.log"}, ctx=ctx)
     assert globs["count"] >= 1
 
-    diff = await tool_service.call_tool(
+    diff = await capability_service.call_tool(
         "workspace.diff_file",
         {"path": "logs/archive/run.log", "content": "l1\nL2\nl3\nl4"},
         ctx=ctx,
     )
     assert diff["changed"] is True
     assert "+l4" in diff["diff"]
-    patched = await tool_service.call_tool(
+    patched = await capability_service.call_tool(
         "workspace.apply_patch",
         {"path": "logs/archive/run.log", "old_text": "l3", "new_text": "L3"},
         ctx=ctx,
     )
     assert patched["patched"] is True
 
-    py = await tool_service.call_tool(
+    py = await capability_service.call_tool(
         "code.run_python",
         {"code": "print(2 + 3)"},
         ctx=ctx,
     )
     assert py["ok"] is True
     assert "5" in py["stdout"]
+    assert list((tmp_path / "ws" / "u1" / "s1" / ".runtime" / "code").glob("snippet-*.py")) == []
 
-    archive = await tool_service.call_tool(
+    archive = await capability_service.call_tool(
         "archive.zip_create",
         {"output_path": "bundle.zip", "paths": ["logs"]},
         ctx=ctx,
     )
     assert archive["count"] >= 1
-    listed = await tool_service.call_tool("archive.zip_list", {"path": "bundle.zip"}, ctx=ctx)
+    listed = await capability_service.call_tool("archive.zip_list", {"path": "bundle.zip"}, ctx=ctx)
     assert listed["count"] >= 1
-    extracted = await tool_service.call_tool(
+    extracted = await capability_service.call_tool(
         "archive.zip_extract",
         {"path": "bundle.zip", "dest_dir": "unpacked"},
         ctx=ctx,
@@ -230,64 +280,64 @@ async def test_official_tools_workspace_roundtrip(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_official_tools_text_and_utils(tmp_path: Path):
-    tool_service, _ = _build_services(tmp_path)
+    capability_service, _ = _build_services(tmp_path)
 
-    stats = await tool_service.call_tool(
+    stats = await capability_service.call_tool(
         "text.word_stats",
         {"text": "alpha beta\ngamma"},
     )
     assert stats["words"] == 3
     assert stats["lines"] == 2
 
-    matches = await tool_service.call_tool(
+    matches = await capability_service.call_tool(
         "text.find_matches",
         {"text": "a b a b a", "query": "a", "max_results": 2},
     )
     assert matches["count"] == 2
 
-    normalized = await tool_service.call_tool(
+    normalized = await capability_service.call_tool(
         "text.normalize_json",
         {"text": "{\"b\":2,\"a\":1}", "sort_keys": True},
     )
     assert normalized["valid"] is True
     assert "\"a\": 1" in normalized["normalized"]
 
-    now = await tool_service.call_tool("utils.now", {})
+    now = await capability_service.call_tool("utils.now", {})
     assert "utc_iso" in now
     assert now["epoch_ms"] > 0
 
-    uuids = await tool_service.call_tool("utils.uuid", {"count": 2})
+    uuids = await capability_service.call_tool("utils.uuid", {"count": 2})
     assert uuids["count"] == 2
     assert len(uuids["uuids"]) == 2
 
-    digest = await tool_service.call_tool(
+    digest = await capability_service.call_tool(
         "utils.hash_text",
         {"text": "hello", "algo": "sha256"},
     )
     assert digest["algo"] == "sha256"
     assert len(digest["digest"]) == 64
 
-    calc = await tool_service.call_tool(
+    calc = await capability_service.call_tool(
         "math.calculate",
         {"expression": "(2 + 3) * 4 - 1"},
     )
     assert calc["value"] == 19.0
 
-    csv_to_json = await tool_service.call_tool(
+    csv_to_json = await capability_service.call_tool(
         "data.csv_to_json",
         {"text": "a,b\n1,2\n3,4\n"},
     )
     assert csv_to_json["count"] == 2
     assert csv_to_json["rows"][0]["a"] == "1"
 
-    json_to_csv = await tool_service.call_tool(
+    json_to_csv = await capability_service.call_tool(
         "data.json_to_csv",
         {"rows": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]},
     )
     assert "a,b" in json_to_csv["csv"]
     assert json_to_csv["count"] == 2
 
-    links = await tool_service.call_tool(
+    links = await capability_service.call_tool(
         "web.extract_links",
         {"html": '<a href="https://example.com">x</a><a href="/docs">y</a>'},
     )
@@ -296,10 +346,10 @@ async def test_official_tools_text_and_utils(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_official_tools_register_without_workspace_service():
-    tool_service = ToolService(event_emitter=EventEmitter())
-    register_official_tools(tool_service=tool_service, workspace_service=None)
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    register_official_tools(capability_service=capability_service, workspace_service=None)
 
-    catalog = await tool_service.get_tool_catalog()
+    catalog = await capability_service.get_tool_catalog()
     names = {str(row.get("tool_name") or "") for row in catalog}
     assert "text.word_stats" in names
     assert "utils.now" in names
@@ -310,17 +360,20 @@ async def test_official_tools_register_without_workspace_service():
 
 
 @pytest.mark.asyncio
-async def test_official_tools_register_memory_session_runtime():
-    tool_service = ToolService(event_emitter=EventEmitter())
-    workflow_engine = WorkflowEngine(tool_service=tool_service)
+async def test_official_tools_register_memory_session_runtime(tmp_path: Path):
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    workflow_engine = WorkflowEngine(
+        capability_service=capability_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
     register_official_tools(
-        tool_service=tool_service,
+        capability_service=capability_service,
         workspace_service=None,
         memory_service=_DummyMemoryService(),
         message_manager=_DummyMessageManager(),
-        gateway_server=_DummyGatewayServer(workflow_engine=workflow_engine, tool_service=tool_service),
+        gateway_server=_DummyGatewayServer(workflow_engine=workflow_engine, capability_service=capability_service),
     )
-    catalog = await tool_service.get_tool_catalog()
+    catalog = await capability_service.get_tool_catalog()
     names = {str(row.get("tool_name") or "") for row in catalog}
     assert "memory.get_context" in names
     assert "memory.list_entries" in names
@@ -332,37 +385,47 @@ async def test_official_tools_register_memory_session_runtime():
     assert "workflow.status" in names
 
     ctx = ToolInvocationContext(session_id="s1", user_id="u1")
-    recall = await tool_service.call_tool("memory.get_context", {"query": "q"}, ctx=ctx)
+    recall = await capability_service.call_tool("memory.get_context", {"query": "q"}, ctx=ctx)
     assert "ctx:u1:s1:q" in recall["context"]
-    recent = await tool_service.call_tool("session.recent_messages", {}, ctx=ctx)
+    recent = await capability_service.call_tool("session.recent_messages", {}, ctx=ctx)
     assert recent["count"] == 1
-    runtime = await tool_service.call_tool("runtime.services", {})
+    runtime = await capability_service.call_tool("runtime.services", {})
     assert runtime["status"] == "healthy"
-    listed = await tool_service.call_tool("runtime.list_tools", {"official_only": True})
+    listed = await capability_service.call_tool("runtime.list_tools", {"official_only": True})
     assert listed["ok"] is True
 
 
 @pytest.mark.asyncio
-async def test_official_tools_runtime_exec_and_workflow_tools(tmp_path: Path):
+async def test_official_tools_runtime_exec_and_workflow_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agentkit.security.sandbox._SANDBOX_POLICY",
+        SandboxPolicy(enabled=False),
+    )
     workspace_service = WorkspaceService(base_dir=str(tmp_path / "ws"))
-    tool_service = ToolService(event_emitter=EventEmitter())
-    workflow_engine = WorkflowEngine(tool_service=tool_service, workspace_service=workspace_service)
-    gateway = _DummyGatewayServer(workflow_engine=workflow_engine, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    workflow_engine = WorkflowEngine(
+        capability_service=capability_service,
+        workspace_service=workspace_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
+    gateway = _DummyGatewayServer(workflow_engine=workflow_engine, capability_service=capability_service)
     register_official_tools(
-        tool_service=tool_service,
+        capability_service=capability_service,
         workspace_service=workspace_service,
         gateway_server=gateway,
     )
     ctx = ToolInvocationContext(session_id="s1", user_id="u1")
-    cmd = await tool_service.call_tool(
+    cmd = await capability_service.call_tool(
         "runtime.exec_command",
         {"command": "cmd /c echo hello"},
         ctx=ctx,
     )
     assert cmd["returncode"] == 0
     assert "hello" in (cmd["stdout"] or "").lower()
+    assert cmd["workspace_id"] == "s1"
+    assert Path(cmd["cwd"]) == tmp_path / "ws" / "u1" / "s1"
 
-    define = await tool_service.call_tool(
+    define = await capability_service.call_tool(
         "workflow.define",
         {
             "workflow_id": "wf_demo",
@@ -372,17 +435,17 @@ async def test_official_tools_runtime_exec_and_workflow_tools(tmp_path: Path):
         ctx=ctx,
     )
     assert define["workflow"]["workflow_id"] == "wf_demo"
-    started = await tool_service.call_tool("workflow.start", {"workflow_id": "wf_demo"}, ctx=ctx)
+    started = await capability_service.call_tool("workflow.start", {"workflow_id": "wf_demo"}, ctx=ctx)
     run_id = started["run"]["workflow_run_id"]
-    status = await tool_service.call_tool("workflow.status", {"workflow_run_id": run_id}, ctx=ctx)
+    status = await capability_service.call_tool("workflow.status", {"workflow_run_id": run_id}, ctx=ctx)
     assert status["run"]["workflow_run_id"] == run_id
 
 
 @pytest.mark.asyncio
 async def test_web_fetch_text_rejects_non_http_scheme(tmp_path: Path):
-    tool_service, _ = _build_services(tmp_path)
+    capability_service, _ = _build_services(tmp_path)
     with pytest.raises(ValueError, match="only http/https URLs are supported"):
-        await tool_service.call_tool(
+        await capability_service.call_tool(
             "web.fetch_text",
             {"url": "file:///tmp/a.txt"},
         )
@@ -390,7 +453,7 @@ async def test_web_fetch_text_rejects_non_http_scheme(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_web_fetch_text_respects_sandbox_url_policy(tmp_path: Path, monkeypatch):
-    tool_service, _ = _build_services(tmp_path)
+    capability_service, _ = _build_services(tmp_path)
 
     class _Decision:
         allowed = False
@@ -403,25 +466,25 @@ async def test_web_fetch_text_respects_sandbox_url_policy(tmp_path: Path, monkey
     monkeypatch.setattr("gateway.official_tools.web_tools.get_sandbox_policy", lambda: _Policy())
 
     with pytest.raises(PermissionError, match="sandbox blocked url"):
-        await tool_service.call_tool(
+        await capability_service.call_tool(
             "web.fetch_text",
             {"url": "https://example.com"},
         )
 
 @pytest.mark.asyncio
 async def test_official_skill_run_tool_returns_instruction():
-    tool_service = ToolService(event_emitter=EventEmitter())
-    gateway = _DummyGatewayServer(workflow_engine=None, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, capability_service=capability_service)
     from skills import build_default_skill_registry
 
     gateway.skill_registry = build_default_skill_registry()
-    register_official_tools(tool_service=tool_service, workspace_service=None, gateway_server=gateway)
+    register_official_tools(capability_service=capability_service, workspace_service=None, gateway_server=gateway)
 
-    catalog = await tool_service.get_tool_catalog()
+    catalog = await capability_service.get_tool_catalog()
     names = {str(row.get("tool_name") or "") for row in catalog}
     assert "skill.run" in names
 
-    out = await tool_service.call_tool(
+    out = await capability_service.call_tool(
         "skill.run",
         {"skill_id": "coding_copilot"},
         ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
@@ -433,8 +496,8 @@ async def test_official_skill_run_tool_returns_instruction():
 
 @pytest.mark.asyncio
 async def test_skill_run_respects_model_invocable_gate():
-    tool_service = ToolService(event_emitter=EventEmitter())
-    gateway = _DummyGatewayServer(workflow_engine=None, tool_service=tool_service)
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, capability_service=capability_service)
 
     from skills.registry import SkillRegistry
     from skills.schema import SkillSpec
@@ -451,9 +514,9 @@ async def test_skill_run_respects_model_invocable_gate():
     )
     gateway.skill_registry = registry
 
-    register_official_tools(tool_service=tool_service, workspace_service=None, gateway_server=gateway)
+    register_official_tools(capability_service=capability_service, workspace_service=None, gateway_server=gateway)
 
-    blocked = await tool_service.call_tool(
+    blocked = await capability_service.call_tool(
         "skill.run",
         {"skill_id": "manual_only"},
         ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
@@ -461,7 +524,7 @@ async def test_skill_run_respects_model_invocable_gate():
     assert blocked.get("ok") is False
     assert blocked.get("reason") == "model_invocation_disabled"
 
-    allowed = await tool_service.call_tool(
+    allowed = await capability_service.call_tool(
         "skill.run",
         {"skill_id": "manual_only", "allow_manual": True},
         ctx=ToolInvocationContext(session_id="s1", user_id="u1"),

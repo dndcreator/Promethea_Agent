@@ -1,4 +1,4 @@
-﻿# Tests
+# Tests
 
 ## 中文
 
@@ -45,7 +45,7 @@ powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite b
 
 ### 最小回归集合（推荐）
 ```powershell
-pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_tool_service.py
+pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_capability_service.py
 ```
 
 ### 临时文件策略

@@ -48,7 +48,27 @@ Controls every LLM call made by the runtime.
 | `API__API_KEY` | string | `placeholder-key-not-set` | **Required.** Your provider's secret key. |
 | `API__BASE_URL` | string | _(empty)_ | **Required.** Must match your provider. |
 | `API__MODEL` | string | _(empty)_ | **Required.** Must be a model your provider supports. |
-| `API__FAILOVER_MODELS` | comma-separated string | `[]` | Advanced/reserved. Listed in config schema, but runtime model failover is not wired by default yet. |
+| `API__FAILOVER_MODELS` | comma-separated string | `[]` | Optional fallback models on the main provider endpoint. |
+
+### Multimodal model routing
+
+Image input remains part of the Conversation model I/O path; it is not an
+official tool and does not pass through tool routing. Promethea sends an image
+request to the main model first. If the provider explicitly reports that the
+model does not support the requested modality, the runtime remembers that
+capability result for the process lifetime and uses the configured multimodal
+model. Transport failures are not treated as capability failures.
+
+| Environment variable | Type | Default | Notes |
+|---|---|---|---|
+| `MULTIMODAL__MODEL` | string | _(empty)_ | Optional dedicated image-capable model. |
+| `MULTIMODAL__BASE_URL` | URL | _(empty)_ | Empty values inherit `API__BASE_URL`. |
+| `MULTIMODAL__API_KEY` | string | _(empty)_ | Empty values inherit `API__API_KEY`. |
+
+If no dedicated model is configured and the main model rejects image input,
+Promethea removes the binary image part and retries with the existing caption
+or OCR fallback. Audio transcription and speech generation continue to use the
+separate Voice provider settings.
 
 ### Provider examples
 
@@ -127,6 +147,8 @@ value".
 | Variable | Type | Default | Notes |
 |---|---|---|---|
 | `SEARCH__PROVIDER` | enum | `auto` | `auto` \| `brave` \| `tavily` \| `serpapi` \| `searxng` \| `duckduckgo` |
+| `SEARCH__FALLBACK_POLICY` | enum | `fallback` | `fallback` tries eligible providers in order; `strict` does not switch after an execution failure. |
+| `SEARCH__PROVIDER_ORDER` | comma-separated ids | `brave,tavily,serpapi,searxng,duckduckgo` | User-owned provider preference; unlisted providers follow declared priority. |
 | `SEARCH__BRAVE_API_KEY` | string | _(empty)_ | Enables Brave Search when provider is `auto` or `brave`. |
 | `SEARCH__TAVILY_API_KEY` | string | _(empty)_ | Enables Tavily when provider is `auto` or `tavily`. |
 | `SEARCH__SERPAPI_API_KEY` | string | _(empty)_ | Enables SerpAPI when provider is `auto` or `serpapi`. |
@@ -134,17 +156,22 @@ value".
 
 Provider selection:
 
-1. If `SEARCH__PROVIDER` names a provider, Promethea tries that provider first.
-2. If it is `auto`, Promethea uses the first configured provider in this order:
-   Brave, Tavily, SerpAPI, SearXNG.
-3. If no configured provider works, Promethea falls back to DuckDuckGo HTML
-   search. DuckDuckGo is key-free but less stable than API-backed providers.
+1. If `SEARCH__PROVIDER` names a provider, Promethea selects that registered provider.
+2. If it is `auto`, available providers follow `SEARCH__PROVIDER_ORDER`, then
+   their provider-declared priority.
+3. With `SEARCH__FALLBACK_POLICY=fallback`, failures advance through that set
+   and may reach key-free DuckDuckGo. Results record the selected provider and
+   whether fallback occurred.
+4. With `SEARCH__FALLBACK_POLICY=strict`, Promethea does not silently switch
+   providers after an execution failure.
 
 Examples:
 
 ```bash
 # Default: no key required, but less reliable.
 SEARCH__PROVIDER=auto
+SEARCH__FALLBACK_POLICY=fallback
+SEARCH__PROVIDER_ORDER=brave,tavily,serpapi,searxng,duckduckgo
 
 # Brave explicit provider.
 SEARCH__PROVIDER=brave
@@ -159,6 +186,8 @@ Provider implementation rule:
 
 - The official tool remains `web.search`.
 - Provider-specific code belongs in the web-search runtime/provider layer.
+- Providers register by stable id; selection does not depend on import or
+  registration order.
 - Do not register separate official tools such as `brave.search` or
   `tavily.search` for the same general web-search capability.
 - Additional providers should return the normalized result shape:
@@ -254,16 +283,80 @@ Or in one step (no dual-write period):
 result = adapter.migrate_backend("flat_memory", mode="cutover")
 ```
 
+### Hippocampus replay
+
+`memory.hippocampus` controls a durable background maintenance loop over memories
+that have already passed the normal write gate. It is not another storage layer:
+warm clustering, cold summarization, and forgetting retain their own configuration.
+
+| Field | Default | Purpose |
+|---|---:|---|
+| `enabled` | `true` | Enable idle-time replay. |
+| `state_path` | `memory/hippocampus/replay_state.json` | Restart-resumable checkpoint state; runtime data and ignored by Git. |
+| `new_memory_threshold` | `24` | Run after this many newly accepted memories. |
+| `min_interval_s` | `21600` | Minimum delay between completed cycles. |
+| `max_interval_s` | `86400` | Process a smaller pending set after this maximum wait. |
+| `revisit_interval_s` | `604800` | Revisit established memory even when no new threshold is reached. |
+| `idle_delay_s` | `300` | Required quiet time after recent memory activity. |
+| `poll_interval_s` | `30` | Scheduler wake interval. |
+| `batch_size` | `24` | Maximum memories reflected on in one cycle. |
+| `max_insights_per_cycle` | `4` | Maximum bounded writes or revisions per cycle. |
+| `cognition_hint_threshold` | `4` | Queue replay after this many grounded temporary cognition hints accumulate. |
+| `max_pending_cognition_hints` | `24` | Maximum bounded hints retained in the replay checkpoint state. |
+| `max_cognition_hint_chars` | `2000` | Maximum normalized text retained per hint. |
+| `retry_delay_s` | `300` | Delay before retrying a failed checkpoint. |
+
+Adaptive or deep cognition that completed without degradation may offer its synthesis and
+source memory IDs to replay. The synthesis is an untrusted hint, not evidence: replay must
+re-read the referenced memories and every accepted insight must still cite a supplied
+non-replay memory.
+
+Replay yields to active conversation/task runs and memory synchronization. It
+checkpoints before writes, resumes interrupted commits, and uses the configured
+memory model through the existing Memory service. Restart the Runtime after
+changing these project-level settings.
+
+### Self Model cognitive recall
+
+`self_model.recall` controls query-conditioned cognition over a single shared
+candidate pool supplied by MemoryService. Passive Self Model projection remains
+deterministic. The bounded reducer is invoked only through `cognition.recall` and
+uses the configured memory model when Adaptive or Deep mode needs an LLM.
+
+| Field | Default | Purpose |
+|---|---:|---|
+| `enabled` | `true` | Enable active cognition reduction. Disabled mode returns a Fast snapshot. |
+| `candidate_pool_limit` | `60` | Maximum governed memory candidates requested once per recall. |
+| `fast_candidate_limit` | `12` | Candidate ceiling for the no-extra-LLM path. |
+| `fast_input_chars` | `6000` | Character budget for automatic Fast selection. |
+| `deep_candidate_threshold` | `36` | Candidate count at which automatic mode may use Deep reduction. |
+| `max_channels` | `3` | Maximum decomposition kernels. |
+| `max_depth` | `2` | Maximum hierarchical reduction depth. |
+| `max_parallel_calls` | `4` | Maximum concurrent kernel calls. |
+| `max_kernel_calls` | `8` | Hard per-recall model-call budget. |
+| `kernel_input_chars` | `16000` | Input budget for one kernel receptive field. |
+| `max_skip_chars` | `5000` | Raw critical-memory residual budget. |
+| `skip_score_threshold` | `0.82` | Score threshold for non-governance-critical skip items. |
+| `deadline_ms` | `6000` | Hard active-recall deadline before deterministic degradation. |
+
+All fields use the existing nested environment convention, for example
+`SELF_MODEL__RECALL__MAX_CHANNELS=2`. Cognition snapshots are Run-scoped and are
+not persisted by the reducer.
+
 ---
 
 ## Section: `sandbox` - Security policy
 
 | Variable | Default | Notes |
 |---|---|---|
-| `SANDBOX__ENABLED` | `false` | Enable sandbox enforcement. |
-| `SANDBOX__PROFILE` | `off` | `off` \| `dev` \| `strict` |
+| `SANDBOX__ENABLED` | `true` | Enable sandbox enforcement. |
+| `SANDBOX__PROFILE` | `strict` | `off` \| `dev` \| `strict` |
 | `SANDBOX__WORKSPACE_ACCESS` | `rw` | `rw` \| `ro` \| `none` |
-| `SANDBOX__COMMAND_MODE` | `allowlist` | `allowlist` \| `audit` |
+| `SANDBOX__COMMAND_MODE` | `approval` | `deny` \| `approval` \| `allowlist` \| `audit` |
+| `SANDBOX__DESKTOP_MODE` | `approval` | `observe_only` \| `approval` \| `host_control` |
+| `SANDBOX__PROCESS_MODE` | `managed_only` | `managed_only` \| `host_control` |
+| `SANDBOX__BROWSER_DISABLE_CHROMIUM_SANDBOX` | `false` | Emergency compatibility switch; weakens browser isolation. |
+| `SANDBOX__COMPUTER_MAX_WORKSPACES` | `8` | Maximum cached computer workspaces (1-64); idle workspaces are evicted first. |
 | `SANDBOX__NETWORK_MODE` | `restricted` | `restricted` \| `none` |
 | `SANDBOX__BLOCK_PRIVATE_NETWORK` | `true` | Block access to `192.168.x`, `10.x`, `172.16-31.x`. |
 
@@ -271,18 +364,80 @@ result = adapter.migrate_backend("flat_memory", mode="cutover")
 It does not automatically override `workspace_access`, `command_mode`, or `network_mode`.
 Set those fields explicitly for deterministic behavior.
 
+The default permits workspace-scoped work while requiring a one-shot user
+confirmation for command execution and host desktop input. Confirmation is
+bound to the reviewed tool name and arguments, is consumed by that invocation,
+and cannot override explicit `deny`, `observe_only`, or workspace boundaries.
+Process termination remains limited to children tracked by the runtime.
+
+The filesystem tool can read from the advertised Desktop, Documents, and
+Downloads locations (including files selected by an absolute path beneath
+those locations). These host locations are read-only: writes, appends, moves,
+deletes, and directory creation remain confined to the workspace. Copying a
+single host file into the workspace is allowed; recursively copying a host
+directory is not. The Home and temporary locations are not general read grants.
+Reading files does not grant mouse or keyboard control of the desktop.
+
+Runtime tool calls and Gateway computer requests resolve computer controllers
+from the authenticated user and workspace, using the same `WorkspaceService`
+as official file and command tools. Browser storage and managed processes are
+owned by that workspace. Idle controller sets can be evicted; active operations
+and running managed processes are never evicted to make room. Desktop input
+still targets the shared host desktop and is not isolated by workspace ownership.
+Process results report their actual `sandbox.backend` and `sandbox.enforcement`.
+The Chromium process sandbox is explicitly enabled unless the compatibility
+switch above is set; it does not isolate the entire desktop or external accounts.
+
+Approved process tools use a platform provider: Linux requires `bwrap`, macOS
+requires `sandbox-exec`, and Windows requires `pywin32` (installed with the
+Windows Python dependency). `command_mode=allowlist` is an optional standing
+operator policy and does not require per-call approval.
+Windows runs native commands under a write-restricted token and a job object;
+it does not require Docker. The workspace must be on an ACL-capable volume and
+owned by the Runtime user. The first execution adds a persistent inheritable
+write-capability ACE to that workspace, which may take time for large trees.
+Runner startup failures fail closed. All providers receive a minimal environment
+without Runtime credentials. The Linux and macOS providers
+currently allow read access to host files outside the workspace, so they protect
+against writes and network access but **not** against reading host secrets.
+Windows reports `partial` enforcement: the restricted token limits file writes,
+but caller-readable files, network access, and process visibility are not
+isolated. Ambient Everyone grants and NTFS hard links may also permit writes
+outside the selected path. `SANDBOX__NETWORK_MODE` governs the direct network
+tools, not arbitrary network activity in a Windows subprocess. Missing providers
+fail closed with `SANDBOX_UNAVAILABLE`; `workspace_access=ro` omits the explicit
+workspace write grant but retains the same partial-enforcement caveats.
+This process boundary does not confine Python code executing inside the Runtime
+itself, third-party plugin internals, or PyAutoGUI's host desktop controls.
+
+`host_control` is an explicit operator assertion, not an isolation mechanism.
+Only enable it when Promethea itself is running inside a disposable VM, Windows
+Sandbox, container-compatible desktop, or a dedicated low-privilege account.
+User confirmation grants an action; it does not make the host environment safe.
+
 **Recommended settings per environment:**
 
 | Environment | Profile | Notes |
 |---|---|---|
-| Local dev | `off` or `dev` | Convenience over strictness |
+| Local dev | `strict` | Default; host mutations require one-shot approval |
 | Staging | `dev` | Catch issues before production |
-| Production | `strict` | Command allowlist active, network restricted |
+| Production | `strict` | Prefer `deny` unless an interactive approval channel is available |
 
-The default command allowlist (`dev` profile): `python`, `pytest`, `pip`, `uv`, `git`, `rg`, `cmd`, `powershell`.
+The compatibility command allowlist, used only when `command_mode=allowlist`, is:
+`python`, `pytest`, `pip`, `uv`, `git`, `rg`, `cmd`, `powershell`. An allowlist is
+not process isolation: interpreters and shells can still perform arbitrary host
+effects. Use `command_mode=deny` when those partial boundaries are insufficient.
 
 Denied command fragments (always active when sandbox is enabled):  
 `rm -rf`, `del /f /q`, `format `, `shutdown`, `reboot`, `mkfs`, `diskpart`, `net user`, `reg add`.
+
+---
+
+## Section: `action` - Main-model control loop
+
+`action.max_steps` bounds the number of tool actions the main model may take during one
+turn. The default is `5`; per-user JSON configuration can lower or raise it without
+changing routing code. Runtime validation keeps the value between `1` and `50`.
 
 ---
 
@@ -312,6 +467,7 @@ Enabled by default in the public preview. It only starts a full reasoning tree w
 | Variable | Default | Notes |
 |---|---|---|
 | `SYSTEM__LOG_LEVEL` | `INFO` | `DEBUG` \| `INFO` \| `WARNING` \| `ERROR` |
+| `SYSTEM__LOG_MODEL_PAYLOADS` | `false` | Opt in to dependency debug logs that may contain prompts, conversations, or recalled memory. |
 | `SYSTEM__DEBUG` | `false` | Enable extra debug output. |
 | `SYSTEM__STREAM_MODE` | `true` | Stream responses when possible. |
 | `SYSTEM__SESSION_TTL_HOURS` | `0` | Session expiry in hours. `0` = no expiry. |
@@ -336,9 +492,10 @@ See:
 Promethea exposes all user-callable tools through a unified Extension Catalog:
 
 - Official local tools are registered from `gateway/official_tools`.
-- Built-in MCP manifest packs under `agentkit/tools` are treated as official.
+- Built-in manifest packs under `agentkit/tools` are treated as official local tools.
 - Community tools are dropped into `extensions/community/<extension_id>` with an
   `agent-manifest.json` file and can be hot-reloaded.
+- External MCP manifests declare a stdio `transport` and remain out of process.
 
 APIs:
 - `GET /api/extensions/catalog`
@@ -360,27 +517,22 @@ Override the agent's system prompt via `.env` or `config/default.json`.
 
 Promethea does not send this base prompt to the model by itself. Normal chat requests pass through `PromptAssembler`, which combines the base identity prompt with runtime blocks.
 
-Before assembly, `PromptPolicyRouter` runs a lightweight first pass. It asks the
-model for strict JSON describing which dynamic blocks look useful for this turn.
-The router can suggest memory, reasoning, tools, workspace, and org context. It
-cannot disable or rewrite required blocks such as identity, soul core, or
-safety/policy constraints.
-
-The router is LLM-driven. It does not use keyword lists or deterministic
-language-specific memory hints. If the router output is unavailable or invalid,
-Promethea falls back to a neutral default and lets the normal memory recall
-classifier decide whether long-term context is needed.
+Before assembly, `ConversationService` reads the structured runtime tool catalog.
+The main model then performs the first decision inside the normal control loop:
+it can answer directly, recall memory, invoke a tool or workflow, or call the
+deeper reasoning service. This avoids a separate Router LLM request while keeping
+budgets, tool policy, permissions, and service ownership in deterministic runtime code.
 
 The assembler is called by:
-- `gateway.conversation_pipeline.stage_response_synthesis` for the canonical staged pipeline when messages are not already prebuilt.
+- `gateway.conversation_pipeline` for the canonical main-model control loop when messages are not already prebuilt.
 - `gateway.conversation_service.prepare_chat_turn` for Web/streaming chat paths before the LLM call.
 
 The assembler can include these blocks:
 - `identity`: base Promethea identity plus language policy.
 - `soul_core`: the read-mostly soul prompt, style/personality only.
-- `memory`: recalled personal memory context.
+- `memory`: personal context returned by the `memory.get_context` capability.
 - `org_context`: organization context when enterprise brain is enabled.
-- `reasoning`: explicit reasoning summary when the reasoning engine rewrites or augments the prompt.
+- `reasoning`: explicit reasoning output returned by the `reasoning.run` capability.
 - `skill`, `tools`, `workspace`, `policy`, `response_format`: active capability, workspace, policy, and output-style blocks.
 
 Important separation:
@@ -441,19 +593,26 @@ APIs:
 
 ---
 
-## Section: `self_evolve` - controlled code evolution
+## Section: `self_evolve` - capability evolution
 
-`self_evolve` is an experimental, disabled-by-default module for scoped code
-evolution tasks. It is not general autonomous self-modification: every task must
-declare target files, patches are limited to those files, and validation commands
-are checked by sandbox policy.
+`self_evolve` is an experimental, disabled-by-default module for append-only
+capability packages. Tasks can write only inside their staging directory. A
+validated package is published as an immutable version under
+`extensions/community/_generated`, registered through the existing extension
+registry, and executed outside the Gateway process by the process sandbox.
+Validation must execute every declared command, and publication is bound to the
+validated content digest. Tasks and generated commands are private to their
+creating user. Self Evolve cannot edit Promethea Core files.
+
+Self Evolve consumes the unified Self Model (`self`, user-scoped `cognition`,
+`capabilities`, and `evolution`) but does not own cognition or memory persistence.
+User cognition remains a runtime projection over the existing Memory service.
 
 | Field | Default | Notes |
 |---|---:|---|
 | `self_evolve.enabled` | `false` | Enables the HTTP self-evolve endpoints for the current user. Keep disabled for normal accounts. |
 | `self_evolve.max_tasks_list` | `50` | Maximum tasks returned by list endpoints. |
-| `self_evolve.max_context_chars_per_file` | `4000` | Bounded file context per target file. |
-| `self_evolve.max_validate_timeout_seconds` | `180` | Maximum validation command timeout. |
+| `self_evolve.max_context_chars_per_file` | `4000` | Bounded file context returned for a staged package. |
 
 APIs:
 - `GET /api/self-evolve/status`
@@ -461,8 +620,30 @@ APIs:
 - `GET /api/self-evolve/tasks`
 - `GET /api/self-evolve/tasks/{task_id}`
 - `POST /api/self-evolve/tasks/{task_id}/context`
-- `POST /api/self-evolve/tasks/{task_id}/patch`
+- `PUT /api/self-evolve/tasks/{task_id}/files`
 - `POST /api/self-evolve/tasks/{task_id}/validate`
+- `POST /api/self-evolve/tasks/{task_id}/publish`
+
+---
+
+## Time and scheduling
+
+`system.timezone` defaults to `auto`. Runtime resolution prefers an explicit
+user setting, then a client-provided IANA timezone, and finally the host
+timezone. Values such as `Europe/Paris`, `UTC`, and `system` are valid. The
+resolved timezone is included in model runtime context and stored with
+calendar-based scheduled jobs.
+
+Scheduled targets can be any registered capability. Supported trigger shapes:
+
+```json
+{"type": "interval", "seconds": 300}
+{"type": "at", "at": "2026-10-01T09:00:00"}
+{"type": "calendar", "time": "09:00", "weekdays": [0, 1, 2, 3, 4]}
+```
+
+Weekdays use Monday `0` through Sunday `6`. Naive `at` values are interpreted
+in the job timezone; offset-aware values retain their stated instant.
 
 ---
 

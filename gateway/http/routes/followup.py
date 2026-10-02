@@ -28,6 +28,9 @@ async def handle_followup(
                 "query_type": request.query_type,
                 "custom_query": request.custom_query,
                 "session_id": request.session_id,
+                "message_id": request.message_id,
+                "start_offset": request.start_offset,
+                "end_offset": request.end_offset,
             },
             user_id=user_id,
             request=raw_request,
@@ -36,6 +39,7 @@ async def handle_followup(
             "status": "success",
             "response": payload.get("response", ""),
             "query": payload.get("query", ""),
+            "followup": payload.get("followup"),
         }
 
     except HTTPException:

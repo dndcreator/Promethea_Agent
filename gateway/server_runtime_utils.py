@@ -33,6 +33,7 @@ def build_run_context(
     trace_id = str(params.get("trace_id") or f"trace_{request.id}")
     requested_mode = params.get("requested_mode")
     requested_skill = params.get("requested_skill")
+    requested_workflow = params.get("requested_workflow")
     tenant_id = str(params.get("tenant_id") or "").strip() or None
     environment = str(params.get("environment") or params.get("env") or "").strip() or None
 
@@ -54,6 +55,8 @@ def build_run_context(
     return RunContext(
         request_id=request.id,
         trace_id=trace_id,
+        task_id=str(params.get("task_id") or "").strip() or None,
+        run_id=str(params.get("run_id") or params.get("workflow_run_id") or "").strip() or None,
         session_state=session_state,
         user_identity={"user_id": str(user_id), "tenant_id": tenant_id, "environment": environment},
         input_payload=params,
@@ -64,6 +67,7 @@ def build_run_context(
         },
         requested_mode=str(requested_mode) if requested_mode else None,
         requested_skill=str(requested_skill) if requested_skill else None,
+        requested_workflow=str(requested_workflow) if requested_workflow else None,
         debug_flags=params.get("debug_flags") or {},
     )
 

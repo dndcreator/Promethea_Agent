@@ -7,10 +7,12 @@ def test_http_contract_registry_contains_core_endpoints():
     indexed = index_http_contracts(contracts)
     assert "config.update" in indexed
     assert "ops.protocol" in indexed
+    assert "ops.schema" in indexed
     assert "ops.http_contracts" in indexed
     assert "ops.governance" in indexed
     assert indexed["config.update"]["path"] == "/api/config/update"
     assert indexed["ops.http_contracts"]["path"] == "/api/ops/http-contracts"
+    assert indexed["ops.schema"]["path"] == "/api/ops/schema"
     assert indexed["ops.governance"]["path"] == "/api/ops/governance"
 
 

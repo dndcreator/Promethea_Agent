@@ -5,9 +5,11 @@ Loosely inspired by the Clawdbot Gateway Protocol design.
 """
 from enum import Enum
 from typing import Dict, Any, Optional, List, Union
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime, timezone
 import uuid
+
+from gateway.public_contracts import Error as PublicError
 
 
 def _utc_now() -> datetime:
@@ -109,16 +111,32 @@ class EventType(str, Enum):
     MEMORY_RECALLED = "memory.recalled"        # Memory recalled
     MEMORY_CLUSTERED = "memory.clustered"      # Memory clustered
     MEMORY_SUMMARIZED = "memory.summarized"    # Memory summarized
-    # Tool invocation lifecycle (for ToolService / multi-agent scheduling)
+    MEMORY_REPLAY_STARTED = "memory.replay.started"
+    MEMORY_REPLAY_CHECKPOINTED = "memory.replay.checkpointed"
+    MEMORY_REPLAY_COMPLETED = "memory.replay.completed"
+    MEMORY_REPLAY_INTERRUPTED = "memory.replay.interrupted"
+    MEMORY_REPLAY_FAILED = "memory.replay.failed"
+    COGNITION_RECALL_STARTED = "cognition.recall.started"
+    COGNITION_RECALL_FINISHED = "cognition.recall.finished"
+    COGNITION_RECALL_FAILED = "cognition.recall.failed"
+    # Governed capability invocation lifecycle.
     TOOL_CALL_START = "tool.call.start"
     TOOL_CALL_RESULT = "tool.call.result"
     TOOL_CALL_ERROR = "tool.call.error"
+    ACTION_STATE_CHANGED = "action.state.changed"
     # Conversation lifecycle events
     CONVERSATION_START = "conversation.start"      # Conversation started
     CONVERSATION_COMPLETE = "conversation.complete"  # Conversation completed
     CONVERSATION_ERROR = "conversation.error"      # Conversation error
     # Full interaction event (user input + assistant output)
     INTERACTION_COMPLETED = "interaction.completed"
+    # Durable task-domain lifecycle events
+    TASK_CREATED = "task.created"
+    TASK_STATE_CHANGED = "task.state.changed"
+    TASK_RUN_STARTED = "task.run.started"
+    TASK_RUN_UPDATED = "task.run.updated"
+    TASK_EXECUTION_CLAIMED = "task.execution.claimed"
+    TASK_EXECUTION_SETTLED = "task.execution.settled"
     # Reasoning lifecycle events
     REASONING_START = "reasoning.start"
     REASONING_NODE_CREATED = "reasoning.node.created"
@@ -146,6 +164,7 @@ class EventType(str, Enum):
     TOOL_EXECUTION_STARTED = "tool.execution.started"
     TOOL_EXECUTION_FINISHED = "tool.execution.finished"
     TOOL_EXECUTION_FAILED = "tool.execution.failed"
+    ENVIRONMENT_STATE_CHANGED = "environment.state.changed"
     RESPONSE_SYNTHESIZED = "response.synthesized"
     MEMORY_WRITE_DECIDED = "memory.write.decided"
     GATEWAY_RUN_FINISHED = "gateway.run.finished"
@@ -160,7 +179,14 @@ class EventType(str, Enum):
     WORKFLOW_RUN_PAUSED = "workflow.run.paused"
     WORKFLOW_RUN_RESUMED = "workflow.run.resumed"
     WORKFLOW_RUN_COMPLETED = "workflow.run.completed"
+    WORKFLOW_RUN_FAILED = "workflow.run.failed"
+    WORKFLOW_RUN_CANCELLED = "workflow.run.cancelled"
     WORKFLOW_STEP_WAITING_HUMAN = "workflow.step.waiting_human"
+    WORKFLOW_STEP_STARTED = "workflow.step.started"
+    WORKFLOW_STEP_COMPLETED = "workflow.step.completed"
+    WORKFLOW_STEP_FAILED = "workflow.step.failed"
+    WORKFLOW_STEP_INTERRUPTED = "workflow.step.interrupted"
+    WORKFLOW_STEP_RETRY_SCHEDULED = "workflow.step.retry_scheduled"
     
 
 class DeviceRole(str, Enum):
@@ -215,6 +241,7 @@ class ResponseMessage(BaseModel):
     ok: bool
     payload: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    error_detail: Optional[PublicError] = None
     timestamp: datetime = Field(default_factory=_utc_now)
     
 
@@ -223,6 +250,7 @@ class EventMessage(BaseModel):
     type: MessageType = MessageType.EVENT
     event: EventType
     payload: Dict[str, Any] = Field(default_factory=dict)
+    event_id: Optional[str] = None
     seq: Optional[int] = None  # Event sequence number
     timestamp: datetime = Field(default_factory=_utc_now)
     
@@ -263,6 +291,9 @@ class FollowupParams(BaseModel):
     query_type: str = "why"  # why, risk, alternative, custom
     custom_query: Optional[str] = None
     session_id: str = "default"
+    message_id: str
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 class ChatParams(BaseModel):
@@ -299,10 +330,12 @@ class ConfigReloadParams(BaseModel):
 
 
 class ConfigUpdateParams(BaseModel):
-    """User config update params (canonical + legacy aliases)."""
+    """Canonical user config update params."""
+    model_config = ConfigDict(populate_by_name=True)
+
     config: Dict[str, Any] = Field(default_factory=dict)
-    config_data: Dict[str, Any] = Field(default_factory=dict)
-    validate_config: bool = Field(default=True, alias="validate")
+    options: Dict[str, Any] = Field(default_factory=dict)
+    should_validate: bool = Field(default=True, alias="validate")
 
 
 class ConfigSwitchModelParams(BaseModel):
@@ -582,11 +615,18 @@ class GatewayProtocol:
         error: Optional[str] = None
     ) -> ResponseMessage:
         """Create a response message."""
+        raw_detail = (payload or {}).get("error_detail")
+        error_detail = (
+            PublicError.model_validate(raw_detail)
+            if isinstance(raw_detail, dict)
+            else None
+        )
         return ResponseMessage(
             id=request_id,
             ok=ok,
             payload=payload,
-            error=error
+            error=error,
+            error_detail=error_detail,
         )
     
     @staticmethod

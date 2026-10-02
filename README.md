@@ -154,7 +154,7 @@ For full setup details, see [QUICK_START.md](QUICK_START.md) and [docs/README.md
 
 ## Release Status
 
-Promethea is currently prepared as a public preview release candidate. The intended experience is graph-first and local-first. Neo4j is recommended for the full memory system, while fallback memory backends remain explicit alternatives when graph memory is unavailable.
+Promethea is currently a public preview. The intended experience is graph-first and local-first. Neo4j is recommended for the full memory system, while fallback memory backends remain explicit alternatives when graph memory is unavailable.
 
 See [RELEASE_NOTES.md](RELEASE_NOTES.md) for release notes and known limitations.
 

@@ -4,7 +4,9 @@
                    "version":  "1.0",
                    "stream_mode":  true,
                    "debug":  false,
-                   "log_level":  "INFO"
+                   "log_level":  "INFO",
+                   "log_model_payloads": false,
+                   "timezone": "auto"
                },
     "api":  {
                 "temperature":  0.7,
@@ -13,6 +15,9 @@
                 "timeout":  null,
                 "retry_count": null
             },
+    "action": {
+                  "max_steps": 5
+              },
     "memory":  {
                    "enabled":  true,
                    "profile": "balanced",
@@ -44,9 +49,13 @@
                                       "idle_cluster_min_messages":  2,
                                       "idle_cluster_min_interval_s":  60
                                   },
-                   "cold_layer":  {
-                                      "max_summary_length":  500,
-                                      "compression_threshold":  50
+                    "cold_layer":  {
+                                       "max_summary_length":  500,
+                                       "compression_threshold":  50,
+                                       "summary_min_interval_s": 600
+                    },
+                    "forgetting": {
+                                      "decay_interval_s": 86400
                                   },
                     "gating":  {
                                   "recall_filter":  {
@@ -75,13 +84,19 @@
                     },
                     "hippocampus": {
                         "enabled": true,
-                        "cluster_every_messages": 12,
-                        "cluster_min_interval_s": 300,
-                        "idle_cluster_delay_s": 120,
-                        "idle_cluster_min_messages": 2,
-                        "idle_cluster_min_interval_s": 60,
-                        "summary_min_interval_s": 600,
-                        "decay_interval_s": 86400
+                        "state_path": "memory/hippocampus/replay_state.json",
+                        "new_memory_threshold": 24,
+                        "min_interval_s": 21600,
+                        "max_interval_s": 86400,
+                        "revisit_interval_s": 604800,
+                        "idle_delay_s": 300,
+                        "poll_interval_s": 30,
+                        "batch_size": 24,
+                        "max_insights_per_cycle": 4,
+                        "cognition_hint_threshold": 4,
+                        "max_pending_cognition_hints": 24,
+                        "max_cognition_hint_chars": 2000,
+                        "retry_delay_s": 300
                     },
                     "migration": {
                         "mode": "off",
@@ -90,6 +105,23 @@
                        "checkpoint": ""
                    }
                },
+    "self_model": {
+        "recall": {
+            "enabled": true,
+            "candidate_pool_limit": 60,
+            "fast_candidate_limit": 12,
+            "fast_input_chars": 6000,
+            "deep_candidate_threshold": 36,
+            "max_channels": 3,
+            "max_depth": 2,
+            "max_parallel_calls": 4,
+            "max_kernel_calls": 8,
+            "kernel_input_chars": 16000,
+            "max_skip_chars": 5000,
+            "skip_score_threshold": 0.82,
+            "deadline_ms": 6000
+        }
+    },
     "reasoning":  {
                       "enabled":  true,
                       "mode":  "react_tot",
@@ -152,14 +184,17 @@
     "self_evolve": {
         "enabled": false,
         "max_tasks_list": 50,
-        "max_context_chars_per_file": 4000,
-        "max_validate_timeout_seconds": 180
+        "max_context_chars_per_file": 4000
     },
     "sandbox":  {
-                    "enabled":  false,
-                    "profile":  "off",
+                    "enabled":  true,
+                    "profile":  "strict",
                     "workspace_access":  "rw",
-                    "command_mode":  "allowlist",
+                      "command_mode":  "approval",
+                      "desktop_mode":  "approval",
+                    "process_mode":  "managed_only",
+                      "browser_disable_chromium_sandbox": false,
+                      "computer_max_workspaces": 8,
                     "allowed_commands":  [
                                              "python",
                                              "pytest",

@@ -56,34 +56,6 @@ def test_strategy_prefers_filesystem_for_save_to_folder_intent():
     assert out["tool_name"] == "fs_action"
 
 
-def test_strategy_prefers_unified_content_action_for_fetch_intent():
-    engine = ToolStrategyEngine()
-    catalog = [
-        {
-            "tool_type": "mcp",
-            "service_name": "content_tools",
-            "tool_name": "web_fetch",
-            "description": "fetch and parse web pages",
-        },
-        {
-            "tool_type": "mcp",
-            "service_name": "computer_control",
-            "tool_name": "content_action",
-            "description": "unified content operations",
-        },
-    ]
-    out = engine.recommend(
-        step={"goal": "fetch webpage content"},
-        user_message="Fetch this web page and parse PDF details",
-        observations=[],
-        catalog=catalog,
-        strategy_hints={},
-    )
-    assert out["use_tool"] is True
-    assert out["service_name"] == "computer_control"
-    assert out["tool_name"] == "content_action"
-
-
 def test_strategy_uses_runtime_quality_hint_to_prefer_more_reliable_tool():
     engine = ToolStrategyEngine()
     catalog = [

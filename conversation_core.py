@@ -8,11 +8,10 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 from openai import AsyncOpenAI, OpenAI
 
-from agentkit.mcp.mcp_manager import get_mcp_manager
-from agentkit.mcp.mcpregistry import initialize_mcp_registry
 from agentkit.mcp.tool_call import tool_call_loop
 from config import config
-from gateway.user_secrets import resolve_llm_runtime_settings
+from gateway.multimodal_service import ModelEndpoint, multimodal_service
+from gateway.user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
 
 
 def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None) -> None:
@@ -30,14 +29,42 @@ def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None)
         logger.debug("failed to record LLM metrics: {}", exc)
 
 
+def _record_llm_first_token_metrics(duration: float) -> None:
+    try:
+        from gateway.http.metrics import get_metrics_collector
+
+        get_metrics_collector().record_llm_first_token(duration=duration)
+    except Exception as exc:
+        logger.debug("failed to record LLM first-token metrics: {}", exc)
+
+
+def _loggable_message_content(value: Any) -> str:
+    if not isinstance(value, list):
+        return str(value or "")
+    parts: List[str] = []
+    for part in value:
+        if not isinstance(part, dict):
+            continue
+        part_type = str(part.get("type") or "").strip().lower()
+        if part_type == "text":
+            parts.append(str(part.get("text") or ""))
+        elif part_type in {"image", "image_url", "input_image"}:
+            parts.append("[image input omitted]")
+        elif part_type in {"audio", "input_audio"}:
+            parts.append("[audio input omitted]")
+        elif part_type in {"video", "input_video"}:
+            parts.append("[video input omitted]")
+        else:
+            parts.append(f"[{part_type or 'structured'} input omitted]")
+    return "\n".join(item for item in parts if item).strip()
+
+
 class PrometheaConversation:
     def __init__(self):
         self.dev_mode = False
         self.client = self._build_sync_client(config.api.api_key, config.api.base_url)
         self.async_client = self._build_async_client(config.api.api_key, config.api.base_url)
 
-        self.mcp_manager = get_mcp_manager()
-        self._init_tools()
 
     @staticmethod
     def _normalized_base_url(base_url: str) -> Optional[str]:
@@ -60,22 +87,10 @@ class PrometheaConversation:
             kwargs["base_url"] = normalized
         return AsyncOpenAI(**kwargs)
 
-    def _init_tools(self):
-        try:
-            services = initialize_mcp_registry(scan_dir="agentkit")
-            community_services = initialize_mcp_registry(scan_dir="extensions/community", force=True)
-            if community_services:
-                services = list(services or []) + list(community_services or [])
-            logger.info(f"Loaded tool services: {services}")
-        except Exception as e:
-            logger.error(f"Tool initialization failed: {e}")
-
     def prepare_messages(self, messages: List[Dict]) -> List[Dict]:
         return self._inject_system_prompt(messages)
 
     def _inject_system_prompt(self, messages: List[Dict]) -> List[Dict]:
-        services_desc = self.mcp_manager.format_available_services()
-
         system_prompt = (
             "You are Promethea, an assistant that can call tools.\n"
             "When you need tools, output only one strict JSON object and no prose in that assistant turn.\n"
@@ -83,10 +98,8 @@ class PrometheaConversation:
             "Use keys: tool_name, agentType, service_name, and args (object). "
             "For official built-in tools use agentType=\"local\" and service_name equal to tool_name.\n"
             "Never write fake function syntax such as math.calculate(...), web_search(...), or file_create(...). "
-            "Never claim a tool ran unless a runtime observation/result is present.\n"
-            "Common official tools include math.calculate, web.search, web.fetch_text, workspace.write_file, workspace.read_file, workspace.list_files, code.run_python, and runtime.list_tools.\n"
-            "Available tools:\n"
-            f"{services_desc}"
+            "Never claim a tool ran unless a runtime observation/result is present. "
+            "Use only tools declared by the runtime tool block for this turn."
         )
 
         new_messages = list(messages)
@@ -110,19 +123,22 @@ class PrometheaConversation:
         session_id: str = None,
         user_id: Optional[str] = None,
         tool_executor=None,
+        confirmation_resolver=None,
         max_recursion: Optional[int] = None,
+        initial_response: Optional[Dict[str, Any]] = None,
     ) -> Dict:
         messages_with_tools = self._inject_system_prompt(messages)
         llm_caller = lambda msgs: self.call_llm(msgs, user_config, user_id=user_id)
 
         final_response = await tool_call_loop(
             messages=messages_with_tools,
-            mcp_manager=self.mcp_manager,
             llm_caller=llm_caller,
             is_streaming=False,
             max_recursion=max_recursion,
             session_id=session_id,
             tool_executor=tool_executor,
+            confirmation_resolver=confirmation_resolver,
+            initial_response=initial_response,
         )
 
         return final_response
@@ -186,6 +202,22 @@ class PrometheaConversation:
             user_id=user_id,
         )
         model_candidates = self._resolve_model_candidates(user_config, model, failover_models)
+        modalities = multimodal_service.detect_modalities(messages)
+        dedicated = multimodal_service.dedicated_endpoint(
+            resolve_multimodal_runtime_settings(user_id, behavior_config=user_config)
+        )
+        routes = [
+            (ModelEndpoint(api_key=api_key, base_url=base_url, model=name), messages)
+            for name in model_candidates
+        ]
+        if modalities:
+            if dedicated is not None:
+                routes.append((dedicated, messages))
+            if model_candidates:
+                routes.append((
+                    ModelEndpoint(api_key=api_key, base_url=base_url, model=model_candidates[0], source="text_fallback"),
+                    multimodal_service.strip_unsupported_parts(messages),
+                ))
         errors: List[str] = []
         if not model_candidates:
             return {
@@ -196,13 +228,22 @@ class PrometheaConversation:
                 "model_attempts": 0,
             }
 
-        for idx, candidate_model in enumerate(model_candidates):
+        allow_multimodal_fallback = False
+        attempts = 0
+        for endpoint, route_messages in routes:
+            if endpoint.source in {"multimodal", "text_fallback"} and not allow_multimodal_fallback:
+                continue
+            if endpoint.source == "main" and multimodal_service.is_known_unsupported(endpoint, modalities):
+                allow_multimodal_fallback = True
+                errors.append(f"{endpoint.model}: cached unsupported modality")
+                continue
+            attempts += 1
             try:
-                client = self._resolve_async_client(user_config, api_key, base_url)
+                client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
                 started = time.perf_counter()
                 resp = await client.chat.completions.create(
-                    model=candidate_model,
-                    messages=messages,
+                    model=endpoint.model,
+                    messages=route_messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=False,
@@ -227,8 +268,9 @@ class PrometheaConversation:
                 result = {
                     "content": content,
                     "status": "success",
-                    "model_used": candidate_model,
-                    "model_attempts": idx + 1,
+                    "model_used": endpoint.model,
+                    "model_route": endpoint.source,
+                    "model_attempts": attempts,
                     "usage": usage,
                 }
 
@@ -241,24 +283,29 @@ class PrometheaConversation:
 
                     log_file = os.path.join(user_log_dir, f"{d}.log")
                     with open(log_file, "a", encoding="utf-8") as f:
-                        last_user = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+                        last_user = next((m.get("content", "") for m in reversed(route_messages) if m.get("role") == "user"), "")
+                        last_user = _loggable_message_content(last_user)
                         f.write(f"[{t}] USER: {last_user}\n")
-                        f.write(f"[{t}] ASSISTANT ({candidate_model}): {content}\n")
+                        f.write(f"[{t}] ASSISTANT ({endpoint.model}): {content}\n")
                         f.write("-" * 50 + "\n")
                 except Exception as e:
                     logger.error(f"save conversation log failed: {e}")
 
-                if idx > 0:
+                if attempts > 1 or endpoint.source != "main":
                     logger.warning(
-                        "LLM failover succeeded: fallback model '{}' used after {} failures",
-                        candidate_model,
-                        idx,
+                        "LLM route fallback succeeded: model '{}' via '{}' after {} attempts",
+                        endpoint.model,
+                        endpoint.source,
+                        attempts,
                     )
                 return result
             except Exception as e:
                 err = str(e)
-                errors.append(f"{candidate_model}: {err}")
-                logger.warning("LLM call failed on model '{}': {}", candidate_model, err)
+                errors.append(f"{endpoint.model}: {err}")
+                if endpoint.source == "main" and modalities and multimodal_service.is_unsupported_modality_error(e):
+                    multimodal_service.mark_unsupported(endpoint, modalities)
+                    allow_multimodal_fallback = True
+                logger.warning("LLM call failed on model '{}' via '{}': {}", endpoint.model, endpoint.source, err)
 
         error_message = "; ".join(errors) if errors else "unknown error"
         logger.error("LLM API call failed on all models: {}", error_message)
@@ -267,7 +314,7 @@ class PrometheaConversation:
             "status": "error",
             "usage": {"prompt_tokens": 0, "completion_tokens": 0},
             "model_used": None,
-            "model_attempts": len(model_candidates),
+            "model_attempts": attempts,
         }
 
     async def call_llm_stream(
@@ -281,19 +328,44 @@ class PrometheaConversation:
             user_id=user_id,
         )
         model_candidates = self._resolve_model_candidates(user_config, model, failover_models)
+        modalities = multimodal_service.detect_modalities(messages)
+        dedicated = multimodal_service.dedicated_endpoint(
+            resolve_multimodal_runtime_settings(user_id, behavior_config=user_config)
+        )
+        routes = [
+            (ModelEndpoint(api_key=api_key, base_url=base_url, model=name), messages)
+            for name in model_candidates
+        ]
+        if modalities:
+            if dedicated is not None:
+                routes.append((dedicated, messages))
+            if model_candidates:
+                routes.append((
+                    ModelEndpoint(api_key=api_key, base_url=base_url, model=model_candidates[0], source="text_fallback"),
+                    multimodal_service.strip_unsupported_parts(messages),
+                ))
         errors: List[str] = []
         if not model_candidates:
             yield "[error] API__MODEL is not configured in user secrets.env or root .env"
             return
 
-        for idx, candidate_model in enumerate(model_candidates):
+        allow_multimodal_fallback = False
+        attempts = 0
+        for endpoint, route_messages in routes:
+            if endpoint.source in {"multimodal", "text_fallback"} and not allow_multimodal_fallback:
+                continue
+            if endpoint.source == "main" and multimodal_service.is_known_unsupported(endpoint, modalities):
+                allow_multimodal_fallback = True
+                errors.append(f"{endpoint.model}: cached unsupported modality")
+                continue
+            attempts += 1
             try:
-                client = self._resolve_async_client(user_config, api_key, base_url)
+                client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
                 started = time.perf_counter()
                 try:
                     stream = await client.chat.completions.create(
-                        model=candidate_model,
-                        messages=messages,
+                        model=endpoint.model,
+                        messages=route_messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=True,
@@ -304,19 +376,21 @@ class PrometheaConversation:
                     if "stream_options" not in message and "include_usage" not in message:
                         raise
                     stream = await client.chat.completions.create(
-                        model=candidate_model,
-                        messages=messages,
+                        model=endpoint.model,
+                        messages=route_messages,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=True,
                     )
-                if idx > 0:
+                if attempts > 1 or endpoint.source != "main":
                     logger.warning(
-                        "LLM stream failover succeeded: fallback model '{}' used after {} failures",
-                        candidate_model,
-                        idx,
+                        "LLM stream route fallback succeeded: model '{}' via '{}' after {} attempts",
+                        endpoint.model,
+                        endpoint.source,
+                        attempts,
                         )
                 usage = {"prompt_tokens": 0, "completion_tokens": 0}
+                first_token_recorded = False
                 async for chunk in stream:
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage:
@@ -325,13 +399,19 @@ class PrometheaConversation:
                             "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
                         }
                     if chunk.choices and chunk.choices[0].delta.content:
+                        if not first_token_recorded:
+                            _record_llm_first_token_metrics(time.perf_counter() - started)
+                            first_token_recorded = True
                         yield chunk.choices[0].delta.content
                 _record_llm_metrics(time.perf_counter() - started, usage)
                 return
             except Exception as e:
                 err = str(e)
-                errors.append(f"{candidate_model}: {err}")
-                logger.warning("LLM streaming failed on model '{}': {}", candidate_model, err)
+                errors.append(f"{endpoint.model}: {err}")
+                if endpoint.source == "main" and modalities and multimodal_service.is_unsupported_modality_error(e):
+                    multimodal_service.mark_unsupported(endpoint, modalities)
+                    allow_multimodal_fallback = True
+                logger.warning("LLM streaming failed on model '{}' via '{}': {}", endpoint.model, endpoint.source, err)
 
         error_message = "; ".join(errors) if errors else "unknown error"
         logger.error("LLM streaming call failed on all models: {}", error_message)

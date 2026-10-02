@@ -27,6 +27,8 @@ class PromptAssembler:
             "policy_block": "policy",
             "memory": "memory",
             "memory_block": "memory",
+            "self_model": "self_model",
+            "self_model_block": "self_model",
             "tools": "tools",
             "tools_block": "tools",
             "workspace": "workspace",
@@ -103,7 +105,7 @@ class PromptAssembler:
         - dynamic: expected to change frequently across turns
         """
         normalized = str(block_id or "").strip().lower()
-        if normalized in {"memory", "reasoning", "workspace", "skill", "policy", "org_context", "runtime_context"}:
+        if normalized in {"memory", "self_model", "reasoning", "workspace", "skill", "policy", "org_context", "runtime_context"}:
             return "dynamic"
         if normalized == "identity":
             # When reasoning rewrites full system prompt, identity is dynamic.
@@ -450,6 +452,32 @@ class PromptAssembler:
             )
         )
 
+        self_model_context = getattr(run_context, "self_model_context", None) if run_context is not None else None
+        self_model_prompt = (
+            str(self_model_context.get("prompt_text") or "").strip()
+            if isinstance(self_model_context, dict)
+            else ""
+        )
+        if self_model_prompt and not plan.system_prompt:
+            blocks.append(
+                PromptBlock(
+                    block_id="self_model",
+                    block_type=PromptBlockType.SELF_MODEL,
+                    source="self_model_service",
+                    content=self_model_prompt,
+                    priority=84,
+                    can_compact=True,
+                    metadata={
+                        "revision": self_model_context.get("revision"),
+                        "runtime_stability": self._resolve_runtime_stability(
+                            block_id="self_model",
+                            plan=plan,
+                            source="self_model_service",
+                            user_config=user_config,
+                        ),
+                    },
+                )
+            )
         if tools.enabled:
             blocks.append(
                 PromptBlock(

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from agentkit.security.sandbox import get_sandbox_policy
-from gateway.tool_service import ToolInvocationContext
+from agentkit.security.process_sandbox import SandboxedProcessRunner
+from gateway.capability_service import ToolInvocationContext
+from .workspace_tools import _resolve_identity
 
 
 class RuntimeExecCommandTool:
@@ -16,29 +16,26 @@ class RuntimeExecCommandTool:
     description = "Execute a shell command under sandbox policy."
     official = True
     official_domain = "runtime"
+    side_effect_level = "privileged_host_action"
+
+    def __init__(self, *, workspace_service: Any) -> None:
+        self.workspace_service = workspace_service
 
     async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
         command = str((args or {}).get("command") or "").strip()
         if not command:
             raise ValueError("command is required")
+        user_id, workspace_id = _resolve_identity(args, ctx)
+        handle = self.workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id=workspace_id)
+        root = Path(handle.root_path)
         cwd = str((args or {}).get("cwd") or ".").strip() or "."
         timeout_s = int((args or {}).get("timeout_s") or 60)
         timeout_s = max(1, min(timeout_s, 600))
 
-        decision = get_sandbox_policy().check_command(command, cwd=cwd)
-        if not decision.allowed:
-            raise PermissionError(f"sandbox blocked command: {decision.reason}")
-
         started = time.time()
-        proc = subprocess.run(  # noqa: S603
-            command,
-            cwd=cwd,
-            shell=True,  # noqa: S602
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            encoding="utf-8",
-            errors="replace",
+        proc = await SandboxedProcessRunner().run_async(
+            command, cwd=cwd, workspace_root=root, shell=True, timeout=timeout_s,
+            session_id=ctx.session_id if ctx else None,
         )
         stdout = proc.stdout or ""
         stderr = proc.stderr or ""
@@ -47,8 +44,10 @@ class RuntimeExecCommandTool:
         return {
             "ok": proc.returncode == 0,
             "command": command,
-            "cwd": str(Path(cwd).resolve()),
+            "cwd": str((root / cwd).resolve()),
+            "workspace_id": handle.workspace_id,
             "returncode": proc.returncode,
+            "sandbox": proc.sandbox,
             "stdout": stdout[:max_chars],
             "stderr": stderr[:max_chars],
             "truncated_stdout": len(stdout) > max_chars,
@@ -61,6 +60,7 @@ class RuntimeExecCommandTool:
 
 class RuntimeReadEnvTool:
     tool_id = "runtime.read_env"
+    side_effect_level = "privileged_host_action"
     name = "runtime.read_env"
     description = "Read environment variables by allowlisted names or prefixes."
     official = True

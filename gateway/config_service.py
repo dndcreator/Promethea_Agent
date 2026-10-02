@@ -35,6 +35,9 @@ ENV_ONLY_SECRET_PATHS = (
     ("api", "base_url"),
     ("api", "model"),
     ("api", "failover_models"),
+    ("multimodal", "api_key"),
+    ("multimodal", "base_url"),
+    ("multimodal", "model"),
     ("memory", "api", "api_key"),
     ("memory", "api", "base_url"),
     ("memory", "api", "model"),
@@ -406,11 +409,9 @@ class ConfigService:
     
     async def update_user_config(
         self,
-        params_or_user_id: Any,
+        user_id: str,
         config_updates: Optional[Dict[str, Any]] = None,
         validate: bool = True,
-        user_id: Optional[str] = None,
-        **kwargs
     ) -> Dict[str, Any]:
         """
         Update a user's configuration.
@@ -419,24 +420,6 @@ class ConfigService:
             Result dict: {"success": bool, "message": str, "config": dict}.
         """
         try:
-            if hasattr(params_or_user_id, "config_data") or hasattr(params_or_user_id, "config"):
-                params_obj = params_or_user_id
-                user_id = user_id or kwargs.get("user_id")
-                config_updates = {}
-                legacy_updates = getattr(params_obj, "config_data", {}) or {}
-                canonical_updates = getattr(params_obj, "config", {}) or {}
-                if isinstance(legacy_updates, dict):
-                    config_updates = self._deep_merge(config_updates, dict(legacy_updates))
-                if isinstance(canonical_updates, dict):
-                    config_updates = self._deep_merge(config_updates, dict(canonical_updates))
-                validate = getattr(
-                    params_obj,
-                    "validate_config",
-                    getattr(params_obj, "validate", validate),
-                )
-            else:
-                user_id = params_or_user_id
-
             if not isinstance(user_id, str) or not user_id:
                 return {"success": False, "message": "user_id is required", "config": {}}
 
