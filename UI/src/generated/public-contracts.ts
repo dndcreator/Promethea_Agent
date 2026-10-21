@@ -57,6 +57,9 @@ export interface CanvasEnvironment {
   preview_url: string
   created_at?: string | null
   updated_at?: string | null
+  lifetime?: "session" | "reusable"
+  content_revision?: string
+  diagnostics?: Array<Record<string, unknown>>
 }
 
 export interface CanvasEnvironmentList {
@@ -64,9 +67,138 @@ export interface CanvasEnvironmentList {
   environments?: Array<CanvasEnvironment>
 }
 
+export interface CanvasState {
+  revision?: number
+  value?: Record<string, unknown>
+}
+
+export interface CanvasStateWrite {
+  expected_revision: number
+  value: Record<string, unknown>
+}
+
+export interface CanvasButton {
+  type: string
+  id: string
+  label: string
+  actions: Array<CanvasMutation>
+  variant?: "primary" | "secondary"
+}
+
+export interface CanvasCheckbox {
+  type: string
+  id: string
+  label: string
+  bind: string
+}
+
+export interface CanvasInput {
+  type: string
+  id: string
+  label: string
+  bind: string
+  input_type?: "text" | "number"
+}
+
+export interface CanvasMutation {
+  op: "set" | "increment" | "toggle" | "reset" | "calculate"
+  field?: string | null
+  value?: boolean | number | number | string | null
+  inputs?: Array<string>
+  operation?: "sum" | "difference" | "product" | "ratio" | null
+}
+
+export interface CanvasOption {
+  label: string
+  value: string
+}
+
+export interface CanvasSelect {
+  type: string
+  id: string
+  label: string
+  bind: string
+  options: Array<CanvasOption>
+}
+
+export interface CanvasStack {
+  type: string
+  id: string
+  direction?: "row" | "column"
+  children: Array<CanvasText | CanvasInput | CanvasCheckbox | CanvasSelect | CanvasButton | CanvasTable | CanvasStack>
+}
+
+export interface CanvasTable {
+  type: string
+  id: string
+  columns: Array<string>
+  rows?: Array<Array<boolean | number | number | string>>
+}
+
+export interface CanvasText {
+  type: string
+  id: string
+  text?: string | null
+  bind?: string | null
+  emphasis?: "heading" | "body" | "caption"
+}
+
+export interface CanvasDocument {
+  version?: string
+  title: string
+  language?: string
+  initial_state?: Record<string, unknown>
+  root: CanvasText | CanvasInput | CanvasCheckbox | CanvasSelect | CanvasButton | CanvasTable | CanvasStack
+}
+
+export interface GapCheck {
+  tool_name: string
+  pointer: string
+  expected: unknown
+}
+
+export interface GoalGap {
+  id: string
+  kind: "epistemic" | "achievement"
+  requirement: string
+  check?: GapCheck | null
+  declared_at?: string
+  state?: "open" | "blocked" | "resolved"
+  support?: "none" | "inferred" | "checked"
+  evidence_refs?: Array<string>
+}
+
+export interface GoalGapView {
+  version?: string
+  revision?: number
+  gaps?: Array<GoalGap>
+  focus?: Array<string>
+}
+
+export interface GapChange {
+  id: string
+  state: "open" | "blocked" | "resolved"
+  evidence_refs?: Array<string>
+}
+
+export interface GapSpec {
+  id: string
+  kind: "epistemic" | "achievement"
+  requirement: string
+  check?: GapCheck | null
+}
+
+export interface GapDelta {
+  revision: number
+  create?: Array<GapSpec>
+  updates?: Array<GapChange>
+  focus?: Array<string> | null
+}
+
 export interface RunRequest {
   message: string
   session_id?: string | null
+  task_id?: string | null
   stream?: boolean
   requested_mode?: string | null
   requested_skill?: string | null
@@ -96,6 +228,26 @@ export interface Session {
   last_activity?: number | null
   message_count?: number
   pinned?: boolean
+}
+
+export interface Project {
+  project_id: string
+  name: string
+  created_at: string
+  updated_at: string
+  session_ids?: Array<string>
+}
+
+export interface ProjectList {
+  projects?: Array<Project>
+}
+
+export interface ProjectWrite {
+  name: string
+}
+
+export interface SessionProjectWrite {
+  project_id?: string | null
 }
 
 export interface Event {
@@ -151,6 +303,7 @@ export interface Task {
   created_at?: string | null
   updated_at?: string | null
   completed_at?: string | null
+  goal_gaps?: GoalGapView | null
 }
 
 export interface TaskControlRequest {
@@ -193,6 +346,14 @@ export interface WorkbenchScope {
   run_id?: string | null
 }
 
+export interface WorkbenchReference {
+  reference_id: string
+  kind: string
+  label: string
+  target: string
+  metadata?: Record<string, unknown>
+}
+
 export interface WorkbenchActivity {
   activity_id: string
   event_id?: string | null
@@ -201,12 +362,21 @@ export interface WorkbenchActivity {
   event_type: string
   kind: string
   subject: string
+  subject_i18n?: Record<string, string>
   summary?: string
+  summary_i18n?: Record<string, string>
   status: string
+  started_at?: string | null
+  updated_at?: string | null
+  completed_at?: string | null
+  requires_attention?: boolean
   task_id?: string | null
   run_id?: string | null
+  conversation_turn_id?: string | null
   trace_id?: string | null
+  occurrence_count?: number
   detail?: Record<string, unknown>
+  references?: Array<WorkbenchReference>
 }
 
 export interface WorkbenchWaitingAction {

@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 from typing import Dict, Any, List, Optional
 from .base import ComputerController, ComputerCapability, ComputerResult
+from .browser_runtime import launch_browser
 from agentkit.security.sandbox import get_sandbox_policy
 import logging
 
@@ -29,23 +30,15 @@ class BrowserController(ComputerController):
         self._downloads: asyncio.Queue = asyncio.Queue(maxsize=128)
         self._download_tasks: set[asyncio.Task] = set()
         self._download_pages: Dict[int, Any] = {}
+        self.initialization_error: Optional[Dict[str, str]] = None
     
     async def initialize(self) -> bool:
         """Initialize browser, context and first page."""
+        self.initialization_error = None
         try:
             from playwright.async_api import async_playwright
             
             self.playwright = await async_playwright().start()
-
-            executable_path = Path(self.playwright.chromium.executable_path)
-            if not executable_path.exists():
-                logger.warning(
-                    "Playwright Chromium is not installed; skipping browser controller. "
-                    "Run: playwright install chromium"
-                )
-                await self.playwright.stop()
-                self.playwright = None
-                return False
 
             launch_timeout_ms = int(os.getenv("COMPUTER_BROWSER_LAUNCH_TIMEOUT_MS", "5000"))
             from config import config
@@ -55,7 +48,8 @@ class BrowserController(ComputerController):
                 logger.warning("Chromium process sandbox explicitly disabled by configuration")
                 launch_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
             
-            self.browser = await self.playwright.chromium.launch(
+            self.browser = await launch_browser(
+                self.playwright,
                 headless=False,
                 chromium_sandbox=not config.sandbox.browser_disable_chromium_sandbox,
                 timeout=launch_timeout_ms,
@@ -88,11 +82,17 @@ class BrowserController(ComputerController):
             return True
             
         except ImportError:
+            self.initialization_error = {"code": "BROWSER_DEPENDENCY_MISSING", "message": "Playwright Python dependency is missing."}
             logger.error("Playwright not installed. Run: pip install playwright && playwright install chromium")
             return False
         except Exception as e:
+            self.initialization_error = {"code": getattr(e, "code", "BROWSER_LAUNCH_FAILED"), "message": str(e)}
             logger.error(f"Failed to initialize browser: {e}")
+            await self.cleanup()
             return False
+        except asyncio.CancelledError:
+            await self.cleanup()
+            raise
     
     async def cleanup(self) -> bool:
         """Clean up browser resources and save state."""

@@ -4,25 +4,39 @@ from gateway.conversation_service import ConversationService
 
 
 class _CapabilityService:
-    async def get_tool_catalog(self, *, run_context=None, user_config=None):
-        _ = (run_context, user_config)
-        return [
+    async def build_capability_snapshot(self, *, run_context=None, user_config=None, preferred_tools=None):
+        _ = (run_context, user_config, preferred_tools)
+        rows = [
             {
-                "tool_type": "mcp",
-                "service_name": "computer_control",
-                "tool_name": "write_file",
+                "name": "computer_control.write_file",
                 "description": "Write text file quickly.",
                 "callable_now": True,
+                "callable_reason": "callable",
                 "requires_confirmation": True,
+                "schema_status": "declared",
+                "capability_type": "mcp",
             },
             {
-                "tool_type": "mcp",
-                "service_name": "hidden",
-                "tool_name": "offline",
+                "name": "hidden.offline",
                 "description": "Unavailable tool.",
                 "callable_now": False,
+                "callable_reason": "service_unavailable",
+                "requires_confirmation": False,
+                "schema_status": "missing",
+                "capability_type": "mcp",
             },
         ]
+        return {
+            "snapshot_id": "caps-1",
+            "compact_index": rows,
+            "selected_specs": [
+                {
+                    "name": "computer_control.write_file",
+                    "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
+                    "output_schema": {},
+                }
+            ],
+        }
 
 
 async def test_runtime_snapshot_preserves_structured_registered_tools():
@@ -36,26 +50,21 @@ async def test_runtime_snapshot_preserves_structured_registered_tools():
     assert tools == [
         {
             "name": "computer_control.write_file",
-            "service_name": "computer_control",
-            "tool_name": "write_file",
-            "tool_type": "mcp",
             "description": "Write text file quickly.",
             "requires_confirmation": True,
             "callable_now": True,
-            "callable_reason": "",
-            "policy_allowed": True,
-            "dependency_ready": True,
+            "callable_reason": "callable",
+            "schema_status": "declared",
+            "capability_type": "mcp",
+            "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}},
         },
         {
             "name": "hidden.offline",
-            "service_name": "hidden",
-            "tool_name": "offline",
-            "tool_type": "mcp",
             "description": "Unavailable tool.",
             "requires_confirmation": False,
             "callable_now": False,
-            "callable_reason": "",
-            "policy_allowed": True,
-            "dependency_ready": True,
+            "callable_reason": "service_unavailable",
+            "schema_status": "missing",
+            "capability_type": "mcp",
         }
     ]

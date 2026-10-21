@@ -10,8 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
-from agentkit.mcp.action_protocol import parse_action_envelope
-from agentkit.mcp.tool_call import parse_tool_calls
 from gateway.action.models import resolve_action_budget
 from gateway.protocol import EventType, RequestType
 
@@ -21,48 +19,6 @@ from .auth import get_current_user_id
 
 
 router = APIRouter()
-
-
-def _is_incomplete_routing_envelope(text: str) -> bool:
-    """Return whether a stream prefix can still be a runtime routing object."""
-    candidate = str(text or "").lstrip()
-    if not candidate:
-        return True
-    if candidate.startswith("```"):
-        line_end = candidate.find("\n")
-        if line_end < 0:
-            return True
-        candidate = candidate[line_end + 1 :].lstrip()
-        if not candidate:
-            return True
-    if not candidate.startswith("{"):
-        return False
-
-    tail = candidate[1:].lstrip()
-    if not tail:
-        return True
-    if not tail.startswith('"'):
-        return False
-
-    escaped = False
-    closing_quote = None
-    for index, char in enumerate(tail[1:], start=1):
-        if escaped:
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
-        if char == '"':
-            closing_quote = index
-            break
-    if closing_quote is None:
-        return True
-    try:
-        first_key = json.loads(tail[: closing_quote + 1])
-    except json.JSONDecodeError:
-        return False
-    return first_key in {"action", "tool_name", "agentType", "service_name"}
 
 
 def _normalize_tool_args(value):
@@ -181,6 +137,8 @@ async def chat(
                     body.setdefault("seq", stream_seq)
                     body.setdefault("request_id", request_id)
                     body.setdefault("source", "gateway.http.chat")
+                    if request.task_id:
+                        body.setdefault("task_id", request.task_id)
                     return (
                         f"id: {event_id}\n"
                         f"event: {event_type}\n"
@@ -200,6 +158,7 @@ async def chat(
                         "requested_mode": request.requested_mode,
                         "requested_skill": request.requested_skill,
                         "requested_workflow": request.requested_workflow,
+                        "task_id": request.task_id,
                         "metadata": dict(request.metadata or {}),
                         "attachments": attachments,
                     }
@@ -210,6 +169,7 @@ async def chat(
                         channel_id="web",
                         input_payload=run_params,
                     )
+                    run_context.conversation_turn_id = turn_id
                     merged_config = (
                         gateway_server.config_service.get_merged_config(user_id)
                         if gateway_server.config_service
@@ -220,7 +180,11 @@ async def chat(
                         requested_skill=request.requested_skill,
                         user_config=merged_config if isinstance(merged_config, dict) else {},
                     )
-                    yield _sse({"type": "session_started", "session_id": session_id})
+                    yield _sse({
+                        "type": "session_started",
+                        "session_id": session_id,
+                        "conversation_turn_id": turn_id,
+                    })
 
                     began = message_manager.begin_turn(
                         session_id=session_id,
@@ -286,13 +250,10 @@ async def chat(
                     messages = prepared["messages"]
                     user_config = prepared["user_config"]
                     prompt_policy = prepared.get("prompt_policy", {}) if isinstance(prepared, dict) else {}
-                    needs_tools = bool(
-                        isinstance(prompt_policy, dict) and prompt_policy.get("need_tools") is True
-                    )
                     tool_budget = int(
                         (prepared.get("execution_budget") or {}).get("tool_budget")
                         or (prompt_policy.get("tool_budget") if isinstance(prompt_policy, dict) else 0)
-                        or (resolve_action_budget(user_config) if needs_tools else 0)
+                        or resolve_action_budget(user_config)
                     )
                     reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
                     tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
@@ -309,96 +270,26 @@ async def chat(
 
                     full_text = ""
                     memory_write_summary = None
-                    stream_failed = False
-                    text_already_streamed = False
-                    run_chat_loop_result = {}
-                    if needs_tools:
-                        buffered = ""
-                        direct_stream = False
-                        async for chunk in gateway_server.conversation_service.call_llm_stream(
-                            messages, user_config=user_config, user_id=user_id
-                        ):
-                            if isinstance(chunk, str) and chunk.startswith("[error]"):
-                                stream_failed = True
-                                break
-                            if not chunk:
-                                continue
-                            buffered += chunk
-                            if not direct_stream:
-                                prefix = buffered.lstrip()
-                                if _is_incomplete_routing_envelope(prefix):
-                                    continue
-                                direct_stream = True
-                                full_text = buffered
-                                yield _sse({"type": "text", "content": buffered})
-                                text_already_streamed = True
-                            else:
-                                full_text += chunk
-                                yield _sse({"type": "text", "content": chunk})
-                                text_already_streamed = True
+                    output_queue: asyncio.Queue = asyncio.Queue()
+                    stream_finished = object()
 
-                        if not stream_failed and not direct_stream:
-                            action = parse_action_envelope(buffered)
-                            if action is not None and action.action == "answer":
-                                full_text = action.content or ""
-                                run_chat_loop_result = {"status": "success", "content": full_text}
-                                if full_text:
-                                    yield _sse({"type": "text", "content": full_text})
-                                    text_already_streamed = True
-                            elif parse_tool_calls(buffered):
-                                yield _sse(
-                                    {
-                                        "type": "tool_meta",
-                                        "session_id": session_id,
-                                        "status": "executing",
-                                        "message": "The main model selected a runtime capability.",
-                                    }
-                                )
-                                run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
-                                    messages,
-                                    user_config=user_config,
-                                    session_id=session_id,
-                                    user_id=user_id,
-                                    run_context=run_context,
-                                    max_recursion=tool_budget,
-                                    initial_response={"content": buffered},
-                                    tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
-                                        name,
-                                        payload,
-                                        session_id=session_id,
-                                        user_id=user_id,
-                                        request_id=request_id,
-                                        connection_id=request_id,
-                                        run_context=run_context,
-                                        user_config=user_config,
-                                    ),
-                                )
-                                full_text = run_chat_loop_result.get("content", "")
-                            else:
-                                full_text = buffered
-                                run_chat_loop_result = {"status": "success", "content": full_text}
-                                if full_text:
-                                    yield _sse({"type": "text", "content": full_text})
-                                    text_already_streamed = True
-                    else:
-                        async for chunk in gateway_server.conversation_service.call_llm_stream(
-                            messages, user_config=user_config, user_id=user_id
-                        ):
-                            if isinstance(chunk, str) and chunk.startswith("[error]"):
-                                stream_failed = True
-                                break
-                            if chunk:
-                                full_text += chunk
-                                yield _sse({"type": "text", "content": chunk})
+                    async def _publish_answer_delta(delta: str) -> None:
+                        if delta:
+                            await output_queue.put(("text", delta))
 
-                    if stream_failed:
-                        run_chat_loop_result = await gateway_server.conversation_service.run_chat_loop(
+                    async def _publish_reasoning_delta(payload: Dict[str, Any]) -> None:
+                        if payload:
+                            await output_queue.put(("reasoning", dict(payload)))
+
+                    action_task = asyncio.create_task(
+                        gateway_server.conversation_service.run_chat_loop(
                             messages,
                             user_config=user_config,
                             session_id=session_id,
                             user_id=user_id,
                             run_context=run_context,
-                            max_recursion=tool_budget or None,
+                            max_recursion=tool_budget,
+                            output_sink=_publish_answer_delta,
                             tool_executor=lambda name, payload: gateway_server._execute_tool_for_chat(
                                 name,
                                 payload,
@@ -409,14 +300,52 @@ async def chat(
                                 run_context=run_context,
                                 user_config=user_config,
                             ),
+                            reasoning_sink=_publish_reasoning_delta,
                         )
-                        full_text = run_chat_loop_result.get("content", "")
+                    )
+                    action_task.add_done_callback(lambda _task: output_queue.put_nowait(stream_finished))
+                    streamed_text = ""
+                    try:
+                        while True:
+                            item = await output_queue.get()
+                            if item is stream_finished:
+                                break
+                            event_type, event_payload = item
+                            if event_type == "text":
+                                streamed_text += str(event_payload)
+                                yield _sse({"type": "text", "content": event_payload})
+                            else:
+                                yield _sse({
+                                    "type": "reasoning",
+                                    "conversation_turn_id": turn_id,
+                                    **dict(event_payload),
+                                })
+                        run_chat_loop_result = await action_task
+                    finally:
+                        if not action_task.done():
+                            action_task.cancel()
+                            await asyncio.gather(action_task, return_exceptions=True)
+                    full_text = str(run_chat_loop_result.get("content") or "")
+
+                    run_status = str(run_chat_loop_result.get("status") or "success").lower()
+                    if run_status not in {"success", "ok", "completed", "needs_confirmation"}:
+                        error = run_chat_loop_result.get("error")
+                        message_manager.abort_turn(
+                            session_id, turn_id, user_id=user_id,
+                            error=error if isinstance(error, dict) else {"message": str(error or "agent run failed")},
+                            reasoning_tree_id=tree_id,
+                            reasoning_steps=list(run_chat_loop_result.get("reasoning_steps") or []),
+                        )
+                        detail = error.get("message") if isinstance(error, dict) else str(error or "agent run failed")
+                        yield _sse({"type": "error", "session_id": session_id, "content": detail, "error_detail": {"code": (error or {}).get("code", "RUN_FAILED") if isinstance(error, dict) else "RUN_FAILED", "message": detail}})
+                        return
 
                     confirmation_payload = None
                     if isinstance(run_chat_loop_result, dict) and run_chat_loop_result.get("status") == "needs_confirmation":
                         pending = dict(run_chat_loop_result)
-                        pending["current_messages"] = messages
+                        pending.setdefault("current_messages", messages)
                         pending["turn_id"] = turn_id
+                        pending["reasoning_tree_id"] = tree_id
                         message_manager.set_pending_confirmation(
                             session_id,
                             pending,
@@ -428,16 +357,24 @@ async def chat(
                             "tool_name": run_chat_loop_result.get("tool_name"),
                             "args": _normalize_tool_args(run_chat_loop_result.get("args")),
                         }
-                        full_text = f"Tool `{run_chat_loop_result.get('tool_name')}` requires confirmation."
+                        full_text = ""
 
-                    if (needs_tools or stream_failed) and full_text and not text_already_streamed:
+                    if full_text and not streamed_text:
                         yield _sse({"type": "text", "content": full_text})
+                    elif full_text.startswith(streamed_text) and len(full_text) > len(streamed_text):
+                        yield _sse({"type": "text", "content": full_text[len(streamed_text) :]})
+
+                    if confirmation_payload:
+                        yield _sse({"type": "done", "session_id": session_id, **confirmation_payload})
+                        return
 
                     committed = message_manager.commit_turn(
                         session_id=session_id,
                         turn_id=turn_id,
                         assistant_content=full_text,
                         user_id=user_id,
+                        reasoning_tree_id=tree_id,
+                        reasoning_steps=list(run_chat_loop_result.get("reasoning_steps") or []),
                     )
                     if not committed:
                         yield _sse({"type": "error", "content": "failed to commit turn"})
@@ -447,35 +384,34 @@ async def chat(
                         memory_write_summary = _summarize_memory_visibility(
                             run_chat_loop_result.get("memory_visibility")
                         )
-                    if not stream_failed:
-                        interaction_context = []
-                        try:
-                            interaction_context = message_manager.get_recent_messages(
-                                session_id,
-                                count=6,
-                                user_id=user_id,
-                            )
-                        except Exception:
-                            interaction_context = []
-                        interaction_task = _emit_interaction_completed_async(
-                            gateway_server,
-                            {
-                                "session_id": session_id,
-                                "user_id": user_id,
-                                "channel": "web",
-                                "user_input": user_text,
-                                "assistant_output": full_text,
-                                "interaction_context": interaction_context,
-                                "attachments": attachments,
-                            },
+                    interaction_context = []
+                    try:
+                        interaction_context = message_manager.get_recent_messages(
+                            session_id,
+                            count=6,
+                            user_id=user_id,
                         )
-                        if interaction_task is not None:
-                            try:
-                                await asyncio.wait_for(asyncio.shield(interaction_task), timeout=0.8)
-                            except asyncio.TimeoutError:
-                                pass
-                            except Exception:
-                                pass
+                    except Exception:
+                        interaction_context = []
+                    interaction_task = _emit_interaction_completed_async(
+                        gateway_server,
+                        {
+                            "session_id": session_id,
+                            "user_id": user_id,
+                            "channel": "web",
+                            "user_input": user_text,
+                            "assistant_output": full_text,
+                            "interaction_context": interaction_context,
+                            "attachments": attachments,
+                        },
+                    )
+                    if interaction_task is not None:
+                        try:
+                            await asyncio.wait_for(asyncio.shield(interaction_task), timeout=0.8)
+                        except asyncio.TimeoutError:
+                            pass
+                        except Exception:
+                            pass
 
                     if not memory_write_summary:
                         memory_write_summary = _drain_memory_visibility(
@@ -485,7 +421,11 @@ async def chat(
                             limit=3,
                         )
 
-                    done_payload = {"type": "done", "session_id": session_id}
+                    done_payload = {
+                        "type": "done",
+                        "session_id": session_id,
+                        "conversation_turn_id": turn_id,
+                    }
                     if confirmation_payload:
                         done_payload.update(confirmation_payload)
                     if memory_write_summary:
@@ -530,8 +470,11 @@ async def chat(
                             done_payload["tree_id"] = tree_id
 
                     yield _sse(done_payload)
-                except Exception as e:
+                except asyncio.CancelledError:
                     message_manager.abort_turn(session_id, turn_id, user_id=user_id)
+                    raise
+                except Exception as e:
+                    message_manager.abort_turn(session_id, turn_id, user_id=user_id, error={"code": "RUN_FAILED", "message": str(e)})
                     logger.error(f"chat stream failed: {e}")
                     yield _sse({"type": "error", "content": str(e)})
 
@@ -554,6 +497,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                     "attachments": attachments,
                 },
@@ -572,6 +516,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                 }
             )
@@ -588,6 +533,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                     "attachments": attachments,
                 },
@@ -599,6 +545,9 @@ async def chat(
         return ChatResponse(
             response=mapped.get("response", ""),
             session_id=mapped.get("session_id"),
+            run_id=mapped.get("run_id"),
+            request_id=mapped.get("request_id"),
+            trace_id=mapped.get("trace_id"),
             status=mapped.get("status", "success"),
             tool_call_id=mapped.get("tool_call_id"),
             tool_name=mapped.get("tool_name"),

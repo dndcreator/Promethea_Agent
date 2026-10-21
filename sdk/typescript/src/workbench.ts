@@ -24,6 +24,12 @@ export class WorkbenchClient {
     return await this.transport.json<WorkbenchSnapshot>(this.path('/api/workbench/snapshot', query), { signal })
   }
 
+  async artifact(workspaceId: string, path: string, signal?: AbortSignal): Promise<Blob> {
+    const params = new URLSearchParams({ workspace_id: workspaceId, path })
+    const response = await this.transport.send(`/api/workbench/artifact?${params.toString()}`, { signal })
+    return await response.blob()
+  }
+
   async *stream(query: WorkbenchQuery = {}, signal?: AbortSignal): AsyncGenerator<WorkbenchSnapshot> {
     const response = await this.transport.send(this.path('/api/workbench/stream', query), {
       headers: { Accept: 'text/event-stream' },

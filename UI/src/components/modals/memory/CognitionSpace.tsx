@@ -32,7 +32,7 @@ export default function CognitionSpace({ bundle, loading, onOpenReview }: Props)
   const stateStats = (stats.states || {}) as Record<string, number>
 
   return (
-    <div className="relative h-full overflow-hidden bg-[#f1f2ef] text-text-strong">
+    <div className="relative h-full overflow-hidden bg-bg-page text-text-strong">
       <header className="relative z-20 flex min-h-[58px] items-center gap-2 border-b border-black/5 bg-white/70 px-3 backdrop-blur-md sm:gap-4 sm:px-5">
         <div className="min-w-0">
           <div className="text-sm font-semibold">{t('意识空间', 'Cognition Space')}</div>
@@ -60,7 +60,7 @@ export default function CognitionSpace({ bundle, loading, onOpenReview }: Props)
               title={t('空间视图', 'Space view')}
               aria-label={t('空间视图', 'Space view')}
               onClick={() => setMode('space')}
-              className={`grid h-8 w-8 place-items-center ${mode === 'space' ? 'bg-[#2f3c39] text-white' : 'text-text-muted hover:text-text-strong'}`}
+              className={`grid h-8 w-8 place-items-center ${mode === 'space' ? 'bg-brand-600 text-white' : 'text-text-muted hover:text-text-strong'}`}
             >
               <Orbit size={16} />
             </button>
@@ -69,7 +69,7 @@ export default function CognitionSpace({ bundle, loading, onOpenReview }: Props)
               title={t('列表视图', 'List view')}
               aria-label={t('列表视图', 'List view')}
               onClick={() => setMode('list')}
-              className={`grid h-8 w-8 place-items-center ${mode === 'list' ? 'bg-[#2f3c39] text-white' : 'text-text-muted hover:text-text-strong'}`}
+              className={`grid h-8 w-8 place-items-center ${mode === 'list' ? 'bg-brand-600 text-white' : 'text-text-muted hover:text-text-strong'}`}
             >
               <LayoutList size={16} />
             </button>
@@ -112,7 +112,7 @@ function CognitionCanvas({
   onSelect: (item: CognitionItem) => void
 }) {
   return (
-    <div className="relative h-full overflow-hidden cognition-field">
+    <div className="cognition-field cognition-cloud">
       {items.map((item, index) => {
         const position = cognitionPosition(item.cognition_id, index)
         const selected = selectedId === item.cognition_id
@@ -121,24 +121,20 @@ function CognitionCanvas({
             key={item.cognition_id}
             type="button"
             onClick={() => onSelect(item)}
-            className={`cognition-thought absolute max-w-[40vw] text-left leading-7 transition-colors focus:outline-none sm:max-w-[260px] ${
-              selected ? 'text-[#17201e]' : stateTextColor(item.state || 'current')
+            className={`cognition-thought text-left leading-7 transition-colors ${
+              selected ? 'text-text-strong' : stateTextColor(item.state || 'current')
             }`}
             style={{
-              left: `${position.left}%`,
-              top: `${position.top}%`,
               fontSize: `${14 + Math.round(Number(item.importance || 0.5) * 5)}px`,
               animationDelay: `${position.delay}s`,
               animationDuration: `${position.duration}s`,
             }}
           >
             <span className={`mr-2 inline-block h-1.5 w-1.5 rounded-full align-middle ${stateDotColor(item.state || 'current')}`} />
-            <span>{item.content}</span>
+            <span className="line-clamp-3">{item.content}</span>
           </button>
         )
       })}
-      <div className="pointer-events-none absolute inset-x-[12%] top-1/2 h-px bg-black/[0.04]" />
-      <div className="pointer-events-none absolute bottom-[12%] top-[12%] left-1/2 w-px bg-black/[0.035]" />
     </div>
   )
 }
@@ -238,11 +234,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 function cognitionPosition(id: string, index: number) {
   const hash = Array.from(id).reduce((value, char) => ((value * 31) + char.charCodeAt(0)) >>> 0, 7)
-  const column = index % 4
-  const row = Math.floor(index / 4)
   return {
-    left: 6 + column * 23 + (hash % 5),
-    top: 12 + row * 27 + ((hash >>> 3) % 7),
     delay: -((hash % 12) + index),
     duration: 18 + (hash % 9),
   }
@@ -251,15 +243,15 @@ function cognitionPosition(id: string, index: number) {
 function stateTextColor(state: string) {
   if (state === 'uncertain') return 'text-amber-700/75'
   if (state === 'historical') return 'text-text-muted/45'
-  if (state === 'evolving') return 'text-[#526963]/70'
-  return 'text-[#34413e]/75'
+  if (state === 'evolving') return 'text-[#687c9b]/80'
+  return 'text-text-normal/80'
 }
 
 function stateDotColor(state: string) {
   if (state === 'uncertain') return 'bg-amber-500'
   if (state === 'historical') return 'bg-gray-400'
-  if (state === 'evolving') return 'bg-[#6f8c85]'
-  return 'bg-[#2f5f58]'
+  if (state === 'evolving') return 'bg-[#8198b5]'
+  return 'bg-brand-400'
 }
 
 function stateLabel(state: string, t: (zh: string, en: string) => string) {

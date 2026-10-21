@@ -1,0 +1,75 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+from gateway.capability_service import ToolInvocationContext
+from gateway.tools.schema import input_object, integer, text
+
+
+def _resolve_user_session(
+    args: Dict[str, Any],
+    ctx: Optional[ToolInvocationContext],
+) -> tuple[str, str]:
+    user_id = str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "default_user").strip() or "default_user"
+    session_id = str((args or {}).get("session_id") or (ctx.session_id if ctx else "") or "default").strip() or "default"
+    return user_id, session_id
+
+
+class SessionRecentMessagesTool:
+    input_schema = input_object({"count": integer(minimum=1)})
+    tool_id = "session.recent_messages"
+    side_effect_level = "read_only"
+    name = "session.recent_messages"
+    description = "Get recent messages in current session."
+    domain = "session"
+
+    def __init__(self, *, message_manager: Any) -> None:
+        self.message_manager = message_manager
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        user_id, session_id = _resolve_user_session(args, ctx)
+        count = int((args or {}).get("count") or 20)
+        count = max(1, min(count, 200))
+        rows = self.message_manager.get_recent_messages(
+            session_id,
+            count=count,
+            user_id=user_id,
+        )
+        return {"session_id": session_id, "user_id": user_id, "count": len(rows), "messages": rows}
+
+
+class SessionInfoTool:
+    input_schema = input_object()
+    tool_id = "session.info"
+    side_effect_level = "read_only"
+    name = "session.info"
+    description = "Get summary info for a session."
+    domain = "session"
+
+    def __init__(self, *, message_manager: Any) -> None:
+        self.message_manager = message_manager
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        user_id, session_id = _resolve_user_session(args, ctx)
+        info = self.message_manager.get_session_info(session_id, user_id=user_id)
+        return {"ok": bool(info), "info": info}
+
+
+class SessionListTool:
+    input_schema = input_object({"last_activity": text()})
+    tool_id = "session.list"
+    side_effect_level = "read_only"
+    name = "session.list"
+    description = "List sessions for current user."
+    domain = "session"
+
+    def __init__(self, *, message_manager: Any) -> None:
+        self.message_manager = message_manager
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        user_id = str((args or {}).get("user_id") or (ctx.user_id if ctx else "") or "default_user").strip() or "default_user"
+        sessions = self.message_manager.get_all_sessions_info(user_id=user_id)
+        rows = list((sessions or {}).values())
+        rows = [x for x in rows if isinstance(x, dict)]
+        rows.sort(key=lambda x: float(x.get("last_activity") or 0.0), reverse=True)
+        return {"user_id": user_id, "count": len(rows), "sessions": rows}

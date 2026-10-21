@@ -30,7 +30,6 @@ from gateway.action import ActionService
 from gateway.config_service import ConfigService
 from gateway.conversation_service import ConversationService
 from gateway.memory_service import MemoryService
-from gateway.org_context_service import OrgContextService
 from gateway.reasoning_service import ReasoningService
 from gateway.self_evolve_module import SelfEvolveModule
 from gateway.self_model_service import SelfModelService
@@ -250,14 +249,15 @@ class GatewayIntegration:
             if self.gateway_server:
                 self.gateway_server.plugin_runtime = registry
 
-            try:
-                from gateway.extension_catalog import reload_extensions
+            if self.gateway_server is not None and (force or changed):
+                try:
+                    from gateway.extension_catalog import reload_extensions
 
-                extension_refresh = reload_extensions()
-                if extension_refresh.get("registered"):
-                    changed = True
-            except Exception as e:
-                logger.warning("Failed refreshing MCP extensions during plugin reload: {}", e)
+                    extension_refresh = await reload_extensions(self.gateway_server)
+                    if extension_refresh.get("registered"):
+                        changed = True
+                except Exception as e:
+                    logger.warning("Failed refreshing MCP extensions during plugin reload: {}", e)
 
             added_channels = await self._sync_channels_from_registry()
             if added_channels:
@@ -297,8 +297,6 @@ class GatewayIntegration:
         self.gateway_server.config_service = ConfigService(event_emitter=event_emitter)
         self.gateway_server.workspace_service = WorkspaceService(event_emitter=event_emitter)
 
-        from gateway.official_tools import register_official_tools
-
         if not self.gateway_server.capability_service:
             from gateway.capability_service import CapabilityService
 
@@ -333,11 +331,20 @@ class GatewayIntegration:
             capability_service=self.gateway_server.capability_service,
             config_service=self.gateway_server.config_service,
         )
-        self.gateway_server.org_context_service = OrgContextService(
-            config_service=self.gateway_server.config_service,
-            memory_service=self.gateway_server.memory_service,
-            llm_client=conversation_core,
-        )
+        try:
+            from gateway.org_brain_store import OrgBrainStore
+            from gateway.org_context_service import OrgContextService
+
+            self.gateway_server.org_context_service = OrgContextService(
+                config_service=self.gateway_server.config_service,
+                memory_service=self.gateway_server.memory_service,
+                llm_client=conversation_core,
+                store=OrgBrainStore(Path(__file__).resolve().parent / "config" / "users" / "org_brain.sqlite3"),
+                event_emitter=event_emitter,
+            )
+        except ImportError as exc:
+            self.gateway_server.org_context_service = None
+            logger.info("Optional Organization Brain component is not installed: {}", exc)
         from gateway.task_service import TaskService
         self.gateway_server.task_service = TaskService(event_emitter=event_emitter)
         self.gateway_server.self_model_service = SelfModelService(
@@ -382,6 +389,8 @@ class GatewayIntegration:
         self.gateway_server.action_service = ActionService(
             event_emitter=event_emitter,
             conversation_core=conversation_core,
+            task_service=self.gateway_server.task_service,
+            capability_service=self.gateway_server.capability_service,
         )
 
         self.gateway_server.conversation_service = ConversationService(
@@ -397,15 +406,7 @@ class GatewayIntegration:
             capability_service=self.gateway_server.capability_service,
             self_model_service=self.gateway_server.self_model_service,
         )
-        # Re-register official tools after all dependent services are fully wired.
-        # This closes initialization-order gaps (memory/workflow/runtime dependent tools).
-        register_official_tools(
-            capability_service=self.gateway_server.capability_service,
-            workspace_service=self.gateway_server.workspace_service,
-            memory_service=self.gateway_server.memory_service,
-            message_manager=message_manager,
-            gateway_server=self.gateway_server,
-        )
+        self.gateway_server.ensure_capability_service().ensure_discovered_tools()
 
         event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)
 

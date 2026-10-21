@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import hashlib
+import shutil
+from uuid import uuid4
 from pathlib import Path
 from typing import Any, Dict
 from urllib.parse import urlencode, urlsplit
 
 import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from jose import JWTError
 
 from computer.execution_context import ComputerWorkspace, bind_workspace
-from gateway.public_contracts import CanvasEnvironmentList
+from computer.canvas_document import artifact_files, render_canvas_html, decode_canvas_library, canvas_csp, is_redirected_path
+from gateway.public_contracts import CanvasEnvironmentList, CanvasState, CanvasStateWrite, CanvasEnvironment
+from pydantic import BaseModel, Field
 
 from ..dispatcher import get_gateway_server
 from .auth import AUTH_COOKIE_NAME, get_current_user_id, user_id_from_access_token
@@ -36,15 +41,10 @@ _MAX_PROXY_BODY_BYTES = 16 * 1024 * 1024
 _MAX_WEBSOCKET_MESSAGE_BYTES = 8 * 1024 * 1024
 
 
-def _preview_headers() -> Dict[str, str]:
+def _preview_headers(*, process: bool = False) -> Dict[str, str]:
     return {
         "Cache-Control": "no-store",
-        "Content-Security-Policy": (
-            "sandbox allow-scripts allow-forms allow-modals; "
-            "default-src 'self' data: blob:; img-src 'self' data: blob:; "
-            "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
-            "connect-src 'self' ws: wss:"
-        ),
+        "Content-Security-Policy": canvas_csp(process=process),
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer",
     }
@@ -55,7 +55,7 @@ def _proxy_response_headers(headers: aiohttp.typedefs.LooseHeaders) -> Dict[str,
         key: value for key, value in headers.items()
         if key.lower() in _FORWARDED_RESPONSE_HEADERS and key.lower() not in _HOP_BY_HOP_HEADERS
     }
-    forwarded.update(_preview_headers())
+    forwarded.update(_preview_headers(process=True))
     return forwarded
 
 
@@ -100,12 +100,25 @@ async def _environment(user_id: str, workspace_id: str, environment_id: str) -> 
     return scope, dict(result.result)
 
 
-def _public_environment(workspace_id: str, row: Dict[str, Any]) -> Dict[str, Any]:
+def _public_environment(workspace_id: str, row: Dict[str, Any], root: Path | None = None) -> Dict[str, Any]:
     environment_id = str(row.get("environment_id") or "")
+    revision = str(row.get("revision", 0))
+    if root is not None and row.get("kind") == "static":
+        app = (root / str(row.get("root") or ".")).resolve()
+        app.relative_to(root.resolve())
+        digest = hashlib.sha256()
+        for path in artifact_files(app):
+            relative = path.relative_to(app)
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            digest.update(relative.as_posix().encode())
+            digest.update(path.read_bytes())
+        revision = digest.hexdigest()
     return {
         **row,
         "workspace_id": workspace_id,
         "preview_url": f"/api/canvas/{workspace_id}/{environment_id}/preview/",
+        "content_revision": revision,
     }
 
 
@@ -121,8 +134,131 @@ async def list_canvas_environments(
         raise HTTPException(status_code=400, detail=result.error or "Unable to list canvas environments")
     return {
         "workspace_id": scope.workspace_id,
-        "environments": [_public_environment(scope.workspace_id, row) for row in (result.result or [])],
+        "environments": [_public_environment(scope.workspace_id, row, scope.root) for row in (result.result or [])],
     }
+
+
+async def _canvas_action(user_id: str, workspace_id: str, environment_id: str, action: str, params: dict | None = None):
+    service, handle, _ = _runtime_and_scope(user_id, workspace_id)
+    with bind_workspace(handle):
+        result = await service.execute_computer_action("environment", action, {**(params or {}), "environment_id": environment_id})
+    if not result.success:
+        raise HTTPException(status_code=409, detail=result.error)
+    return result.result
+
+
+@router.get("/{workspace_id}/{environment_id}/state", response_model=CanvasState)
+async def get_canvas_state(workspace_id: str, environment_id: str, user_id: str = Depends(get_current_user_id)):
+    return await _canvas_action(user_id, workspace_id, environment_id, "state_get")
+
+
+@router.put("/{workspace_id}/{environment_id}/state", response_model=CanvasState)
+async def set_canvas_state(workspace_id: str, environment_id: str, body: CanvasStateWrite, user_id: str = Depends(get_current_user_id)):
+    return await _canvas_action(user_id, workspace_id, environment_id, "state_set", body.model_dump())
+
+
+class CanvasDiagnostic(BaseModel):
+    message: str = Field(max_length=2000)
+
+
+@router.post("/{workspace_id}/{environment_id}/diagnostics")
+async def report_canvas_error(workspace_id: str, environment_id: str, body: CanvasDiagnostic, user_id: str = Depends(get_current_user_id)):
+    return await _canvas_action(user_id, workspace_id, environment_id, "report_error", body.model_dump())
+
+
+@router.post("/{workspace_id}/{environment_id}/retain", response_model=CanvasEnvironment)
+async def retain_canvas(workspace_id: str, environment_id: str, user_id: str = Depends(get_current_user_id)):
+    scope, row = await _environment(user_id, workspace_id, environment_id)
+    if row.get("kind") != "static":
+        raise HTTPException(status_code=400, detail="only static canvas artifacts can be retained")
+    service, _, _ = _runtime_and_scope(user_id, workspace_id)
+    handle = service.workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id="_canvas_library")
+    source = (scope.root / row["root"]).resolve()
+    source.relative_to(scope.root)
+    new_id = f"env_{uuid4().hex}"
+    relative = f".canvas_apps/{new_id}"
+    destination = Path(handle.root_path) / relative
+    destination.mkdir(parents=True, exist_ok=False)
+    try:
+        for path in artifact_files(source):
+            target = destination / path.relative_to(source)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        with bind_workspace(handle):
+            registered = await service.execute_computer_action("environment", "register", {
+                "environment_id": new_id, "name": row["name"], "root": relative,
+                "entrypoint": row["entrypoint"], "lifetime": "reusable",
+            })
+        if not registered.success:
+            raise HTTPException(status_code=409, detail=registered.error)
+        state = await _canvas_action(user_id, workspace_id, environment_id, "state_get")
+        await _canvas_action(user_id, handle.workspace_id, new_id, "state_set", {"expected_revision": 0, "value": state["value"]})
+        return _public_environment(handle.workspace_id, registered.result, Path(handle.root_path))
+    except BaseException:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise
+
+
+@router.delete("/{workspace_id}/{environment_id}")
+async def remove_canvas(workspace_id: str, environment_id: str, user_id: str = Depends(get_current_user_id)):
+    scope, row = await _environment(user_id, workspace_id, environment_id)
+    result = await _canvas_action(user_id, workspace_id, environment_id, "remove")
+    relative = Path(row.get("root", "."))
+    if relative.parts == (".canvas_apps", environment_id):
+        target = scope.root / relative
+        if is_redirected_path(target):
+            raise HTTPException(status_code=409, detail="Canvas root must not redirect through a link")
+        target = target.resolve()
+        target.relative_to(scope.root)
+        shutil.rmtree(target)
+    return result
+
+
+async def restore_canvas_library(user_id: str, payload: list[dict], *, merge: bool = True) -> int:
+    apps = decode_canvas_library(payload)
+    service, handle, scope = _runtime_and_scope(user_id, "_canvas_library")
+    with bind_workspace(handle):
+        current = await service.execute_computer_action("environment", "list", {})
+    existing = {row["environment_id"]: row for row in current.result or []}
+    pending = []
+    for app in apps:
+        environment_id = app["environment_id"]
+        if merge and environment_id in existing:
+            previous = existing[environment_id]
+            old_root = (scope.root / previous["root"]).resolve()
+            old_root.relative_to(scope.root)
+            old_files = {p.relative_to(old_root).as_posix(): p.read_bytes() for p in artifact_files(old_root)}
+            state = await _canvas_action(user_id, "_canvas_library", environment_id, "state_get")
+            if old_files != app["files"] or state["value"] != app["value"] or previous["entrypoint"] != app["entrypoint"]:
+                raise ValueError("canvas archive conflicts with an existing application; use replace mode")
+            continue
+        if (scope.root / ".canvas_apps" / environment_id).exists() and environment_id not in existing:
+            raise ValueError("canvas archive destination already exists")
+        pending.append(app)
+    if not merge:
+        for environment_id in existing:
+            await remove_canvas("_canvas_library", environment_id, user_id)
+        existing = {}
+    for app in pending:
+        environment_id = app["environment_id"]
+        if environment_id in existing:
+            raise ValueError("canvas archive conflicts with an existing application; use replace mode")
+        relative = f".canvas_apps/{environment_id}"
+        root = scope.root / relative
+        if root.exists():
+            raise ValueError("canvas archive destination already exists")
+        root.mkdir(parents=True)
+        for name, data in app["files"].items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        with bind_workspace(handle):
+            result = await service.execute_computer_action("environment", "register", {"environment_id": environment_id,
+                "name": app["name"], "root": relative, "entrypoint": app["entrypoint"], "lifetime": "reusable"})
+        if not result.success:
+            raise ValueError(result.error)
+        await _canvas_action(user_id, "_canvas_library", environment_id, "state_set", {"expected_revision": 0, "value": app["value"]})
+    return len(apps)
 
 
 @router.api_route(
@@ -201,6 +337,8 @@ async def preview_canvas_environment(
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Canvas asset not found")
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    if media_type == "text/html":
+        return HTMLResponse(render_canvas_html(target.read_text(encoding="utf-8"), root=root, entrypoint=target), headers=headers)
     return FileResponse(target, media_type=media_type, headers=headers)
 
 

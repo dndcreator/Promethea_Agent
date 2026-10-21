@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,26 +19,29 @@ class _DummyCore:
         self.response = response or {"status": "success", "content": "ok", "tool_calls": []}
         self.calls = []
 
-    async def run_chat_loop(
-        self,
-        messages,
-        user_config=None,
-        session_id=None,
-        user_id=None,
-        tool_executor=None,
-        max_recursion=None,
-    ):
-        self.calls.append(
-            {
-                "messages": messages,
-                "tool_executor": tool_executor,
-                "max_recursion": max_recursion,
+    async def call_llm(self, messages, user_config=None, user_id=None):
+        self.calls.append({"messages": messages, "user_config": user_config, "user_id": user_id})
+        tool_calls = list(self.response.get("tool_calls") or [])
+        if tool_calls and len(self.calls) == 1:
+            call = tool_calls[0]
+            return {
+                "status": "success",
+                "content": (
+                    '{"action":"tool_call","id":"test-call","tool_name":"'
+                    + str(call.get("tool_name") or "")
+                    + '","args":{}}'
+                ),
             }
-        )
-        return dict(self.response)
+        return {
+            "status": "success",
+            "content": json.dumps({"action": "answer", "content": str(self.response.get("content") or "")}),
+        }
 
 
 class _CapabilityService:
+    def __init__(self, *, fail=False):
+        self.fail = fail
+
     async def get_tool_catalog(self, **_kwargs):
         return [
             {
@@ -46,11 +50,44 @@ class _CapabilityService:
                 "tool_type": "local",
                 "description": "Recall relevant memory.",
                 "callable_now": True,
-            }
+            },
+            {
+                "service_name": "reasoning.run",
+                "tool_name": "reasoning.run",
+                "tool_type": "local",
+                "description": "Run deeper reasoning.",
+                "callable_now": True,
+            },
         ]
 
+    async def build_capability_snapshot(self, **kwargs):
+        rows = await self.get_tool_catalog(**kwargs)
+        compact = [
+            {
+                "name": row["tool_name"],
+                "description": row["description"],
+                "callable_now": True,
+                "callable_reason": "callable",
+                "requires_confirmation": False,
+                "schema_status": "declared",
+                "capability_type": "local",
+            }
+            for row in rows
+        ]
+        return {"snapshot_id": "caps-test", "compact_index": compact, "selected_specs": []}
+
     async def call_tool(self, **_kwargs):
+        if self.fail:
+            raise RuntimeError("tool failed")
         return {"context": "remembered"}
+
+    def requires_confirmation(self, *_args, **_kwargs):
+        return False
+
+
+class _FailedProviderCore:
+    async def call_llm(self, _messages, user_config=None, user_id=None):
+        return {"status": "error", "content": "provider unavailable"}
 
 
 @pytest.mark.asyncio
@@ -82,7 +119,23 @@ async def test_simple_turn_reaches_main_model_without_router_call():
 
     assert out.content == "ok"
     assert len(core.calls) == 1
-    assert core.calls[0]["max_recursion"] == 5
+    assert any(
+        message.get("role") == "system" and "Runtime action protocol" in str(message.get("content") or "")
+        for message in core.calls[0]["messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_is_reflected_in_pipeline_state():
+    service = ConversationService(conversation_core=_FailedProviderCore(), event_emitter=None)
+
+    out = await service.run_conversation(
+        ConversationRunInput(user_message="hello", session_id="s1", user_id="u1")
+    )
+
+    assert out.status == "error"
+    assert out.raw["pipeline"]["stage_status"]["model_control_loop"]["status"] == "failed"
+    assert out.raw["capability_state"]["degraded"] is True
 
 
 @pytest.mark.asyncio
@@ -99,7 +152,7 @@ async def test_control_loop_budget_comes_from_user_config():
         )
     )
 
-    assert core.calls[0]["max_recursion"] == 7
+    assert core.calls
 
 
 @pytest.mark.asyncio
@@ -134,7 +187,11 @@ async def test_main_model_memory_call_is_reflected_in_output():
             "tool_calls": [{"tool_name": "memory.get_context", "ok": True}],
         }
     )
-    service = ConversationService(conversation_core=core, event_emitter=None)
+    service = ConversationService(
+        conversation_core=core,
+        event_emitter=None,
+        capability_service=_CapabilityService(),
+    )
 
     out = await service.run_conversation(
         ConversationRunInput(user_message="what do you remember", session_id="s1", user_id="u1")
@@ -153,7 +210,11 @@ async def test_failed_memory_call_is_not_reported_as_recalled():
             "tool_calls": [{"tool_name": "memory.get_context", "ok": False}],
         }
     )
-    service = ConversationService(conversation_core=core, event_emitter=None)
+    service = ConversationService(
+        conversation_core=core,
+        event_emitter=None,
+        capability_service=_CapabilityService(fail=True),
+    )
 
     out = await service.run_conversation(
         ConversationRunInput(user_message="what do you remember", session_id="s1", user_id="u1")
@@ -172,7 +233,11 @@ async def test_main_model_reasoning_call_is_reflected_in_output():
             "tool_calls": [{"tool_name": "reasoning.run", "ok": True}],
         }
     )
-    service = ConversationService(conversation_core=core, event_emitter=None)
+    service = ConversationService(
+        conversation_core=core,
+        event_emitter=None,
+        capability_service=_CapabilityService(),
+    )
 
     out = await service.run_conversation(
         ConversationRunInput(user_message="solve this", session_id="s1", user_id="u1")

@@ -1,13 +1,13 @@
 # Extensions
 
 Promethea exposes tools through one user-facing Extension Catalog and one
-governed execution path. Tools have three origins:
+governed execution path. Package location and transport do not grant privileges:
 
-| Provider | Backend path | Intended use |
+| Packaging | Backend path | Intended use |
 |---|---|---|
-| `official` | `gateway/official_tools/*.py` and built-in `agentkit/tools/**/agent-manifest.json` | Release-grade built-in capabilities. |
-| `community` | `extensions/community/**/agent-manifest.json` | User, community, or Self Evolve capabilities discovered at runtime. |
-| `external` | `agent-manifest.json` with `serviceType: "mcp"` | Out-of-process providers connected over standard MCP. |
+| Bundled packages | `agentkit/tools/**/agent-manifest.json` | Included tool implementations, including the `standard` pack. |
+| Installed packages | `extensions/community/**/agent-manifest.json` | User, community, or Self Evolve capabilities discovered at runtime. |
+| MCP transport | `agent-manifest.json` with `serviceType: "mcp"` | Out-of-process providers connected over standard MCP. |
 
 The Web UI does not need to know which backend path registered the capability.
 It reads the unified catalog and shows provider/source badges, tool counts,
@@ -17,10 +17,9 @@ callable state, and hot reload controls.
 
 | API | Purpose |
 |---|---|
-| `GET /api/extensions/catalog` | Return unified official/community extension catalog. |
+| `GET /api/extensions/catalog` | Return the unified tool package catalog. |
 | `POST /api/extensions/reload` | Rescan built-in manifest packs and `extensions/community`, then refresh the runtime tool cache. |
 | `GET /api/status/tools` | Low-level callable tool catalog used for diagnostics. |
-| `GET /api/status/tools/official` | Official local-tool subset. |
 
 ## Invocation contract
 
@@ -52,6 +51,12 @@ Older explicit routing fields are accepted only at the input compatibility
 boundary. Unknown tools are not treated as successful actions.
 
 ## Community extension layout
+
+For native tool classes with `invoke(args, ctx)`, use the factory manifest in
+[How To Add A Tool](playbooks/how-to-add-a-tool.md). This is also how the bundled
+`standard` package is discovered. The command-service adapter below is useful
+when a class already exposes named methods. These are packaging forms, not
+separate tool services or permission systems.
 
 Drop a folder under `extensions/community`:
 
@@ -135,6 +140,17 @@ Keep credentials in the process environment or user secrets. Manifest env
 values may reference an environment variable with `${NAME}`; secrets should not
 be embedded in the manifest.
 
+MCP is a transport adapter below `CapabilityService`, not a second tool system.
+Its configuration directory retains provider launch settings; `MCPManager`
+discovers remote definitions and maps them into the unified `ToolRegistry`.
+Provider names must be unique, and remote tool ids must not collide with another
+execution source. Provider configuration reload validates the complete selected
+roots before replacement and before closing existing connections. Invalid
+configuration leaves the previous configuration intact. Tool-definition refresh
+also preserves the previous snapshot on error, but blocks MCP execution until a
+valid refresh succeeds; it never silently changes the implementation or risk
+classification of an existing in-process tool.
+
 ## Agent-generated capabilities
 
 Self Evolve publishes generated versions below
@@ -163,17 +179,21 @@ excluded from Git.
 - Do not store API keys, passwords, or personal files in extension folders.
 - Sensitive values belong in `.env` or `config/users/<user_id>/secrets.env`.
 - Use manifest names and command names that describe the action, not a specific provider implementation.
-- The same capability can later move from community to official without changing the UI catalog contract.
+- Moving a package between bundled and installed roots does not change its tool contract or permissions.
 
-## Release official extension set
+## Included Tool Packages
 
-The current built-in extension surface covers:
+The `standard` package contributes these domains to the shared catalog:
 
 - `archive`
 - `code`
+- `cognition`
+- `calendar`
 - `data`
 - `math`
+- `mail`
 - `memory`
+- `organization`
 - `runtime`
 - `session`
 - `skill`
@@ -183,5 +203,6 @@ The current built-in extension surface covers:
 - `workflow`
 - `workspace`
 
-Built-in manifest packs under `agentkit/tools` also appear as official
-extensions when their manifests are loaded.
+Other manifest packages under `agentkit/tools` appear alongside installed
+packages. Every native package is labeled `plugin`; MCP remains a transport
+label, not a separate permission tier.

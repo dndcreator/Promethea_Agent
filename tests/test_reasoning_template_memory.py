@@ -184,3 +184,42 @@ def test_reasoning_template_memory_records_opro_episode_run():
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
 
+
+def test_action_success_path_is_retained_as_moirai_candidate():
+    case_dir = _make_case_dir()
+    try:
+        store = ReasoningTemplateMemory(base_dir=case_dir / "reasoning_templates")
+        store.record_action_success(
+            user_id="u1",
+            session_id="s1",
+            user_message="Look at my desktop",
+            assistant_output="I found several shortcuts.",
+            execution_path=[
+                {
+                    "kind": "capability_request",
+                    "objective": "observe the live desktop",
+                    "required_capabilities": ["computer.screen"],
+                    "max_side_effect": "read_only",
+                },
+                {
+                    "kind": "tool_call",
+                    "tool_name": "computer_control.screen_action",
+                    "args": {"action": "screenshot"},
+                    "ok": True,
+                    "observation_id": "obs-1",
+                },
+            ],
+        )
+
+        matched = store.match_action_template(
+            user_id="u1",
+            task="Look at my desktop",
+            tool_intent="computer.screen",
+        )
+        assert matched["matched"] is True
+        assert matched["actions"][0]["tool_name"] == "screen_action"
+        assert matched["actions"][0]["capability"] == "computer.screen"
+        assert (case_dir / "moirai_runs" / "opro_episode_u1.json").exists()
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+

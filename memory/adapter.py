@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .session_scope import scoped_session_id
 from .backends import FlatMemoryStore, Neo4jMemoryStore, SqliteGraphMemoryStore
+from .migration_lineage import MigrationLineageStore
 from .text_normalization import normalize_message_text
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class MemoryAdapter:
         self.store_backend = "neo4j"
         self.store = None
         self._dual_write_store = None
+        self._migration_lineage = MigrationLineageStore()
         self._migration_state = {
             "mode": "off",
             "source_backend": None,
@@ -1014,32 +1016,75 @@ class MemoryAdapter:
         return dict(self._migration_state)
 
     def migrate_backend(self, target_backend: str, *, mode: str = "cutover", merge: bool = True) -> Dict[str, Any]:
+        target_backend = str(target_backend or "").strip().lower()
+        mode_norm = str(mode or "cutover").strip().lower()
+        if mode_norm not in {"cutover", "dual_write"}:
+            return {"ok": False, "reason": f"unsupported migration mode: {mode_norm}"}
+        if target_backend == self.store_backend:
+            return {"ok": False, "reason": "target backend is already active", "active_backend": self.store_backend}
         target = self._build_store(target_backend)
         if target is None:
             return {"ok": False, "reason": f"target backend not available: {target_backend}"}
         snapshot = self.export_mef()
-        imported = target.import_mef(snapshot, merge=merge)
+        generation = self._migration_lineage.begin(
+            source_backend=self.store_backend,
+            target_backend=target_backend,
+            snapshot=snapshot,
+        )
+        generation_id = str(generation["generation_id"])
+        try:
+            imported = target.import_mef(snapshot, merge=merge)
+        except Exception as exc:
+            self._migration_lineage.finish(generation_id, status="failed", error=str(exc))
+            return {
+                "ok": False,
+                "reason": f"import failed: {exc}",
+                "generation_id": generation_id,
+                "active_backend": self.store_backend,
+            }
         imported_ok = bool(imported.get("ok", True)) if isinstance(imported, dict) else True
         imported_reason = str((imported or {}).get("reason") or "").strip().lower() if isinstance(imported, dict) else ""
         # Allow empty-source migrations, but block cutover on real import errors.
         if not imported_ok and imported_reason not in {"", "none", "no_importable_memory_items"}:
+            self._migration_lineage.finish(generation_id, status="failed", error=imported_reason)
             return {
                 "ok": False,
                 "reason": f"import failed: {imported_reason}",
                 "imported": imported,
                 "active_backend": self.store_backend,
+                "generation_id": generation_id,
             }
-        mode_norm = str(mode or "cutover").strip().lower()
         if mode_norm == "dual_write":
             self._dual_write_store = target
-            self.configure_migration(mode="dual_write", source_backend=self.store_backend, target_backend=target_backend)
-            return {"ok": True, "mode": "dual_write", "imported": imported}
+            self.configure_migration(
+                mode="dual_write",
+                source_backend=self.store_backend,
+                target_backend=target_backend,
+                checkpoint=generation_id,
+            )
+            self._migration_lineage.finish(generation_id, status="staged")
+            return {"ok": True, "mode": "dual_write", "imported": imported, "generation_id": generation_id}
 
         self.store = target
         self.store_backend = str(target_backend or self.store_backend).strip().lower()
         self._dual_write_store = None
-        self.configure_migration(mode="cutover", source_backend=snapshot.get("source_backend"), target_backend=self.store_backend)
-        return {"ok": True, "mode": "cutover", "imported": imported, "active_backend": self.store_backend}
+        self.configure_migration(
+            mode="cutover",
+            source_backend=snapshot.get("source_backend"),
+            target_backend=self.store_backend,
+            checkpoint=generation_id,
+        )
+        self._migration_lineage.finish(generation_id, status="completed")
+        return {
+            "ok": True,
+            "mode": "cutover",
+            "imported": imported,
+            "active_backend": self.store_backend,
+            "generation_id": generation_id,
+        }
+
+    def get_migration_lineage(self) -> Dict[str, Any]:
+        return self._migration_lineage.snapshot()
 
     def is_enabled(self) -> bool:
         """Return True if the memory system is initialised and usable."""

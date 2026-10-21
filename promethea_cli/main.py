@@ -325,7 +325,6 @@ def cmd_simple(args: argparse.Namespace, c: Client) -> None:
         ("status", "memory"): ("GET", "/api/health/memory", None),
         ("status", "routes"): ("GET", "/api/status/routes", None),
         ("status", "tools"): ("GET", "/api/status/tools", None),
-        ("status", "official-tools"): ("GET", "/api/status/tools/official", None),
         # metrics
         ("metrics", "json"): ("GET", "/api/metrics", None),
         # doctor
@@ -722,7 +721,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     f = sp.add_parser("followup"); f.add_argument("selected_text"); f.add_argument("query_type"); f.add_argument("session_id"); f.add_argument("--custom-query", default=None)
     ses = sp.add_parser("sessions"); ssp = ses.add_subparsers(dest="sessions_cmd", required=True); ssp.add_parser("list"); ss = ssp.add_parser("show"); ss.add_argument("session_id")
-    st = sp.add_parser("status"); tsp = st.add_subparsers(dest="status_cmd", required=True); [tsp.add_parser(x) for x in ("base", "services", "memory", "routes", "tools", "official-tools")]
+    st = sp.add_parser("status"); tsp = st.add_subparsers(dest="status_cmd", required=True); [tsp.add_parser(x) for x in ("base", "services", "memory", "routes", "tools")]
 
     cfg = sp.add_parser("config"); cgp = cfg.add_subparsers(dest="config_cmd", required=True)
     g = cgp.add_parser("get"); g.add_argument("--view", choices=["basic", "full"], default="full"); g.add_argument("--raw", action="store_true")

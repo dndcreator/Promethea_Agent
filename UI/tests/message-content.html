@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head><meta name="viewport" content="width=device-width,initial-scale=1"><title>Message content test fixture</title></head>
+<body>
+<div id="root"></div>
+<script type="module">
+  import React from 'react'
+  import { createRoot } from 'react-dom/client'
+  import MessageContent from '/src/components/MessageContent.tsx'
+  import MainContent from '/src/components/MainContent.tsx'
+  import RightSidebar from '/src/components/RightSidebar.tsx'
+  import SettingsModal from '/src/components/modals/SettingsModal.tsx'
+  import { AuthProvider, useAuth } from '/src/store/AuthContext.tsx'
+  import { authFetch } from '/src/services/api.ts'
+  import { LanguageProvider, useLanguage } from '/src/store/LanguageContext.tsx'
+  import { WorkbenchProvider } from '/src/store/WorkbenchContext.tsx'
+  import { sourceSelection } from '/src/utils/message-links.ts'
+  import '/src/index.css'
+  const root = createRoot(document.getElementById('root'))
+  const noop = () => {}
+  function AuthFixture() {
+    const auth = useAuth()
+    React.useEffect(() => { window.testAuth = auth; window.testAuthRequest = () => authFetch('/api/test-old') }, [auth])
+    return React.createElement('output', {id:'profile'}, auth.user?.user_id || 'guest')
+  }
+  function ChatFixture() {
+    const [sessionId, setSessionId] = React.useState('test-session')
+    const { setLang } = useLanguage()
+    React.useEffect(() => { window.selectTestSession = setSessionId; window.setTestLanguage = setLang }, [setLang])
+    return React.createElement(AuthProvider, null, React.createElement(WorkbenchProvider, {sessionId}, React.createElement(MainContent, {
+      sessionId, setSessionId, setTreeId: noop, setChatRunning: noop,
+      onRequireAuth: noop, onOpenFiles: noop, onOpenSearch: noop, onOpenMemory: noop, onOpenWorkbench: noop,
+      memoryReviewId: 'test-review', attachments: [], onRemoveAttachment: noop, onClearAttachments: noop,
+    })))
+  }
+  function WorkbenchFixture() {
+    const { setLang } = useLanguage()
+    React.useEffect(() => { window.setTestLanguage = setLang }, [setLang])
+    return React.createElement(AuthProvider, null, React.createElement(WorkbenchProvider, {sessionId:'test-session'}, React.createElement(RightSidebar, {sessionId:'test-session', treeId:null})))
+  }
+  window.renderMessage = (content, followups = []) => {
+    window.messageSource = content
+    root.render(React.createElement(LanguageProvider, null,
+      React.createElement('div', { id: 'message', style: { width: 'min(600px, 100%)', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' } },
+        React.createElement(MessageContent, { content, followups }))))
+  }
+  window.selectedSource = () => sourceSelection(document.getElementById('message'), window.messageSource, window.getSelection().getRangeAt(0))
+  if (new URLSearchParams(location.search).has('auth')) {
+    root.render(React.createElement(LanguageProvider, null, React.createElement(AuthProvider, null, React.createElement(AuthFixture))))
+  } else if (new URLSearchParams(location.search).has('chat')) {
+    document.getElementById('root').style.height = '100vh'
+    root.render(React.createElement(LanguageProvider, null, React.createElement(ChatFixture)))
+  } else if (new URLSearchParams(location.search).has('workbench')) {
+    document.getElementById('root').style.cssText = 'height:100vh;width:322px'
+    root.render(React.createElement(LanguageProvider, null, React.createElement(WorkbenchFixture)))
+  } else if (new URLSearchParams(location.search).has('settings')) {
+    root.render(React.createElement(LanguageProvider, null, React.createElement(AuthProvider, null, React.createElement(SettingsModal, {onClose:noop}))))
+  } else window.renderMessage('Ready')
+</script>
+</body>
+</html>

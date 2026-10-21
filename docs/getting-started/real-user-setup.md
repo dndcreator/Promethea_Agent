@@ -120,13 +120,16 @@ If backend logs are clean and `/api/status` is 200, this is usually frontend-sid
 
 ### Playwright browser missing
 
-If logs show `playwright install` hint:
+Leave the browser selection on Automatic. Promethea reuses a compatible
+Chromium or installed Edge/Chrome; if none is present, it prepares managed
+Chromium automatically. The first startup may therefore need network access.
 
-```bash
-playwright install
-```
-
-This affects browser controller only, not core chat pipeline.
+If preparation fails, check connectivity/proxy settings and retry after the
+configured cooldown or restart. On Linux, missing system libraries may require
+administrator setup; Promethea will not install privileged OS packages or turn
+off the sandbox automatically. Offline hosts can preinstall Playwright Chromium
+or set an installed browser channel. Browser availability affects computer web
+actions and Canvas verification, not ordinary text chat.
 
 ### User config parse error (corrupt JSON)
 

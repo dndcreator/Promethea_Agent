@@ -62,6 +62,7 @@ async def test_tool_events_include_run_context_fields():
         tool_id = "local.echo"
         name = "Echo"
         description = "echo"
+        side_effect_level = "read_only"
 
         async def invoke(self, args, ctx=None):
             return {"ok": True, "args": args}

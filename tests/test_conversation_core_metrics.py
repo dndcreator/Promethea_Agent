@@ -92,6 +92,44 @@ async def test_call_llm_records_usage_metrics(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content,finish_reason,code", [
+    ("", "stop", "MODEL_EMPTY_RESPONSE"),
+    ("   ", "stop", "MODEL_EMPTY_RESPONSE"),
+    ("partial action", "length", "MODEL_OUTPUT_LIMIT"),
+])
+async def test_non_stream_model_output_errors_preserve_terminal_facts(content, finish_reason, code):
+    response = SimpleNamespace(
+        id="provider-sync", choices=[SimpleNamespace(finish_reason=finish_reason, message=SimpleNamespace(content=content))],
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5),
+    )
+    create = _FakeCreate(response)
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    out = await conv.call_llm([{"role": "user", "content": "build"}])
+    assert out["status"] == "error" and out["code"] == code
+    assert out["finish_reason"] == finish_reason and out["request_id"] == "provider-sync"
+    assert out["max_tokens"] == 200 and out["usage"]["completion_tokens"] == 5
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content,finish_reason,code", [
+    ("", "stop", "MODEL_EMPTY_RESPONSE"),
+    ("   ", "stop", "MODEL_EMPTY_RESPONSE"),
+    ("partial action", "length", "MODEL_OUTPUT_LIMIT"),
+])
+async def test_non_stream_model_output_errors_preserve_terminal_facts(content, finish_reason, code):
+    response = SimpleNamespace(
+        id="provider-sync", choices=[SimpleNamespace(finish_reason=finish_reason, message=SimpleNamespace(content=content))],
+        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5),
+    )
+    create = _FakeCreate(response)
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    out = await conv.call_llm([{"role": "user", "content": "build"}])
+    assert out["status"] == "error" and out["code"] == code
+    assert out["finish_reason"] == finish_reason and out["request_id"] == "provider-sync"
+    assert out["max_tokens"] == 200 and out["usage"]["completion_tokens"] == 5
+
+
+@pytest.mark.asyncio
 async def test_call_llm_stream_requests_and_records_stream_usage(monkeypatch):
     async def stream():
         yield SimpleNamespace(
@@ -127,6 +165,60 @@ async def test_call_llm_stream_requests_and_records_stream_usage(monkeypatch):
     assert create.calls[0]["stream_options"] == {"include_usage": True}
     assert recorded == [{"prompt_tokens": 20, "completion_tokens": 7}]
     assert len(first_tokens) == 1
+
+
+@pytest.mark.asyncio
+async def test_call_llm_stream_projects_provider_reasoning_separately(monkeypatch):
+    async def stream():
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content="consider "))],
+            usage=None,
+        )
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content="answer", reasoning_content="sources"))],
+            usage=None,
+        )
+
+    create = _FakeCreate(stream())
+    client = SimpleNamespace(chat=SimpleNamespace(completions=create))
+    conv = _conversation_with_client(client)
+    reasoning = []
+
+    async def reasoning_sink(delta):
+        reasoning.append(delta)
+
+    chunks = []
+    async for chunk in conv.call_llm_stream(
+        [{"role": "user", "content": "hi"}],
+        reasoning_sink=reasoning_sink,
+    ):
+        chunks.append(chunk)
+
+    assert chunks == ["answer"]
+    assert reasoning == ["consider ", "sources"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason,code", [("length", "MODEL_OUTPUT_LIMIT"), ("stop", "MODEL_EMPTY_RESPONSE")])
+async def test_reasoning_only_stream_reports_provider_terminal_facts(finish_reason, code):
+    async def stream():
+        yield SimpleNamespace(id="provider-1", choices=[SimpleNamespace(delta=SimpleNamespace(content=None, reasoning_content="think"), finish_reason=None)], usage=None)
+        yield SimpleNamespace(id="provider-1", choices=[SimpleNamespace(delta=SimpleNamespace(content=None), finish_reason=finish_reason)], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=200))
+
+    create = _FakeCreate(stream())
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    recorded = []
+
+    async def result_sink(result):
+        recorded.append(result)
+
+    output = [chunk async for chunk in conv.call_llm_stream([{"role": "user", "content": "build"}], result_sink=result_sink)]
+    assert output == [f"[error] {code}"]
+    assert recorded[0]["status"] == "error"
+    assert recorded[0]["finish_reason"] == finish_reason
+    assert recorded[0]["request_id"] == "provider-1"
+    assert recorded[0]["max_tokens"] == 200
+    assert recorded[0]["reasoning_chars"] == 5
 
 
 @pytest.mark.asyncio
@@ -231,6 +323,29 @@ async def test_multimodal_stream_falls_back_before_emitting_content(monkeypatch)
     assert chunks == ["visible"]
     assert main_create.calls[0]["model"] == "text-stream-model"
     assert multimodal_create.calls[0]["model"] == "vision-stream-model"
+
+
+@pytest.mark.asyncio
+async def test_interrupted_stream_does_not_concatenate_a_fallback_models_output():
+    async def broken():
+        yield SimpleNamespace(id="partial", choices=[SimpleNamespace(delta=SimpleNamespace(content='{"action":"tool_call"'), finish_reason=None)], usage=None)
+        raise ConnectionError("stream disconnected")
+
+    async def fallback():
+        yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content="unrelated fallback answer"))], usage=None)
+
+    create = _SequenceCreate([broken(), fallback()])
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    conv._resolve_model_candidates = lambda *_args: ["primary", "fallback"]
+    terminal = []
+
+    async def capture(result):
+        terminal.append(result)
+
+    chunks = [chunk async for chunk in conv.call_llm_stream([{"role": "user", "content": "act"}], result_sink=capture)]
+    assert chunks == ['{"action":"tool_call"', "[error] stream disconnected"]
+    assert len(create.calls) == 1
+    assert terminal[0]["code"] == "MODEL_STREAM_INTERRUPTED"
 
 
 @pytest.mark.asyncio

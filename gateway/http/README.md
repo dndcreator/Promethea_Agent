@@ -6,12 +6,14 @@
 
 - `gateway/http/router.py`: route assembly
 - `gateway/http/middleware.py`: context, rate-limit, logging, and error handling
-- `gateway/http/user_manager.py`: user and user-config persistence
+- `gateway/http/identity_store.py`: backend-independent account and channel identity persistence
+- `gateway/http/user_manager.py`: identity orchestration, legacy account migration, and user-config persistence
 - `gateway/http/message_manager.py`: session message storage
 - `gateway/http/routes/auth.py`: register, login, and profile
 - `gateway/http/routes/chat.py`: chat endpoints, including streaming
 - `gateway/http/routes/config.py`: config APIs
 - `gateway/http/routes/memory.py`: memory endpoints and graph payloads
+- `gateway/http/routes/org_brain.py`: governed organization knowledge, review, membership, and migration endpoints
 - `gateway/http/routes/sessions.py`: session list and details
 
 ## Request Flow

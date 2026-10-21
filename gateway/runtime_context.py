@@ -39,6 +39,7 @@ def build_runtime_context_block(
     *,
     recent_messages: Optional[Iterable[Dict[str, Any]]] = None,
     timezone_name: str = "",
+    ui_language: str = "",
     user_config: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Build the shared runtime-context block used by routing and answering."""
@@ -52,7 +53,10 @@ def build_runtime_context_block(
         f"- Current local time: {clock['local_time']} ({clock['timezone']})",
         f"- Current local datetime: {clock['local_datetime']}",
         "- Resolve short follow-ups and ellipses against the recent conversation when present.",
+        "- Match the user's language in explanations and visible reasoning; use the UI language fallback when the request does not establish a language.",
         "- For current/latest/recent external facts, use runtime observations from tools; do not infer stale dates.",
         "- Do not claim that a search, tool call, file read/write, browser action, or external lookup happened unless a runtime Observation/result exists in this turn.",
     ]
+    if str(ui_language or "").strip():
+        sections.insert(4, f"- UI language fallback: {str(ui_language).strip()}")
     return "\n".join(sections)

@@ -72,13 +72,26 @@ async def test_org_brain_graph_returns_nodes_and_edges(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_org_brain_status_exposes_fallback_notice(monkeypatch):
-    monkeypatch.setattr(
-        org_brain,
-        "_get_org_service",
-        lambda: (_Svc(enabled=True, connector_available=False), _CfgSvc({"org_brain": {"enabled": True, "org_id": "org_demo"}})),
+    server = SimpleNamespace(
+        org_context_service=_Svc(enabled=True, connector_available=False),
+        config_service=_CfgSvc({"org_brain": {"enabled": True, "org_id": "org_demo"}}),
     )
+    monkeypatch.setattr(org_brain, "get_gateway_integration", lambda: SimpleNamespace(get_gateway_server=lambda: server))
     out = await org_brain.org_brain_status(current_user_id="u1")
     assert out["status"] == "success"
     assert out["org_brain"]["core_capability"] == "graph_structure"
     assert out["org_brain"]["backend"] == "in_memory_fallback"
     assert "fallback mode" in str(out["org_brain"]["notice"]).lower()
+
+
+@pytest.mark.asyncio
+async def test_org_brain_status_detects_missing_optional_component(monkeypatch):
+    server = SimpleNamespace(org_context_service=None, config_service=None)
+    monkeypatch.setattr(org_brain, "get_gateway_integration", lambda: SimpleNamespace(get_gateway_server=lambda: server))
+    out = await org_brain.org_brain_status(current_user_id="u1")
+    assert out["org_brain"] == {
+        "installed": False,
+        "enabled": False,
+        "ready": False,
+        "reason": "not_installed",
+    }

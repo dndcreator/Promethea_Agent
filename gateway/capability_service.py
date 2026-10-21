@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from contextlib import nullcontext
+from copy import deepcopy
+from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 from uuid import uuid4
@@ -18,6 +22,7 @@ from .protocol import EventType
 from .runtime_hooks import RuntimeHookManager, get_runtime_hook_manager
 from .temporal import resolve_context_timezone_name
 from .tools import SideEffectLevel, ToolPolicy, ToolPolicyDecision, ToolRegistry
+from .tools.presentation import project_tool_call, project_tool_result
 
 
 @dataclass
@@ -32,6 +37,17 @@ class ToolPolicyViolationError(RuntimeError):
     def __init__(self, message: str, decision: Optional[ToolPolicyDecision] = None):
         super().__init__(message)
         self.decision = decision
+
+
+class ToolConfirmationRequiredError(ToolPolicyViolationError):
+    code = "TOOL_CONFIRMATION_REQUIRED"
+    category = "policy"
+    retryable = False
+    advice = "Request Runtime confirmation for this exact call; do not retry or bypass the requirement."
+
+    def __init__(self, tool_name: str, decision: ToolPolicyDecision):
+        self.details = {"tool_name": tool_name, "requires_confirmation": True}
+        super().__init__(f"Tool requires explicit confirmation: {tool_name}", decision=decision)
 
 
 class ToolCapabilityUnavailableError(RuntimeError):
@@ -85,6 +101,16 @@ class CapabilityService:
         self.workspace_service = workspace_service
         self._discovered_tool_sources: Dict[str, str] = {}
         self._tool_discovery_initialized = False
+        self._tool_runtime_bindings: Dict[str, Any] = {}
+        self._mcp_registry_error: Optional[str] = None
+
+    def bind_tool_runtime(self, **bindings: Any) -> None:
+        """Refresh trusted host dependencies, never model-supplied arguments."""
+        if any(self._tool_runtime_bindings.get(key) is not value for key, value in bindings.items()):
+            self._tool_runtime_bindings.update(bindings)
+            self._tool_discovery_initialized = False
+        if "workspace_service" in bindings:
+            self.workspace_service = bindings["workspace_service"]
 
     async def execute_computer_action(self, capability: str, action: str, params: Dict[str, Any]) -> Any:
         """Execute a computer capability in the trusted workspace bound to this invocation."""
@@ -153,9 +179,9 @@ class CapabilityService:
     def register_tool(self, tool: Tool) -> None:
         if tool.tool_id in self._registered_tools:
             logger.warning(f"Tool already registered: {tool.tool_id}, will overwrite")
-        self._registered_tools[tool.tool_id] = tool
         self.tool_registry.register_local_tool(tool)
-        logger.info(f"Registered local tool: {tool.tool_id}")
+        self._registered_tools[tool.tool_id] = tool
+        logger.debug(f"Registered local tool: {tool.tool_id}")
 
     def reload_discovered_tools(
         self,
@@ -167,14 +193,14 @@ class CapabilityService:
         from .tools.discovery import discover_manifest_tools
 
         project_root = Path(__file__).resolve().parents[1]
-        official_root = (project_root / "agentkit" / "tools").resolve()
+        bundled_root = (project_root / "agentkit" / "tools").resolve()
         roots = [Path(item).resolve() for item in (scan_dirs or [
-            str(official_root),
+            str(bundled_root),
             str(project_root / "extensions" / "community"),
         ])]
         staged = discover_manifest_tools(
             roots,
-            official_root=official_root,
+            runtime={"workspace_service": self.workspace_service, **self._tool_runtime_bindings},
             reload_modules=reload_modules,
         )
 
@@ -201,14 +227,17 @@ class CapabilityService:
                 "manifest tool ids collide with existing runtime tools: "
                 + ", ".join(sorted(collisions))
             )
-        for tool_id in stale_ids:
-            self.unregister_tool(tool_id)
-            self._discovered_tool_sources.pop(tool_id, None)
-
+        # Validate the whole staged snapshot before replacing live tools.
+        validation_registry = ToolRegistry()
+        for spec in self.tool_registry.list_specs():
+            if spec.full_name not in stale_set:
+                validation_registry.register_spec(spec)
+        for item in staged:
+            validation_registry.register_local_tool(item.tool)
         configured_services = set()
         for item in staged:
             tool = item.tool
-            service = getattr(getattr(tool, "_method", None), "__self__", None)
+            service = getattr(getattr(tool, "_method", None), "__self__", tool)
             service_identity = id(service)
             if service is not None and service_identity not in configured_services:
                 configured_services.add(service_identity)
@@ -221,6 +250,14 @@ class CapabilityService:
                 configure_reloader = getattr(service, "configure_extension_reloader", None)
                 if callable(configure_reloader):
                     configure_reloader(self.reload_discovered_tools)
+                configure_canvas = getattr(service, "configure_canvas_runtime", None)
+                if callable(configure_canvas):
+                    configure_canvas(self)
+        for tool_id in stale_ids:
+            self.unregister_tool(tool_id)
+            self._discovered_tool_sources.pop(tool_id, None)
+        for item in staged:
+            tool = item.tool
             self.register_tool(tool)
             self._discovered_tool_sources[tool.tool_id] = str(item.manifest_path.resolve())
 
@@ -249,7 +286,7 @@ class CapabilityService:
         if tool_id in self._registered_tools:
             del self._registered_tools[tool_id]
             self.tool_registry.unregister_spec(tool_id)
-            logger.info(f"Unregistered local tool: {tool_id}")
+            logger.debug(f"Unregistered local tool: {tool_id}")
 
     def requires_confirmation(
         self,
@@ -277,8 +314,12 @@ class CapabilityService:
         try:
             services_filtered = self.mcp_manager.get_available_services_filtered()
             self.tool_registry.replace_mcp_services(services_filtered)
+            self._mcp_registry_error = None
         except Exception as e:
-            logger.debug(f"Tool registry MCP sync failed: {e}")
+            reason = str(e)
+            if reason != self._mcp_registry_error:
+                logger.warning("Tool registry MCP refresh rejected: {}", reason)
+            self._mcp_registry_error = reason
 
     async def list_tools(self) -> Dict[str, Any]:
         tools: List[Dict[str, Any]] = []
@@ -287,14 +328,26 @@ class CapabilityService:
         try:
             services_filtered = self.mcp_manager.get_available_services_filtered()
             mcp_services = services_filtered.get("mcp_services", [])
+            mcp_ids = {
+                spec.full_name for spec in self.tool_registry.list_specs()
+                if spec.source.value == "mcp" and not spec.metadata.get("inferred")
+            }
 
             for svc in mcp_services:
+                name = str(svc.get("name") or "")
+                declared_actions = svc.get("available_tools") or []
+                actions = [
+                    action for action in declared_actions
+                    if f"{name}.{action.get('name') or name}" in mcp_ids
+                ]
+                if (declared_actions and not actions) or (not declared_actions and f"{name}.{name}" not in mcp_ids):
+                    continue
                 tools.append(
                     {
                         "service": svc.get("name"),
                         "name": svc.get("label", svc.get("name")),
                         "description": svc.get("description", ""),
-                        "actions": svc.get("available_tools", []),
+                        "actions": actions,
                         "type": "mcp",
                     }
                 )
@@ -358,14 +411,17 @@ class CapabilityService:
         reason = ""
         if str(tool_type).lower() == "mcp":
             row = health_by_service.get(str(service_name))
-            if row:
+            if self._mcp_registry_error is not None:
+                ready, reason = False, "mcp_registry_refresh_failed"
+            elif row:
                 status = str(row.get("status") or "").strip().lower()
                 visibility = str(row.get("user_visibility") or "visible").strip().lower()
                 ready = status in {"online", "healthy", "ready", "ok"} and visibility == "visible"
                 if not ready:
                     reason = f"mcp_{status or 'offline'}"
+        registered_name = str(tool_name) if str(service_name) == str(tool_name) else f"{service_name}.{tool_name}"
         spec = self.tool_registry.resolve(
-            tool_name=f"{service_name}.{tool_name}",
+            tool_name=registered_name,
             params={"agentType": tool_type, "service_name": service_name, "tool_name": tool_name},
         )
         required = str(spec.metadata.get("requires_capability") or "").strip()
@@ -428,9 +484,7 @@ class CapabilityService:
                     )
                     policy_allowed = bool(decision.allowed)
                     policy_reason = str(decision.reason or "")
-                config_ready, config_reason = self._required_config_ready(
-                    spec.metadata.get("requires_config"), user_config
-                )
+                config_ready, config_reason = self._tool_config_readiness(spec, user_config, user_id)
                 dependency_ready, dependency_reason, required_capability, capability_details = self._dependency_readiness(
                     tool_type=str(tool_type),
                     service_name=str(service_name),
@@ -465,6 +519,12 @@ class CapabilityService:
                         "required_capability": required_capability or None,
                         "capability_details": capability_details,
                         "requires_confirmation": requires_confirmation,
+                        "input_schema": dict(spec.input_schema or {}),
+                        "output_schema": dict(spec.output_schema or {}),
+                        "schema_status": "declared" if spec.input_schema else "missing",
+                        "capability_type": spec.capability_type,
+                        "side_effect_level": str(spec.side_effect_level.value),
+                        "side_effect_selector": dict(spec.metadata.get("side_effect_selector") or {}),
                     }
                 )
                 continue
@@ -483,9 +543,7 @@ class CapabilityService:
                     )
                     policy_allowed = bool(decision.allowed)
                     policy_reason = str(decision.reason or "")
-                config_ready, config_reason = self._required_config_ready(
-                    spec.metadata.get("requires_config"), user_config
-                )
+                config_ready, config_reason = self._tool_config_readiness(spec, user_config, user_id)
                 dependency_ready, dependency_reason, required_capability, capability_details = self._dependency_readiness(
                     tool_type=str(tool_type),
                     service_name=str(service_name),
@@ -520,9 +578,252 @@ class CapabilityService:
                         "required_capability": required_capability or None,
                         "capability_details": capability_details,
                         "requires_confirmation": requires_confirmation,
+                        "input_schema": dict(spec.input_schema or {}),
+                        "output_schema": dict(spec.output_schema or {}),
+                        "schema_status": "declared" if spec.input_schema else "missing",
+                        "capability_type": spec.capability_type,
+                        "side_effect_level": str(spec.side_effect_level.value),
+                        "side_effect_selector": dict(spec.metadata.get("side_effect_selector") or {}),
                     }
                 )
         return catalog
+
+    async def build_capability_snapshot(
+        self,
+        *,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
+        preferred_tools: Optional[List[str]] = None,
+        schema_budget_chars: int = 12000,
+    ) -> Dict[str, Any]:
+        """Build a versioned projection of registry state for one model-visible turn."""
+        catalog = await self.get_tool_catalog(run_context=run_context, user_config=user_config)
+        preferred = {str(item).strip() for item in (preferred_tools or []) if str(item).strip()}
+        compact_index: List[Dict[str, Any]] = []
+        candidates: List[tuple[int, str, Dict[str, Any]]] = []
+        for row in catalog:
+            service_name = str(row.get("service_name") or "").strip()
+            tool_name = str(row.get("tool_name") or "").strip()
+            if not tool_name:
+                continue
+            full_name = (
+                tool_name
+                if not service_name or tool_name == service_name or tool_name.startswith(f"{service_name}.")
+                else f"{service_name}.{tool_name}"
+            )
+            compact_index.append(
+                {
+                    "name": full_name,
+                    "description": str(row.get("description") or "").strip(),
+                    "callable_now": bool(row.get("callable_now", False)),
+                    "callable_reason": str(row.get("callable_reason") or ""),
+                    "requires_confirmation": bool(row.get("requires_confirmation", False)),
+                    "side_effect_level": str(row.get("side_effect_level") or ""),
+                    "side_effect_selector": dict(row.get("side_effect_selector") or {}),
+                    "schema_status": str(row.get("schema_status") or "missing"),
+                    "capability_type": str(row.get("capability_type") or "general"),
+                    "required_capability": str(row.get("required_capability") or "") or None,
+                    "capability_details": dict(row.get("capability_details") or {}),
+                }
+            )
+            schema = row.get("input_schema") if isinstance(row.get("input_schema"), dict) else {}
+            if not schema:
+                continue
+            priority = 0 if full_name in preferred else 1
+            candidates.append(
+                (
+                    priority,
+                    full_name,
+                    {
+                        "name": full_name,
+                        "description": str(row.get("description") or "").strip(),
+                        "input_schema": schema,
+                        "output_schema": dict(row.get("output_schema") or {}),
+                        "side_effect_level": str(row.get("side_effect_level") or ""),
+                        "side_effect_selector": dict(row.get("side_effect_selector") or {}),
+                        "required_capability": str(row.get("required_capability") or "") or None,
+                    },
+                )
+            )
+
+        selected_specs: List[Dict[str, Any]] = []
+        remaining = max(0, int(schema_budget_chars))
+        for _, _, spec in sorted(candidates, key=lambda item: (item[0], item[1])):
+            size = len(json.dumps(spec, ensure_ascii=False, separators=(",", ":")))
+            if size > remaining and selected_specs:
+                continue
+            if size > remaining:
+                break
+            selected_specs.append(spec)
+            remaining -= size
+
+        stable = json.dumps(catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        registry_revision = hashlib.sha256(stable.encode("utf-8")).hexdigest()
+        previous = getattr(run_context, "tool_availability", None)
+        if isinstance(previous, dict) and previous.get("registry_revision") == registry_revision and previous.get("selected_specs") == selected_specs and previous.get("schema_budget_chars") == int(schema_budget_chars):
+            return dict(previous)
+        snapshot = {
+            "snapshot_id": f"caps_{uuid4().hex}",
+            "registry_revision": registry_revision,
+            "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "total_count": len(compact_index),
+            "callable_count": sum(1 for item in compact_index if item["callable_now"]),
+            "compact_index": compact_index,
+            "selected_specs": selected_specs,
+            "schema_budget_chars": int(schema_budget_chars),
+            "missing_schema_count": sum(1 for item in compact_index if item["schema_status"] == "missing"),
+        }
+        if run_context is not None:
+            try:
+                run_context.tool_availability = dict(snapshot)
+            except Exception:
+                pass
+        if self.event_emitter is not None:
+            fields = self._extract_run_context_fields(run_context)
+            await self.event_emitter.emit(
+                EventType.CAPABILITY_SNAPSHOT_CREATED,
+                {**fields, **snapshot},
+            )
+        return snapshot
+
+    async def resolve_capability_intent(
+        self,
+        intent: Dict[str, Any],
+        *,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
+        preferred_tools: Optional[List[str]] = None,
+        limit: int = 8,
+    ) -> Dict[str, Any]:
+        """Resolve a model-declared capability intent against current Runtime truth."""
+        request = dict(intent or {})
+        required = {
+            str(item).strip()
+            for item in (request.get("required_capabilities") or [])
+            if str(item).strip()
+        }
+        if not required:
+            return {"error": "required_capabilities is empty", "candidates": []}
+        max_effect = str(request.get("max_side_effect") or "read_only").strip().lower()
+        effect_rank = {
+            SideEffectLevel.READ_ONLY.value: 0,
+            SideEffectLevel.WORKSPACE_WRITE.value: 1,
+            SideEffectLevel.EXTERNAL_WRITE.value: 2,
+            SideEffectLevel.PRIVILEGED_HOST_ACTION.value: 3,
+        }
+        if max_effect not in effect_rank:
+            return {"error": f"invalid max_side_effect: {max_effect}", "candidates": []}
+
+        preferred = {str(item).strip() for item in (preferred_tools or []) if str(item).strip()}
+        catalog = await self.get_tool_catalog(run_context=run_context, user_config=user_config)
+        candidates: List[tuple[int, int, str, Dict[str, Any]]] = []
+        unavailable: List[Dict[str, Any]] = []
+        for row in catalog:
+            declared = str(row.get("required_capability") or "").strip()
+            if not declared or not any(self._capability_identifiers_overlap(declared, item) for item in required):
+                continue
+            if not bool(row.get("callable_now")):
+                unavailable.append({key: row.get(key) for key in (
+                    "service_name", "tool_name", "required_capability", "callable_reason", "dependency_ready", "config_ready",
+                )})
+                continue
+            effect = str(row.get("side_effect_level") or SideEffectLevel.PRIVILEGED_HOST_ACTION.value)
+            selector = row.get("side_effect_selector") if isinstance(row.get("side_effect_selector"), dict) else {}
+            groups = selector.get("groups") if isinstance(selector.get("groups"), dict) else {}
+            effect_options = {effect, *(str(item) for item in groups if str(item) in effect_rank)}
+            eligible_effects = [item for item in effect_options if effect_rank.get(item, 3) <= effect_rank[max_effect]]
+            if not eligible_effects:
+                continue
+            service_name = str(row.get("service_name") or "").strip()
+            tool_name = str(row.get("tool_name") or "").strip()
+            full_name = (
+                tool_name
+                if not service_name or tool_name == service_name or tool_name.startswith(f"{service_name}.")
+                else f"{service_name}.{tool_name}"
+            )
+            candidate = {
+                "name": full_name,
+                "description": str(row.get("description") or "").strip(),
+                "required_capability": declared,
+                "side_effect_level": effect,
+                "side_effect_options": sorted(effect_options, key=lambda item: effect_rank.get(item, 3)),
+                "requires_confirmation": bool(row.get("requires_confirmation")),
+                "confirmation_depends_on_arguments": bool(groups),
+                "input_schema": dict(row.get("input_schema") or {}),
+                "output_schema": dict(row.get("output_schema") or {}),
+            }
+            candidates.append(
+                (
+                    0 if full_name in preferred else 1,
+                    min(effect_rank.get(item, 3) for item in eligible_effects),
+                    full_name,
+                    candidate,
+                )
+            )
+
+        resolved = [item[3] for item in sorted(candidates, key=lambda item: (item[0], item[1], item[2]))[:max(1, limit)]]
+        return {
+            "objective": str(request.get("objective") or "").strip(),
+            "required_capabilities": sorted(required),
+            "preferred_modalities": [
+                str(item).strip()
+                for item in (request.get("preferred_modalities") or [])
+                if str(item).strip()
+            ],
+            "max_side_effect": max_effect,
+            "candidate_count": len(resolved),
+            "candidates": resolved,
+            "unavailable_candidates": unavailable[:max(1, limit)],
+            "registry_revision": self._registry_revision(catalog),
+        }
+
+    @staticmethod
+    def _capability_identifiers_overlap(declared: str, requested: str) -> bool:
+        left = str(declared or "").strip().lower()
+        right = str(requested or "").strip().lower()
+        return bool(left and right and (left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")))
+
+    @staticmethod
+    def _registry_revision(catalog: List[Dict[str, Any]]) -> str:
+        stable = json.dumps(catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+
+    def inspect_capabilities(
+        self,
+        names: List[str],
+        *,
+        run_context: Optional[Any] = None,
+        user_config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Resolve exact schemas from the authoritative registry without copying specs."""
+        requested = [str(item).strip() for item in names if str(item).strip()]
+        items: List[Dict[str, Any]] = []
+        for name in requested:
+            normalized, params = self.tool_registry.normalize_call(tool_name=name, params={})
+            spec = self.tool_registry.resolve_for_call(tool_name=normalized, params=params)
+            decision = self.tool_policy.evaluate(spec=spec, run_context=run_context, user_config=user_config)
+            registered = spec.full_name in {item.full_name for item in self.tool_registry.list_specs()}
+            owner = str(spec.metadata.get("owner_user_id") or "")
+            user_id = str(getattr(run_context, "user_id", "") or "")
+            registered = registered and not bool(spec.metadata.get("inferred")) and (not owner or owner == user_id)
+            config_ready, config_reason = self._tool_config_readiness(spec, user_config, user_id)
+            required = str(spec.metadata.get("requires_capability") or "")
+            dependency_ready, dependency_reason, _ = self._capability_readiness(required)
+            callable_now = bool(registered and decision.allowed and spec.enabled and config_ready and dependency_ready)
+            items.append(
+                {
+                    "name": spec.full_name,
+                    "registered": registered,
+                    "callable_now": callable_now,
+                    "callable_reason": "callable" if callable_now else ("not_registered" if not registered else "disabled" if not spec.enabled else config_reason or dependency_reason or decision.reason),
+                    "required_capability": required if registered else None,
+                    "description": spec.description if registered else "",
+                    "input_schema": dict(spec.input_schema or {}) if registered else {},
+                    "output_schema": dict(spec.output_schema or {}) if registered else {},
+                    "schema_status": "declared" if registered and spec.input_schema else "missing",
+                }
+            )
+        return {"requested": requested, "items": items}
 
     @staticmethod
     def _extract_run_context_fields(run_context: Optional[Any]) -> Dict[str, Any]:
@@ -532,6 +833,10 @@ class CapabilityService:
         request_id = getattr(run_context, "request_id", None)
         task_id = getattr(run_context, "task_id", None)
         run_id = getattr(run_context, "run_id", None)
+        task_run_id = getattr(run_context, "task_run_id", None)
+        workflow_run_id = getattr(run_context, "workflow_run_id", None)
+        conversation_turn_id = getattr(run_context, "conversation_turn_id", None)
+        action_loop_id = getattr(run_context, "action_loop_id", None)
         session_value = getattr(run_context, "session_id", None)
         user_value = getattr(run_context, "user_id", None)
         tenant_id = getattr(run_context, "tenant_id", None)
@@ -562,6 +867,14 @@ class CapabilityService:
             fields["task_id"] = str(task_id)
         if run_id:
             fields["run_id"] = str(run_id)
+        if task_run_id:
+            fields["task_run_id"] = str(task_run_id)
+        if workflow_run_id:
+            fields["workflow_run_id"] = str(workflow_run_id)
+        if conversation_turn_id:
+            fields["conversation_turn_id"] = str(conversation_turn_id)
+        if action_loop_id:
+            fields["action_loop_id"] = str(action_loop_id)
         if session_value:
             fields["session_id"] = str(session_value)
         if user_value:
@@ -661,14 +974,22 @@ class CapabilityService:
         self._sync_registry_from_mcp()
         spec = self.tool_registry.resolve_for_call(tool_name=tool_name, params=params)
 
+        if spec.source.value == "mcp" and self._mcp_registry_error is not None:
+            error = ToolCapabilityUnavailableError(spec.full_name, "mcp_registry_refresh_failed")
+            await self._emit_event(EventType.TOOL_CALL_ERROR, {
+                "request_id": request_id, "connection_id": connection_id, **context_fields,
+                "tool_type": "mcp", "tool_name": spec.full_name,
+                "ok": False, "status": "blocked", "error": str(error),
+                "error_detail": error_from_exception(error).as_dict(),
+            })
+            raise error
+
         owner_user_id = str(spec.metadata.get("owner_user_id") or "").strip()
         requester_user_id = str(context_fields.get("user_id") or "").strip()
         if owner_user_id and requester_user_id != owner_user_id:
             raise ToolPolicyViolationError("tool is private to another user")
 
-        config_ready, config_reason = self._required_config_ready(
-            spec.metadata.get("requires_config"), user_config
-        )
+        config_ready, config_reason = self._tool_config_readiness(spec, user_config, requester_user_id)
         if not config_ready:
             await self._emit_event(
                 EventType.TOOL_CALL_ERROR,
@@ -700,6 +1021,16 @@ class CapabilityService:
             raise ToolPolicyViolationError(decision.reason, decision=decision)
 
         return {"spec": spec, "decision": decision}
+
+    def _tool_config_readiness(self, spec: Any, user_config: Optional[Dict[str, Any]], user_id: str) -> tuple[bool, str]:
+        ready, reason = self._required_config_ready(spec.metadata.get("requires_config"), user_config)
+        probe = getattr(self._registered_tools.get(spec.full_name), "check_ready", None)
+        if ready and callable(probe):
+            try:
+                ready, reason = probe(user_id)
+            except Exception:
+                return False, "tool_configuration_probe_failed"
+        return bool(ready), str(reason or "")
 
     @staticmethod
     def _required_config_ready(requirement: Any, user_config: Optional[Dict[str, Any]]) -> tuple[bool, str]:
@@ -841,9 +1172,12 @@ class CapabilityService:
         run_context: Optional[Any] = None,
         user_config: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        approved = matches_approved_call(tool_name, params)
+        approval_name = tool_name
+        params = deepcopy(dict(params or {}))
+        approval_params = deepcopy(params)
         self._sync_registry_from_mcp()
         tool_name, params = self.tool_registry.normalize_call(tool_name=tool_name, params=params)
+        execution_params = deepcopy(params)
         context_fields = self._build_context_fields(ctx=ctx, run_context=run_context)
         context_fields["timezone"] = resolve_context_timezone_name(
             user_config,
@@ -868,6 +1202,27 @@ class CapabilityService:
         )
         spec = auth["spec"]
         decision = auth["decision"]
+        confirmation_error: Optional[ToolConfirmationRequiredError] = None
+
+        async def require_confirmation() -> bool:
+            nonlocal confirmation_error
+            approved = matches_approved_call(approval_name, approval_params) and params == execution_params
+            if decision.requires_confirmation and not approved:
+                error = ToolConfirmationRequiredError(spec.full_name, decision)
+                confirmation_error = error
+                await self._emit_event(EventType.TOOL_CALL_ERROR, {
+                    "request_id": request_id, "connection_id": connection_id, **context_fields,
+                    "tool_type": str(spec.source.value), "tool_id": spec.full_name,
+                    "ok": False, "status": "blocked", "error": str(error),
+                    "requires_confirmation": True,
+                    "error_detail": error_from_exception(error).as_dict(),
+                })
+                raise error
+            return approved
+
+        await require_confirmation()
+        presentation_source = self._registered_tools.get(tool_name) or spec
+        call_presentation = project_tool_call(presentation_source, params)
         hook_payload_base = {
             "tool_name": str(tool_name),
             "params": dict(params or {}),
@@ -887,17 +1242,25 @@ class CapabilityService:
                     "request_id": request_id,
                     "connection_id": connection_id,
                     **context_fields,
-                    "tool_type": "local",
+                    "tool_type": str(spec.source.value),
                     "tool_id": tool_name,
                     "args": params,
                     "tool_spec": spec.model_dump(mode="json"),
+                    "presentation": call_presentation,
                     "policy": (decision.effective if decision else {}),
                 },
             )
             try:
+                approved = await require_confirmation()
                 with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved):
                     result = await local_tool.invoke(params, ctx)
                 result_summary, result_metadata = self._project_local_result(local_tool, result)
+                result_presentation = project_tool_result(
+                    local_tool,
+                    params,
+                    result,
+                    call_presentation=call_presentation,
+                )
                 normalized = await self._emit_tool_outcome(
                     tool_name=tool_name,
                     result=result,
@@ -905,8 +1268,9 @@ class CapabilityService:
                         "request_id": request_id,
                         "connection_id": connection_id,
                         **context_fields,
-                        "tool_type": "local",
+                        "tool_type": str(spec.source.value),
                         "tool_id": tool_name,
+                        "presentation": result_presentation,
                     },
                     result_summary=result_summary,
                     result_metadata=result_metadata,
@@ -917,11 +1281,13 @@ class CapabilityService:
                         **hook_payload_base,
                         "result": result,
                         "error": normalized.error.message if normalized.error else None,
-                        "tool_type": "local",
+                        "tool_type": str(spec.source.value),
                     },
                 )
                 return result
             except Exception as e:
+                if e is confirmation_error:
+                    raise
                 logger.error(f"Local tool invocation failed [{tool_name}]: {e}")
                 error_detail = error_from_exception(e)
                 await self._emit_event(
@@ -930,8 +1296,9 @@ class CapabilityService:
                         "request_id": request_id,
                         "connection_id": connection_id,
                         **context_fields,
-                        "tool_type": "local",
+                        "tool_type": str(spec.source.value),
                         "tool_id": tool_name,
+                        "presentation": call_presentation,
                         "error": str(e),
                         "ok": False,
                         "status": "failed",
@@ -943,7 +1310,7 @@ class CapabilityService:
                     {
                         **hook_payload_base,
                         "error": str(e),
-                        "tool_type": "local",
+                        "tool_type": str(spec.source.value),
                     },
                 )
                 raise
@@ -963,6 +1330,7 @@ class CapabilityService:
                     "tool_type": "agent",
                     "agent_name": agent_name,
                     "tool_spec": spec.model_dump(mode="json"),
+                    "presentation": call_presentation,
                     "policy": (decision.effective if decision else {}),
                 },
             )
@@ -970,6 +1338,7 @@ class CapabilityService:
                 from agentkit.mcp.agent_manager import get_agent_manager
 
                 agent_manager = get_agent_manager()
+                await require_confirmation()
                 agent_result = await agent_manager.call_agent(
                     str(agent_name),
                     str(prompt),
@@ -992,6 +1361,7 @@ class CapabilityService:
                         **context_fields,
                         "tool_type": "agent",
                         "agent_name": agent_name,
+                        "presentation": call_presentation,
                     },
                 )
                 await self._run_hook(
@@ -1005,6 +1375,8 @@ class CapabilityService:
                 )
                 return result
             except Exception as e:
+                if e is confirmation_error:
+                    raise
                 error_detail = error_from_exception(e)
                 await self._emit_event(
                     EventType.TOOL_CALL_ERROR,
@@ -1014,6 +1386,7 @@ class CapabilityService:
                         **context_fields,
                         "tool_type": "agent",
                         "agent_name": agent_name,
+                        "presentation": call_presentation,
                         "error": str(e),
                         "ok": False,
                         "status": "failed",
@@ -1049,11 +1422,13 @@ class CapabilityService:
                 "tool_name": actual_tool_name,
                 "args": args,
                 "tool_spec": spec.model_dump(mode="json"),
+                "presentation": project_tool_call(spec, args),
                 "policy": (decision.effective if decision else {}),
             },
         )
 
         try:
+            approved = await require_confirmation()
             with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved):
                 result = await self.mcp_manager.call_service_tool(
                     service_name=service_name,
@@ -1074,6 +1449,7 @@ class CapabilityService:
                     "tool_type": "mcp",
                     "service_name": service_name,
                     "tool_name": actual_tool_name,
+                    "presentation": project_tool_call(spec, args),
                 },
             )
             await self._run_hook(
@@ -1089,6 +1465,8 @@ class CapabilityService:
             )
             return result
         except Exception as e:
+            if e is confirmation_error:
+                raise
             logger.error(f"MCP tool invocation failed [{service_name}.{actual_tool_name}]: {e}")
             error_detail = error_from_exception(e)
             await self._emit_event(
@@ -1100,6 +1478,7 @@ class CapabilityService:
                     "tool_type": "mcp",
                     "service_name": service_name,
                     "tool_name": actual_tool_name,
+                    "presentation": project_tool_call(spec, args),
                     "error": str(e),
                     "ok": False,
                     "status": "failed",

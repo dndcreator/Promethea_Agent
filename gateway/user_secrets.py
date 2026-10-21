@@ -12,6 +12,13 @@ from config import ENV_FILE, PROJECT_ROOT
 USER_SECRETS_FILENAME = "secrets.env"
 USER_SECRETS_DIR = PROJECT_ROOT / "config" / "users"
 
+# Personal accounts never inherit the operator's or another user's credentials.
+PERSONAL_ACCOUNT_ENV_KEYS: tuple[str, ...] = (
+    "MAIL__IMAP_HOST", "MAIL__IMAP_PORT", "MAIL__SMTP_HOST", "MAIL__SMTP_PORT",
+    "MAIL__SMTP_SECURITY", "MAIL__USERNAME", "MAIL__PASSWORD", "MAIL__FROM",
+    "CALENDAR__URL", "CALENDAR__USERNAME", "CALENDAR__PASSWORD",
+)
+
 SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "API__API_KEY",
     "API__BASE_URL",
@@ -21,7 +28,6 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "MULTIMODAL__BASE_URL",
     "MULTIMODAL__MODEL",
     "MEMORY__ENABLED",
-    "MEMORY__STORE_BACKEND",
     "MEMORY__SQLITE_GRAPH_PATH",
     "MEMORY__FLAT_MEMORY_PATH",
     "MEMORY__API__USE_MAIN_API",
@@ -40,6 +46,7 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "SEARCH__TAVILY_API_KEY",
     "SEARCH__SERPAPI_API_KEY",
     "SEARCH__SEARXNG_URL",
+    *PERSONAL_ACCOUNT_ENV_KEYS,
 )
 
 
@@ -64,6 +71,8 @@ def _default_secret_values() -> Dict[str, str]:
     values = {key: "" for key in SENSITIVE_ENV_KEYS}
     root_env = _read_env_file(ENV_FILE)
     for key in values:
+        if key in PERSONAL_ACCOUNT_ENV_KEYS:
+            continue
         if key in root_env:
             values[key] = root_env[key]
         elif key in os.environ:
@@ -117,7 +126,19 @@ def load_user_secrets(user_id: str, *, ensure: bool = True) -> Dict[str, str]:
     return {key: str(values.get(key) or "") for key in SENSITIVE_ENV_KEYS}
 
 
-def update_user_secrets(user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+def resolve_personal_account_settings(user_id: str, namespace: str) -> Dict[str, str]:
+    if not str(user_id or "").strip():
+        raise PermissionError("personal accounts require an authenticated user")
+    values = load_user_secrets(user_id, ensure=False)
+    prefix = f"{namespace.upper()}__"
+    return {key.removeprefix(prefix).lower(): values.get(key, "").strip()
+            for key in PERSONAL_ACCOUNT_ENV_KEYS if key.startswith(prefix)}
+
+
+def update_user_secrets(user_id: str, updates: Dict[str, Any], *, remove: Optional[List[str]] = None) -> Dict[str, Any]:
+    removed = {str(key).strip().upper() for key in (remove or [])}
+    if not removed.issubset(PERSONAL_ACCOUNT_ENV_KEYS):
+        raise ValueError("only personal account fields can be removed through this operation")
     current = load_user_secrets(user_id, ensure=True)
     for key, value in (updates or {}).items():
         normalized = str(key or "").strip().upper()
@@ -125,6 +146,8 @@ def update_user_secrets(user_id: str, updates: Dict[str, Any]) -> Dict[str, Any]
         # Empty form fields mean "keep existing value"; do not wipe configured secrets.
         if normalized in SENSITIVE_ENV_KEYS and text.strip():
             current[normalized] = text
+    for key in removed:
+        current[key] = ""
     _write_env_atomic(user_secrets_path(user_id), current)
     return get_user_secrets_status(user_id)
 
@@ -252,6 +275,18 @@ def get_user_secrets_status(user_id: str) -> Dict[str, Any]:
     return {
         "path": str(path),
         "exists": path.exists(),
+        "personal_accounts": {
+            "mail": {
+                "imap_configured": all(values.get(key) for key in ("MAIL__IMAP_HOST", "MAIL__USERNAME", "MAIL__PASSWORD")),
+                "smtp_configured": all(values.get(key) for key in ("MAIL__SMTP_HOST", "MAIL__USERNAME", "MAIL__PASSWORD")),
+                **{key.removeprefix("MAIL__").lower(): values.get(key, "") for key in PERSONAL_ACCOUNT_ENV_KEYS if key.startswith("MAIL__") and key != "MAIL__PASSWORD"},
+            },
+            "calendar": {
+                "configured": all(values.get(key) for key in ("CALENDAR__URL", "CALENDAR__USERNAME", "CALENDAR__PASSWORD")),
+                "url": values.get("CALENDAR__URL", ""),
+                "username": values.get("CALENDAR__USERNAME", ""),
+            },
+        },
         "api": {
             "api_key_configured": bool(api_key and api_key != "placeholder-key-not-set"),
             "base_url_configured": bool(base_url),

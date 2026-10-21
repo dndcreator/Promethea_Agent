@@ -9,6 +9,7 @@
     "dev": "vite",
     "prebuild": "npm run sdk:build",
     "build": "tsc && vite build",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },
@@ -16,6 +17,9 @@
     "@promethea/sdk": "file:../sdk/typescript",
     "framer-motion": "^11.0.8",
     "lucide-react": "^0.359.0",
+    "mdast-util-from-markdown": "^2.1.0",
+    "mdast-util-gfm-autolink-literal": "^2.0.1",
+    "micromark-extension-gfm-autolink-literal": "^2.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "clsx": "^2.1.0",

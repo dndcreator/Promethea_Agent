@@ -2,8 +2,10 @@
 import { createSelfEvolveTask, getSelfEvolveStatus, refreshSelfEvolveSelfModel } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
 import ResultCard from './settings/ResultCard'
+import FeatureSurface from '../FeatureSurface'
+import { X } from 'lucide-react'
 
-export default function EvolveModal({ onClose }: { onClose: () => void }) {
+export default function EvolveModal({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
   const [status, setStatus] = useState<any>({})
   const [goal, setGoal] = useState('')
   const [capabilityId, setCapabilityId] = useState('')
@@ -50,16 +52,16 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-8">
-      <div className="bg-white rounded-2xl shadow-xl w-[800px] max-h-[80vh] flex flex-col overflow-hidden">
+    <FeatureSurface embedded={embedded} onClose={onClose} label={t('自我进化', 'Self Evolve')}>
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <div className="px-6 py-4 border-b border-black/5 flex justify-between items-center bg-gray-50/50">
           <h2 className="text-lg font-bold text-text-strong flex items-center gap-2">
             {t('自我进化实验室', 'Self Evolution Lab')}
             <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded">{t('实验性', 'Experimental')}</span>
           </h2>
-          <button type="button" onClick={onClose} className="text-2xl leading-none text-text-muted hover:text-text-strong">&times;</button>
+          <button type="button" onClick={onClose} className="icon-button" title={t('关闭', 'Close')} aria-label={t('关闭', 'Close')}><X size={17} /></button>
         </div>
-        <div className="flex-1 p-6 overflow-y-auto grid grid-cols-2 gap-6 bg-bg-page">
+        <div className="min-h-0 flex-1 p-4 sm:p-6 overflow-y-auto grid grid-cols-1 lg:grid-cols-2 gap-5 bg-bg-page">
           <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm">
             <h3 className="font-semibold text-text-strong mb-4">{t('模块状态', 'Module Status')}</h3>
             <div className="grid grid-cols-2 gap-2 text-xs">
@@ -85,7 +87,7 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
               <StatusPill label={t('模型位置', 'Model Path')} value={selfModel.path || '-'} wide />
             </div>
           </div>
-          <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm col-span-2">
+          <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm lg:col-span-2">
             <h3 className="font-semibold text-text-strong mb-4">{t('任务审计', 'Task Audit')}</h3>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <StatusPill label={t('存储位置', 'Store Path')} value={evolve.store_path || '-'} wide />
@@ -98,9 +100,9 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
               )}
             </div>
           </div>
-          <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm col-span-2">
+          <div className="bg-white p-4 rounded-xl border border-black/5 shadow-sm lg:col-span-2">
             <h3 className="font-semibold text-text-strong mb-3">{t('创建进化任务', 'Create Evolution Task')}</h3>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-1 gap-2 xl:grid-cols-[minmax(150px,1fr)_130px_130px_auto]">
               <input
                 value={goal}
                 onChange={(event) => setGoal(event.target.value)}
@@ -111,13 +113,13 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
                 value={capabilityId}
                 onChange={(event) => setCapabilityId(event.target.value)}
                 placeholder={t('能力 ID', 'Capability ID')}
-                className="w-40 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
+                className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
               />
               <input
                 value={command}
                 onChange={(event) => setCommand(event.target.value)}
                 placeholder={t('命令', 'Command')}
-                className="w-40 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
+                className="w-full px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
               />
               <button type="button" onClick={createTask} className="px-4 py-2 bg-brand-500 text-white rounded-lg text-sm font-medium">
                 {t('创建', 'Create')}
@@ -134,7 +136,7 @@ export default function EvolveModal({ onClose }: { onClose: () => void }) {
           </div>
         </div>
       </div>
-    </div>
+    </FeatureSurface>
   )
 }
 

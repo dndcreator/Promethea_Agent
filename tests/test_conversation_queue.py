@@ -38,6 +38,22 @@ class _FakeConversationCore:
         return {"content": "{\"recall\": false}"}
 
 
+class _FakeActionService:
+    def __init__(self, core):
+        self.core = core
+
+    async def run_action(self, *, messages, user_config=None, session_id=None, user_id=None, tool_executor=None, confirmation_resolver=None, budget=None, **_kwargs):
+        return await self.core.run_chat_loop(
+            messages,
+            user_config=user_config,
+            session_id=session_id,
+            user_id=user_id,
+            tool_executor=tool_executor,
+            confirmation_resolver=confirmation_resolver,
+            max_recursion=budget,
+        )
+
+
 def _build_message_manager():
     mgr = MagicMock()
     mgr.get_session.return_value = True
@@ -72,6 +88,7 @@ async def test_conversation_retries_on_failure():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),
@@ -97,6 +114,7 @@ async def test_conversation_queue_serial_per_session():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),
@@ -123,6 +141,7 @@ async def test_conversation_queue_collect_coalesces_backlog():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),
@@ -153,6 +172,7 @@ async def test_conversation_queue_steer_backlog_marks_urgent_slot():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),
@@ -183,6 +203,7 @@ async def test_conversation_queue_command_sets_mode_and_trims_prefix():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),
@@ -209,6 +230,7 @@ async def test_conversation_queue_overflow_drop_oldest_keeps_new_message():
     svc = ConversationService(
         event_emitter=None,
         conversation_core=core,
+        action_service=_FakeActionService(core),
         memory_service=None,
         message_manager=_build_message_manager(),
         config_service=_build_config_service(),

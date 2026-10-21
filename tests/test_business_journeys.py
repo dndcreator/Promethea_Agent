@@ -17,6 +17,7 @@ class _EchoTool:
     tool_id = "utils.echo"
     name = "utils.echo"
     description = "Echo input text."
+    side_effect_level = "read_only"
 
     async def invoke(self, args, ctx=None):
         _ = ctx
@@ -67,12 +68,14 @@ class _InMemoryMessageManager:
         turn_id: str,
         assistant_content: str,
         user_id: Optional[str] = None,
+        reasoning_tree_id: Optional[str] = None,
+        reasoning_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         key = self._k(user_id, session_id)
         sess = self.sessions.get(key)
         if not sess:
             return False
-        sess["messages"].append({"role": "assistant", "content": assistant_content, "turn_id": turn_id})
+        sess["messages"].append({"role": "assistant", "content": assistant_content, "turn_id": turn_id, "reasoning_tree_id": reasoning_tree_id, "reasoning_steps": reasoning_steps or []})
         self.turns.pop(turn_id, None)
         return True
 
@@ -139,19 +142,26 @@ class _FlowConversationService:
             "content": "Report written. You can find it at reports/today.md.",
         }
 
+    async def resume_action(self, **_kwargs):
+        return {
+            "status": "success",
+            "content": "Report written. You can find it at reports/today.md.",
+        }
+
+    async def reject_pending_action(self, **_kwargs):
+        return {
+            "status": "success",
+            "content": "好的，我不会执行这项操作。",
+            "reasoning_steps": [],
+        }
+
 
 @pytest.mark.asyncio
-async def test_business_journey_chat_confirmation_then_resume(monkeypatch):
+async def test_business_journey_chat_confirmation_then_resume():
     server = GatewayServer()
     server.message_manager = _InMemoryMessageManager()
     server.conversation_service = _FlowConversationService()
     server.mcp_manager = object()
-
-    async def _fake_execute_tool_calls(*args, **kwargs):
-        _ = (args, kwargs)
-        return [{"type": "text", "text": "tool execution ok: reports/today.md"}]
-
-    monkeypatch.setattr("gateway.server.execute_tool_calls", _fake_execute_tool_calls)
 
     first = await server.handle_http_request(
         method=RequestType.CHAT,
@@ -176,6 +186,37 @@ async def test_business_journey_chat_confirmation_then_resume(monkeypatch):
     assert second.ok is True
     assert second.payload["status"] == "success"
     assert "reports/today.md" in str(second.payload.get("response") or "")
+    assert server.message_manager.get_pending_confirmation(session_id, user_id="u_biz") is None
+
+
+@pytest.mark.asyncio
+async def test_business_journey_rejected_tool_keeps_conversation_turn():
+    server = GatewayServer()
+    server.message_manager = _InMemoryMessageManager()
+    server.conversation_service = _FlowConversationService()
+    server.mcp_manager = object()
+
+    first = await server.handle_http_request(
+        method=RequestType.CHAT,
+        params={"message": "请帮我生成日报并写入文件"},
+        user_id="u_biz",
+    )
+    session_id = str(first.payload["session_id"])
+    rejected = await server.handle_http_request(
+        method=RequestType.CHAT_CONFIRM,
+        params={
+            "session_id": session_id,
+            "tool_call_id": "tc_1",
+            "action": "reject",
+        },
+        user_id="u_biz",
+    )
+
+    assert rejected.ok is True
+    assert rejected.payload["status"] == "success"
+    assert rejected.payload["response"] == "好的，我不会执行这项操作。"
+    session = server.message_manager.get_session(session_id, user_id="u_biz")
+    assert session["messages"][-1]["content"] == "好的，我不会执行这项操作。"
     assert server.message_manager.get_pending_confirmation(session_id, user_id="u_biz") is None
 
 

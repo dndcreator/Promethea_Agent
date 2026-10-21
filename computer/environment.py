@@ -77,6 +77,9 @@ class EnvironmentController(ComputerController):
             "launch": self._launch,
             "stop": self._stop,
             "remove": self._remove,
+            "state_get": self._state_get,
+            "state_set": self._state_set,
+            "report_error": self._report_error,
         }
         handler = handlers.get(str(action or "").strip().lower())
         if handler is None:
@@ -132,6 +135,9 @@ class EnvironmentController(ComputerController):
             raise ValueError("running environment must be stopped before registration changes")
         scope = current_workspace()
         now = _now()
+        lifetime = str(params.get("lifetime") or existing.get("lifetime") or "session")
+        if lifetime not in {"session", "reusable"}:
+            raise ValueError("canvas lifetime must be session or reusable")
         record = {
             "environment_id": environment_id,
             "name": name,
@@ -147,6 +153,9 @@ class EnvironmentController(ComputerController):
             "session_id": scope.execution.get("session_id") if scope else None,
             "created_at": existing.get("created_at") or now,
             "updated_at": now,
+            "lifetime": lifetime,
+            "app_state": existing.get("app_state", {"revision": 0, "value": {}}),
+            "diagnostics": existing.get("diagnostics", []),
         }
         self.environments[environment_id] = record
         self._save()
@@ -232,6 +241,39 @@ class EnvironmentController(ComputerController):
         self._record_event("removed", removed)
         return {"environment_id": environment_id, "removed": True}
 
+    async def _state_get(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._require(str(params.get("environment_id") or ""))
+        return json.loads(json.dumps(row.get("app_state", {"revision": 0, "value": {}})))
+
+    async def _state_set(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._require(str(params.get("environment_id") or ""))
+        current = row.get("app_state", {"revision": 0, "value": {}})
+        if params.get("expected_revision") != current["revision"]:
+            raise ValueError("canvas state revision conflict; reload state before saving")
+        value = params.get("value")
+        payload = json.dumps(value, allow_nan=False)
+        if not isinstance(value, dict) or len(payload.encode("utf-8")) > 256_000:
+            raise ValueError("canvas state must be a JSON object of at most 256 KB")
+        state = {"revision": current["revision"] + 1, "value": json.loads(payload)}
+        previous = row.get("app_state")
+        row["app_state"] = state
+        # State saves must not change render identity or destroy unsaved form input.
+        try:
+            self._save()
+        except Exception:
+            if previous is None:
+                row.pop("app_state", None)
+            else:
+                row["app_state"] = previous
+            raise
+        return json.loads(json.dumps(state))
+
+    async def _report_error(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        row = self._require(str(params.get("environment_id") or ""))
+        row["diagnostics"] = [*row.get("diagnostics", [])[-9:], {"message": str(params.get("message", ""))[:2000], "at": _now()}]
+        self._save()
+        return {"ok": True}
+
     def _refresh_statuses(self) -> None:
         changed = False
         for environment_id, process in list(self.processes.items()):
@@ -300,4 +342,4 @@ class EnvironmentController(ComputerController):
 
     @staticmethod
     def _public(row: Dict[str, Any]) -> Dict[str, Any]:
-        return {key: value for key, value in row.items() if key != "command"}
+        return {key: value for key, value in row.items() if key not in {"command", "app_state"}}

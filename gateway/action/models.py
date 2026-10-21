@@ -3,9 +3,10 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .state_machine import RuntimeActionStateMachine
+from gateway.goal_gaps import GoalGapState
 
 
 DEFAULT_ACTION_BUDGET = 5
@@ -31,6 +32,7 @@ class ActionContext:
     user_config: Optional[Dict[str, Any]] = None
     run_context: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    prepare_messages: Optional[Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]]] = None
 
 
 @dataclass
@@ -47,6 +49,16 @@ class ActionRun:
     started_at: float = field(default_factory=time.time)
     ended_at: Optional[float] = None
     machine: RuntimeActionStateMachine = field(default_factory=RuntimeActionStateMachine)
+    step: int = 0
+    observations: List[Dict[str, Any]] = field(default_factory=list)
+    execution_path: List[Dict[str, Any]] = field(default_factory=list)
+    reasoning_steps: List[Dict[str, Any]] = field(default_factory=list)
+    approved_call_ids: set[str] = field(default_factory=set)
+    gap_state: GoalGapState = field(default_factory=GoalGapState)
+    gap_feedback: str = ""
+    gap_task_revision: Optional[int] = None
+    gap_task_objective: str = ""
+    gap_execution_token: Dict[str, Any] = field(default_factory=dict)
 
     def add_trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         self.trace.append(

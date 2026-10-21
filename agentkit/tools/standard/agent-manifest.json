@@ -1,0 +1,10 @@
+{
+  "name": "standard",
+  "label": "Standard tools",
+  "version": "1.0.0",
+  "serviceType": "tool",
+  "entryPoint": {
+    "module": "agentkit.tools.standard",
+    "factory": "create_tools"
+  }
+}

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, List, Optional, Set
 from loguru import logger
 
 from .prompt_blocks import PromptBlock, PromptBlockType
 from .protocol import MemoryRecallBundle, ModeDecision, PlanResult, ToolExecutionBundle
-from .tool_prompt_blocks import build_tool_execution_prompt
+from .tool_prompt_blocks import build_action_protocol_prompt, build_tool_execution_prompt
 
 
 class PromptAssembler:
@@ -339,7 +340,15 @@ class PromptAssembler:
                         )
                     )
 
-        if memory_bundle.recalled and memory_bundle.context and not plan.system_prompt:
+        org_context = {}
+        if run_context is not None:
+            rs = getattr(run_context, "reasoning_state", None)
+            if isinstance(rs, dict):
+                org_context = rs.get("org_context") if isinstance(rs.get("org_context"), dict) else {}
+        org_collaboration = str(org_context.get("personal_memory_collaboration") or "context_only")
+        allow_personal_memory = not (org_context.get("recalled") and org_collaboration == "off")
+
+        if allow_personal_memory and memory_bundle.recalled and memory_bundle.context and not plan.system_prompt:
             blocks.append(
                 PromptBlock(
                     block_id="memory",
@@ -360,11 +369,6 @@ class PromptAssembler:
                 )
             )
 
-        org_context = {}
-        if run_context is not None:
-            rs = getattr(run_context, "reasoning_state", None)
-            if isinstance(rs, dict):
-                org_context = rs.get("org_context") if isinstance(rs.get("org_context"), dict) else {}
         org_summary = str(org_context.get("summary_text") or "").strip()
         org_enabled = bool((user_config or {}).get("org_brain", {}).get("enabled")) if isinstance(user_config, dict) else False
         if org_enabled and org_summary:
@@ -379,6 +383,8 @@ class PromptAssembler:
                     metadata={
                         "org_id": org_context.get("org_id"),
                         "audience": org_context.get("audience"),
+                        "personal_memory_collaboration": org_collaboration,
+                        "isolation": "context_only_no_cross_write",
                         "runtime_stability": self._resolve_runtime_stability(
                             block_id="org_context",
                             plan=plan,
@@ -478,6 +484,17 @@ class PromptAssembler:
                     },
                 )
             )
+        blocks.append(
+            PromptBlock(
+                block_id="runtime_action_protocol",
+                block_type=PromptBlockType.RESPONSE_FORMAT,
+                source="action_runtime",
+                content=build_action_protocol_prompt(),
+                priority=96,
+                can_compact=False,
+                metadata={"runtime_stability": "stable"},
+            )
+        )
         if tools.enabled:
             blocks.append(
                 PromptBlock(
@@ -486,6 +503,7 @@ class PromptAssembler:
                     source="tool_runtime",
                     content=build_tool_execution_prompt(
                         registered_tools=(tools.metadata or {}).get("registered_tools"),
+                        capability_snapshot=(tools.metadata or {}).get("capability_snapshot"),
                     ),
                     priority=40,
                     can_compact=True,
@@ -682,6 +700,32 @@ class PromptAssembler:
             rendered.append(content)
         return "\n\n".join(rendered).strip()
 
+    def render_messages(self, blocks: List[PromptBlock]) -> List[Dict[str, Any]]:
+        static = self.render_prompt([block for block in blocks if block.block_id != "tools"])
+        tools = self.render_prompt([block for block in blocks if block.block_id == "tools"])
+        return [{"role": "system", "content": content} for content in (static, tools) if content]
+
+    @staticmethod
+    def refresh_tool_message(messages: List[Dict[str, Any]], *, tools: List[Dict[str, Any]], snapshot: Dict[str, Any], run_context: Optional[Any]) -> List[Dict[str, Any]]:
+        from .tool_prompt_blocks import CAPABILITIES_HEADER
+
+        content = build_tool_execution_prompt(registered_tools=tools, capability_snapshot=snapshot)
+        result = [dict(message) for message in messages if not (
+            message.get("role") == "system" and isinstance(message.get("content"), str)
+            and message["content"].startswith(CAPABILITIES_HEADER)
+        )]
+        position = next((index for index, message in enumerate(result) if message.get("role") != "system"), len(result))
+        result.insert(position, {"role": "system", "content": content})
+        blocks = getattr(run_context, "prompt_blocks", None)
+        if isinstance(blocks, dict):
+            blocks.setdefault("block_manifest", {})["tools"] = {
+                "block_type": PromptBlockType.TOOLS.value, "source": "tool_runtime",
+                "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            }
+            if "tools" not in blocks.setdefault("used_block_ids", []):
+                blocks["used_block_ids"].append("tools")
+        return result
+
     def assemble(
         self,
         *,
@@ -752,6 +796,14 @@ class PromptAssembler:
                     "dropped_block_ids": debug["dropped_block_ids"],
                     "compacted": debug["compacted"],
                     "estimated_total_tokens": debug["estimated_total_tokens"],
+                    "block_manifest": {
+                        block.block_id: {
+                            "block_type": block.block_type.value,
+                            "source": block.source,
+                            "content_hash": hashlib.sha256(block.content.encode("utf-8")).hexdigest(),
+                        }
+                        for block in kept_blocks
+                    },
                 }
             except Exception as e:
                 logger.debug("PromptAssembler: failed to attach prompt block debug info: {}", e)

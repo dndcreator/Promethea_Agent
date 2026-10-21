@@ -1,4 +1,5 @@
-import sys
+"""External MCP provider configuration, not the Runtime tool registry."""
+
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any, List
@@ -8,15 +9,6 @@ from typing import Optional, Dict, Any, List
 MCP_REGISTRY = {}
 MANIFEST_CACHE = {}
 MANIFEST_SOURCES = {}
-
-def load_tools_manifest(manifest_path: Path) -> Optional[Dict[str, Any]]:
-
-    try:
-        with open(manifest_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        sys.stderr.write(f"Failed to load manifest file {manifest_path}: {e}\n")
-        return None
 
 def _external_mcp_config(manifest: Dict[str, Any], manifest_path: Path) -> Dict[str, Any]:
     transport = manifest.get("transport") or {}
@@ -39,35 +31,6 @@ def _external_mcp_config(manifest: Dict[str, Any], manifest_path: Path) -> Dict[
         "cwd": cwd or None,
         "env": {str(key): str(value) for key, value in env.items()},
     }
-
-def scan_and_register_services(service_dir: str = 'agentkit') -> List[str]:
-
-    p = Path(service_dir)
-    registered_services = []
-
-    for manifest_file in p.glob('**/agent-manifest.json'):
-        try:
-            manifest = load_tools_manifest(manifest_file)
-            if not manifest:
-                continue
-            service_type = manifest.get('serviceType')
-            service_name = manifest.get('name')
-
-            if not service_name:
-                sys.stderr.write(f"Manifest missing name field: {manifest_file}\n")
-                continue
-
-            if service_type == 'mcp':
-                MANIFEST_CACHE[service_name] = manifest
-                MANIFEST_SOURCES[service_name] = str(manifest_file.resolve())
-                MCP_REGISTRY[service_name] = _external_mcp_config(manifest, manifest_file)
-                registered_services.append(service_name)
-        except Exception as e:
-            sys.stderr.write(f"Failed processing manifest {manifest_file}: {e}\n")
-            continue
-    
-    return registered_services
-
 
 def get_service_info(service_name: str) -> Optional[Dict[str, Any]]:
 
@@ -109,6 +72,7 @@ def get_available_tools(service_name: str) -> List[Dict[str, Any]]:
             "owner_user_id": command.get('ownerUserId'),
             "side_effect_level": command.get('sideEffectLevel'),
             "side_effect_selector": command.get('sideEffectSelector'),
+            "presentation": command.get('presentation') or manifest.get('presentation') or {},
         })
     return tools
 
@@ -123,32 +87,40 @@ def get_all_services_info() -> Dict[str, Any]:
     return services_info
 
 def reload_mcp_registry(scan_dirs: Optional[List[str]] = None) -> List[str]:
-    """Reload MCP manifests from one or more roots.
-
-    Refresh entries whose manifest came from the selected roots. It is
-    intentionally conservative:
-    only services with a known source path under those roots are removed before
-    rescanning, so unrelated runtime registrations are preserved.
-    """
+    """Validate provider configurations before replacing the selected roots."""
     roots = [Path(x or "agentkit").resolve() for x in (scan_dirs or ["agentkit"])]
-    removed = []
+    removed = set()
     for service_name, source in list(MANIFEST_SOURCES.items()):
         try:
             source_path = Path(source).resolve()
             if any(source_path.is_relative_to(root) for root in roots):
-                removed.append(service_name)
+                removed.add(service_name)
         except Exception:
             continue
+    staged = {}
+    paths = sorted({path.resolve() for root in roots if root.exists() for path in root.glob("**/agent-manifest.json")})
+    for path in paths:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict):
+            raise ValueError(f"MCP manifest must contain an object: {path}")
+        if manifest.get("serviceType") != "mcp" or manifest.get("entryPoint") or manifest.get("generatedCapability"):
+            continue
+        name = str(manifest.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"MCP manifest is missing name: {path}")
+        if name in staged or (name in MCP_REGISTRY and name not in removed):
+            raise ValueError(f"duplicate MCP provider name: {name}")
+        staged[name] = (manifest, _external_mcp_config(manifest, path), str(path))
+
     for service_name in removed:
         MCP_REGISTRY.pop(service_name, None)
         MANIFEST_CACHE.pop(service_name, None)
         MANIFEST_SOURCES.pop(service_name, None)
-
-    registered: List[str] = []
-    for root in roots:
-        if root.exists():
-            registered.extend(scan_and_register_services(str(root)))
-    return registered
+    for name, (manifest, config, source) in staged.items():
+        MCP_REGISTRY[name] = config
+        MANIFEST_CACHE[name] = manifest
+        MANIFEST_SOURCES[name] = source
+    return list(staged)
 
 if __name__ == "__main__":
     reload_mcp_registry()

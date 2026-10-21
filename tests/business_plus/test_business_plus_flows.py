@@ -17,6 +17,7 @@ class _EchoTool:
     tool_id = "utils.echo"
     name = "utils.echo"
     description = "Echo input text."
+    side_effect_level = "read_only"
 
     async def invoke(self, args, ctx=None):
         _ = ctx
@@ -67,12 +68,14 @@ class _InMemoryMessageManager:
         turn_id: str,
         assistant_content: str,
         user_id: Optional[str] = None,
+        reasoning_tree_id: Optional[str] = None,
+        reasoning_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         key = self._k(user_id, session_id)
         sess = self.sessions.get(key)
         if not sess:
             return False
-        sess["messages"].append({"role": "assistant", "content": assistant_content, "turn_id": turn_id})
+        sess["messages"].append({"role": "assistant", "content": assistant_content, "turn_id": turn_id, "reasoning_tree_id": reasoning_tree_id, "reasoning_steps": reasoning_steps or []})
         self.turns.pop(turn_id, None)
         return True
 
@@ -139,19 +142,16 @@ class _FlowConversationService:
             "content": "Business-plus report written.",
         }
 
+    async def resume_action(self, **_kwargs):
+        return {"status": "success", "content": "Business-plus report written."}
+
 
 @pytest.mark.asyncio
-async def test_business_plus_chat_confirmation_roundtrip(monkeypatch):
+async def test_business_plus_chat_confirmation_roundtrip():
     server = GatewayServer()
     server.message_manager = _InMemoryMessageManager()
     server.conversation_service = _FlowConversationService()
     server.mcp_manager = object()
-
-    async def _fake_execute_tool_calls(*args, **kwargs):
-        _ = (args, kwargs)
-        return [{"type": "text", "text": "tool execution ok: reports/business-plus.md"}]
-
-    monkeypatch.setattr("gateway.server.execute_tool_calls", _fake_execute_tool_calls)
 
     first = await server.handle_http_request(
         method=RequestType.CHAT,

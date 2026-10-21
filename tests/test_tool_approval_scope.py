@@ -1,21 +1,40 @@
 import asyncio
 import hashlib
+import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls_detailed
 from agentkit.security.approval import approval_scope, call_is_approved
 from agentkit.security.sandbox import SandboxPolicy
+from gateway.action.model_action import InvalidModelAction, parse_model_action
+from gateway.action.service import ActionService
+from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolConfirmationRequiredError
 from gateway.chat_gateway_handler import handle_chat_confirm
-from gateway.capability_service import ToolInvocationContext, CapabilityService
 from gateway.workspace_service import WorkspaceService
 
 
-def tool_call(identifier="one", name="execute_command", **args):
-    return {"id": identifier, "name": name, "args": args}
+class _Core:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    async def call_llm(self, _messages, **_kwargs):
+        return {"status": "success", "content": self.responses.pop(0)}
+
+
+def _batch_action():
+    return json.dumps(
+        {
+            "action": "tool_calls",
+            "calls": [
+                {"id": "a", "tool_name": "execute_command", "args": {"command": "one"}},
+                {"id": "b", "tool_name": "execute_command", "args": {"command": "two"}},
+            ],
+        }
+    )
 
 
 def test_approval_mode_is_limited_to_invocation_and_does_not_override_denial():
@@ -46,54 +65,51 @@ async def test_approval_expires_in_inherited_background_task():
 
 @pytest.mark.asyncio
 async def test_batch_approvals_accumulate_without_executing_early():
-    calls = [tool_call("a"), tool_call("b")]
     executor = AsyncMock(return_value={"ok": True})
-    resolver = lambda _name, _args: True
-    with pytest.raises(ToolConfirmationRequired) as first:
-        await execute_tool_calls_detailed(calls, tool_executor=executor, confirmation_resolver=resolver)
-    with pytest.raises(ToolConfirmationRequired) as second:
-        await execute_tool_calls_detailed(
-            first.value.all_tool_calls,
-            tool_executor=executor,
-            confirmation_resolver=resolver,
-            approved_call_ids={"a"},
-        )
-    assert second.value.approved_call_ids == {"a"}
-    assert second.value.tool_call_id == "b"
-    executor.assert_not_awaited()
-    result = await execute_tool_calls_detailed(
-        second.value.all_tool_calls,
+    service = ActionService(conversation_core=_Core([_batch_action(), '{"action":"answer","content":"done"}']))
+    pending = await service.run_action(
+        goal="batch",
+        messages=[{"role": "user", "content": "batch"}],
         tool_executor=executor,
-        confirmation_resolver=resolver,
-        approved_call_ids=second.value.approved_call_ids | {"b"},
+        confirmation_resolver=lambda *_: True,
+        budget=3,
     )
-    assert all(row.ok for row in result)
+    second = await service.resume_action(
+        pending=pending,
+        approved_call_id="a",
+        user_config=None,
+        session_id="s",
+        user_id="u",
+        run_context=None,
+        tool_executor=executor,
+        confirmation_resolver=lambda *_: True,
+    )
+    assert second["status"] == "needs_confirmation"
+    assert second["tool_call_id"] == "b"
+    executor.assert_not_awaited()
+
+    result = await service.resume_action(
+        pending=second,
+        approved_call_id="b",
+        user_config=None,
+        session_id="s",
+        user_id="u",
+        run_context=None,
+        tool_executor=executor,
+        confirmation_resolver=lambda *_: True,
+    )
+    assert result["status"] == "success"
     assert executor.await_count == 2
     assert not call_is_approved()
 
 
-@pytest.mark.asyncio
-async def test_duplicate_ids_cannot_extend_approval_to_another_call():
-    with pytest.raises(ValueError, match="unique"):
-        await execute_tool_calls_detailed(
-            [tool_call(), tool_call(command="other")],
-            tool_executor=AsyncMock(),
-            confirmation_resolver=lambda _name, _args: False,
-            approved_call_ids={"one"},
+def test_duplicate_ids_cannot_extend_approval_to_another_call():
+    with pytest.raises(InvalidModelAction, match="unique"):
+        parse_model_action(
+            '{"action":"tool_calls","calls":['
+            '{"id":"same","tool_name":"a","args":{}},'
+            '{"id":"same","tool_name":"b","args":{}}]}'
         )
-
-
-@pytest.mark.asyncio
-async def test_confirmation_keeps_snapshot_of_reviewed_arguments():
-    calls = [tool_call(command="python -V")]
-    with pytest.raises(ToolConfirmationRequired) as confirmation:
-        await execute_tool_calls_detailed(
-            calls,
-            tool_executor=AsyncMock(),
-            confirmation_resolver=lambda _name, _args: True,
-        )
-    calls[0]["args"]["command"] = "changed"
-    assert confirmation.value.all_tool_calls[0]["args"]["command"] == "python -V"
 
 
 @pytest.mark.asyncio
@@ -110,14 +126,14 @@ async def test_capability_service_does_not_transfer_consent_to_changed_arguments
     service.register_tool(Tool())
     with approval_scope(Tool.tool_id, {"value": 1}, confirmed=True):
         same = await service.call_tool(Tool.tool_id, {"value": 1})
-        changed = await service.call_tool(Tool.tool_id, {"value": 2, "approved": True})
+        with pytest.raises(ToolConfirmationRequiredError):
+            await service.call_tool(Tool.tool_id, {"value": 2, "approved": True})
     assert same["approved"] is True
-    assert changed["approved"] is False
 
 
 @pytest.mark.asyncio
 async def test_runtime_confirmation_comes_from_tool_registry_policy():
-    service = CapabilityService()
+    capabilities = CapabilityService()
 
     class Tool:
         tool_id = name = "custom.side_effect"
@@ -127,54 +143,62 @@ async def test_runtime_confirmation_comes_from_tool_registry_policy():
         async def invoke(self, args, ctx):
             return {"ok": True}
 
-    service.register_tool(Tool())
-    calls = [tool_call("custom", Tool.tool_id, value=1)]
-    with pytest.raises(ToolConfirmationRequired):
-        await execute_tool_calls_detailed(
-            calls,
-            tool_executor=AsyncMock(return_value={"ok": True}),
-            confirmation_resolver=service.requires_confirmation,
-        )
+    capabilities.register_tool(Tool())
+    pending = await ActionService(
+        conversation_core=_Core(['{"action":"tool_call","id":"custom","tool_name":"custom.side_effect","args":{"value":1}}'])
+    ).run_action(
+        goal="side effect",
+        messages=[{"role": "user", "content": "side effect"}],
+        tool_executor=AsyncMock(return_value={"ok": True}),
+        confirmation_resolver=capabilities.requires_confirmation,
+    )
+    assert pending["status"] == "needs_confirmation"
+    assert pending["tool_call_id"] == "custom"
 
 
 @pytest.mark.asyncio
 async def test_confirm_handler_preserves_batch_consent_and_rejects_replay():
-    calls = [tool_call("a"), tool_call("b")]
-    pending = {"tool_call_id": "a", "pending_tool_calls": calls, "current_messages": []}
+    pending = {"tool_call_id": "a", "turn_id": "turn", "status": "needs_confirmation", "reasoning_tree_id": "tree"}
 
-    def store(session, data, **kwargs):
+    def store(_session, data, **_kwargs):
         nonlocal pending
         pending = data
 
-    def clear(*args, **kwargs):
+    def clear(*_args, **_kwargs):
         nonlocal pending
         pending = None
 
     entered, finish = asyncio.Event(), asyncio.Event()
 
-    async def execute(*args, **kwargs):
-        assert call_is_approved()
+    async def resume_action(**kwargs):
+        assert kwargs["run_context"].conversation_turn_id == "turn"
+        if kwargs["approved_call_id"] == "a":
+            return {"status": "needs_confirmation", "tool_call_id": "b", "tool_name": "write", "args": {}, "approved_call_ids": ["a"]}
         entered.set()
         await finish.wait()
-        return {"ok": True}
+        return {"status": "success", "content": "done"}
 
     server = SimpleNamespace(
-        message_manager=SimpleNamespace(get_pending_confirmation=lambda *a, **k: pending,
-                                        set_pending_confirmation=store, clear_pending_confirmation=clear,
-                                        add_message=Mock()),
-        conversation_service=SimpleNamespace(run_conversation=AsyncMock(return_value={"status": "success", "content": "done"})),
-        capability_service=SimpleNamespace(requires_confirmation=lambda *_args, **_kwargs: True),
-        config_service=None, mcp_manager=object(),
+        message_manager=SimpleNamespace(
+            get_pending_confirmation=lambda *a, **k: pending,
+            set_pending_confirmation=store,
+            clear_pending_confirmation=clear,
+            commit_turn=Mock(return_value=True),
+            add_message=Mock(),
+        ),
+        conversation_service=SimpleNamespace(resume_action=resume_action),
+        config_service=None,
         _resolve_request_user_id=lambda *a: "user",
         _build_run_context=lambda **k: SimpleNamespace(trace_id="trace"),
-        _execute_tool_for_chat=execute, _emit_gateway_event=AsyncMock(),
+        _execute_tool_for_chat=AsyncMock(),
     )
     connection = SimpleNamespace(connection_id="connection")
-    request = SimpleNamespace(id="r1", params={"session_id": "s", "tool_call_id": "a", "action": "approve"})
-    first = await handle_chat_confirm(server, connection, request)
-    assert first.ok
-    assert pending["tool_call_id"] == "b"
-    assert pending["approved_call_ids"] == ["a"]
+    first = await handle_chat_confirm(
+        server,
+        connection,
+        SimpleNamespace(id="r1", params={"session_id": "s", "tool_call_id": "a", "action": "approve"}),
+    )
+    assert first.ok and pending["tool_call_id"] == "b"
     request = SimpleNamespace(id="r2", params={"session_id": "s", "tool_call_id": "b", "action": "approve"})
     running = asyncio.create_task(handle_chat_confirm(server, connection, request))
     await entered.wait()
@@ -184,6 +208,39 @@ async def test_confirm_handler_preserves_batch_consent_and_rejects_replay():
     finally:
         finish.set()
     assert (await running).ok
+    assert server.message_manager.commit_turn.call_args.kwargs["reasoning_tree_id"] == "tree"
+
+
+@pytest.mark.asyncio
+async def test_confirmation_failure_never_commits_an_assistant_reply():
+    manager = SimpleNamespace(
+        get_pending_confirmation=lambda *a, **k: {"tool_call_id": "call", "turn_id": "turn"},
+        clear_pending_confirmation=Mock(),
+        abort_turn=Mock(),
+        commit_turn=Mock(),
+        add_message=Mock(),
+    )
+    server = SimpleNamespace(
+        message_manager=manager,
+        conversation_service=SimpleNamespace(resume_action=AsyncMock(return_value={
+            "status": "error", "content": "", "error": {"message": "provider unavailable"},
+        })),
+        config_service=None,
+        _resolve_request_user_id=lambda *a: "user",
+        _build_run_context=lambda **k: SimpleNamespace(trace_id="trace"),
+        _execute_tool_for_chat=AsyncMock(),
+    )
+    response = await handle_chat_confirm(
+        server, SimpleNamespace(connection_id="connection"),
+        SimpleNamespace(id="request", params={"session_id": "s", "tool_call_id": "call", "action": "approve"}),
+    )
+    assert not response.ok
+    manager.commit_turn.assert_not_called()
+    manager.add_message.assert_not_called()
+    manager.abort_turn.assert_called_once_with(
+        "s", "turn", user_id="user", error={"message": "provider unavailable"},
+        reasoning_tree_id=None, reasoning_steps=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -193,7 +250,7 @@ async def test_native_approved_image_workflow_preserves_original(monkeypatch, tm
     import win32security
     from PIL import Image
     from computer.filesystem import FileSystemController
-    from gateway.official_tools.code_tools import CodeRunPythonTool
+    from agentkit.tools.standard.code_tools import CodeRunPythonTool
 
     token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
     try:
@@ -211,31 +268,37 @@ async def test_native_approved_image_workflow_preserves_original(monkeypatch, tm
     filesystem.locations.register("input", lambda: tmp_path, host_readable=True)
     await filesystem.initialize()
     assert (await filesystem.execute("copy", {"src": str(original), "dst": "input.png"})).success
-    service = CapabilityService()
-    service.workspace_service = workspaces
-    service.register_tool(CodeRunPythonTool(workspace_service=workspaces))
+    capabilities = CapabilityService()
+    capabilities.workspace_service = workspaces
+    capabilities.register_tool(CodeRunPythonTool(workspace_service=workspaces))
     ctx = ToolInvocationContext(user_id="u", session_id="s")
-    code = "from PIL import Image\nImage.open('input.png').resize((40,30)).save('output.png')\nprint('created output.png')"
-    calls = [tool_call("image", "code.run_python", code=code)]
+    code = "from PIL import Image\nImage.open('input.png').resize((40,30)).save('output.png')"
 
     async def executor(name, args):
-        return await service.call_tool(name, args, ctx=ctx)
+        return await capabilities.call_tool(name, args, ctx=ctx)
 
-    with pytest.raises(ToolConfirmationRequired):
-        await execute_tool_calls_detailed(
-            calls,
-            tool_executor=executor,
-            confirmation_resolver=service.requires_confirmation,
-        )
-    results = await execute_tool_calls_detailed(
-        calls,
+    service = ActionService(conversation_core=_Core([
+        json.dumps({"action": "tool_call", "id": "image", "tool_name": "code.run_python", "args": {"code": code}}),
+        '{"action":"answer","content":"done"}',
+    ]))
+    pending = await service.run_action(
+        goal="resize image",
+        messages=[{"role": "user", "content": "resize image"}],
         tool_executor=executor,
-        approved_call_ids={"image"},
-        confirmation_resolver=service.requires_confirmation,
+        confirmation_resolver=capabilities.requires_confirmation,
     )
-    assert results[0].ok, results[0]
-    from pathlib import Path
-
+    assert pending["status"] == "needs_confirmation"
+    result = await service.resume_action(
+        pending=pending,
+        approved_call_id="image",
+        user_config=None,
+        session_id="s",
+        user_id="u",
+        run_context=None,
+        tool_executor=executor,
+        confirmation_resolver=capabilities.requires_confirmation,
+    )
+    assert result["status"] == "success"
     with Image.open(Path(handle.root_path) / "output.png") as image:
         assert image.size == (40, 30)
     assert hashlib.sha256(original.read_bytes()).hexdigest() == digest

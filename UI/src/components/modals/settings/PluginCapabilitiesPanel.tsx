@@ -1,87 +1,79 @@
-﻿import { useState } from 'react'
-import { applyPluginConfig, getExtensionCatalog, getPluginCatalog, reloadExtensions } from '../../../services/api'
+import { useRef, useState } from 'react'
+import { RefreshCw, RotateCw } from 'lucide-react'
+import { applyPluginConfig, getExtensionCatalog, getPluginCatalog, readApiResponse, reloadExtensions } from '../../../services/api'
 import { useLanguage } from '../../../store/LanguageContext'
-import ResultCard from './ResultCard'
 
 export default function PluginCapabilitiesPanel() {
   const [plugins, setPlugins] = useState<any[]>([])
   const [extensions, setExtensions] = useState<any[]>([])
-  const [result, setResult] = useState<unknown>(null)
+  const [loaded, setLoaded] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [receipt, setReceipt] = useState<unknown>(null)
+  const submitting = useRef(false)
   const { t } = useLanguage()
 
   const load = async () => {
-    const [pluginData, extensionData] = await Promise.all([
-      getPluginCatalog().then((res) => res.json()).catch(() => ({ plugins: [] })),
-      getExtensionCatalog().then((res) => res.json()).catch(() => ({ extensions: [] })),
+    const [pluginData, extensionData] = await Promise.allSettled([
+      getPluginCatalog().then(readApiResponse), getExtensionCatalog().then(readApiResponse),
     ])
-    setPlugins(pluginData.plugins || [])
-    setExtensions(extensionData.extensions || [])
-    setResult({ status: 'loaded', plugins: pluginData.plugins || [], extensions: extensionData.extensions || [] })
+    if (pluginData.status === 'fulfilled') setPlugins(pluginData.value.plugins || [])
+    if (extensionData.status === 'fulfilled') setExtensions(extensionData.value.extensions || [])
+    setLoaded(true)
+    if (pluginData.status === 'rejected' || extensionData.status === 'rejected') setError(t('部分目录加载失败，请重试', 'Some catalogs could not be loaded. Retry.'))
   }
-
-  const reload = async () => {
-    const data = await reloadExtensions().then((res) => res.json())
-    setResult(data)
+  const perform = async (operation: () => Promise<void>) => {
+    if (submitting.current) return
+    submitting.current = true
+    setBusy(true); setError(''); setNotice(''); setReceipt(null)
+    try { await operation() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { submitting.current = false; setBusy(false) }
+  }
+  const reload = () => perform(async () => {
+    const data = await reloadExtensions().then(readApiResponse)
+    setReceipt(data)
     await load()
-  }
+    setNotice(t('重载请求已完成', 'Reload request completed'))
+  })
+  const apply = (plugin: any, enabled: boolean) => perform(async () => {
+    const data = await applyPluginConfig(plugin.id, enabled, plugin.config || {}).then(readApiResponse)
+    setPlugins((rows) => rows.map((row) => row.id === plugin.id ? { ...row, enabled: data.enabled } : row))
+    setReceipt(data)
+    await load()
+  })
 
-  return (
-    <section className="mt-4 flex flex-col gap-4 border-t border-black/5 pt-4">
-      <div className="flex items-start justify-between gap-3">
-        <h3 className="font-semibold text-text-strong">{t('扩展与工具', 'Extensions & Tools')}</h3>
-        <div className="flex shrink-0 gap-2">
-          <button type="button" onClick={load} className="rounded-lg bg-gray-100 px-3 py-1.5 text-sm">{t('刷新', 'Refresh')}</button>
-          <button type="button" onClick={reload} className="rounded-lg bg-slate-800 px-3 py-1.5 text-sm text-white">{t('热重载', 'Hot Reload')}</button>
-        </div>
+  return <section className="settings-section">
+    <header className="settings-section-heading">
+      <h3>{t('扩展与工具', 'Extensions & Tools')}</h3>
+      <div className="settings-actions">
+        <button type="button" disabled={busy} onClick={() => void perform(load)} className="icon-button" title={t('刷新', 'Refresh')} aria-label={t('刷新工具目录', 'Refresh tool catalog')}><RefreshCw size={15} className={busy ? 'animate-spin' : ''} /></button>
+        <button type="button" disabled={busy} onClick={() => void reload()} className="secondary-button"><RotateCw size={14} />{t('热重载', 'Hot reload')}</button>
       </div>
-
-      <div className="grid gap-2">
-        {extensions.map((extension) => (
-          <details key={extension.id} className="rounded-xl border border-black/5 bg-white p-3 text-xs">
-            <summary className="cursor-pointer list-none">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-semibold text-text-strong">{extension.name || extension.id}</span>
-                    <span className={`rounded-full px-2 py-0.5 ${extension.provider === 'official' ? 'bg-slate-100 text-slate-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                      {extension.provider || 'community'}
-                    </span>
-                    <span className="rounded-full bg-gray-100 px-2 py-0.5 text-text-muted">{extension.source_type || 'unknown'}</span>
-                  </div>
-                  <p className="mt-1 truncate text-text-muted">{extension.description || extension.id}</p>
-                </div>
-                <span className="shrink-0 text-text-muted">{extension.callable_count || 0}/{extension.tool_count || 0}</span>
-              </div>
-            </summary>
-            <div className="mt-3 grid gap-2">
-              {(extension.tools || []).map((tool: any) => (
-                <div key={tool.tool_id} className="rounded-lg bg-gray-50 px-3 py-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium text-text-strong">{tool.tool_id}</span>
-                    <span className={tool.callable_now ? 'text-emerald-700' : 'text-amber-700'}>
-                      {tool.callable_now ? t('可调用', 'Callable') : tool.callable_reason || t('不可用', 'Unavailable')}
-                    </span>
-                  </div>
-                  {tool.description && <p className="mt-1 text-text-muted">{tool.description}</p>}
-                </div>
-              ))}
-            </div>
-          </details>
-        ))}
-      </div>
-
-      <div className="flex flex-col gap-2 border-t border-dashed border-black/10 pt-3">
-        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-text-muted">{t('配置插件', 'Config Plugins')}</div>
-        {plugins.map((plugin) => (
-          <div key={plugin.id} className="flex items-center justify-between gap-3 rounded border bg-white p-3 text-xs">
-            <span>{plugin.name || plugin.id} ({plugin.status || 'unknown'})</span>
-            <button type="button" onClick={() => applyPluginConfig(plugin.id, !plugin.enabled, plugin.config || {}).then((res) => res.json()).then(setResult)} className="rounded bg-brand-50 px-2 py-1 text-brand-600">
-              {plugin.enabled ? t('停用', 'Disable') : t('启用', 'Enable')}
-            </button>
-          </div>
-        ))}
-      </div>
-      <ResultCard payload={result} />
-    </section>
-  )
+    </header>
+    <div className="extension-list">
+      {extensions.map((extension) => <details key={extension.id} className="extension-item">
+        <summary><span><strong>{extension.name || extension.id}</strong><small>{extension.provider || ''}</small></span>
+          <span>{extension.callable_count ?? '-'} / {extension.tool_count ?? '-'} {t('可调用', 'callable')}</span>
+        </summary>
+        {extension.description && <p className="extension-description">{extension.description}</p>}
+        {(extension.tools || []).map((tool: any) => <div key={tool.tool_id} className="extension-tool">
+          <div><strong>{tool.tool_id}</strong><span className={tool.callable_now ? 'text-emerald-700' : 'text-amber-700'}>{tool.callable_now ? t('可调用', 'Callable') : t('不可用', 'Unavailable')}</span></div>
+          {tool.description && <p>{tool.description}</p>}
+          {!tool.callable_now && tool.callable_reason && <p>{tool.callable_reason}</p>}
+        </div>)}
+      </details>)}
+      {loaded && !extensions.length && !error && <p className="text-xs text-text-muted">{t('暂无扩展', 'No extensions')}</p>}
+    </div>
+    {!!plugins.length && <div className="plugin-settings-list">
+      <h4>{t('配置插件', 'Config plugins')}</h4>
+      {plugins.map((plugin) => <label key={plugin.id} className="plugin-setting-row">
+        <span>{plugin.name || plugin.id}</span><input type="checkbox" disabled={busy} checked={Boolean(plugin.enabled)} aria-label={t(`启用 ${plugin.name || plugin.id}`, `Enable ${plugin.name || plugin.id}`)} onChange={(event) => void apply(plugin, event.target.checked)} />
+      </label>)}
+    </div>}
+    {notice && <p role="status" className="text-xs text-emerald-700">{notice}</p>}
+    {error && <p role="alert" className="text-xs text-red-600">{error}</p>}
+    {receipt !== null && <details className="operation-details"><summary>{t('技术详情', 'Technical details')}</summary><pre>{JSON.stringify(receipt, null, 2)}</pre></details>}
+  </section>
 }

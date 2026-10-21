@@ -83,6 +83,7 @@ async def test_side_effect_tool_generates_audit_event():
         tool_id = "local.write_file"
         name = "Write"
         description = "write file"
+        side_effect_level = "workspace_write"
 
         async def invoke(self, args, ctx=None):
             return {"ok": True}

@@ -9,6 +9,15 @@ from .runtime_event_log import RuntimeEventLog
 
 logger = logging.getLogger("Gateway.Events")
 
+_DURABLE_RUNTIME_EVENTS = {
+    EventType.INTERACTION_COMPLETED,
+    EventType.ACTION_STATE_CHANGED,
+    EventType.ACTION_OBSERVATION_COMMITTED,
+    EventType.MODEL_CALL_RECORDED,
+    EventType.CAPABILITY_SNAPSHOT_CREATED,
+}
+_FAIL_CLOSED_RUNTIME_EVENTS = _DURABLE_RUNTIME_EVENTS - {EventType.INTERACTION_COMPLETED}
+
 
 class EventEmitter:
     """Async event emitter with listener registry and bounded history."""
@@ -32,13 +41,11 @@ class EventEmitter:
         """Register a listener for an event."""
         if handler not in self._listeners[event]:
             self._listeners[event].append(handler)
-            logger.debug(f"Registered handler for event: {event}")
 
     def off(self, event: EventType, handler: Callable) -> None:
         """Unregister a listener."""
         if handler in self._listeners[event]:
             self._listeners[event].remove(handler)
-            logger.debug(f"Unregistered handler for event: {event}")
 
     def once(self, event: EventType, handler: Callable) -> None:
         """Register a listener that runs once."""
@@ -52,7 +59,7 @@ class EventEmitter:
     async def emit(self, event: EventType, payload: Dict[str, Any]) -> None:
         """Emit event to all listeners."""
         persisted = None
-        requires_commit = event == EventType.INTERACTION_COMPLETED
+        requires_commit = event in _DURABLE_RUNTIME_EVENTS
         if self.event_log is not None:
             try:
                 persisted = await asyncio.to_thread(
@@ -63,8 +70,10 @@ class EventEmitter:
                 )
             except Exception as exc:
                 logger.error(f"Runtime event log append failed: {exc}")
-                if requires_commit:
+                if event == EventType.INTERACTION_COMPLETED:
                     return
+                if event in _FAIL_CLOSED_RUNTIME_EVENTS:
+                    raise
 
         if persisted is not None:
             event_seq = int(persisted["seq"])
@@ -103,7 +112,6 @@ class EventEmitter:
         # Dispatch handlers.
         handlers = self._listeners.get(event, [])
         if handlers:
-            logger.debug(f"Emitting event {event} to {len(handlers)} handlers")
             tasks = []
             for handler in handlers:
                 try:
@@ -116,8 +124,6 @@ class EventEmitter:
 
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-        else:
-            logger.debug(f"No handlers for event: {event}")
 
     def get_history(self, event: Optional[EventType] = None, limit: int = 100) -> List[EventMessage]:
         """Return event history, optionally filtered by event type."""

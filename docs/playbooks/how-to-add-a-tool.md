@@ -8,9 +8,16 @@ A tool in Promethea has three parts:
 
 1. `ToolSpec`: metadata, name, description, schema, side-effect level, and permission scope.
 2. Implementation: a class with an async `invoke(args, ctx=None)` method.
-3. Registration: startup code registers the tool with `CapabilityService`.
+3. Registration: manifest discovery registers the tool with `CapabilityService`.
 
 `CapabilityService` handles policy checks, namespace resolution, event emission, and audit/trace integration. A tool implementation should focus on the capability itself.
+
+Account- or dependency-backed local tools may expose a synchronous
+`check_ready(user_id) -> (bool, reason)` probe. Catalog projection, exact
+inspection, and execution authorization use the same probe. Keep it cheap and
+local: inspect configuration/dependency availability without network calls or
+secret values in the returned reason. Do not equate configuration with remote
+service health. The existing manifest `requiresConfig` check remains unchanged.
 
 ## Tool, Extension, And Skill Boundaries
 
@@ -26,7 +33,7 @@ If the capability performs an action, implement it as a tool. If the capability 
 
 If a tool represents one stable capability that can be served by multiple backends, keep one public tool id and put provider selection inside the tool's runtime layer.
 
-Use this pattern for official capabilities such as web search:
+Use this pattern for capabilities such as web search:
 
 ```text
 CapabilityService
@@ -36,7 +43,7 @@ WebSearchRuntime
   auto | brave | tavily | serpapi | searxng | duckduckgo
 ```
 
-Do not register separate official tools for the same general capability, such as `brave.search`, `tavily.search`, and `searxng.search`. That leaks provider choice into router and prompt logic. Provider routing should be explicit runtime configuration, normally stored in `.env` or the current user's `config/users/<user_id>/secrets.env`.
+Do not register separate tools for the same general capability, such as `brave.search`, `tavily.search`, and `searxng.search`. That leaks provider choice into router and prompt logic. Provider routing should be explicit runtime configuration, normally stored in `.env` or the current user's `config/users/<user_id>/secrets.env`.
 
 Community tools can stay simple. Add a provider runtime only when the community tool also exposes one stable capability backed by multiple providers.
 
@@ -88,6 +95,17 @@ class WeatherTool:
     name = "weather.current"
     description = "Get current weather for a city."
     side_effect_level = "read_only"
+    input_schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+        "additionalProperties": False,
+    }
+    presentation = {
+        "title": "Check weather",
+        "title_i18n": {"zh": "查询天气", "en": "Check weather"},
+        "subject_arg": "city",
+    }
 
     async def invoke(
         self,
@@ -105,19 +123,82 @@ class WeatherTool:
         }
 ```
 
-## Step 3: Register At Startup
+`presentation` is optional. It lets the Runtime persist a readable Workbench
+card without coupling React to a tool id. Manifest-backed commands accept the
+same object, and may also declare typed references such as
+`{"kind":"url","arg":"url"}`. Without it, Workbench uses the registered tool
+description as a generic title.
 
-Register the tool in application startup code, usually through the same path that initializes official local tools.
+Concurrent execution is opt-in: set `concurrency_safe = True` on a local tool,
+`concurrencySafe: true` on a discovered manifest command, or `concurrency_safe`
+on its trusted Runtime `ToolSpec`. An undeclared tool runs exclusively. Opt in
+only if invocations do not race over shared state or a GUI session; read-only
+policy classification alone is not a concurrency guarantee. The existing Action
+loop enforces the pool limit and ordering barriers, without granting permissions
+or automatically retrying side effects. Tool cancellation must release owned
+resources and must not report uncertain external effects as a confirmed failure.
 
-```python
-from gateway.capability_service import CapabilityService
-from yourmodule.weather_tool import WeatherTool
+The equivalent command declaration in `agent-manifest.json` is:
 
-capability_service = CapabilityService(event_emitter=event_emitter)
-capability_service.register_tool(WeatherTool())
+```json
+{
+  "command": "current",
+  "description": "Get current weather for a city.",
+  "presentation": {
+    "title": "Check weather",
+    "title_i18n": {"zh": "查询天气", "en": "Check weather"},
+    "subject_arg": "city"
+  }
+}
 ```
 
-`register_tool` adds the tool to both invocation storage and `ToolRegistry`, which is used for policy resolution and catalog queries.
+Supported fields are `kind`, `title`, `title_i18n`, `subject_arg`, `summary`,
+`summary_i18n`, and `references`. Each reference declares a generic `kind` and
+either an argument name in `arg` or a fixed `target`. Invalid declarations fail
+registration instead of silently producing a broken card.
+
+## Step 3: Package For Discovery
+
+Add `extensions/community/weather/agent-manifest.json`:
+
+```json
+{
+  "name": "weather",
+  "label": "Weather",
+  "version": "0.1.0",
+  "serviceType": "tool",
+  "entryPoint": {
+    "module": "extensions.community.weather.tools",
+    "factory": "create_tools"
+  }
+}
+```
+
+In `extensions/community/weather/tools.py`, define the tool above and its factory:
+
+```python
+def create_tools(runtime):
+    return [WeatherTool()]
+```
+
+Both `agentkit/tools` and `extensions/community` use this discovery path. Startup
+scans manifests; `/api/extensions/reload` refreshes implementations and removes
+deleted tools. Factories return fresh instances on each load, never register them themselves. Native
+tool schemas, readiness probes and presentation hooks remain on the tool class;
+they do not need to be copied into JSON. Existing `{module, class}` command
+manifests and external MCP transport manifests are also supported by the same
+catalog and governed execution path.
+
+The factory receives trusted host bindings (`workspace_service`, `memory_service`,
+`message_manager`, `gateway_server`, and available Runtime services). Use only the
+dependencies needed by the package; return no dependent tools when a service is
+absent. Bindings never come from model arguments and confer no approval. Package
+code is operator-installed Python code, not sandboxed by importing it. Install
+only trusted packages; Agent-generated tools must use Self Evolve's existing
+sandboxed proxy, and out-of-process providers should use MCP.
+
+`ToolSpec` is derived from the registered instance. The explicit spec above
+illustrates the Runtime contract; there is no second spec file to maintain.
 
 For an MCP command whose risk depends on one parameter, declare the mapping in
 its manifest instead of adding tool-name branches to policy code:
@@ -166,8 +247,14 @@ Call flow:
 1. Namespace and user-boundary checks run.
 2. `ToolRegistry.resolve_for_call` applies any manifest-declared action effect.
 3. `ToolPolicy.evaluate` checks the call against `run_context`.
-4. The tool's `invoke` method runs.
-5. Tool result events are emitted for trace/audit.
+4. If policy requires confirmation, CapabilityService requires an active Runtime grant for the exact call before hooks or `invoke`. Otherwise it raises `TOOL_CONFIRMATION_REQUIRED`; direct calls and missing `RunContext` are not exemptions.
+5. The tool's `invoke` method runs.
+6. Tool result events are emitted for trace/audit.
+
+Do not accept `approved` arguments as authorization or mint an `approval_scope`
+inside a tool. User-facing confirmation is owned by Runtime. Nested high-risk
+calls need their own exact grant; workflow-step approval and permission allowlists
+are not substitutes for tool-call confirmation.
 
 ## Step 6: Add Tests
 

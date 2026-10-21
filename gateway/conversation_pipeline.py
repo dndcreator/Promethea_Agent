@@ -200,6 +200,7 @@ async def stage_capability_discovery(
         metadata={
             "tool_budget": action_budget,
             "registered_tools": catalog,
+            "capability_snapshot": dict(getattr(run_context, "tool_availability", {}) or {}),
             "decision_owner": "main_model",
         },
     )
@@ -317,7 +318,17 @@ async def _assemble_response(
 
 
 def _capability_outcome(raw: Dict[str, Any]) -> Dict[str, Any]:
-    calls = [item for item in (raw.get("tool_calls") or []) if isinstance(item, dict)]
+    observations = [item for item in (raw.get("observations") or []) if isinstance(item, dict)]
+    calls = [
+        {
+            "tool_name": str(item.get("tool_name") or ""),
+            "tool_call_id": item.get("tool_call_id"),
+            "observation_id": item.get("observation_id"),
+            "ok": bool(item.get("ok", False)),
+            "error": item.get("error"),
+        }
+        for item in observations
+    ]
     successful_names = [
         str(item.get("tool_name") or "")
         for item in calls
@@ -371,6 +382,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
                 recent_messages=normalized.recent_messages,
                 user_config=user_config,
                 timezone_name=str((normalized.metadata or {}).get("timezone") or ""),
+                ui_language=str((normalized.metadata or {}).get("ui_language") or ""),
             ),
         )
         base_system_prompt = service._append_language_policy(service._ensure_core_system_prompt(base_system_prompt))
@@ -419,18 +431,23 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             tools=tools,
         )
         outcome = _capability_outcome(response.response_data)
+        runtime_failed = response.status not in {"success", "needs_confirmation"}
         await _emit_stage(
             service,
             stage=current_stage,
-            status="finished",
+            status="failed" if runtime_failed else "finished",
             run_context=run_context,
             session_id=session_id,
             user_id=user_id,
-            payload={"tool_call_count": len(outcome["calls"]), "mode": outcome["mode"]},
+            payload={
+                "tool_call_count": len(outcome["calls"]),
+                "mode": outcome["mode"],
+                "runtime_status": response.status,
+            },
         )
         state["stages"].append(current_stage)
         state["stage_status"][current_stage] = {
-            "status": "degraded" if outcome["failed"] else "ok",
+            "status": "failed" if runtime_failed else ("degraded" if outcome["failed"] else "ok"),
             "tool_call_count": len(outcome["calls"]),
         }
 
@@ -485,8 +502,8 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
                 "status": "degraded" if outcome["failed"] else ("ok" if outcome["calls"] else "skipped"),
                 "call_count": len(outcome["calls"]),
             },
-            "degraded": bool(outcome["failed"]),
-            "degraded_stages": ["model_control_loop"] if outcome["failed"] else [],
+            "degraded": bool(outcome["failed"] or runtime_failed),
+            "degraded_stages": ["model_control_loop"] if outcome["failed"] or runtime_failed else [],
         }
         raw["task_graph"] = build_task_graph_snapshot(
             stage_status=state["stage_status"],

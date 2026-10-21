@@ -595,6 +595,7 @@ class ReasoningService:
                 parts.append("Critical cognition:\n" + "\n".join(f"- {line}" for line in critical_lines))
         return "\n\n".join(parts)
     async def _emit_node(self, tree: ReasoningTree, node: ReasoningNode, event: EventType) -> None:
+        summary = str(node.summary or node.observation or "").strip()
         await self._emit(
             event,
             {
@@ -606,6 +607,7 @@ class ReasoningService:
                 "kind": node.kind,
                 "title": node.title,
                 "status": node.status,
+                "summary": self._truncate_text(summary, 280) if summary else None,
             },
         )
 

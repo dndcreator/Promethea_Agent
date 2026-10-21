@@ -87,6 +87,9 @@ ADVANCED_CONFIG_FIELDS = [
     "org_brain.extract_text_max_chars",
     "org_brain.heuristic_max_lines",
     "org_brain.heuristic_max_items",
+    "org_brain.chunk_chars",
+    "org_brain.max_chunks",
+    "org_brain.personal_memory_collaboration",
 ]
 
 
@@ -117,6 +120,7 @@ class ConfigSwitchModelRequest(BaseModel):
 
 class SecretsUpdateRequest(BaseModel):
     values: Dict[str, str] = Field(default_factory=dict)
+    remove: list[str] = Field(default_factory=list, max_length=32)
 
 
 def _get_config_service():
@@ -217,6 +221,7 @@ def _build_basic_config_view(config_data: Dict[str, Any]) -> Dict[str, Any]:
             "recall_priority": org_brain.get("recall_priority", "blend"),
             "confirmation_queue": _to_bool(org_brain.get("confirmation_queue"), default=True),
             "audience_default": org_brain.get("audience_default", "业务部门"),
+            "personal_memory_collaboration": org_brain.get("personal_memory_collaboration", "context_only"),
         },
         "soul": build_soul_response_payload(cfg),
     }
@@ -355,7 +360,10 @@ async def update_config_secrets(
     request: SecretsUpdateRequest,
     current_user_id: str = Depends(get_current_user_id),
 ) -> Dict[str, Any]:
-    status = update_user_secrets(current_user_id, request.values)
+    try:
+        status = update_user_secrets(current_user_id, request.values, remove=request.remove)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
     return {
         "status": "success",
         "user_id": current_user_id,

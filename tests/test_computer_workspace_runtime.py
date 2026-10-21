@@ -22,6 +22,27 @@ def scope(tmp_path, user, workspace="task"):
     return ComputerWorkspace(user, workspace, root.resolve())
 
 
+def _filesystem_manager(invoke):
+    return SimpleNamespace(call_service_tool=invoke, get_available_services_filtered=lambda: {
+        "mcp_services": [{"name": "computer_control", "available_tools": [{
+            "name": "fs_action", "side_effect_level": "workspace_write",
+        }]}],
+    })
+
+
+@pytest.mark.asyncio
+async def test_browser_preparation_failure_remains_a_runtime_observation(tmp_path):
+    controller = SimpleNamespace(is_initialized=False,
+                                 initialize=AsyncMock(return_value=False), cleanup=AsyncMock(),
+                                 initialization_error={"code": "BROWSER_SETUP_FAILED", "message": "Download timed out"},
+                                 has_background_activity=lambda: False)
+    runtime = ComputerRuntime({"browser": lambda **_: controller})
+    result = await runtime.execute(scope(tmp_path, "alice"), "browser", "navigate", {})
+    assert not result.success and result.error == "Download timed out"
+    assert result.metadata["initialization_error"]["code"] == "BROWSER_SETUP_FAILED"
+    await runtime.close()
+
+
 @pytest.mark.asyncio
 async def test_filesystem_workspaces_do_not_share_files(tmp_path):
     runtime = ComputerRuntime({"filesystem": FileSystemController})
@@ -51,7 +72,7 @@ async def test_mcp_scope_is_trusted_and_restored_after_parallel_calls(tmp_path):
         assert current_workspace() == before
         return {"ok": True, "user_id": before.user_id}
 
-    manager = SimpleNamespace(call_service_tool=invoke, get_available_services_filtered=lambda: {})
+    manager = _filesystem_manager(invoke)
     service = CapabilityService(mcp_manager=manager)
     service.workspace_service = workspaces
     results = await asyncio.gather(*[
@@ -77,7 +98,7 @@ async def test_cancelled_tool_does_not_leak_workspace(tmp_path):
         entered.set()
         await asyncio.Event().wait()
 
-    service = CapabilityService(mcp_manager=SimpleNamespace(call_service_tool=invoke, get_available_services_filtered=lambda: {}))
+    service = CapabilityService(mcp_manager=_filesystem_manager(invoke))
     service.workspace_service = WorkspaceService(base_dir=str(tmp_path))
     task = asyncio.create_task(service.call_tool("fs_action", {"service_name": "computer_control"},
                               ctx=ToolInvocationContext(user_id="alice", session_id="task")))

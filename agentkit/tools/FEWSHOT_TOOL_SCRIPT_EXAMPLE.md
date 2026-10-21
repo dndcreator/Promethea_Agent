@@ -16,6 +16,7 @@ Project conventions:
    - entryPoint.module = "extensions.community.<tool_slug>.service"
    - entryPoint.class = "<ClassName>"
    - capabilities.invocation_commands[] with command/description/example
+   - commands may declare presentation with title/title_i18n, subject_arg, and typed references
    - inputSchema.type = "object"
 3) Python class:
    - class name must match manifest entryPoint.class
@@ -57,6 +58,10 @@ Now generate tool:
             {
                 "command": "normalize_text",
                 "description": "Normalize spaces and line breaks.",
+                "presentation": {
+                    "title": "Normalize text",
+                    "subject_arg": "text"
+                },
                 "example": "normalize_text(text='  hello\\nworld  ')"
             },
             {

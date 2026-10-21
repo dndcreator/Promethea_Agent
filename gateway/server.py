@@ -20,10 +20,9 @@ from .protocol import (
     GatewayRequest, GatewayResponse, GatewayEvent, ConversationRunInput
 )
 from channels.base import MessageType as ChannelMessageType
-from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
 from .connection import ConnectionManager, Connection
 from .events import EventEmitter
-from .capability_service import CapabilityService, ToolInvocationContext
+from .capability_service import CapabilityService, ToolInvocationContext, ToolConfirmationRequiredError
 from .tool_policy import ToolPolicyEngine
 from .memory_service import MemoryService
 from .conversation_service import ConversationService
@@ -127,6 +126,16 @@ class GatewayServer:
                 self.capability_service.workspace_service = self.workspace_service
             if self.config_service is not None:
                 self.capability_service.config_provider = self.config_service.get_merged_config
+        self.capability_service.bind_tool_runtime(
+            workspace_service=self.workspace_service,
+            memory_service=self.memory_service,
+            message_manager=self.message_manager,
+            gateway_server=self,
+            reasoning_service=self.reasoning_service,
+            self_model_service=self.self_model_service,
+            org_context_service=self.org_context_service,
+            workflow_engine=self.workflow_engine,
+        )
         return self.capability_service
 
     def _register_default_handlers(self):
@@ -628,6 +637,9 @@ class GatewayServer:
     async def stop(self):
         """Stop the gateway server."""
         self.is_running = False
+        learning = getattr(getattr(self.reasoning_service, "template_memory", None), "learning", None)
+        if learning is not None:
+            await learning.stop()
         logger.info("Gateway Server stopped")
     
     async def handle_connection(self, websocket, connection: Connection):
@@ -1397,6 +1409,15 @@ class GatewayServer:
                 "tool": tool_name,
                     "result": result,
                 },
+            )
+        except ToolConfirmationRequiredError as e:
+            return GatewayProtocol.create_response(
+                request.id, False,
+                payload={"error_detail": {
+                    "code": e.code, "message": str(e), "retryable": e.retryable,
+                    "advice": e.advice, "details": e.details,
+                }},
+                error=str(e),
             )
         except Exception as e:
             logger.error(f"Error calling tool: {e}")

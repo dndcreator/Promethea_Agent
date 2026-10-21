@@ -4,7 +4,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from loguru import logger
-from neo4j.exceptions import AuthError, ServiceUnavailable
 
 from ..schemas import (
     ChannelBindRequest,
@@ -76,21 +75,12 @@ async def register(user: UserRegister):
     user_id = user_manager.create_user(user.username, user.password, user.agent_name)
     if not user_id:
         can_register, reason = user_manager.can_register()
-        if not can_register and reason in {
-            "neo4j_user_backend_unavailable",
-            "neo4j_unavailable",
-            "neo4j_authentication_failed",
-        }:
-            messages = {
-                "neo4j_authentication_failed": "Neo4j is reachable, but username/password authentication failed",
-                "neo4j_unavailable": "Neo4j is configured as the user backend but is unavailable",
-                "neo4j_user_backend_unavailable": "Neo4j is configured as the user backend but is unavailable",
-            }
+        if not can_register:
             raise HTTPException(
                 status_code=503,
                 detail={
                     "code": reason,
-                    "message": messages.get(reason, "Neo4j user backend is unavailable"),
+                    "message": "Identity store is unavailable",
                 },
             )
         raise HTTPException(
@@ -105,24 +95,7 @@ async def register(user: UserRegister):
 
 @router.post("/auth/login")
 async def login(user: UserLogin, response: Response):
-    try:
-        db_user = user_manager.verify_user(user.username, user.password)
-    except AuthError:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "neo4j_authentication_failed",
-                "message": "Neo4j is reachable, but username/password authentication failed",
-            },
-        )
-    except ServiceUnavailable:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "code": "neo4j_unavailable",
-                "message": "Neo4j is configured as the user backend but is unavailable",
-            },
-        )
+    db_user = user_manager.verify_user(user.username, user.password)
     if not db_user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
@@ -225,6 +198,10 @@ async def delete_user_account(
 
     try:
         gateway = get_gateway_integration().gateway_server
+        learning = getattr(getattr(getattr(gateway, "reasoning_service", None), "template_memory", None), "learning", None)
+        if learning is not None:
+            await learning.interrupt(user_id)
+            await learning.interrupt(user_id.replace("user_", "", 1))
         workflow_engine = getattr(gateway, "workflow_engine", None)
         purge = getattr(workflow_engine, "purge_user_state", None) if workflow_engine else None
         if callable(purge):

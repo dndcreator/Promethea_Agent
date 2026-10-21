@@ -7,6 +7,8 @@ import {
   type RunRequest,
   type Task,
   type UserFile,
+  type Project,
+  type Session,
   type WorkbenchSnapshot,
 } from '@promethea/sdk'
 
@@ -16,10 +18,12 @@ export type {
   RunRequest,
   RunResponse,
   Session,
+  Project,
   ToolCall,
   ToolResult,
   Task,
   WorkbenchActivity,
+  WorkbenchReference,
   WorkbenchSnapshot,
   CognitionItem,
   CognitionBundle,
@@ -41,21 +45,21 @@ export function getAuthToken(): string {
   return localStorage.getItem('auth_token') || ''
 }
 
-function createRuntimeClient(): PrometheaClient {
+function createRuntimeClient(token = getAuthToken()): PrometheaClient {
   return new PrometheaClient({
     baseUrl: resolveApiBase(),
-    token: getAuthToken,
+    token,
     credentials: 'include',
   })
 }
 
 async function sdkCall<T>(operation: (client: PrometheaClient) => Promise<T>): Promise<T> {
+  const token = getAuthToken()
   try {
-    return await operation(createRuntimeClient())
+    return await operation(createRuntimeClient(token))
   } catch (error) {
     if (error instanceof PrometheaError && error.status === 401) {
-      clearAuthToken()
-      window.dispatchEvent(new Event('auth-expired'))
+      expireAuthToken(token)
     }
     throw error
   }
@@ -77,23 +81,63 @@ export function clearAuthToken(): void {
   localStorage.removeItem('auth_token')
 }
 
+function expireAuthToken(expectedToken: string): void {
+  if (!expectedToken || getAuthToken() !== expectedToken) return
+  clearAuthToken()
+  window.dispatchEvent(new Event('auth-expired'))
+}
+
 export type AuthFetchOptions = RequestInit & {
   suppressAuthExpired?: boolean
 }
 
 export async function authFetch(path: string, options: AuthFetchOptions = {}): Promise<Response> {
   const { suppressAuthExpired, ...fetchOptions } = options
-  const client = createRuntimeClient()
+  const token = getAuthToken()
+  const client = createRuntimeClient(token)
   const response = await client.request(path, fetchOptions)
   if (response.status === 401 && !suppressAuthExpired) {
-    clearAuthToken()
-    window.dispatchEvent(new Event('auth-expired'))
+    expireAuthToken(token)
   }
   return response
 }
 
 export function getSession(sessionId: string): Promise<Response> {
   return authFetch(`/api/sessions/${encodeURIComponent(sessionId)}`)
+}
+
+export async function listSessions(signal?: AbortSignal): Promise<Session[]> {
+  const response = await authFetch('/api/sessions?limit=1000', { signal })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
+  const data = await response.json()
+  return Array.isArray(data.sessions) ? data.sessions : []
+}
+
+export function listProjects(signal?: AbortSignal): Promise<Project[]> {
+  return sdkCall(async (client) => (await client.projects.list(signal)).projects || [])
+}
+
+export function createProject(name: string): Promise<Project> {
+  return sdkCall((client) => client.projects.create({ name }))
+}
+
+export function renameProject(projectId: string, name: string): Promise<Project> {
+  return sdkCall((client) => client.projects.rename(projectId, { name }))
+}
+
+export function deleteProject(projectId: string): Promise<void> {
+  return sdkCall((client) => client.projects.delete(projectId))
+}
+
+export function assignSessionProject(sessionId: string, projectId: string | null): Promise<void> {
+  return sdkCall((client) => client.projects.assignSession(sessionId, projectId))
+}
+
+export async function setSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+  const response = await authFetch(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pinned }),
+  })
+  if (!response.ok) throw new Error(`HTTP ${response.status}`)
 }
 
 export type FollowupRequest = {
@@ -114,8 +158,8 @@ export function sendFollowup(data: FollowupRequest): Promise<Response> {
   })
 }
 
-export function getConfig(): Promise<Response> {
-  return authFetch('/api/config')
+export function getConfig(signal?: AbortSignal): Promise<Response> {
+  return authFetch('/api/config', { signal })
 }
 
 export function updateConfig(config: unknown): Promise<Response> {
@@ -126,15 +170,15 @@ export function updateConfig(config: unknown): Promise<Response> {
   })
 }
 
-export function getRuntimeSecrets(): Promise<Response> {
-  return authFetch('/api/config/secrets')
+export function getRuntimeSecrets(signal?: AbortSignal): Promise<Response> {
+  return authFetch('/api/config/secrets', { signal })
 }
 
-export function updateRuntimeSecrets(values: Record<string, string>): Promise<Response> {
+export function updateRuntimeSecrets(values: Record<string, string>, remove: string[] = []): Promise<Response> {
   return authFetch('/api/config/secrets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ values }),
+    body: JSON.stringify({ values, remove }),
   })
 }
 
@@ -244,6 +288,10 @@ export function listCanvasEnvironments(workspaceId = 'default'): Promise<CanvasE
   return sdkCall((client) => client.canvas.list(workspaceId))
 }
 
+export function getCanvasClient() {
+  return createRuntimeClient().canvas
+}
+
 export function updateMemoryEntry(memoryId: string, content: string): Promise<Response> {
   return authFetch(`/api/memory/entries/${encodeURIComponent(memoryId)}`, {
     method: 'PATCH',
@@ -288,8 +336,17 @@ export function listUserFiles(query = '', limit = 50): Promise<Response> {
   return authFetch(`/api/files?${params.toString()}`)
 }
 
-export function unifiedSearch(query: string): Promise<Response> {
-  return authFetch(`/api/search?q=${encodeURIComponent(query)}&limit_sessions=20&limit_files=20`)
+export function unifiedSearch(query: string, signal?: AbortSignal): Promise<Response> {
+  return authFetch(`/api/search?q=${encodeURIComponent(query)}&limit_sessions=20&limit_files=20`, { signal })
+}
+
+export async function readApiResponse<T = any>(response: Response): Promise<T> {
+  const data = await response.json().catch(() => null)
+  if (!response.ok) {
+    const message = data?.error_detail?.message || data?.detail?.message || data?.detail || data?.error || `HTTP ${response.status}`
+    throw new Error(typeof message === 'string' ? message : `HTTP ${response.status}`)
+  }
+  return data as T
 }
 
 export function listWorkflows(limit = 50): Promise<Response> {
@@ -324,22 +381,26 @@ export function getWorkbenchSnapshot(sessionId?: string | null, taskId?: string 
   return sdkCall((client) => client.workbench.get({ sessionId, taskId, runId, limit: 160 }))
 }
 
+export function getWorkbenchArtifact(workspaceId: string, path: string, signal?: AbortSignal): Promise<Blob> {
+  return sdkCall((client) => client.workbench.artifact(workspaceId, path, signal))
+}
+
 export async function* watchWorkbenchSnapshots(
   sessionId?: string | null,
   taskId?: string | null,
   runId?: string | null,
   signal?: AbortSignal,
 ): AsyncGenerator<WorkbenchSnapshot> {
+  const token = getAuthToken()
   try {
-    yield* createRuntimeClient().workbench.watch(
+    yield* createRuntimeClient(token).workbench.watch(
       { sessionId, taskId, runId, limit: 160 },
       {},
       signal,
     )
   } catch (error) {
     if (error instanceof PrometheaError && error.status === 401) {
-      clearAuthToken()
-      window.dispatchEvent(new Event('auth-expired'))
+      expireAuthToken(token)
     }
     throw error
   }
@@ -347,6 +408,10 @@ export async function* watchWorkbenchSnapshots(
 
 export function pauseTask(taskId: string, expectedRevision?: number): Promise<Task> {
   return sdkCall((client) => client.tasks.pause(taskId, { expected_revision: expectedRevision }))
+}
+
+export function listTasks(signal?: AbortSignal): Promise<Task[]> {
+  return sdkCall((client) => client.tasks.list({ limit: 100 }, signal))
 }
 
 export function resumeTask(taskId: string, expectedRevision?: number): Promise<Task> {
@@ -367,6 +432,31 @@ export function getOrgBrainStatus(): Promise<Response> {
 
 export function ingestOrgBrainFile(formData: FormData): Promise<Response> {
   return authFetch('/api/org-brain/ingest-file', { method: 'POST', body: formData })
+}
+
+export function listOrgBrainDocuments(status?: string): Promise<Response> {
+  const query = status ? `?status=${encodeURIComponent(status)}` : ''
+  return authFetch(`/api/org-brain/documents${query}`)
+}
+
+export function reviewOrgBrainRevision(revisionId: string, approve: boolean): Promise<Response> {
+  return authFetch('/api/org-brain/review', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revision_id: revisionId, approve }),
+  })
+}
+
+export function exportOrgBrain(): Promise<Response> {
+  return authFetch('/api/org-brain/export')
+}
+
+export function importOrgBrain(bundle: unknown): Promise<Response> {
+  return authFetch('/api/org-brain/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bundle }),
+  })
 }
 
 export function getPluginCatalog(): Promise<Response> {
@@ -491,6 +581,7 @@ export async function streamChat(
   onError: (error: Error) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const token = getAuthToken()
   try {
     const runRequest: RunRequest = {
       message,
@@ -499,20 +590,20 @@ export async function streamChat(
       attachments,
       metadata: {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        ui_language: document.documentElement.lang || navigator.language,
       },
     }
-    const client = createRuntimeClient()
-    let sawDone = false
+    const client = createRuntimeClient(token)
+    let terminal = false
     for await (const event of client.runs.stream(runRequest, signal)) {
-      if (event.event_type === 'done') sawDone = true
+      if (event.event_type === 'done' || event.event_type === 'error') terminal = true
       onEvent(event.event_type, event.payload)
     }
-    if (!sawDone) onEvent('done', { status: 'stream_closed' })
+    if (!terminal && !signal?.aborted) onError(new Error('STREAM_INTERRUPTED'))
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') return
     if (error instanceof PrometheaError && error.status === 401) {
-      clearAuthToken()
-      window.dispatchEvent(new Event('auth-expired'))
+      expireAuthToken(token)
     }
     onError(error instanceof Error ? error : new Error(String(error)))
   }

@@ -3,11 +3,13 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from .spec import ToolSource
+from .presentation import validate_presentation_declaration
 
 
 SUPPORTED_SERVICE_TYPES = {"mcp", "tool", "internal_tool", "extension_tool"}
@@ -45,6 +47,9 @@ class ManifestTool:
         self.description = str(command.get("description") or manifest.get("description") or "")
         self.input_schema = dict(command.get("inputSchema") or manifest.get("inputSchema") or {})
         self.output_schema = dict(command.get("outputSchema") or manifest.get("outputSchema") or {})
+        self.presentation = validate_presentation_declaration(
+            command.get("presentation") or manifest.get("presentation")
+        )
         self.side_effect_level = str(command.get("sideEffectLevel") or "privileged_host_action")
         self.side_effect_selector = dict(command.get("sideEffectSelector") or {})
         self.requires_capability = str(command.get("requiresCapability") or "").strip()
@@ -57,9 +62,9 @@ class ManifestTool:
         self.timeout_ms = int(command.get("timeoutMs") or manifest.get("timeoutMs") or 30000)
         self.retry_policy = dict(command.get("retryPolicy") or manifest.get("retryPolicy") or {"max_retries": 0})
         self.idempotency_hint = str(command.get("idempotencyHint") or "unknown")
+        self.concurrency_safe = command.get("concurrencySafe") is True
         self.tool_source = source
-        self.official = source == ToolSource.LOCAL
-        self.official_domain = str(manifest.get("category") or service_name)
+        self.domain = str(manifest.get("category") or service_name)
         self.extension_id = service_name
         self.extension_name = str(manifest.get("label") or service_name)
         self.extension_version = str(manifest.get("version") or "")
@@ -107,18 +112,42 @@ def _load_service(manifest: Dict[str, Any], manifest_path: Path, *, reload_modul
     return service_class()
 
 
-def _source_for(path: Path, official_root: Path) -> ToolSource:
-    try:
-        path.resolve().relative_to(official_root.resolve())
-        return ToolSource.LOCAL
-    except ValueError:
-        return ToolSource.EXTENSION
+def _load_factory_tools(
+    manifest: Dict[str, Any], manifest_path: Path, *,
+    runtime: Dict[str, Any], reload_modules: bool,
+) -> List[Any]:
+    entry = manifest["entryPoint"]
+    if entry.get("class") or manifest.get("generatedCapability"):
+        raise ValueError(f"tool manifest must select exactly one entry point: {manifest_path}")
+    module = importlib.import_module(str(entry.get("module") or ""))
+    if reload_modules:
+        importlib.invalidate_caches()
+        # Reload only the plugin package, never the host services it imports.
+        for name in sorted(list(sys.modules), key=lambda value: value.count("."), reverse=True):
+            if name.startswith(module.__name__ + ".") and sys.modules[name] is not None:
+                importlib.reload(sys.modules[name])
+        module = importlib.reload(module)
+    factory = getattr(module, str(entry["factory"]))
+    tools = factory(dict(runtime))
+    if not isinstance(tools, (list, tuple)):
+        raise ValueError(f"tool factory must return a list of tools: {manifest_path}")
+    for tool in tools:
+        if not isinstance(getattr(tool, "tool_id", None), str) or not tool.tool_id.strip():
+            raise ValueError(f"factory tool is missing tool_id: {manifest_path}")
+        if not callable(getattr(tool, "invoke", None)):
+            raise ValueError(f"factory tool is missing invoke: {manifest_path}")
+        tool.tool_source = ToolSource.EXTENSION
+        tool.extension_id = str(manifest["name"])
+        tool.extension_name = str(manifest.get("label") or manifest["name"])
+        tool.extension_version = str(manifest.get("version") or "")
+        tool.manifest_path = str(manifest_path.resolve())
+    return list(tools)
 
 
 def discover_manifest_tools(
     roots: Iterable[Path],
     *,
-    official_root: Path,
+    runtime: Optional[Dict[str, Any]] = None,
     reload_modules: bool = False,
 ) -> List[DiscoveredTool]:
     """Scan manifests and stage a complete tool snapshot before registration."""
@@ -139,22 +168,24 @@ def discover_manifest_tools(
             service_name = str(manifest.get("name") or "").strip()
             if not service_name:
                 raise ValueError(f"tool manifest is missing name: {manifest_path}")
-            service = _load_service(manifest, manifest_path, reload_modules=reload_modules)
-            commands = ((manifest.get("capabilities") or {}).get("invocation_commands") or [])
-            if not isinstance(commands, list) or not commands:
-                raise ValueError(f"tool manifest has no invocation commands: {manifest_path}")
-            source = _source_for(manifest_path, official_root)
-            for command in commands:
-                if not isinstance(command, dict):
-                    raise ValueError(f"invalid tool command in {manifest_path}")
-                tool = ManifestTool(
-                    service_name=service_name,
-                    service=service,
-                    command=command,
-                    manifest=manifest,
-                    manifest_path=manifest_path,
-                    source=source,
+            if (manifest.get("entryPoint") or {}).get("factory"):
+                tools = _load_factory_tools(
+                    manifest, manifest_path, runtime=dict(runtime or {}), reload_modules=reload_modules,
                 )
+            else:
+                service = _load_service(manifest, manifest_path, reload_modules=reload_modules)
+                commands = ((manifest.get("capabilities") or {}).get("invocation_commands") or [])
+                if not isinstance(commands, list) or not commands:
+                    raise ValueError(f"tool manifest has no invocation commands: {manifest_path}")
+                tools = []
+                for command in commands:
+                    if not isinstance(command, dict):
+                        raise ValueError(f"invalid tool command in {manifest_path}")
+                    tools.append(ManifestTool(
+                        service_name=service_name, service=service, command=command,
+                        manifest=manifest, manifest_path=manifest_path, source=ToolSource.EXTENSION,
+                    ))
+            for tool in tools:
                 previous = seen_ids.get(tool.tool_id)
                 if previous is not None:
                     raise ValueError(f"duplicate tool id {tool.tool_id}: {previous} and {manifest_path}")

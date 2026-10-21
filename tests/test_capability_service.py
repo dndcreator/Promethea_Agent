@@ -3,8 +3,9 @@ CapabilityService
 ?
 """
 import pytest
+from agentkit.security.approval import approval_scope
 from unittest.mock import MagicMock, AsyncMock
-from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolPolicyViolationError
+from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolPolicyViolationError, ToolConfirmationRequiredError
 from gateway.events import EventEmitter
 
 
@@ -23,6 +24,67 @@ class TestCapabilityService:
         assert service._required_config_ready(requirement, None)[0] is False
         assert service._required_config_ready(requirement, {"self_evolve": {"enabled": False}})[0] is False
         assert service._required_config_ready(requirement, {"self_evolve": {"enabled": True}}) == (True, "")
+
+    def test_computer_manifest_separates_observation_from_host_control(self):
+        service = CapabilityService()
+        service.ensure_discovered_tools()
+
+        assert service.requires_confirmation(
+            "computer_control.screen_action", {"action": "screenshot"}
+        ) is False
+        assert service.requires_confirmation(
+            "computer_control.perception_action", {"mode": "ocr_screen"}
+        ) is False
+        assert service.requires_confirmation(
+            "computer_control.screen_action", {"action": "click", "x": 10, "y": 10}
+        ) is True
+        assert service.requires_confirmation(
+            "computer_control.execute_command", {"command": "echo ok"}
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_capability_snapshot_preserves_parameterized_side_effects(self):
+        service = CapabilityService()
+        service.ensure_discovered_tools()
+
+        snapshot = await service.build_capability_snapshot(
+            preferred_tools=["computer_control.screen_action"]
+        )
+        screen = next(
+            item for item in snapshot["compact_index"]
+            if item["name"] == "computer_control.screen_action"
+        )
+
+        assert screen["side_effect_level"] == "privileged_host_action"
+        assert "screenshot" in screen["side_effect_selector"]["groups"]["read_only"]
+        assert screen["required_capability"] == "computer.screen"
+
+    @pytest.mark.asyncio
+    async def test_capability_intent_resolves_runtime_ready_read_only_variants(self):
+        service = CapabilityService(
+            capability_provider=lambda: {
+                "screen": {"initialized": True},
+                "filesystem": {"initialized": True},
+                "process": {"initialized": True},
+            }
+        )
+        service.ensure_discovered_tools()
+
+        resolved = await service.resolve_capability_intent(
+            {
+                "objective": "observe the live desktop",
+                "required_capabilities": ["computer.screen"],
+                "max_side_effect": "read_only",
+            },
+            preferred_tools=["computer_control.perception_action"],
+        )
+
+        names = [item["name"] for item in resolved["candidates"]]
+        assert names[:2] == [
+            "computer_control.perception_action",
+            "computer_control.screen_action",
+        ]
+        assert all("read_only" in item["side_effect_options"] for item in resolved["candidates"])
     
     def test_register_tool(self):
         """TODO: add docstring."""
@@ -76,6 +138,27 @@ class TestCapabilityService:
         tools = await service.list_tools()
         assert "tools" in tools
         assert isinstance(tools["tools"], list)
+
+    @pytest.mark.asyncio
+    async def test_capability_revision_changes_when_schema_changes(self):
+        service = CapabilityService()
+
+        class TestTool:
+            tool_id = "test.schema"
+            name = "test.schema"
+            description = "Schema revision"
+            input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+
+            async def invoke(self, args, ctx=None):
+                return args
+
+        service.register_tool(TestTool())
+        first = await service.build_capability_snapshot()
+        TestTool.input_schema = {"type": "object", "properties": {"value": {"type": "integer"}}}
+        service.register_tool(TestTool())
+        second = await service.build_capability_snapshot()
+
+        assert first["registry_revision"] != second["registry_revision"]
     
     @pytest.mark.asyncio
     async def test_call_tool(self):
@@ -86,6 +169,7 @@ class TestCapabilityService:
             tool_id = "test.tool"
             name = "Test Tool"
             description = "A test tool"
+            side_effect_level = "read_only"
             
             async def invoke(self, args, ctx=None):
                 return {"result": "success", "args": args}
@@ -102,9 +186,35 @@ class TestCapabilityService:
         assert result["result"] == "success"
         assert result["args"]["param"] == "value"
 
+    @pytest.mark.asyncio
+    async def test_call_tool_emits_runtime_owned_presentation(self):
+        emitter = EventEmitter()
+        service = CapabilityService(event_emitter=emitter)
+
+        class PresentedTool:
+            tool_id = "test.presented"
+            name = "test.presented"
+            description = "Inspect a value."
+            side_effect_level = "read_only"
+            presentation = {
+                "title": "Inspect value",
+                "title_i18n": {"zh": "查看内容", "en": "Inspect value"},
+                "subject_arg": "value",
+            }
+
+            async def invoke(self, args, ctx=None):
+                return {"value": args["value"]}
+
+        service.register_tool(PresentedTool())
+        await service.call_tool("test.presented", {"value": "alpha"})
+
+        history = emitter.get_history()
+        assert history[0].payload["presentation"]["subject"] == "alpha"
+        assert history[-1].payload["presentation"]["title_i18n"]["zh"] == "查看内容"
+
 
     @pytest.mark.asyncio
-    async def test_call_tool_with_run_context_allows_side_effect_by_default(self):
+    async def test_policy_allow_does_not_confirm_an_undeclared_effect(self):
         service = CapabilityService(event_emitter=EventEmitter())
 
         class WriteTool:
@@ -119,13 +229,13 @@ class TestCapabilityService:
 
         run_context = type("Ctx", (), {"tool_policy": {}, "session_state": type("S", (), {"reasoning_mode": "fast"})()})()
 
-        out = await service.call_tool(
-            "local.write_file",
-            {"path": "a.txt", "content": "x"},
-            ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
-            run_context=run_context,
-        )
-        assert out["ok"] is True
+        with pytest.raises(ToolConfirmationRequiredError):
+            await service.call_tool(
+                "local.write_file",
+                {"path": "a.txt", "content": "x"},
+                ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+                run_context=run_context,
+            )
 
     @pytest.mark.asyncio
     async def test_call_tool_with_strict_policy_blocks_side_effect_without_allow(self):
@@ -159,7 +269,7 @@ class TestCapabilityService:
             )
 
     @pytest.mark.asyncio
-    async def test_call_tool_without_run_context_keeps_backward_compat(self):
+    async def test_call_tool_without_run_context_still_requires_confirmation(self):
         service = CapabilityService(event_emitter=EventEmitter())
 
         class WriteTool:
@@ -172,8 +282,8 @@ class TestCapabilityService:
 
         service.register_tool(WriteTool())
 
-        out = await service.call_tool("local.write_file", {"path": "a.txt"})
-        assert out["ok"] is True
+        with pytest.raises(ToolConfirmationRequiredError):
+            await service.call_tool("local.write_file", {"path": "a.txt"})
 
     @pytest.mark.asyncio
     async def test_tool_catalog_exposes_callable_now_for_local_and_mcp_health(self):
@@ -392,14 +502,9 @@ class TestCapabilityService:
                 return {"service_name": service_name, "tool_name": tool_name, "args": args}
 
         service = CapabilityService(event_emitter=EventEmitter(), mcp_manager=_DummyMCPManager())
-        out = await service.call_tool(
-            "computer_control",
-            {
-                "agentType": "local",
-                "service_name": "execute_command",
-                "command": "echo hello",
-            },
-        )
+        args = {"agentType": "local", "service_name": "execute_command", "command": "echo hello"}
+        with approval_scope("computer_control", args, confirmed=True):
+            out = await service.call_tool("computer_control", args)
 
         assert out["service_name"] == "computer_control"
         assert out["tool_name"] == "execute_command"
@@ -433,6 +538,7 @@ class TestCapabilityService:
             tool_id = "local.ok"
             name = "ok"
             description = "ok"
+            side_effect_level = "read_only"
 
             async def invoke(self, args, ctx=None):
                 _ = (args, ctx)
@@ -442,6 +548,7 @@ class TestCapabilityService:
             tool_id = "local.bad"
             name = "bad"
             description = "bad"
+            side_effect_level = "read_only"
 
             async def invoke(self, args, ctx=None):
                 _ = (args, ctx)
@@ -470,6 +577,7 @@ class TestCapabilityService:
             tool_id = "local.echo_ctx"
             name = "echo_ctx"
             description = "echo"
+            side_effect_level = "read_only"
 
             async def invoke(self, args, ctx=None):
                 _ = (args, ctx)

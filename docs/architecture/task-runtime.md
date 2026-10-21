@@ -81,6 +81,20 @@ offer reconciliation for exactly-once-like behavior.
 This gives Workbench, background execution, and future subagents a shared
 parent without turning conversations into task containers.
 
+## Goal-Relative Gaps
+
+The existing Action loop now supports optional, bounded `gap_update` deltas.
+TaskService persists task-bound gaps with revision and execution fencing;
+ordinary conversations keep them local to their Action run. Confirmations
+checkpoint the same state. Open or blocked tracked gaps prevent execution-run
+completion from automatically marking the parent Task completed.
+
+This is a lightweight adaptation of Beyond Memory / PoS, not a full belief-state
+or Sentinel implementation. Checks and provisional interpretations remain
+distinct, and overall user-goal verification remains unknown. See
+[Goal Gaps](./goal-gaps.md) for the paper, implemented contract, cost controls,
+recovery behavior, and limitations.
+
 ## Runtime Events
 
 Gateway events are persisted to a bounded, append-only `RuntimeEventLog`. Its

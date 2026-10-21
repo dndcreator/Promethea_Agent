@@ -12,13 +12,29 @@
     "invocation_commands": [
       {
         "command": "evolve_create_task",
+        "presentation": {"title": "Prepare application", "title_i18n": {"zh": "准备应用", "en": "Prepare application"}, "subject_arg": "goal"},
         "sideEffectLevel": "workspace_write",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
-        "description": "Create a staged capability package with an id, version, description, commands, and optional smoke-test arguments.",
+        "description": "Create an isolated tool package with commands and test_args (optionally expected_result), or a canvas application with canvas={entrypoint, tests:[{action,selector,value}]}. For forms, checklists, tables and calculators, inspect evolve_get_canvas_schema then use evolve_compose_canvas to compose trusted components without writing code. Custom HTML/JS/CSS remains available for other applications. Core files are never editable.",
         "example": "evolve_create_task(goal='add a formatter', capability_id='text_formatter', version='1.0.0', description='Format text', commands=[{'command':'format_text','description':'Format text','test_args':{'text':'hello'}}])"
       },
       {
+        "command": "evolve_get_canvas_schema",
+        "presentation": {"title": "Inspect canvas components", "title_i18n": {"zh": "查看画布组件", "en": "Inspect canvas components"}},
+        "sideEffectLevel": "read_only",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Get the authoritative canvas.ui.v1 component schema on demand: layout, text, input, checkbox, select, button, table; typed local state mutations and arithmetic. No arbitrary code, tool execution, or network actions."
+      },
+      {
+        "command": "evolve_compose_canvas",
+        "presentation": {"title": "Compose application", "title_i18n": {"zh": "编排应用界面", "en": "Compose application"}},
+        "sideEffectLevel": "workspace_write",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Compose a canvas task's HTML entrypoint from a schema-validated component document using the trusted renderer. Uses the existing checkpoints, validation, state bridge and library lifecycle; still requires evolve_validate before opening. Use expected_sha256 when replacing inspected content."
+      },
+      {
         "command": "evolve_get_task",
+        "presentation": {"title": "Inspect application progress", "title_i18n": {"zh": "查看应用进度", "en": "Inspect application progress"}},
         "sideEffectLevel": "read_only",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "Get one self-evolution task and its audit trail.",
@@ -26,6 +42,7 @@
       },
       {
         "command": "evolve_list_tasks",
+        "presentation": {"title": "List applications", "title_i18n": {"zh": "查看应用列表", "en": "List applications"}},
         "sideEffectLevel": "read_only",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "List recent self-evolution tasks.",
@@ -33,6 +50,7 @@
       },
       {
         "command": "evolve_collect_context",
+        "presentation": {"title": "Read application context", "title_i18n": {"zh": "读取应用上下文", "en": "Read application context"}},
         "sideEffectLevel": "read_only",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "Collect bounded context from a staged capability package.",
@@ -40,6 +58,7 @@
       },
       {
         "command": "evolve_write_file",
+        "presentation": {"title": "Write file", "title_i18n": {"zh": "编写文件", "en": "Write file"}, "subject_arg": "path"},
         "sideEffectLevel": "workspace_write",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "Write or replace a file only inside a capability task staging directory. Use tool.py to implement handle(command, args).",
@@ -47,13 +66,71 @@
       },
       {
         "command": "evolve_validate",
+        "presentation": {"title": "Test application", "title_i18n": {"zh": "测试应用", "en": "Test application"}},
         "sideEffectLevel": "privileged_host_action",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "Validate package structure and execute declared smoke tests in the process sandbox.",
         "example": "evolve_validate(task_id='se_xxx')"
       },
       {
+        "command": "evolve_review",
+        "presentation": {"title": "Review changes", "title_i18n": {"zh": "检查修改", "en": "Review changes"}},
+        "sideEffectLevel": "read_only",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Inspect staged file diffs and available automatic checkpoints. Use after edits and before validation."
+      },
+      {
+        "command": "evolve_read_file",
+        "presentation": {"title": "Read file", "title_i18n": {"zh": "读取文件", "en": "Read file"}, "subject_arg": "path"},
+        "sideEffectLevel": "read_only",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Read a bounded line-numbered range of one staged file with its current sha256."
+      },
+      {
+        "command": "evolve_search",
+        "presentation": {"title": "Search application files", "title_i18n": {"zh": "搜索应用文件", "en": "Search application files"}, "subject_arg": "query"},
+        "sideEffectLevel": "read_only",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Search literal text inside this package only; returns bounded file and line matches."
+      },
+      {
+        "command": "evolve_delete_file",
+        "presentation": {"title": "Remove staged file", "title_i18n": {"zh": "移除草稿文件", "en": "Remove staged file"}, "subject_arg": "path"},
+        "sideEffectLevel": "workspace_write",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Delete one staged file using its inspected sha256; checkpointed and reversible. Cannot delete published packages or Core files."
+      },
+      {
+        "command": "evolve_patch_file",
+        "presentation": {"title": "Edit file", "title_i18n": {"zh": "修改文件", "en": "Edit file"}, "subject_arg": "path"},
+        "sideEffectLevel": "workspace_write",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Apply one exact text replacement with the sha256 obtained from evolve_collect_context. Rejects ambiguous matches or stale files; records a checkpoint."
+      },
+      {
+        "command": "evolve_restore",
+        "presentation": {"title": "Restore checkpoint", "title_i18n": {"zh": "恢复检查点", "en": "Restore checkpoint"}},
+        "sideEffectLevel": "workspace_write",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Restore one owned staging checkpoint without touching Core or published packages. Must validate again."
+      },
+      {
+        "command": "evolve_run_check",
+        "presentation": {"title": "Run checks", "title_i18n": {"zh": "运行检查", "en": "Run checks"}},
+        "sideEffectLevel": "privileged_host_action",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Run a build, test, or linter argv in the existing process sandbox scoped to this task. Returns exit code and bounded diagnostics; never marks a package validated. Fix errors and validate again."
+      },
+      {
+        "command": "evolve_open_canvas",
+        "presentation": {"title": "Open application", "title_i18n": {"zh": "打开应用", "en": "Open application"}},
+        "sideEffectLevel": "workspace_write",
+        "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
+        "description": "Deploy a browser-verified canvas application to the current workspace, or to the user's library with reusable=true. Apps run independently in the Canvas shell, with window.promethea.getState() and setState(value, expectedRevision) for app data only."
+      },
+      {
         "command": "evolve_publish",
+        "presentation": {"title": "Publish capability", "title_i18n": {"zh": "发布能力", "en": "Publish capability"}},
         "sideEffectLevel": "privileged_host_action",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
         "description": "Publish a validated immutable version, register it, and make its tool ids callable immediately.",
@@ -75,7 +152,19 @@
       "status": { "type": "string" },
       "max_chars_per_file": { "type": "integer" },
       "path": { "type": "string" },
-      "content": { "type": "string" }
+      "content": { "type": "string" },
+      "document": { "type": "object", "description": "canvas.ui.v1 document. Inspect evolve_get_canvas_schema for its generated schema." }
+      ,"canvas": { "type": "object", "properties": { "entrypoint": { "type": "string" }, "tests": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "object", "properties": { "action": { "enum": ["click", "fill", "check", "select", "expect_text", "expect_count"] }, "selector": { "type": "string" }, "value": { "type": "string" } }, "required": ["action", "selector"] } } }, "required": ["tests"] }
+      ,"checkpoint_id": { "type": "string" }
+      ,"old_text": { "type": "string" }
+      ,"new_text": { "type": "string" }
+      ,"expected_sha256": { "type": "string" }
+      ,"argv": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+      ,"timeout": { "type": "integer", "minimum": 1, "maximum": 120 }
+      ,"reusable": { "type": "boolean" }
+      ,"start_line": { "type": "integer", "minimum": 1 }
+      ,"end_line": { "type": "integer", "minimum": 1 }
+      ,"query": { "type": "string" }
     }
   }
 }

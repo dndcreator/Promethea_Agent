@@ -35,13 +35,14 @@ class _DummyCore:
 
     async def call_llm(self, messages, user_config=None, user_id=None):
         _ = (messages, user_config, user_id)
-        return {"content": "{\"recall\": false}"}
+        return {"status": "success", "content": '{"action":"answer","content":"ok"}'}
 
 
 class _EchoTool:
     tool_id = "utils.echo"
     name = "utils.echo"
     description = "Echo input text."
+    side_effect_level = "read_only"
 
     async def invoke(self, args, ctx=None):
         _ = ctx

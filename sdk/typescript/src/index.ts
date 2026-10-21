@@ -5,6 +5,7 @@ export { type FileUploadOptions } from './files.js'
 export { type WorkbenchQuery, type WorkbenchWatchOptions } from './workbench.js'
 export { CognitionClient } from './cognition.js'
 export { CanvasClient } from './canvas.js'
+export { connectCanvasFrame } from './canvas-bridge.js'
 export type {
   Attachment,
   UserFile,
@@ -14,6 +15,10 @@ export type {
   RunRequest,
   RunResponse,
   Session,
+  Project,
+  ProjectList,
+  ProjectWrite,
+  SessionProjectWrite,
   ToolCall,
   ToolResult,
   Task,
@@ -25,6 +30,7 @@ export type {
   TaskListResponse,
   TaskRunResponse,
   WorkbenchScope,
+  WorkbenchReference,
   WorkbenchActivity,
   WorkbenchWaitingAction,
   WorkbenchSnapshot,
@@ -33,4 +39,22 @@ export type {
   CognitionResponse,
   CanvasEnvironment,
   CanvasEnvironmentList,
+  CanvasState,
+  CanvasStateWrite,
+  CanvasDocument,
+  CanvasMutation,
+  CanvasText,
+  CanvasInput,
+  CanvasCheckbox,
+  CanvasSelect,
+  CanvasOption,
+  CanvasButton,
+  CanvasTable,
+  CanvasStack,
+  GoalGapView,
+  GoalGap,
+  GapSpec,
+  GapCheck,
+  GapDelta,
+  GapChange,
 } from './generated/public-contracts.js'

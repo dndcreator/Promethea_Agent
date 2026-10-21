@@ -7,10 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from agentkit.mcp.mcp_manager import get_mcp_manager
 from agentkit.mcp.mcpregistry import reload_mcp_registry
 
-from .official_tools import register_official_tools
-
-
-OFFICIAL_TOOL_ROOT = (Path(__file__).resolve().parents[1] / "agentkit" / "tools").resolve()
+BUNDLED_TOOL_ROOT = (Path(__file__).resolve().parents[1] / "agentkit" / "tools").resolve()
 COMMUNITY_EXTENSION_ROOT = (Path(__file__).resolve().parents[1] / "extensions" / "community").resolve()
 
 
@@ -20,13 +17,13 @@ def ensure_extension_roots() -> None:
 
 def ensure_capability_service(gateway_server: Any) -> Any:
     capability_service = gateway_server.ensure_capability_service()
-    register_official_tools(
-        capability_service=capability_service,
+    capability_service.bind_tool_runtime(
         workspace_service=getattr(gateway_server, "workspace_service", None),
         memory_service=getattr(gateway_server, "memory_service", None),
         message_manager=getattr(gateway_server, "message_manager", None),
         gateway_server=gateway_server,
     )
+    capability_service.ensure_discovered_tools()
     return capability_service
 
 def _normalize_tool(
@@ -118,18 +115,19 @@ async def build_extension_catalog(
     for tool_id, tool in registered.items():
         spec = capability_service.tool_registry.resolve(tool_name=str(tool_id), params={})
         metadata = dict(spec.metadata or {})
-        is_extension = str(spec.source.value) == "extension"
-        domain = str(getattr(tool, "official_domain", "misc") or "misc")
-        extension_id = str(metadata.get("extension_id") or (f"official.{domain}" if not is_extension else domain))
+        domain = str(getattr(tool, "domain", "misc") or "misc")
+        extension_id = str(metadata.get("extension_id") or domain)
         service_name = str(spec.service_name or tool_id)
         tool_name = str(spec.tool_name or tool_id)
         catalog_row = by_key.get((service_name, tool_name)) or by_key.get((str(tool_id), str(tool_id))) or {}
+        if not catalog_row:
+            continue
         rows.append(
             {
                 "extension_id": extension_id,
-                "extension_name": str(metadata.get("extension_name") or (f"Official {domain}" if not is_extension else extension_id)),
-                "provider": "community" if is_extension else "official",
-                "source_type": "manifest_tool" if metadata.get("manifest_path") else "official_tools",
+                "extension_name": str(metadata.get("extension_name") or extension_id),
+                "provider": "plugin",
+                "source_type": "manifest_tool" if metadata.get("manifest_path") else "registered_tool",
                 "extension_description": str(getattr(tool, "description", "")),
                 "version": str(metadata.get("extension_version") or ""),
                 "source_path": str(metadata.get("manifest_path") or ""),
@@ -157,6 +155,8 @@ async def build_extension_catalog(
         tool_name = str(spec.tool_name)
         provider_info = manager.query_service_by_name(service_name) or {}
         catalog_row = by_key.get((service_name, tool_name), {})
+        if not catalog_row:
+            continue
         rows.append(
             {
                 "extension_id": service_name,
@@ -189,7 +189,7 @@ async def build_extension_catalog(
     return {
         "status": "success",
         "roots": {
-            "official": str(OFFICIAL_TOOL_ROOT),
+            "bundled": str(BUNDLED_TOOL_ROOT),
             "community": str(COMMUNITY_EXTENSION_ROOT),
         },
         "total": len(extensions),
@@ -199,15 +199,15 @@ async def build_extension_catalog(
 
 async def reload_extensions(gateway_server: Any) -> Dict[str, Any]:
     ensure_extension_roots()
-    roots = [str(OFFICIAL_TOOL_ROOT), str(COMMUNITY_EXTENSION_ROOT)]
+    roots = [str(BUNDLED_TOOL_ROOT), str(COMMUNITY_EXTENSION_ROOT)]
     capability_service = ensure_capability_service(gateway_server)
     registered = capability_service.reload_discovered_tools(roots, reload_modules=True)
     manager = get_mcp_manager()
-    await manager.clean_services()
     external = reload_mcp_registry(roots)
+    await manager.clean_services()
     return {
         "status": "success",
         "registered": registered,
         "external_mcp": external,
-        "roots": {"official": roots[0], "community": roots[1]},
+        "roots": {"bundled": roots[0], "community": roots[1]},
     }

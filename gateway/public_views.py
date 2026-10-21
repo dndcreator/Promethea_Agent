@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional
+from gateway.goal_gaps import GoalGapView
 
 
 def public_task_run(run: Dict[str, Any]) -> Dict[str, Any]:
@@ -34,6 +35,7 @@ def public_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "created_at": task.get("created_at"),
         "updated_at": task.get("updated_at"),
         "completed_at": task.get("completed_at"),
+        "goal_gaps": GoalGapView.model_validate(task["goal_gaps"]).model_dump() if task.get("goal_gaps") else None,
     }
 
 

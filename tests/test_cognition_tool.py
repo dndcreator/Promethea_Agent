@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from gateway.capability_service import ToolInvocationContext
-from gateway.official_tools.cognition_tools import CognitionRecallTool
+from agentkit.tools.standard.cognition_tools import CognitionRecallTool
 
 
 class _SelfModel:

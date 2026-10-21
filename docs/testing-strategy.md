@@ -98,3 +98,40 @@ python -m pytest tests/test_files_routes.py tests/test_chat_routes_args_resilien
 - Channel adapter end-to-end fixtures for major official channels.
 - More negative-path tests for memory/reasoning degradation reason codes.
 - Release-grade scenario replay packs for regression prevention.
+
+## 10. Manual Business Acceptance
+
+Use a dedicated test account. Automated suites use synthetic models/providers;
+passing them does not validate a live provider, search quality, or the operator's
+database connection. Do not switch memory backends during the first acceptance
+pass. Keep the sandbox enabled and use disposable workspace files, not real
+trading accounts or valuable host documents.
+
+Before starting, wait for `/health` to identify a ready Gateway and inspect
+`/api/health/memory`. Configure the model through the normal settings. Canvas
+authoring requires `self_evolve.enabled=true` and an installed Playwright browser;
+on Windows, `SELF_EVOLVE__BROWSER_CHANNEL=msedge` selects an installed Edge.
+
+| Scenario | Acceptance Check |
+|---|---|
+| Sign in, open an old conversation, create a new one | Session contents and language remain correct; no stuck preparation state. |
+| Ask a simple question, then a workspace file creation/read task | Ordinary chat does not invoke unnecessary tools; actual outputs match committed observations and files. |
+| Request an approval-gated action and reject it; retry and approve | Rejection executes nothing and preserves conversation access; approval executes the intended batch once. |
+| Search and follow a source | Workbench shows actual queried/fetched sources and usable links; distinguish provider/network failures from fabricated success. |
+| State a durable preference, open a new conversation, then contradict it | Inspect actual recall and any review proposal; compatible facts should not be mistaken for conflicts. Never confirm replacement without reading the candidate. |
+| Create a small form/calculator in Canvas; type without blurring, refresh after saves, retain and reopen | Inputs persist, calculations work, rapid edits do not corrupt revisions, and retained apps survive reopening. Test a newly generated app: old retained artifacts intentionally keep their bundled renderer. |
+| Start a multi-step Workflow; pause/resume and restart the Gateway | Run identity, completed steps and artifacts remain traceable; no claim of exactly-once remote effects across a hard crash. |
+| Explicitly bind a run to an owned Task and inspect Gap state | Public Task data retains requirements; checked assertions and inferred resolutions stay distinct. Ordinary unbound chat gaps are transient. |
+
+For API acceptance, create a Task with `POST /api/tasks`, then send its `task_id`
+with `POST /api/chat` or `client.runs.run/stream`. Query `GET /api/tasks/{task_id}`
+before and after restart. Another account must not read or mutate that Task.
+An approval issued before a task objective change, pause, or execution lease
+replacement must not execute the old action; resume/replan through the current
+Task lifecycle instead.
+
+Record failures with the input, expected/actual behavior, UI language, provider,
+memory backend, session/task identity and approximate time. Redact secrets. Inspect
+work products, not only assistant wording or tool-success counters. Live model
+quality, optional multimodal providers, and full task token savings need this
+manual pass; deterministic tests do not establish them.

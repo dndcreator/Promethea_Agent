@@ -1,0 +1,4 @@
+[
+  {"title":"Compare before committing", "user_input":"Find a refundable hotel for two people next Friday.", "assistant_output":"Ask for the destination and budget if missing, inspect current provider/browser options, and compare total prices and refund deadlines. Do not submit a reservation."},
+  {"title":"Ambiguous checkout", "user_input":"The checkout page timed out. Try again.", "assistant_output":"Inspect the provider's reservations or confirmation first; report an unknown outcome if it cannot be verified, without submitting another purchase."}
+]

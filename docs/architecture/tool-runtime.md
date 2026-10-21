@@ -1,4 +1,4 @@
-# Tool Runtime (Backlog 005)
+# Tool Runtime
 
 ## Goal
 
@@ -31,9 +31,22 @@ discovered extensions, and external MCP tools.
 - `normalize_call(tool_name, params)` maps model-produced calls to a canonical registered tool id
 - `resolve_for_call(tool_name, params)` returns the canonical `ToolSpec` with any manifest-declared parameterized effect applied
 
+`agentkit/mcp/mcpregistry.py` is only the external provider configuration
+directory. `MCPManager` owns protocol connections and `tools/list` discovery;
+those definitions are projected into this same `ToolRegistry`. Neither the
+configuration directory nor a provider can select tools or grant permissions.
+Current external transport support is stdio.
+
+A canonical id cannot be reassigned to another execution source by catalog
+refresh. MCP snapshots are validated before replacement; malformed definitions
+or collisions leave the previous snapshot intact. While a refresh is rejected,
+MCP calls fail closed and catalog entries show `mcp_registry_refresh_failed`;
+in-process tools remain usable. Correcting the provider definitions allows the
+next synchronization to recover without another Registry or fallback executor.
+
 Canonical ids use these forms:
 
-- official local tools: `<category>.<tool>`, for example `web.search`
+- native factory tools: `<category>.<tool>`, for example `web.search`
 - manifest-backed tools: `<service>.<action>`, for example `computer_control.execute_command`
 - external MCP tools: `<provider>.<action>`
 
@@ -69,11 +82,24 @@ Default behavior:
 - `external_write` and `privileged_host_action` require one-shot confirmation
 - explicit deny and host/workspace sandbox ceilings cannot be overridden by confirmation
 
+Policy allowance is not consent. `CapabilityService.call_tool` enforces
+`requires_confirmation` before hooks or dispatch for every execution source,
+including calls from Reasoning, Workflow and background services without a
+`RunContext`. Missing consent raises structured `TOOL_CONFIRMATION_REQUIRED` and
+records a blocked tool event; the tool implementation is never entered.
+
+Only an active Runtime `approval_scope` matching the exact submitted tool name
+and arguments supplies consent. Model arguments, allowlists, invocation metadata
+and approval of an outer tool or workflow do not authorize another operation.
+The boundary rechecks the grant at dispatch after awaited hooks; expired grants
+and changed arguments are rejected. Conversation confirmation remains the normal
+user interaction, while downstream tool and sandbox checks remain defense in depth.
+
 ## Service Integration
 
 `CapabilityService.call_tool` now uses:
 
-1. startup or hot-reload discovery from official and community manifests, plus external MCP synchronization
+1. startup or hot-reload discovery from bundled and installed manifests, plus external MCP synchronization
 2. registry-driven call normalization
 3. manifest-declared capability readiness
 4. per-call registry resolution, including declarative action-level side effects
@@ -116,7 +142,7 @@ cannot authorize a capability that has since gone offline. Catalog and router
 code must not branch on concrete tool names; a new capability becomes visible
 by registration and manifest metadata.
 
-Risk classification follows the same rule. Official local tools declare
+Risk classification follows the same rule. Native tool classes declare
 `side_effect_level` on the tool class; manifest-backed tools declare `sideEffectLevel` and,
 when needed, `sideEffectSelector` in their manifest. Undeclared tools are
 treated as `privileged_host_action`. The runtime never infers authority from
@@ -186,20 +212,20 @@ All execution paths normalize provider output to an internal
 - optional metadata
 
 MCP `isError`, first-party structured results, and exceptions map directly to
-this contract. Routers, ReAct gates, Workbench projections, and event consumers
-never infer success from display text.
+this contract. The Action state machine, Workbench projections, and event
+consumers never infer success from display text.
 
-Lifecycle events persist a bounded result summary or a structured error, not
-the raw tool payload. Execution-local hooks can still inspect the original
-result. This keeps Runtime Event Log useful for recovery and monitoring without
-turning it into a duplicate payload store.
+Committed Observation events persist stable identities, status, structured
+error data, and bounded result projections. Oversized values are represented by
+a hash and preview. The live ActionRun retains the execution value needed by the
+current loop without turning Runtime Event Log into a duplicate payload store.
 
-## Lightweight ReAct For Action Turns
+## Runtime Action Loop
 
 Promethea does not start the full ToT/reasoning tree for every request. Pure
 chat stays on the direct path. The main model makes that choice in the same
 bounded loop: it can answer immediately or select a registered capability. A
-tool selection uses the existing lightweight ReAct path:
+tool selection uses one Runtime-owned path:
 
 ```text
 Action -> runtime Observation -> minimal verification/correction -> Answer
@@ -211,28 +237,63 @@ available, such as file existence, readback, status, source/date, or command
 result checks. If a tool fails or the observation does not prove completion, the
 final answer must report failure or uncertainty instead of claiming success.
 
-`light_action` keeps a small action budget by default: one primary action, one
-optional verification/correction, and one recovery step for normal
-external-source failures. `deep_reasoning` and `workflow` still use the heavier
-reasoning/tree machinery.
+`ActionService` keeps a bounded step budget. Only a canonical `answer` becomes
+the terminal assistant reply. `tool_calls`, `capability_request`, and
+`capability_inspect` are Runtime control actions. Independent tool calls remain
+a batch and execute concurrently.
+`deep_reasoning` and `workflow` still use the heavier reasoning/tree machinery
+through their own capabilities.
 
 ## Action Service Boundary
 
 `ActionService` is the gateway first-class service for action-mode execution.
-It is not a separate router and it does not own memory writes. `ConversationService`
-provides the structured runtime catalog, then the main model chooses between a
-direct answer and a registered capability. `ActionService` owns that control-loop lifecycle:
+It is not a separate router, prompt assembler, or memory writer.
+`ConversationService` provides the assembled model context and a versioned
+CapabilitySnapshot, then the main model proposes the next canonical action.
+`ActionService` is the only owner of the model/action/observation lifecycle:
 
 - create an action run and trace
-- delegate action execution to the existing lightweight ReAct/tool-call loop
-- keep executable calls inside the existing tool runtime
-- track budget/status and return a structured action result
+- validate state transitions before committing them
+- send tool proposals through `CapabilityService` and `ToolRegistry`
+- commit first-class Runtime Observations before the next model step
+- pause at `waiting_confirmation` and resume the same ActionRun after approval
+- preserve batch execution, cancellation, budgets, and terminal status
+
+The model decides what to propose. Runtime owns whether a tool exists, whether
+it is callable, whether confirmation is required, what executed, and what
+result was observed. The deleted historical tool-call loop no longer maintains
+a second set of execution facts.
+
+`ConversationService` and `PromptAssembler` provide the canonical action
+contract as part of the model-visible context. `ActionService` does not assemble
+prompts and does not accept a precomputed provider response. Provider failures
+therefore enter the Action state machine as Runtime failures rather than being
+retried as malformed model actions.
+
+CapabilitySnapshot is a projection, not another registry. It contains a compact
+index of the complete current catalog and selected full schemas within a prompt
+budget. When the model knows the evidence or effect it needs but not the correct
+binding, `capability_request` asks `CapabilityService` to resolve
+manifest-declared capability identifiers against current availability, policy,
+side-effect limits, and learned successful-path preferences. The returned
+candidates are an Observation; they do not bypass normal tool validation.
+`capability_inspect` resolves omitted schemas from the same registry. Native
+tools declare their input schema and required Runtime capability beside the
+implementation.
 
 Memory recall and memory writes remain owned by `MemoryService`. Deeper reasoning
 remains owned by `ReasoningService`; both are exposed to the control loop through
-thin official tools. Durable workflow/checkpoint behavior remains owned by
-MoIRAI/Workflow services. Action runs only expose structured traces that those
-services may consume later.
+thin registered tools. Durable workflow/checkpoint behavior remains owned by
+Moirai/Workflow services. Observation-backed successful Action paths are
+retained as candidate templates in the existing Moirai-backed reasoning-template
+memory and may influence later candidate ordering. They do not become executable
+Workflow templates automatically; completed workflows still pass the Workflow
+retention gate.
+
+Moirai also records failures and approval outcomes as process experience, then
+distills versioned advisory procedures through a replaceable model backend.
+See [Moirai learning](../../agentkit/tools/moirai/README.md) for ownership,
+configuration, migration, and the local-model learning boundary.
 
 ## MCP Health And Tool Panel (Backlog 010)
 

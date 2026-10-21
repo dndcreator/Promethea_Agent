@@ -71,7 +71,12 @@ class ComputerRuntime:
                     entry.controllers[capability] = controller
                 if not controller.is_initialized and not await controller.initialize():
                     await controller.cleanup()
-                    return ComputerResult(success=False, error=f"Controller '{capability}' failed to initialize")
+                    detail = getattr(controller, "initialization_error", None)
+                    return ComputerResult(
+                        success=False,
+                        error=str(detail.get("message")) if isinstance(detail, dict) else f"Controller '{capability}' failed to initialize",
+                        metadata={"initialization_error": dict(detail)} if isinstance(detail, dict) else {},
+                    )
                 from agentkit.security.sandbox import get_sandbox_policy
 
                 controller.sandbox = get_sandbox_policy()

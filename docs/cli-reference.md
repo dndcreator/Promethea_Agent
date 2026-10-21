@@ -27,7 +27,6 @@ promethea auth login <username> <password>
 promethea chat send "è¯·æ»ç»ä»å¤©çå·¥ä½" --stream
 
 # inspect tools and services
-promethea status official-tools
 promethea status services
 ```
 
@@ -89,7 +88,6 @@ Use this group when your goal is "long-running or resumable tasks".
 
 - `call` (generic tool invoke)
 - `status tools`
-- `status official-tools`
 - `ops capabilities`
 - `ops protocol`
 - `ops methods`
@@ -167,7 +165,7 @@ These are presentation differences, not core capability gaps.
 
 For CI or release gate, keep these as minimal checks:
 - one chat turn
-- official tools list
+- unified tools list
 - workflow start + run
 - config effective
 - ops protocol + http-contracts

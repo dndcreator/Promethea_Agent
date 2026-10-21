@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +40,22 @@ class OrgGraphRequest(BaseModel):
     topic: Optional[str] = None
     audience: Optional[str] = None
     limit_nodes: int = Field(default=200, ge=1, le=500)
+
+
+class OrgReviewRequest(BaseModel):
+    revision_id: str = Field(min_length=1)
+    approve: bool
+
+
+class OrgMemberRequest(BaseModel):
+    user_id: str = Field(min_length=1)
+    role: str = Field(default="reader")
+    audiences: List[str] = Field(default_factory=list)
+
+
+class OrgImportRequest(BaseModel):
+    bundle: Dict[str, Any]
+    target_org_id: Optional[str] = None
 
 
 def _decode_upload_to_text(filename: str, content: bytes, *, allowed_suffixes: Optional[set[str]] = None) -> str:
@@ -129,11 +145,58 @@ def _resolve_org_id(
     return org_id
 
 
+def _authorize_org(
+    svc: Any,
+    *,
+    user_id: str,
+    merged_config: Optional[Dict[str, Any]],
+    request_org_id: Optional[str] = None,
+    write: bool = False,
+    admin: bool = False,
+) -> tuple[str, Dict[str, Any]]:
+    profile = svc.resolve_org_profile(merged_config)
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
+    resolver = getattr(svc, "resolve_authorized_org", None)
+    if callable(resolver):
+        try:
+            return resolver(
+                user_id=user_id,
+                user_config=merged_config,
+                requested_org_id=request_org_id,
+                write=write,
+                admin=admin,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _resolve_org_id(request_org_id=request_org_id, merged_config=merged_config), {}
+
+
 @router.get("/status")
 async def org_brain_status(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
-    svc, config_service = _get_org_service()
+    integration = get_gateway_integration()
+    if not integration:
+        raise HTTPException(status_code=503, detail="Gateway not initialized")
+    gateway_server = integration.get_gateway_server()
+    svc = getattr(gateway_server, "org_context_service", None)
+    config_service = getattr(gateway_server, "config_service", None)
+    if svc is None:
+        return {
+            "status": "success",
+            "user_id": current_user_id,
+            "org_brain": {"installed": False, "enabled": False, "ready": False, "reason": "not_installed"},
+        }
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
+    component_status = getattr(svc, "component_status", None)
+    if callable(component_status):
+        return {
+            "status": "success",
+            "user_id": current_user_id,
+            "org_brain": component_status(user_id=current_user_id, user_config=merged),
+        }
     connector = svc._resolve_connector() if hasattr(svc, "_resolve_connector") else None
     backend = "neo4j" if connector else "in_memory_fallback"
     notice = (
@@ -165,11 +228,9 @@ async def org_brain_ingest(
     svc, config_service = _get_org_service()
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
-    org_id = _resolve_org_id(request_org_id=request.org_id, merged_config=merged)
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
-    if not org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, request_org_id=request.org_id, write=True)
     result = await svc.ingest_document(
         org_id=org_id,
         source_doc_id=request.source_doc_id,
@@ -178,6 +239,8 @@ async def org_brain_ingest(
         register=request.register_name,
         use_llm=bool(request.use_llm),
         user_config=merged,
+        user_id=current_user_id,
+        source_title=request.source_doc_id,
     )
     return {"status": "success", "user_id": current_user_id, **result}
 
@@ -195,11 +258,9 @@ async def org_brain_ingest_file(
     svc, config_service = _get_org_service()
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
-    resolved_org_id = _resolve_org_id(request_org_id=org_id, merged_config=merged)
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
-    if not resolved_org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
+    resolved_org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, request_org_id=org_id, write=True)
     filename = str(getattr(file, "filename", "") or "").strip()
     if not filename:
         raise HTTPException(status_code=400, detail="filename is required")
@@ -222,6 +283,9 @@ async def org_brain_ingest_file(
         register=register_name,
         use_llm=bool(use_llm),
         user_config=merged,
+        user_id=current_user_id,
+        source_title=filename,
+        source_metadata={"filename": filename, "bytes": len(raw), "content_type": str(file.content_type or "")},
     )
     return {
         "status": "success",
@@ -241,11 +305,9 @@ async def org_brain_recall(
     svc, config_service = _get_org_service()
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
-    org_id = _resolve_org_id(request_org_id=request.org_id, merged_config=merged)
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
-    if not org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
+    org_id, membership = _authorize_org(svc, user_id=current_user_id, merged_config=merged, request_org_id=request.org_id)
     audience = request.audience or profile.get("audience_default") or ""
     context_type = str(request.context_type or profile.get("recall_context_type_default") or "writing")
     top_k = int(request.top_k or profile.get("recall_top_k_default") or 5)
@@ -259,6 +321,8 @@ async def org_brain_recall(
         recall_priority=str(profile.get("recall_priority") or "blend"),
         summary_label=str(profile.get("summary_label") or "Organization context hints"),
         summary_max_items=int(profile.get("summary_max_items") or 8),
+        membership=membership,
+        collaboration_mode=str(profile.get("personal_memory_collaboration") or "context_only"),
     )
     return {"status": "success", "user_id": current_user_id, **payload}
 
@@ -271,11 +335,9 @@ async def org_brain_graph(
     svc, config_service = _get_org_service()
     merged = config_service.get_merged_config(current_user_id) if config_service else {}
     profile = svc.resolve_org_profile(merged)
-    org_id = _resolve_org_id(request_org_id=request.org_id, merged_config=merged)
     if not profile.get("enabled"):
         raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
-    if not org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, request_org_id=request.org_id)
     payload = await svc.get_visual_graph(
         org_id=org_id,
         topic=str(request.topic or ""),
@@ -284,3 +346,117 @@ async def org_brain_graph(
         user_id=current_user_id,
     )
     return {"status": "success", "user_id": current_user_id, **payload}
+
+
+@router.get("/documents")
+async def org_brain_documents(
+    status: Optional[str] = None,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    profile = svc.resolve_org_profile(merged)
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged)
+    return {"status": "success", "org_id": org_id, "documents": svc.list_documents(org_id=org_id, user_id=current_user_id, status=status)}
+
+
+@router.delete("/documents/{document_id}")
+async def org_brain_revoke_document(
+    document_id: str,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, admin=True)
+    try:
+        result = svc.revoke_document(org_id=org_id, user_id=current_user_id, document_id=document_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "success", "org_id": org_id, **result}
+
+
+@router.post("/review")
+async def org_brain_review(
+    request: OrgReviewRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    profile = svc.resolve_org_profile(merged)
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, admin=True)
+    try:
+        result = await svc.review_revision(org_id=org_id, user_id=current_user_id, revision_id=request.revision_id, approve=request.approve)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "success", "org_id": org_id, **result}
+
+
+@router.get("/members")
+async def org_brain_members(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged)
+    return {"status": "success", "org_id": org_id, "members": svc.list_members(org_id=org_id, user_id=current_user_id)}
+
+
+@router.post("/members")
+async def org_brain_upsert_member(
+    request: OrgMemberRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, admin=True)
+    try:
+        member = svc.upsert_member(org_id=org_id, actor_user_id=current_user_id, user_id=request.user_id, role=request.role, audiences=request.audiences)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": "success", "org_id": org_id, "member": member}
+
+
+@router.get("/export")
+async def org_brain_export(current_user_id: str = Depends(get_current_user_id)) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, admin=True)
+    return svc.export_bundle(org_id=org_id, user_id=current_user_id)
+
+
+@router.get("/audit")
+async def org_brain_audit(
+    limit: int = 100,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    org_id, _ = _authorize_org(svc, user_id=current_user_id, merged_config=merged, admin=True)
+    return {
+        "status": "success",
+        "org_id": org_id,
+        "events": svc.list_audit_events(org_id=org_id, user_id=current_user_id, limit=max(1, min(limit, 500))),
+    }
+
+
+@router.post("/import")
+async def org_brain_import(
+    request: OrgImportRequest,
+    current_user_id: str = Depends(get_current_user_id),
+) -> Dict[str, Any]:
+    svc, config_service = _get_org_service()
+    merged = config_service.get_merged_config(current_user_id) if config_service else {}
+    profile = svc.resolve_org_profile(merged)
+    configured_org_id = str(profile.get("org_id") or "").strip()
+    if not profile.get("enabled"):
+        raise HTTPException(status_code=400, detail="org_brain is disabled for current user")
+    target = str(request.target_org_id or configured_org_id or "").strip()
+    if configured_org_id and target and configured_org_id != target:
+        raise HTTPException(status_code=403, detail="target organization does not match the configured organization")
+    try:
+        result = svc.import_bundle(bundle=request.bundle, user_id=current_user_id, target_org_id=target or None)
+    except (ValueError, PermissionError) as exc:
+        raise HTTPException(status_code=400 if isinstance(exc, ValueError) else 403, detail=str(exc)) from exc
+    return {"status": "success", **result}

@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+from typing import Any
+
+from .archive_tools import ArchiveZipCreateTool, ArchiveZipExtractTool, ArchiveZipListTool
+from .code_tools import CodeRunPythonTool
+from .cognition_tools import CognitionRecallTool
+from .mail_tools import MailReadTool, MailSearchTool, MailSendTool
+from .calendar_tools import CalendarCreateTool, CalendarDeleteTool, CalendarListTool, CalendarReadTool, CalendarSearchTool
+from .command_tools import RuntimeExecCommandTool, RuntimeReadEnvTool
+from .data_tools import DataCsvToJsonTool, DataJsonToCsvTool
+from .math_tools import MathCalculateTool
+from .memory_tools import (
+    MemoryCreateEntryTool,
+    MemoryGetContextTool,
+    MemoryListEntriesTool,
+    MemoryRecallRunsTool,
+    MemorySummarizeSessionTool,
+)
+from .organization_tools import OrganizationRecallTool
+from .runtime_tools import RuntimeListToolsTool, RuntimeProcessingStatsTool, RuntimeReadObservationTool, RuntimeServicesTool
+from .reasoning_tools import ReasoningRunTool
+from .skill_tools import SkillRunTool
+from .session_tools import SessionInfoTool, SessionListTool, SessionRecentMessagesTool
+from .text_tools import TextFindMatchesTool, TextNormalizeJsonTool, TextWordStatsTool
+from .utility_tools import UtilsHashTextTool, UtilsNowTool, UtilsUuidTool
+from .web_tools import (
+    WebDownloadToWorkspaceTool,
+    WebExtractLinksTool,
+    WebFetchJsonTool,
+    WebFetchTextTool,
+    WebSearchTool,
+)
+from .workflow_tools import (
+    WorkflowApproveStepTool,
+    WorkflowCheckpointsTool,
+    WorkflowDefineTool,
+    WorkflowListRunsTool,
+    WorkflowListTool,
+    WorkflowPauseTool,
+    WorkflowResumeTool,
+    WorkflowRetryStepTool,
+    WorkflowStartTool,
+    WorkflowStatusTool,
+)
+from .workspace_tools import (
+    WorkspaceCopyFileTool,
+    WorkspaceApplyPatchTool,
+    WorkspaceDeleteFileTool,
+    WorkspaceDiffFileTool,
+    WorkspaceEnsureDirTool,
+    WorkspaceFileInfoTool,
+    WorkspaceGlobFilesTool,
+    WorkspaceListFilesTool,
+    WorkspaceMoveFileTool,
+    WorkspaceReadFilesTool,
+    WorkspaceReadFileTool,
+    WorkspaceReplaceTextTool,
+    WorkspaceSearchTextTool,
+    WorkspaceTailFileTool,
+    WorkspaceWriteFileTool,
+)
+
+
+def create_tools(runtime: dict[str, Any]) -> list[Any]:
+    """Contribute tools through the same manifest factory as any other package."""
+    workspace_service = runtime.get("workspace_service")
+    memory_service = runtime.get("memory_service")
+    message_manager = runtime.get("message_manager")
+    gateway_server = runtime.get("gateway_server")
+    tools = [
+        DataCsvToJsonTool(),
+        DataJsonToCsvTool(),
+        MathCalculateTool(),
+        TextWordStatsTool(),
+        TextFindMatchesTool(),
+        TextNormalizeJsonTool(),
+        UtilsNowTool(),
+        UtilsUuidTool(),
+        UtilsHashTextTool(),
+        WebFetchTextTool(),
+        WebFetchJsonTool(),
+        WebSearchTool(),
+        WebExtractLinksTool(),
+        MailSearchTool(),
+        MailReadTool(),
+        MailSendTool(),
+        CalendarListTool(),
+        CalendarSearchTool(),
+        CalendarReadTool(),
+        CalendarCreateTool(),
+        CalendarDeleteTool(),
+        RuntimeReadEnvTool(),
+        SkillRunTool(gateway_server=gateway_server),
+    ]
+    if memory_service is not None:
+        tools.extend(
+            [
+                MemoryGetContextTool(memory_service=memory_service),
+                MemoryListEntriesTool(memory_service=memory_service),
+                MemoryCreateEntryTool(memory_service=memory_service),
+                MemorySummarizeSessionTool(memory_service=memory_service),
+                MemoryRecallRunsTool(memory_service=memory_service),
+            ]
+        )
+    if message_manager is not None:
+        tools.extend(
+            [
+                SessionRecentMessagesTool(message_manager=message_manager),
+                SessionInfoTool(message_manager=message_manager),
+                SessionListTool(message_manager=message_manager),
+            ]
+        )
+    if gateway_server is not None:
+        tools.extend(
+            [
+                RuntimeServicesTool(gateway_server=gateway_server),
+                RuntimeProcessingStatsTool(gateway_server=gateway_server),
+                RuntimeListToolsTool(gateway_server=gateway_server),
+                RuntimeReadObservationTool(gateway_server=gateway_server),
+            ]
+        )
+        if getattr(gateway_server, "reasoning_service", None) is not None:
+            tools.append(ReasoningRunTool(gateway_server=gateway_server))
+        if getattr(gateway_server, "self_model_service", None) is not None:
+            tools.append(CognitionRecallTool(self_model_service=gateway_server.self_model_service))
+        if getattr(gateway_server, "org_context_service", None) is not None:
+            tools.append(OrganizationRecallTool(org_context_service=gateway_server.org_context_service))
+        if getattr(gateway_server, "workflow_engine", None) is not None:
+            tools.extend(
+                [
+                    WorkflowDefineTool(gateway_server=gateway_server),
+                    WorkflowListTool(gateway_server=gateway_server),
+                    WorkflowStartTool(gateway_server=gateway_server),
+                    WorkflowStatusTool(gateway_server=gateway_server),
+                    WorkflowListRunsTool(gateway_server=gateway_server),
+                    WorkflowPauseTool(gateway_server=gateway_server),
+                    WorkflowResumeTool(gateway_server=gateway_server),
+                    WorkflowRetryStepTool(gateway_server=gateway_server),
+                    WorkflowApproveStepTool(gateway_server=gateway_server),
+                    WorkflowCheckpointsTool(gateway_server=gateway_server),
+                ]
+            )
+    if workspace_service is not None:
+        tools.extend(
+            [
+                RuntimeExecCommandTool(workspace_service=workspace_service),
+                ArchiveZipCreateTool(workspace_service=workspace_service),
+                ArchiveZipExtractTool(workspace_service=workspace_service),
+                ArchiveZipListTool(workspace_service=workspace_service),
+                CodeRunPythonTool(workspace_service=workspace_service),
+                WebDownloadToWorkspaceTool(workspace_service=workspace_service),
+                WorkspaceApplyPatchTool(workspace_service=workspace_service),
+                WorkspaceCopyFileTool(workspace_service=workspace_service),
+                WorkspaceDeleteFileTool(workspace_service=workspace_service),
+                WorkspaceDiffFileTool(workspace_service=workspace_service),
+                WorkspaceEnsureDirTool(workspace_service=workspace_service),
+                WorkspaceFileInfoTool(workspace_service=workspace_service),
+                WorkspaceGlobFilesTool(workspace_service=workspace_service),
+                WorkspaceListFilesTool(workspace_service=workspace_service),
+                WorkspaceMoveFileTool(workspace_service=workspace_service),
+                WorkspaceReadFilesTool(workspace_service=workspace_service),
+                WorkspaceReadFileTool(workspace_service=workspace_service),
+                WorkspaceReplaceTextTool(workspace_service=workspace_service),
+                WorkspaceWriteFileTool(workspace_service=workspace_service),
+                WorkspaceSearchTextTool(workspace_service=workspace_service),
+                WorkspaceTailFileTool(workspace_service=workspace_service),
+            ]
+        )
+    return tools

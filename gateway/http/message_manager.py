@@ -26,6 +26,11 @@ class Message(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     role: str
     content: str
+    reasoning_tree_id: Optional[str] = None
+    conversation_turn_id: Optional[str] = None
+    reasoning_steps: List[Dict[str, Any]] = Field(default_factory=list)
+    run_status: Optional[str] = None
+    error: Optional[Dict[str, Any]] = None
 
 
 class FollowUp(BaseModel):
@@ -307,6 +312,9 @@ class MessageManager:
         content: str,
         user_id: str = "default_user",
         sync_memory: bool = True,
+        reasoning_tree_id: Optional[str] = None,
+        conversation_turn_id: Optional[str] = None,
+        reasoning_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """Append a message to a session and optionally sync to memory."""
         key = self._resolve_session_key(session_id, user_id=user_id)
@@ -315,7 +323,15 @@ class MessageManager:
             return False
         
         session = self.session[key]
-        session.messages.append(Message(role=role, content=content))
+        session.messages.append(
+            Message(
+                role=role,
+                content=content,
+                reasoning_tree_id=str(reasoning_tree_id or "") or None,
+                conversation_turn_id=str(conversation_turn_id or "") or None,
+                reasoning_steps=list(reasoning_steps or []),
+            )
+        )
         session.last_activity = time.time()
 
         if len(session.messages) > self.max_messages_per_session:
@@ -371,6 +387,8 @@ class MessageManager:
         if turn_id in session.completed_turn_ids:
             return True
         existing = session.pending_turns.get(turn_id)
+        if any(message.conversation_turn_id == turn_id for message in session.messages):
+            return False
         if existing:
             # Idempotent retry: same turn_id is allowed only for the same payload.
             same_content = (
@@ -398,6 +416,8 @@ class MessageManager:
         turn_id: str,
         assistant_content: str,
         user_id: str = "default_user",
+        reasoning_tree_id: Optional[str] = None,
+        reasoning_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         """
         Commit a turn: write user + assistant messages into the final message
@@ -421,10 +441,20 @@ class MessageManager:
             return False
 
         session.messages.append(
-            Message(role=turn.get("user_role", "user"), content=turn.get("user_content", ""))
+            Message(
+                role=turn.get("user_role", "user"),
+                content=turn.get("user_content", ""),
+                conversation_turn_id=turn_id,
+            )
         )
         session.messages.append(
-            Message(role="assistant", content=assistant_content or "")
+            Message(
+                role="assistant",
+                content=assistant_content or "",
+                reasoning_tree_id=str(reasoning_tree_id or "") or None,
+                conversation_turn_id=turn_id,
+                reasoning_steps=list(reasoning_steps or []),
+            )
         )
         session.last_activity = time.time()
 
@@ -463,14 +493,25 @@ class MessageManager:
         session_id: str,
         turn_id: str,
         user_id: str = "default_user",
+        *,
+        error: Optional[Dict[str, Any]] = None,
+        reasoning_tree_id: Optional[str] = None,
+        reasoning_steps: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
-        """Abort a pending turn without committing user/assistant messages."""
+        """Retain the user's request and Runtime failure, never a fabricated answer."""
         key = self._resolve_session_key(session_id, user_id=user_id)
         if not key:
             return False
         session = self.session[key]
         if turn_id in session.pending_turns:
-            session.pending_turns.pop(turn_id, None)
+            turn = session.pending_turns.pop(turn_id)
+            session.messages.extend([
+                Message(role=turn.get("user_role", "user"), content=turn.get("user_content", ""), conversation_turn_id=turn_id),
+                Message(role="status", content="", conversation_turn_id=turn_id,
+                        run_status="failed" if error else "interrupted",
+                        error=error, reasoning_tree_id=reasoning_tree_id,
+                        reasoning_steps=list(reasoning_steps or [])),
+            ])
             session.last_activity = time.time()
             self.session_store.save_all(self.session)
             return True
@@ -527,7 +568,7 @@ class MessageManager:
             return []
         if count is None:
             count = self.max_messages_per_session
-        messages = self.get_messages(session_id, user_id=user_id)
+        messages = [row for row in self.get_messages(session_id, user_id=user_id) if row["role"] != "status"]
         return messages[-count:] if messages else []
     
     def build_conversation(
@@ -567,9 +608,7 @@ class MessageManager:
             if title != session.title:
                 session.title = title
                 self.session_store.save_all(self.session)
-        last_msg_preview = (
-            session.messages[-1].content[:100] + "..." if session.messages else ""
-        )
+        last_msg_preview = next((message.content[:100] for message in reversed(session.messages) if message.content), "")
         return {
             "session_id": raw_session_id,
             "user_id": owner_user_id or "default_user",
@@ -737,7 +776,16 @@ class MessageManager:
                 role = str(msg.get("role") or "").strip() or "user"
                 content = str(msg.get("content") or "")
                 message_id = str(msg.get("id") or "").strip()
-                session.messages.append(Message(id=message_id or uuid.uuid4().hex, role=role, content=content))
+                session.messages.append(Message(
+                    id=message_id or uuid.uuid4().hex,
+                    role=role,
+                    content=content,
+                    reasoning_tree_id=str(msg.get("reasoning_tree_id") or "") or None,
+                    conversation_turn_id=str(msg.get("conversation_turn_id") or "") or None,
+                    reasoning_steps=list(msg.get("reasoning_steps") or []),
+                    run_status=msg.get("run_status"),
+                    error=msg.get("error"),
+                ))
             session.followups = []
             known_message_ids = {message.id for message in session.messages}
             for raw_followup in row.get("followups") if isinstance(row.get("followups"), list) else []:

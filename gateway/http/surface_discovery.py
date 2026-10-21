@@ -86,7 +86,6 @@ def build_surface_payload(routes: Iterable[Any]) -> Dict[str, Any]:
                 "config.update": {"command": "promethea config update --file patch.json", "http": "POST /api/config/update"},
                 "config.effective": {"command": "promethea config effective --view full", "http": "GET /api/config/effective"},
                 "config.ui_schema": {"command": "promethea config ui-schema --view both", "http": "GET /api/config/ui-schema"},
-                "status.official_tools": {"command": "promethea status official-tools", "http": "GET /api/status/tools/official"},
             },
         },
     }

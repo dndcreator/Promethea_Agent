@@ -7,6 +7,8 @@ patch Python Core or any other existing project file.
 from __future__ import annotations
 
 import ast
+import asyncio
+import difflib
 import hashlib
 import json
 import re
@@ -18,14 +20,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agentkit.mcp.invocation_context import get_invocation_context
+from gateway.tools.presentation import validate_presentation_declaration
 
 from .generated_runtime import GeneratedCapabilityService
+from .canvas import CanvasSpec, artifact_files, verify_canvas
+from computer.canvas_components import CanvasDocument, render_component_document
 
 
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
 _VERSION = re.compile(r"^[0-9]+(?:\.[0-9]+){0,2}(?:[-_][a-z0-9]+)?$")
 _COMMAND = re.compile(r"^[a-z][a-z0-9_]{1,47}$")
-_WRITABLE_SUFFIXES = {".py", ".json", ".md", ".txt"}
+_WRITABLE_SUFFIXES = {".py", ".json", ".md", ".txt", ".html", ".css", ".js", ".svg", ".ts", ".tsx", ".jsx"}
 _RESERVED_FILES = {"agent-manifest.json", ".published.json"}
 _SCAFFOLD_MARKER = "raise NotImplementedError"
 _STORE_LOCKS: Dict[str, threading.RLock] = {}
@@ -49,12 +54,16 @@ class SelfEvolveService:
         self.publish_root = self.workspace_root / "extensions" / "community" / "_generated"
         self.self_model_service = self_model_service
         self._extension_reloader: Optional[Callable[..., List[str]]] = None
+        self._capability_runtime: Optional[Any] = None
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         self.staging_root.mkdir(parents=True, exist_ok=True)
         self.publish_root.mkdir(parents=True, exist_ok=True)
 
     def configure_extension_reloader(self, reloader: Callable[..., List[str]]) -> None:
         self._extension_reloader = reloader
+
+    def configure_canvas_runtime(self, runtime: Any) -> None:
+        self._capability_runtime = runtime
 
     def _lock(self) -> threading.RLock:
         return _store_lock(self.store_path)
@@ -148,7 +157,14 @@ class SelfEvolveService:
             if not isinstance(raw.get("test_args"), dict):
                 raise ValueError(f"command test_args must be an object: {name}")
             test_args = dict(raw["test_args"])
-            normalized.append({"command": name, "description": description, "test_args": test_args})
+            presentation = validate_presentation_declaration(raw.get("presentation"))
+            normalized.append({
+                "command": name,
+                "description": description,
+                "test_args": test_args,
+                **({"expected_result": raw["expected_result"]} if "expected_result" in raw else {}),
+                **({"presentation": presentation} if presentation else {}),
+            })
         return normalized
 
     @staticmethod
@@ -174,14 +190,30 @@ class SelfEvolveService:
             return {"exists": False, "reason": "self_model_service_unavailable"}
         return await self.self_model_service.get_self_model()
 
+    async def evolve_get_canvas_schema(self) -> Dict[str, Any]:
+        """Inspect the component grammar without expanding every model request."""
+        return {"version": "canvas.ui.v1", "schema": CanvasDocument.model_json_schema(),
+                "workflow": "Create a canvas task with browser tests; compose its document, validate, then open. Interactions only update app state, never execute Runtime tools."}
+
+    async def evolve_compose_canvas(self, task_id: str, document: Dict[str, Any], expected_sha256: Optional[str] = None) -> Dict[str, Any]:
+        """Compile a bounded component document using the trusted Canvas renderer."""
+        task = self._get_task_or_raise(task_id)
+        if not task.get("canvas"):
+            raise ValueError("component documents require a canvas application task")
+        if Path(task["canvas"]["entrypoint"]).suffix.lower() != ".html":
+            raise ValueError("component documents require an HTML entrypoint")
+        html = render_component_document(document)
+        return await self.evolve_write_file(task_id, task["canvas"]["entrypoint"], html, expected_sha256=expected_sha256)
+
     async def evolve_create_task(
         self,
         goal: str,
         capability_id: str,
         version: str,
         description: str,
-        commands: List[Dict[str, Any]],
+        commands: Optional[List[Dict[str, Any]]] = None,
         acceptance_criteria: Optional[List[str]] = None,
+        canvas: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         goal = str(goal or "").strip()
         capability_id = str(capability_id or "").strip().lower().replace("-", "_")
@@ -195,19 +227,24 @@ class SelfEvolveService:
             raise ValueError("version must use a simple semantic version such as 1.0.0")
         if not description:
             raise ValueError("description is required")
-        normalized_commands = self._normalize_commands(commands)
+        canvas_spec = CanvasSpec.model_validate(canvas).model_dump() if canvas is not None else None
+        if canvas_spec and commands:
+            raise ValueError("canvas artifacts and callable tools are separate package kinds")
+        normalized_commands = [] if canvas_spec else self._normalize_commands(commands)
         owner_user_id = self._current_user_id()
 
         task_id = f"se_{uuid.uuid4().hex}"
         root = self._task_root(task_id)
         root.mkdir(parents=True, exist_ok=False)
         scaffold = self._scaffold(normalized_commands)
-        (root / "tool.py").write_text(scaffold, encoding="utf-8")
+        if not canvas_spec:
+            (root / "tool.py").write_text(scaffold, encoding="utf-8")
 
         now = time.time()
         task = {
             "task_id": task_id,
-            "kind": "capability_package",
+            "kind": "canvas_application" if canvas_spec else "capability_package",
+            "canvas": canvas_spec,
             "owner_user_id": owner_user_id,
             "goal": goal,
             "capability_id": capability_id,
@@ -217,7 +254,7 @@ class SelfEvolveService:
             "acceptance_criteria": [str(x) for x in (acceptance_criteria or []) if str(x).strip()],
             "status": "draft",
             "staging_path": root.relative_to(self.workspace_root).as_posix(),
-            "changes": [{"ts": now, "op": "scaffold", "path": "tool.py"}],
+            "changes": [] if canvas_spec else [{"ts": now, "op": "scaffold", "path": "tool.py"}],
             "validations": [],
             "revision": 1,
             "created_at": now,
@@ -254,16 +291,17 @@ class SelfEvolveService:
         cap = max(200, int(max_chars_per_file))
         root = self._task_root(task_id)
         files = []
-        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        for path in artifact_files(root):
             files.append(
                 {
                     "path": path.relative_to(root).as_posix(),
                     "content": path.read_text(encoding="utf-8", errors="replace")[:cap],
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 }
             )
         return {"ok": True, "task": task, "files": files}
 
-    async def evolve_write_file(self, task_id: str, path: str, content: str) -> Dict[str, Any]:
+    async def evolve_write_file(self, task_id: str, path: str, content: str, expected_sha256: Optional[str] = None) -> Dict[str, Any]:
         task = self._get_task_or_raise(task_id)
         if task.get("status") == "published":
             raise PermissionError("published capability versions are immutable")
@@ -271,8 +309,6 @@ class SelfEvolveService:
         if len(payload.encode("utf-8")) > 256_000:
             raise ValueError("capability file exceeds 256 KB")
         file_path = self._task_file(task_id, path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(payload, encoding="utf-8")
         relative = file_path.relative_to(self._task_root(task_id)).as_posix()
 
         def _record(row: Dict[str, Any]) -> None:
@@ -283,8 +319,124 @@ class SelfEvolveService:
             row.pop("validated_digest", None)
             row["revision"] = int(row.get("revision") or 0) + 1
 
-        self._update_task(task_id, _record)
+        with self._lock():
+            task = self._get_task_or_raise(task_id)
+            if task.get("status") == "published":
+                raise PermissionError("published capability versions are immutable")
+            actual = hashlib.sha256(file_path.read_bytes()).hexdigest() if file_path.exists() else ""
+            if expected_sha256 is not None and actual != expected_sha256:
+                raise ValueError("file changed since inspection; read it again before editing")
+            self._checkpoint(task_id)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(payload, encoding="utf-8")
+            self._update_task(task_id, _record)
         return {"ok": True, "task_id": task_id, "path": relative, "bytes": len(payload.encode("utf-8"))}
+
+    async def evolve_read_file(self, task_id: str, path: str, start_line: int = 1, end_line: int = 200) -> Dict[str, Any]:
+        self._get_task_or_raise(task_id)
+        data = self._task_file(task_id, path).read_bytes()
+        lines = data.decode("utf-8").splitlines()
+        start = max(1, int(start_line))
+        end = min(len(lines), max(start, min(int(end_line), start + 399)))
+        return {"path": path, "sha256": hashlib.sha256(data).hexdigest(), "total_lines": len(lines),
+                "content": "\n".join(f"{index + 1}: {lines[index]}" for index in range(start - 1, end))[:24000]}
+
+    async def evolve_search(self, task_id: str, query: str) -> Dict[str, Any]:
+        self._get_task_or_raise(task_id)
+        if not query:
+            raise ValueError("search query is required")
+        root = self._task_root(task_id)
+        matches = []
+        for path in artifact_files(root):
+            for index, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if query.casefold() in line.casefold():
+                    matches.append({"path": path.relative_to(root).as_posix(), "line": index, "text": line[:500]})
+                    if len(matches) == 100:
+                        return {"matches": matches, "truncated": True}
+        return {"matches": matches, "truncated": False}
+
+    async def evolve_delete_file(self, task_id: str, path: str, expected_sha256: str) -> Dict[str, Any]:
+        with self._lock():
+            task = self._get_task_or_raise(task_id)
+            if task["status"] == "published":
+                raise PermissionError("published versions are immutable")
+            target = self._task_file(task_id, path)
+            if hashlib.sha256(target.read_bytes()).hexdigest() != expected_sha256:
+                raise ValueError("file changed since inspection")
+            self._checkpoint(task_id)
+            target.unlink()
+            def invalidate(row):
+                row.update(status="draft", revision=row["revision"] + 1)
+                row.pop("validated_digest", None)
+            self._update_task(task_id, invalidate)
+        return {"ok": True, "path": path}
+
+    def _checkpoint(self, task_id: str) -> str:
+        task = self._get_task_or_raise(task_id)
+        checkpoint_id = f"cp_{uuid.uuid4().hex}"
+        root = self.staging_root.parent / "checkpoints" / task_id / checkpoint_id
+        root.mkdir(parents=True)
+        for path in artifact_files(self._task_root(task_id)):
+            target = root / path.relative_to(self._task_root(task_id))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+        def record(row):
+            rows = row.setdefault("checkpoints", [])
+            rows.append({"checkpoint_id": checkpoint_id, "revision": task["revision"], "at": time.time()})
+            while len(rows) > 20:
+                old = rows.pop(0)
+                shutil.rmtree(root.parent / old["checkpoint_id"])
+        self._update_task(task_id, record)
+        return checkpoint_id
+
+    async def evolve_review(self, task_id: str, checkpoint_id: str = "") -> Dict[str, Any]:
+        task = self._get_task_or_raise(task_id)
+        checkpoints = task.get("checkpoints", [])
+        selected = next((row for row in checkpoints if row["checkpoint_id"] == checkpoint_id), None) if checkpoint_id else (checkpoints[-1] if checkpoints else None)
+        if checkpoint_id and not selected:
+            raise FileNotFoundError("checkpoint not found")
+        if not selected:
+            return {"ok": True, "checkpoints": checkpoints, "diff": ""}
+        before = self.staging_root.parent / "checkpoints" / task_id / selected["checkpoint_id"]
+        current = self._task_root(task_id)
+        names = {p.relative_to(before).as_posix() for p in artifact_files(before)} | {p.relative_to(current).as_posix() for p in artifact_files(current)}
+        diff = []
+        for name in sorted(names):
+            old = (before / name).read_text(encoding="utf-8").splitlines(True) if (before / name).exists() else []
+            new = (current / name).read_text(encoding="utf-8").splitlines(True) if (current / name).exists() else []
+            diff.extend(difflib.unified_diff(old, new, fromfile=f"before/{name}", tofile=f"after/{name}"))
+        return {"ok": True, "checkpoint_id": selected["checkpoint_id"], "checkpoints": checkpoints, "diff": "".join(diff)[:24000]}
+
+    async def evolve_restore(self, task_id: str, checkpoint_id: str) -> Dict[str, Any]:
+        with self._lock():
+            task = self._get_task_or_raise(task_id)
+            if task["status"] == "published":
+                raise PermissionError("published versions are immutable")
+            if checkpoint_id not in {r["checkpoint_id"] for r in task.get("checkpoints", [])}:
+                raise FileNotFoundError("checkpoint not found")
+            before = self.staging_root.parent / "checkpoints" / task_id / checkpoint_id
+            snapshot = {path.relative_to(before): path.read_bytes() for path in artifact_files(before)}
+            self._checkpoint(task_id)
+            current = self._task_root(task_id)
+            for path in artifact_files(current):
+                path.unlink()
+            for relative, data in snapshot.items():
+                target = current / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+            def restored(row):
+                row.update(status="draft", revision=row["revision"] + 1)
+                row.pop("validated_digest", None)
+            self._update_task(task_id, restored)
+        return {"ok": True, "task_id": task_id}
+
+    async def evolve_patch_file(self, task_id: str, path: str, old_text: str, new_text: str, expected_sha256: str) -> Dict[str, Any]:
+        with self._lock():
+            self._get_task_or_raise(task_id)
+            source = self._task_file(task_id, path).read_text(encoding="utf-8")
+            if not old_text or source.count(old_text) != 1:
+                raise ValueError("patch must match exactly one occurrence")
+            return await self.evolve_write_file(task_id, path, source.replace(old_text, new_text, 1), expected_sha256)
 
     def _service_name(self, task: Dict[str, Any]) -> str:
         version_slug = re.sub(r"[^a-z0-9]+", "_", str(task["version"]).lower()).strip("_")
@@ -293,12 +445,15 @@ class SelfEvolveService:
 
     def _manifest(self, task: Dict[str, Any]) -> Dict[str, Any]:
         service_name = self._service_name(task)
+        if task.get("canvas"):
+            return {"name": service_name, "version": task["version"], "canvasApplication": task["canvas"], "ownerUserId": task["owner_user_id"]}
         commands = [
             {
                 "command": row["command"],
                 "description": row["description"],
                 "sideEffectLevel": "privileged_host_action",
                 "ownerUserId": task["owner_user_id"],
+                **({"presentation": row["presentation"]} if row.get("presentation") else {}),
             }
             for row in task["commands"]
         ]
@@ -323,15 +478,17 @@ class SelfEvolveService:
     @staticmethod
     def _tree_digest(root: Path, manifest: Dict[str, Any]) -> str:
         digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, ensure_ascii=True).encode("utf-8"))
-        for path in sorted(p for p in root.rglob("*") if p.is_file() and p.name not in _RESERVED_FILES):
-            if path.is_symlink():
-                raise PermissionError("capability packages cannot contain symbolic links")
+        for path in artifact_files(root):
             digest.update(path.relative_to(root).as_posix().encode("utf-8"))
             digest.update(path.read_bytes())
         return digest.hexdigest()
 
     async def evolve_validate(self, task_id: str) -> Dict[str, Any]:
         task = self._get_task_or_raise(task_id)
+        if task["status"] == "published":
+            raise PermissionError("published versions are immutable; create a new version")
+        if task.get("canvas"):
+            return await self._validate_canvas(task)
         task_revision = int(task.get("revision") or 0)
         root = self._task_root(task_id)
         entry = root / "tool.py"
@@ -350,6 +507,13 @@ class SelfEvolveService:
                     errors.append("tool.py must export handle(command, args)")
             except SyntaxError as exc:
                 errors.append(f"tool.py syntax error: {exc.msg} at line {exc.lineno}")
+
+        for path in artifact_files(root):
+            if path.suffix == ".py" and path != entry:
+                try:
+                    ast.parse(path.read_text(encoding="utf-8"), filename=path.relative_to(root).as_posix())
+                except SyntaxError as exc:
+                    errors.append(f"{path.name}: {exc.msg} at line {exc.lineno}")
 
         package_files = [path for path in root.rglob("*") if path.is_file() and path.name not in _RESERVED_FILES]
         if any(path.is_symlink() for path in package_files):
@@ -375,6 +539,8 @@ class SelfEvolveService:
                 for row in task["commands"]:
                     try:
                         value = await service.invoke(row["command"], dict(row["test_args"]), require_approval=False)
+                        if "expected_result" in row and value != row["expected_result"]:
+                            raise ValueError(f"expected {row['expected_result']!r}, received {value!r}")
                         smoke_results.append({"command": row["command"], "ok": True, "result": value})
                     except Exception as exc:
                         smoke_results.append({"command": row["command"], "ok": False, "error": str(exc)})
@@ -409,6 +575,91 @@ class SelfEvolveService:
         self._update_task(task_id, _record)
         return {"ok": ok, "task_id": task_id, "errors": errors, "smoke_tests": smoke_results}
 
+    async def _validate_canvas(self, task: Dict[str, Any]) -> Dict[str, Any]:
+        task_id = task["task_id"]
+        root = self._task_root(task_id)
+        digest = self._tree_digest(root, self._manifest(task))
+        from config import config
+        settings = config.self_evolve.model_dump()
+        provider = getattr(self._capability_runtime, "config_provider", None)
+        if callable(provider):
+            settings.update((provider(self._current_user_id()) or {}).get("self_evolve") or {})
+        try:
+            from computer.browser_runtime import setup_timeout
+            result = await asyncio.wait_for(verify_canvas(root, task["canvas"], self.staging_root.parent / "validation" / task_id / "preview.png", browser_channel=settings["browser_channel"]), 45 + setup_timeout())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = {"ok": False, "errors": [str(exc)[:4000]], "steps": []}
+        if self._tree_digest(root, self._manifest(task)) != digest:
+            result = {**result, "ok": False, "errors": [*result["errors"], "canvas changed during validation"]}
+        def record(row):
+            if row["revision"] != task["revision"]:
+                raise ValueError("canvas changed during validation")
+            row.setdefault("validations", []).append({"ts": time.time(), "package_digest": digest, **result})
+            row["status"] = "validated" if result["ok"] else "failed_validation"
+            row.pop("validated_digest", None)
+            if result["ok"]:
+                row["validated_digest"] = digest
+        self._update_task(task_id, record)
+        return {"task_id": task_id, **result}
+
+    async def evolve_run_check(self, task_id: str, argv: List[str], timeout: int = 30) -> Dict[str, Any]:
+        from agentkit.security.process_sandbox import SandboxedProcessRunner
+        task = self._get_task_or_raise(task_id)
+        if task["status"] == "published":
+            raise PermissionError("published versions are immutable")
+        root = self._task_root(task_id)
+        self._checkpoint(task_id)
+        try:
+            process = await SandboxedProcessRunner().run_async(argv, cwd=root, workspace_root=root, timeout=max(1, min(timeout, 120)))
+            result = {"ok": process.returncode == 0, "exit_code": process.returncode,
+                      "stdout": (process.stdout or "")[-12000:], "stderr": (process.stderr or "")[-12000:]}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)[:4000]}
+        finally:
+            def invalidate(row):
+                row.update(status="draft", revision=row["revision"] + 1)
+                row.pop("validated_digest", None)
+            self._update_task(task_id, invalidate)
+        self._update_task(task_id, lambda row: row.setdefault("checks", []).append({"ts": time.time(), "argv": argv, **result}))
+        return result
+
+    async def evolve_open_canvas(self, task_id: str, reusable: bool = False) -> Dict[str, Any]:
+        from computer.execution_context import current_workspace, bind_workspace
+        runtime = self._capability_runtime
+        scope = current_workspace()
+        task = self._get_task_or_raise(task_id)
+        if not task.get("canvas") or task["status"] not in {"validated", "published"}:
+            raise ValueError("a canvas must pass browser verification before opening")
+        if runtime is None or scope is None or scope.user_id != self._current_user_id():
+            raise RuntimeError("canvas deployment requires the current Runtime workspace")
+        source = self.workspace_root / task["published_path"] if task["status"] == "published" else self._task_root(task_id)
+        digest = self._tree_digest(source, self._manifest(task))
+        if digest != task.get("validated_digest"):
+            raise ValueError("canvas changed after validation")
+        handle = runtime.workspace_service.resolve_workspace_handle(user_id=scope.user_id, workspace_id="_canvas_library" if reusable else scope.workspace_id)
+        environment_id = f"env_{uuid.uuid4().hex}"
+        relative = f".canvas_apps/{environment_id}"
+        target = Path(handle.root_path) / relative
+        target.mkdir(parents=True, exist_ok=False)
+        for path in artifact_files(source):
+            destination = target / path.relative_to(source)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+        if self._tree_digest(target, self._manifest(task)) != digest:
+            raise ValueError("canvas changed during deployment")
+        with bind_workspace(handle, scope.execution):
+            result = await runtime.execute_computer_action("environment", "register", {
+                "environment_id": environment_id, "name": task["description"], "root": relative,
+                "entrypoint": task["canvas"]["entrypoint"], "lifetime": "reusable" if reusable else "session",
+            })
+        if not result.success:
+            raise RuntimeError(result.error)
+        return {"ok": True, "workspace_id": handle.workspace_id, **result.result}
+
     async def evolve_publish(self, task_id: str) -> Dict[str, Any]:
         task = self._get_task_or_raise(task_id)
         if task.get("status") != "validated":
@@ -419,9 +670,11 @@ class SelfEvolveService:
         if digest != task.get("validated_digest"):
             raise ValueError("capability changed after validation; validate it again before publishing")
         service_name = self._service_name(task)
-        destination = (self.publish_root / service_name).resolve()
+        publish_root = self.staging_root.parent / "canvas-packages" if task.get("canvas") else self.publish_root
+        publish_root.mkdir(parents=True, exist_ok=True)
+        destination = (publish_root / service_name).resolve()
         try:
-            destination.relative_to(self.publish_root.resolve())
+            destination.relative_to(publish_root.resolve())
         except ValueError as exc:
             raise PermissionError("capability publish path escaped generated extension root") from exc
         if destination.exists():
@@ -430,7 +683,7 @@ class SelfEvolveService:
             if existing.get("digest") != digest:
                 raise FileExistsError("this capability version already exists with different content; publish a new version")
         else:
-            temporary = self.publish_root / f".{service_name}.{uuid.uuid4().hex}.tmp"
+            temporary = publish_root / f".{service_name}.{uuid.uuid4().hex}.tmp"
             try:
                 temporary.mkdir(parents=False, exist_ok=False)
                 for path in source_root.rglob("*"):
@@ -459,14 +712,14 @@ class SelfEvolveService:
             finally:
                 shutil.rmtree(temporary, ignore_errors=True)
 
-        if not callable(self._extension_reloader):
+        if not task.get("canvas") and not callable(self._extension_reloader):
             raise RuntimeError("capability registry reload is not configured")
-        registered = self._extension_reloader(
+        registered = [] if task.get("canvas") else self._extension_reloader(
             [str(self.workspace_root / "extensions" / "community")],
             reload_modules=True,
         )
         registered_service = any(tool_id.startswith(f"{service_name}.") for tool_id in registered)
-        if not registered_service:
+        if not task.get("canvas") and not registered_service:
             raise RuntimeError(f"published capability failed to register: {service_name}")
 
         def _record(row: Dict[str, Any]) -> None:

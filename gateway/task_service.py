@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .events import EventEmitter
 from .protocol import EventType
+from .goal_gaps import GoalGapState, gap_event_delta
 
 
 TASK_OPEN = "open"
@@ -141,6 +142,8 @@ class TaskService:
             run["metadata"].update(detail)
         previous_status = self._normalize_task_status(task.get("status"))
         next_status = self._derive_task_status(task["runs"], fallback=previous_status)
+        if next_status == TASK_COMPLETED and any(gap.state != "resolved" for gap in GoalGapState.model_validate(task.get("goal_gaps") or {}).gaps):
+            next_status = TASK_WAITING_USER
         task["status"] = next_status
         if next_status == TASK_COMPLETED:
             task["completed_at"] = _now()
@@ -161,6 +164,59 @@ class TaskService:
         if state_event:
             self._publish(EventType.TASK_STATE_CHANGED, state_event)
         return self._copy(run)
+
+    def assert_action_execution(self, *, task_id: str, user_id: str, expected_objective: str,
+                                task_run_id: Optional[str] = None,
+                                execution_token: Optional[Dict[str, Any]] = None) -> None:
+        task = self._require(task_id, user_id)
+        if task.get("objective", "") != expected_objective:
+            raise TaskExecutionConflict("task objective changed; the old execution proposal is no longer valid")
+        if task.get("status") in {TASK_CANCELLED, TASK_PAUSED}:
+            raise TaskExecutionConflict("task is not accepting execution updates")
+        if execution_token:
+            self._assert_execution_token(task, execution_token)
+        elif task_run_id and task.get("executions", {}).get(str(task_run_id)):
+            raise TaskExecutionConflict("leased task execution requires its original Runtime token")
+
+    def commit_goal_gaps(self, *, task_id: str, user_id: str, state: GoalGapState,
+                         expected_revision: int, expected_objective: str,
+                         execution_token: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Commit Runtime-derived goal state, never a model-supplied task status."""
+        task = self._require(task_id, user_id)
+        current = GoalGapState.model_validate(task.get("goal_gaps") or {})
+        self.assert_action_execution(task_id=task_id, user_id=user_id, expected_objective=expected_objective,
+                                     execution_token=execution_token)
+        if current.revision != expected_revision:
+            raise TaskRevisionConflict("goal state changed; reload before proposing another delta")
+        if state.revision <= current.revision:
+            raise TaskRevisionConflict("goal state revision must advance")
+        previous = self._copy(task)
+        previous_events = list(self._events.get(task_id, []))
+        task["goal_gaps"] = state.model_dump()
+        next_status = self._derive_task_status(task["runs"], fallback=task["status"])
+        if next_status == TASK_COMPLETED and any(gap.state != "resolved" for gap in state.gaps):
+            next_status = TASK_WAITING_USER
+        task["status"] = next_status
+        if next_status == TASK_COMPLETED:
+            task["completed_at"] = _now()
+        elif next_status not in TASK_TERMINAL:
+            task["completed_at"] = None
+        task["updated_at"] = _now()
+        self._advance_revision(task)
+        event = self._record(task_id, "goal.gaps.updated", gap_event_delta(current, state))
+        state_event = None
+        if previous["status"] != next_status:
+            state_event = self._record(task_id, "task.state.changed", {"from_status": previous["status"], "to_status": next_status, "reason": "goal_gaps_changed"})
+        try:
+            self._persist()
+        except Exception:
+            self._tasks[task_id] = previous
+            self._events[task_id] = previous_events
+            raise
+        self._publish(EventType.GOAL_GAPS_UPDATED, event)
+        if state_event:
+            self._publish(EventType.TASK_STATE_CHANGED, state_event)
+        return self._copy(task)
 
     def transition_task(
         self,
@@ -219,7 +275,11 @@ class TaskService:
             task["title"] = resolved
             changes["title"] = resolved
         if objective is not None:
-            task["objective"] = str(objective).strip()
+            new_objective = str(objective).strip()
+            if new_objective != task.get("objective") and task.get("goal_gaps"):
+                previous_gaps = task.pop("goal_gaps")
+                self._record(task_id, "goal.gaps.reset", {"previous": previous_gaps, "reason": "objective_changed"})
+            task["objective"] = new_objective
             changes["objective"] = task["objective"]
         if not changes:
             return self._copy(task)
@@ -456,6 +516,8 @@ class TaskService:
         if isinstance(legacy_execution, dict) and legacy_execution.get("run_id"):
             executions.setdefault(str(legacy_execution["run_id"]), legacy_execution)
         task["executions"] = executions
+        if task.get("goal_gaps"):
+            task["goal_gaps"] = GoalGapState.model_validate(task["goal_gaps"]).model_dump()
         for run in task.get("runs", []):
             if isinstance(run, dict):
                 run.setdefault("attempts", [])

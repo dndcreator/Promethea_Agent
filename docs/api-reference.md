@@ -2,6 +2,12 @@
 
 This document defines the externally consumable runtime API surface for Promethea.
 
+## Project Metadata
+
+Project routes require the current authenticated user. `GET /api/projects` returns `{projects: Project[]}`; `POST /api/projects` accepts `{name}` and returns the created `Project` (201). `PATCH /api/projects/{project_id}` renames it. `DELETE /api/projects/{project_id}` returns 204 and only removes grouping metadata. `PUT /api/sessions/{session_id}/project` accepts `{project_id: string | null}` and returns 204; both objects must belong to the current user. Unknown or foreign objects return 404. Names contain 1-100 nonblank characters.
+
+`Project` is defined in `gateway/public_contracts.py` and generated into the SDK. A project groups conversations; it does not rename, merge, or create execution workspaces. Project records are included in personal workspace archives and legacy personal bundles when exporting sessions.
+
 ## Positioning
 
 Promethea backend is the canonical runtime.
@@ -29,12 +35,16 @@ This avoids hardcoding stale assumptions.
 - `POST /api/chat/confirm`
 - `POST /api/followup`
 
+Chat requests may include an owned `task_id` to bind the run to durable Task
+goal state. This applies to HTTP, SSE and the TypeScript SDK; omission keeps
+ordinary conversation behavior. Task read models expose `goal_gaps` without
+internal monitoring frames or execution tokens.
+
 ### Tools and Extensions
 
 - `GET /api/extensions/catalog`
 - `POST /api/extensions/reload`
 - `GET /api/status/tools`
-- `GET /api/status/tools/official`
 
 Tool execution is mediated by `CapabilityService` rather than a public `POST /api/tools/call` endpoint. Discover callable tools through the status and extension catalog endpoints, then drive tool use through chat, task, or workflow routes.
 
@@ -221,7 +231,6 @@ Chat response may include:
 
 ```bash
 curl http://127.0.0.1:8000/api/status/tools
-curl http://127.0.0.1:8000/api/status/tools/official
 ```
 
 ### Example: list skill catalog

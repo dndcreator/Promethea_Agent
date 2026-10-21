@@ -44,6 +44,58 @@ def test_runtime_event_log_restores_sequence_and_redacts_secrets(tmp_path: Path)
     assert rows[0]["payload"]["config"]["provider"]["access_token"] == "[REDACTED]"
 
 
+def test_runtime_event_log_persists_execution_identity_levels(tmp_path: Path):
+    log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    row = log.append(
+        event_type=EventType.MODEL_CALL_RECORDED.value,
+        payload={
+            "user_id": "u1",
+            "task_run_id": "task-run-1",
+            "workflow_run_id": "workflow-run-1",
+            "conversation_turn_id": "turn-1",
+            "action_loop_id": "action-1",
+            "model_step_id": "step-1",
+            "model_call_id": "model-call-1",
+            "provider_request_id": "provider-1",
+        },
+    )
+
+    assert row["task_run_id"] == "task-run-1"
+    assert row["workflow_run_id"] == "workflow-run-1"
+    assert row["conversation_turn_id"] == "turn-1"
+    assert row["action_loop_id"] == "action-1"
+    assert row["model_step_id"] == "step-1"
+    assert row["model_call_id"] == "model-call-1"
+    assert row["provider_request_id"] == "provider-1"
+    assert row["run_id"] == "task-run-1"
+
+
+def test_runtime_event_log_normalizes_sets_at_protocol_boundary(tmp_path: Path):
+    log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+
+    log.append(
+        event_type=EventType.TOOL_CALL_START.value,
+        payload={
+            "user_id": "u1",
+            "policy": {"allowed_scopes": {"workspace.read", "runtime.inspect"}},
+        },
+    )
+
+    row = log.query(user_id="u1", limit=1)[0]
+    assert row["payload"]["policy"]["allowed_scopes"] == ["runtime.inspect", "workspace.read"]
+
+
+@pytest.mark.asyncio
+async def test_action_audit_log_failure_is_not_silently_ignored():
+    failed_log = MagicMock()
+    failed_log.next_seq = 1
+    failed_log.append.side_effect = OSError("disk full")
+    emitter = EventEmitter(event_log=failed_log)
+
+    with pytest.raises(OSError, match="disk full"):
+        await emitter.emit(EventType.ACTION_STATE_CHANGED, {"action_loop_id": "action-1"})
+
+
 def test_runtime_event_log_rotates_with_bounded_archives(tmp_path: Path):
     path = tmp_path / "events.jsonl"
     log = RuntimeEventLog(storage_path=str(path), max_bytes=220, max_archives=2)

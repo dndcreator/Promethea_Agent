@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
+from config import config as global_config
 
 from conversation_core import PrometheaConversation
 
+from .action import ActionService
 from .action.models import resolve_action_budget
 from .events import EventEmitter
 from .prompt_assembler import PromptAssembler
@@ -20,6 +22,7 @@ from .runtime_io import (
 )
 from .user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
 from .runtime_input_builder import build_runtime_input_blocks
+from .tool_prompt_blocks import build_action_protocol_prompt
 from .protocol import (
     EventType,
     ConversationRunInput,
@@ -67,7 +70,8 @@ class ConversationService:
         "Language policy:\n"
         "- Default to the same language as the user's latest message.\n"
         "- If the user explicitly asks for a different language, follow that language.\n"
-        "- Do not use UI language as a response-language signal."
+        "- Use that language for user-visible reasoning as well as the final answer.\n"
+        "- If the latest message has no clear language, use the UI language supplied by Runtime metadata."
     )
 
     """Gateway conversation orchestration service."""
@@ -90,7 +94,11 @@ class ConversationService:
         self.conversation_core = conversation_core or PrometheaConversation()
         self.memory_service = memory_service
         self.reasoning_service = reasoning_service
-        self.action_service = action_service
+        self.action_service = action_service or ActionService(
+            event_emitter=event_emitter,
+            conversation_core=self.conversation_core,
+            capability_service=capability_service,
+        )
         self.workflow_engine = workflow_engine
         self.message_manager = message_manager
         self.config_service = config_service
@@ -585,50 +593,43 @@ class ConversationService:
         run_context: Optional[Any],
         user_config: Optional[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Return the structured tool snapshot used by the main-model loop."""
+        """Return the model projection of the authoritative capability snapshot."""
         if not self.capability_service:
             return []
-        try:
-            catalog = await self.capability_service.get_tool_catalog(
-                run_context=run_context,
-                user_config=user_config,
-            )
-        except Exception as e:
-            logger.debug("ConversationService: runtime tool catalog unavailable: {}", e)
-            return []
+        preferred_tools: List[str] = []
+        active_skill = getattr(run_context, "active_skill", None) if run_context is not None else None
+        if isinstance(active_skill, dict):
+            for key in ("allowed_tools", "tool_allowlist"):
+                values = active_skill.get(key)
+                if isinstance(values, list):
+                    preferred_tools.extend(str(item) for item in values if str(item).strip())
+        snapshot = await self.capability_service.build_capability_snapshot(
+            run_context=run_context,
+            user_config=user_config,
+            preferred_tools=preferred_tools,
+        )
 
+        specs = {
+            str(item.get("name") or ""): item
+            for item in (snapshot.get("selected_specs") or [])
+            if isinstance(item, dict)
+        }
         tools: List[Dict[str, Any]] = []
-        for item in catalog or []:
+        for item in snapshot.get("compact_index") or []:
             if not isinstance(item, dict):
                 continue
-            service_name = str(item.get("service_name") or "").strip()
-            tool_name = str(item.get("tool_name") or "").strip()
-            if not service_name or not tool_name:
+            full_name = str(item.get("name") or "").strip()
+            if not full_name:
                 continue
-            full_name = (
-                tool_name
-                if tool_name == service_name or tool_name.startswith(f"{service_name}.")
-                else f"{service_name}.{tool_name}"
-            )
-            tool_row = {
-                    "name": full_name,
-                    "service_name": service_name,
-                    "tool_name": tool_name,
-                    "tool_type": str(item.get("tool_type") or "").strip(),
-                    "description": str(item.get("description") or "").strip(),
-                    "requires_confirmation": bool(item.get("requires_confirmation", False)),
-                    "callable_now": bool(item.get("callable_now", True)),
-                    "callable_reason": str(item.get("callable_reason") or "").strip(),
-                    "policy_allowed": bool(item.get("policy_allowed", True)),
-                    "dependency_ready": bool(item.get("dependency_ready", True)),
-                }
-            required_capability = str(item.get("required_capability") or "").strip()
-            capability_details = dict(item.get("capability_details") or {})
-            if required_capability:
-                tool_row["required_capability"] = required_capability
-            if capability_details:
-                tool_row["capability_details"] = capability_details
+            tool_row = dict(item)
+            selected = specs.get(full_name)
+            if selected:
+                tool_row["input_schema"] = dict(selected.get("input_schema") or {})
+                if selected.get("output_schema"):
+                    tool_row["output_schema"] = dict(selected.get("output_schema") or {})
             tools.append(tool_row)
+        if run_context is not None:
+            run_context.registered_tools = list(tools)
         return tools
 
     async def attach_self_model_context(
@@ -782,17 +783,16 @@ class ConversationService:
                 session_id, user_id=user_id
             )
 
+        input_metadata = (
+            (getattr(assembler_context, "input_payload", {}) or {}).get("metadata", {})
+            if isinstance(getattr(assembler_context, "input_payload", {}), dict)
+            else {}
+        )
         runtime_context_block = build_runtime_context_block(
             recent_messages=recent_messages,
             user_config=user_config,
-            timezone_name=str(
-                (
-                    (getattr(assembler_context, "input_payload", {}) or {}).get("metadata", {})
-                    if isinstance(getattr(assembler_context, "input_payload", {}), dict)
-                    else {}
-                ).get("timezone")
-                or ""
-            ),
+            timezone_name=str(input_metadata.get("timezone") or ""),
+            ui_language=str(input_metadata.get("ui_language") or ""),
         )
         try:
             setattr(assembler_context, "runtime_context", runtime_context_block)
@@ -900,12 +900,13 @@ class ConversationService:
             memory_bundle=memory_bundle,
             tools=ToolExecutionBundle(
                 enabled=tools_enabled,
-                strategy="tool_call_loop" if tools_enabled else "none",
+                strategy="runtime_action_machine",
                 metadata={
                     "prompt_policy": dict(prompt_policy or {}),
                     "tool_budget": tool_budget,
                     "cognitive_mode": prompt_policy.get("cognitive_mode"),
                     "registered_tools": list(getattr(assembler_context, "registered_tools", []) or []),
+                    "capability_snapshot": dict(getattr(assembler_context, "tool_availability", {}) or {}),
                 },
             ),
             user_config=user_config,
@@ -915,7 +916,9 @@ class ConversationService:
         if not system_prompt:
             system_prompt = base_system_prompt
 
-        if system_prompt:
+        if prompt_assembly.get("blocks"):
+            messages.extend(self.prompt_assembler.render_messages(prompt_assembly["blocks"]))
+        elif system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.extend(recent_messages)
         vision_enabled = self._is_vision_enabled(user_config=user_config, user_id=user_id)
@@ -1039,7 +1042,13 @@ class ConversationService:
             user_id=user_id,
             max_recursion=max_recursion,
         )
+        if str(response_data.get("status") or "success").lower() not in {"success", "ok", "completed"}:
+            error = response_data.get("error")
+            detail = error.get("message") if isinstance(error, dict) else str(error or "agent run failed")
+            raise RuntimeError(detail)
         reply_content = response_data.get("content", "")
+        reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+        tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
 
         if self.message_manager:
             if turn_id and hasattr(self.message_manager, "commit_turn"):
@@ -1048,6 +1057,8 @@ class ConversationService:
                     turn_id=turn_id,
                     assistant_content=reply_content or "",
                     user_id=user_id,
+                    reasoning_tree_id=tree_id,
+                    reasoning_steps=list(response_data.get("reasoning_steps") or []),
                 )
                 if not committed:
                     raise RuntimeError(
@@ -1067,11 +1078,11 @@ class ConversationService:
                     reply_content,
                     user_id,
                     sync_memory=False,
+                    reasoning_tree_id=tree_id,
+                    reasoning_steps=list(response_data.get("reasoning_steps") or []),
                 )
 
         try:
-            reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
-            tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
             if self.reasoning_service and tree_id:
                 await self.reasoning_service.assess_outcome(
                     tree_id=tree_id,
@@ -1129,8 +1140,15 @@ class ConversationService:
         run_context: Optional[Any] = None,
         tool_executor=None,
         max_recursion: Optional[int] = None,
-        initial_response: Optional[Dict[str, Any]] = None,
+        output_sink=None,
+        reasoning_sink=None,
     ) -> Dict:
+        if run_context is None:
+            run_context = SimpleNamespace(user_id=user_id, session_id=session_id)
+        learning = getattr(getattr(self.reasoning_service, "template_memory", None), "learning", None)
+        if learning is not None and user_id:
+            await learning.interrupt(user_id)
+        messages = self._with_action_protocol(messages)
         confirmation_resolver = None
         if callable(getattr(self.capability_service, "requires_confirmation", None)):
             confirmation_resolver = lambda name, args: self.capability_service.requires_confirmation(
@@ -1149,7 +1167,7 @@ class ConversationService:
                 )
             except Exception:
                 goal = ""
-            return await self.action_service.run_light_action(
+            result = await self.action_service.run_action(
                 goal=goal,
                 messages=messages,
                 user_config=user_config,
@@ -1158,22 +1176,288 @@ class ConversationService:
                 run_context=run_context,
                 tool_executor=tool_executor,
                 confirmation_resolver=confirmation_resolver,
+                capability_inspector=(
+                    lambda names: self._inspect_runtime_capabilities(
+                        names,
+                        run_context=run_context,
+                        user_config=user_config,
+                    )
+                ),
+                capability_resolver=(
+                    lambda intent: self._resolve_runtime_capabilities(
+                        intent,
+                        run_context=run_context,
+                        user_config=user_config,
+                        user_id=user_id,
+                    )
+                ),
                 budget=max_recursion,
                 metadata={"source": "conversation_service.run_chat_loop"},
-                initial_response=initial_response,
+                output_sink=output_sink,
+                reasoning_sink=reasoning_sink,
+                prepare_messages=lambda current, observations: self._prepare_action_messages(
+                    current, observations, run_context=run_context, user_config=user_config,
+                ),
             )
-        call_kwargs = {
-            "user_config": user_config,
-            "session_id": session_id,
-            "user_id": user_id,
-            "tool_executor": tool_executor,
-            "max_recursion": max_recursion,
-        }
-        if confirmation_resolver is not None:
-            call_kwargs["confirmation_resolver"] = confirmation_resolver
-        if initial_response is not None:
-            call_kwargs["initial_response"] = initial_response
-        return await self.conversation_core.run_chat_loop(messages, **call_kwargs)
+            await self._record_action_episode(
+                result=result,
+                user_id=user_id,
+                session_id=session_id,
+                user_message=goal,
+                user_config=user_config,
+            )
+            return result
+        raise RuntimeError("ActionService is required for conversation execution")
+
+    async def _prepare_action_messages(self, messages: List[Dict[str, Any]], observations: List[Dict[str, Any]], *, run_context: Optional[Any], user_config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        from config import ActionConfig
+
+        policy = ActionConfig(**{**global_config.action.model_dump(), **((user_config or {}).get("action") or {})})
+        if self.capability_service is not None:
+            tools = await self._build_runtime_tool_snapshot(run_context=run_context, user_config=user_config)
+            messages = self.prompt_assembler.refresh_tool_message(
+                messages, tools=tools, snapshot=getattr(run_context, "tool_availability", {}) or {}, run_context=run_context,
+            )
+        return self.context_compiler.project_observations(
+            messages, observations, per_result_chars=policy.observation_chars,
+            total_chars=policy.observation_history_chars,
+        )
+
+    @staticmethod
+    def _with_action_protocol(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ensure ConversationService hands ActionService a complete model contract."""
+        prepared = [dict(message) for message in (messages or [])]
+        marker = "Runtime action protocol:"
+        for message in prepared:
+            if message.get("role") == "system" and marker in str(message.get("content") or ""):
+                return prepared
+        protocol = build_action_protocol_prompt()
+        for message in prepared:
+            if message.get("role") == "system" and isinstance(message.get("content"), str):
+                content = str(message.get("content") or "").strip()
+                message["content"] = f"{content}\n\n{protocol}" if content else protocol
+                return prepared
+        prepared.insert(0, {"role": "system", "content": protocol})
+        return prepared
+
+    async def _inspect_runtime_capabilities(
+        self,
+        names: List[str],
+        *,
+        run_context: Optional[Any],
+        user_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if self.capability_service is None:
+            raise RuntimeError("capability service is unavailable")
+        return self.capability_service.inspect_capabilities(
+            names,
+            run_context=run_context,
+            user_config=user_config,
+        )
+
+    async def _resolve_runtime_capabilities(
+        self,
+        intent: Dict[str, Any],
+        *,
+        run_context: Optional[Any],
+        user_config: Optional[Dict[str, Any]],
+        user_id: Optional[str],
+    ) -> Dict[str, Any]:
+        if self.capability_service is None:
+            raise RuntimeError("capability service is unavailable")
+        preferred_tools: List[str] = []
+        template_memory = getattr(self.reasoning_service, "template_memory", None)
+        if template_memory is not None and user_id:
+            try:
+                required = " ".join(
+                    str(item) for item in (intent.get("required_capabilities") or []) if str(item).strip()
+                )
+                matched = template_memory.match_action_template(
+                    user_id=user_id,
+                    task=str(intent.get("objective") or ""),
+                    tool_intent=required,
+                )
+                for action in matched.get("actions", []) if isinstance(matched, dict) else []:
+                    if not isinstance(action, dict):
+                        continue
+                    service = str(action.get("service_name") or "").strip()
+                    tool = str(action.get("tool_name") or "").strip()
+                    name = f"{service}.{tool}" if service and tool else tool
+                    if name and name not in preferred_tools:
+                        preferred_tools.append(name)
+            except Exception as exc:
+                logger.debug("ConversationService: learned capability preference unavailable: {}", exc)
+        projection = await self.capability_service.resolve_capability_intent(
+            intent,
+            run_context=run_context,
+            user_config=user_config,
+            preferred_tools=preferred_tools,
+        )
+        learning = getattr(template_memory, "learning", None)
+        settings = {**global_config.moirai_learning.model_dump(), **((user_config or {}).get("moirai_learning") or {})}
+        if learning is not None and user_id and settings["enabled"]:
+            projection = dict(projection)
+            learning_intent = {**intent, "candidate_names": [item["name"] for item in projection.get("candidates", []) if isinstance(item, dict) and item.get("name")]}
+            projection["process_experience"] = await asyncio.to_thread(learning.recall, user_id, learning_intent)
+        return projection
+
+    async def _record_action_episode(
+        self,
+        *,
+        result: Dict[str, Any],
+        user_id: str,
+        session_id: str,
+        user_message: str,
+        user_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not user_id or str((result or {}).get("status") or "").lower() == "needs_confirmation":
+            return
+        path = (result or {}).get("execution_path") or []
+        if not isinstance(path, list) or not path:
+            return
+        template_memory = getattr(self.reasoning_service, "template_memory", None)
+        learning = getattr(template_memory, "learning", None)
+        settings = {**global_config.moirai_learning.model_dump(), **((user_config or {}).get("moirai_learning") or {})}
+        if learning is not None and settings.get("enabled", True):
+            try:
+                await asyncio.to_thread(learning.record, user_id=user_id, result=result, goal=user_message)
+                if settings.get("distillation_enabled", True):
+                    from agentkit.tools.moirai.learning import ModelDistillationBackend
+
+                    backend = ModelDistillationBackend(lambda messages: self.call_llm(
+                        messages, user_config=user_config, user_id=user_id,
+                    ))
+                    learning.schedule(
+                        user_id, backend,
+                        idle_seconds=max(0, float(settings.get("idle_seconds", 60))),
+                        min_episodes=max(2, int(settings.get("min_episodes", 8))),
+                        interval=max(0, float(settings.get("interval_seconds", 3600))),
+                        timeout=max(1, float(settings.get("timeout_seconds", 30))),
+                    )
+            except Exception as exc:
+                logger.warning("Moirai episode learning deferred: {}", exc)
+        if str((result or {}).get("status") or "").lower() != "success":
+            return
+        recorder = getattr(template_memory, "record_action_success", None)
+        if not callable(recorder):
+            return
+        recorder(
+            user_id=user_id,
+            session_id=session_id,
+            user_message=user_message,
+            assistant_output=str((result or {}).get("content") or ""),
+            execution_path=path,
+        )
+
+    async def resume_action(
+        self,
+        *,
+        pending: Dict[str, Any],
+        approved_call_id: str,
+        user_config: Optional[Dict[str, Any]],
+        session_id: str,
+        user_id: str,
+        run_context: Optional[Any],
+        tool_executor: Any,
+    ) -> Dict[str, Any]:
+        if run_context is None:
+            run_context = SimpleNamespace(user_id=user_id, session_id=session_id)
+        if self.action_service is None:
+            raise RuntimeError("ActionService is required for action resume")
+        confirmation_resolver = None
+        if callable(getattr(self.capability_service, "requires_confirmation", None)):
+            confirmation_resolver = lambda name, args: self.capability_service.requires_confirmation(
+                name,
+                args,
+                run_context=run_context,
+                user_config=user_config,
+            )
+        result = await self.action_service.resume_action(
+            pending=pending,
+            approved_call_id=approved_call_id,
+            user_config=user_config,
+            session_id=session_id,
+            user_id=user_id,
+            run_context=run_context,
+            tool_executor=tool_executor,
+            confirmation_resolver=confirmation_resolver,
+            prepare_messages=lambda current, observations: self._prepare_action_messages(
+                current, observations, run_context=run_context, user_config=user_config,
+            ),
+            capability_inspector=lambda names: self._inspect_runtime_capabilities(
+                names,
+                run_context=run_context,
+                user_config=user_config,
+            ),
+            capability_resolver=lambda intent: self._resolve_runtime_capabilities(
+                intent,
+                run_context=run_context,
+                user_config=user_config,
+                user_id=user_id,
+            ),
+        )
+        await self._record_action_episode(
+            result=result,
+            user_id=user_id,
+            session_id=session_id,
+            user_message=str(pending.get("goal") or ""),
+            user_config=user_config,
+        )
+        return result
+
+    async def reject_pending_action(
+        self,
+        *,
+        pending: Dict[str, Any],
+        user_config: Optional[Dict[str, Any]],
+        session_id: str,
+        user_id: str,
+        run_context: Optional[Any],
+        tool_executor: Any,
+    ) -> Dict[str, Any]:
+        if run_context is None:
+            run_context = SimpleNamespace(user_id=user_id, session_id=session_id)
+        if self.action_service is None:
+            raise RuntimeError("ActionService is required for action rejection")
+        confirmation_resolver = None
+        if callable(getattr(self.capability_service, "requires_confirmation", None)):
+            confirmation_resolver = lambda name, args: self.capability_service.requires_confirmation(
+                name,
+                args,
+                run_context=run_context,
+                user_config=user_config,
+            )
+        result = await self.action_service.reject_pending_action(
+            pending=pending,
+            user_config=user_config,
+            session_id=session_id,
+            user_id=user_id,
+            run_context=run_context,
+            tool_executor=tool_executor,
+            confirmation_resolver=confirmation_resolver,
+            prepare_messages=lambda current, observations: self._prepare_action_messages(
+                current, observations, run_context=run_context, user_config=user_config,
+            ),
+            capability_inspector=lambda names: self._inspect_runtime_capabilities(
+                names,
+                run_context=run_context,
+                user_config=user_config,
+            ),
+            capability_resolver=lambda intent: self._resolve_runtime_capabilities(
+                intent,
+                run_context=run_context,
+                user_config=user_config,
+                user_id=user_id,
+            ),
+        )
+        await self._record_action_episode(
+            result=result,
+            user_id=user_id,
+            session_id=session_id,
+            user_message=str(pending.get("goal") or ""),
+            user_config=user_config,
+        )
+        return result
 
     async def call_llm(
         self,
@@ -1198,11 +1482,13 @@ class ConversationService:
         messages: List[Dict],
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        reasoning_sink=None,
     ):
         async for chunk in self.conversation_core.call_llm_stream(
             messages,
             user_config=user_config,
             user_id=user_id,
+            reasoning_sink=reasoning_sink,
         ):
             yield chunk
 

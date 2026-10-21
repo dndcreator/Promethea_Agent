@@ -97,6 +97,21 @@ async def test_service_online_after_tool_sync(isolated_mcp_registry):
     assert health["last_sync_at"]
 
 
+def test_manifest_presentation_survives_remote_tool_catalog_refresh(isolated_mcp_registry):
+    _register_service("svc_a")
+    MANIFEST_CACHE["svc_a"]["capabilities"]["invocation_commands"][0]["presentation"] = {
+        "title": "Echo text",
+        "subject_arg": "text",
+    }
+    manager = MCPManager()
+    manager.tools_cache["svc_a"] = [{"name": "echo", "description": "Remote description"}]
+
+    tool = manager.get_available_services_filtered()["mcp_services"][0]["available_tools"][0]
+
+    assert tool["description"] == "Remote description"
+    assert tool["presentation"] == {"title": "Echo text", "subject_arg": "text"}
+
+
 @pytest.mark.asyncio
 async def test_external_provider_tools_are_discovered_into_catalog(isolated_mcp_registry, monkeypatch):
     _register_service("svc_external")

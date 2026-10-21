@@ -22,7 +22,6 @@ class ActionPhase(str, Enum):
 
 
 TERMINAL_PHASES: Set[ActionPhase] = {
-    ActionPhase.WAITING_CONFIRMATION,
     ActionPhase.COMPLETED,
     ActionPhase.FAILED,
     ActionPhase.CANCELLED,
@@ -31,9 +30,10 @@ TERMINAL_PHASES: Set[ActionPhase] = {
 
 _ALLOWED: Mapping[ActionPhase, Set[ActionPhase]] = {
     ActionPhase.PENDING: {ActionPhase.AWAITING_MODEL, ActionPhase.FAILED, ActionPhase.CANCELLED},
-    ActionPhase.AWAITING_MODEL: {ActionPhase.EVALUATING, ActionPhase.FAILED, ActionPhase.CANCELLED},
+    ActionPhase.AWAITING_MODEL: {ActionPhase.EVALUATING, ActionPhase.OBSERVING, ActionPhase.FAILED, ActionPhase.CANCELLED},
     ActionPhase.EVALUATING: {
         ActionPhase.AWAITING_MODEL,
+        ActionPhase.OBSERVING,
         ActionPhase.VALIDATING,
         ActionPhase.COMPLETED,
         ActionPhase.FAILED,
@@ -41,6 +41,7 @@ _ALLOWED: Mapping[ActionPhase, Set[ActionPhase]] = {
     },
     ActionPhase.VALIDATING: {
         ActionPhase.EXECUTING,
+        ActionPhase.OBSERVING,
         ActionPhase.WAITING_CONFIRMATION,
         ActionPhase.FAILED,
         ActionPhase.CANCELLED,
@@ -57,7 +58,12 @@ _ALLOWED: Mapping[ActionPhase, Set[ActionPhase]] = {
         ActionPhase.FAILED,
         ActionPhase.CANCELLED,
     },
-    ActionPhase.WAITING_CONFIRMATION: set(),
+    ActionPhase.WAITING_CONFIRMATION: {
+        ActionPhase.VALIDATING,
+        ActionPhase.OBSERVING,
+        ActionPhase.FAILED,
+        ActionPhase.CANCELLED,
+    },
     ActionPhase.COMPLETED: set(),
     ActionPhase.FAILED: set(),
     ActionPhase.CANCELLED: set(),
@@ -75,6 +81,30 @@ class RuntimeActionStateMachine:
     phase: ActionPhase = ActionPhase.PENDING
     revision: int = 0
     transitions: List[Dict[str, Any]] = field(default_factory=list)
+
+    @classmethod
+    def restore(cls, transitions: List[Dict[str, Any]]) -> "RuntimeActionStateMachine":
+        machine = cls()
+        for index, row in enumerate(transitions or [], start=1):
+            declared_from = str(row.get("from") or "")
+            if declared_from and declared_from != machine.phase.value:
+                raise InvalidActionTransition(
+                    f"invalid restored transition source: expected {machine.phase.value}, got {declared_from}"
+                )
+            declared_revision = int(row.get("revision") or index)
+            if declared_revision != index:
+                raise InvalidActionTransition(
+                    f"invalid restored transition revision: expected {index}, got {declared_revision}"
+                )
+            target = ActionPhase(str(row.get("to") or ""))
+            machine.transition(
+                target,
+                cause=str(row.get("cause") or "restored"),
+                facts=dict(row.get("facts") or {}),
+            )
+        machine.transitions = [dict(row) for row in transitions or []]
+        machine.revision = len(machine.transitions)
+        return machine
 
     def transition(
         self,
@@ -107,4 +137,3 @@ class RuntimeActionStateMachine:
             "revision": self.revision,
             "terminal": self.phase in TERMINAL_PHASES,
         }
-

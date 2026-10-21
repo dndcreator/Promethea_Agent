@@ -1,13 +1,14 @@
 import json
 
 from gateway.http.user_manager import UserManager
+from gateway.http.identity_store import IdentityStore
 
 
 def _make_manager(tmp_path):
     mgr = object.__new__(UserManager)
     mgr.users_dir = tmp_path / "users"
     mgr.users_dir.mkdir(parents=True, exist_ok=True)
-    mgr.store_backend = "sqlite_graph"
+    mgr.identity_store = IdentityStore(mgr.users_dir / "identity.sqlite3")
     mgr.connector = None
     return mgr
 
@@ -99,7 +100,7 @@ def test_user_default_config_does_not_persist_model_routing(monkeypatch):
     assert cfg["persona"]["enabled"] is True
 
 
-def test_local_user_backend_registers_and_verifies_without_neo4j(tmp_path, monkeypatch):
+def test_identity_store_registers_and_verifies_without_neo4j(tmp_path, monkeypatch):
     mgr = _make_manager(tmp_path)
     monkeypatch.setattr(
         UserManager,
@@ -114,11 +115,11 @@ def test_local_user_backend_registers_and_verifies_without_neo4j(tmp_path, monke
     assert user is not None
     assert user["user_id"] == user_id
     assert user["agent_name"] == "Alicia"
-    assert (mgr.users_dir / "_local_users.json").exists()
+    assert (mgr.users_dir / "identity.sqlite3").exists()
     assert (mgr.users_dir / user_id / "config.json").exists()
 
 
-def test_local_user_backend_delete_removes_user_and_local_state(tmp_path, monkeypatch):
+def test_identity_store_delete_removes_user_and_local_state(tmp_path, monkeypatch):
     mgr = _make_manager(tmp_path)
     monkeypatch.setattr(
         UserManager,
@@ -159,14 +160,75 @@ def test_create_user_config_creates_secrets_without_overwriting_existing(tmp_pat
     assert secrets_path.read_text(encoding="utf-8") == "API__API_KEY=keep-me\n"
 
 
-def test_neo4j_backend_without_connector_rejects_registration(tmp_path):
-    from memory.neo4j_connector import Neo4jConnectionPool
-
-    Neo4jConnectionPool._last_error = ""
-    Neo4jConnectionPool._last_error_code = ""
+def test_identity_registration_does_not_require_neo4j(tmp_path, monkeypatch):
     mgr = _make_manager(tmp_path)
-    mgr.store_backend = "neo4j"
-    mgr.connector = None
+    monkeypatch.setattr(
+        UserManager,
+        "_build_user_default_config",
+        staticmethod(lambda agent_name: {"agent_name": agent_name, "system_prompt": ""}),
+    )
 
-    assert UserManager.can_register(mgr) == (False, "neo4j_user_backend_unavailable")
-    assert UserManager.create_user(mgr, "alice", "pw", "Alicia") is None
+    assert UserManager.can_register(mgr) == (True, "")
+    assert UserManager.create_user(mgr, "alice", "pw", "Alicia") is not None
+
+
+def test_legacy_local_and_neo4j_accounts_migrate_into_identity_store(tmp_path):
+    mgr = _make_manager(tmp_path)
+    local_user = {
+        "id": "user_local-id",
+        "user_id": "local-id",
+        "username": "local-user",
+        "password_hash": "local-hash",
+        "agent_name": "Local",
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    neo4j_user = {
+        "id": "user_graph-id",
+        "user_id": "graph-id",
+        "username": "commander-shepard",
+        "password_hash": "graph-hash",
+        "agent_name": "EDI",
+        "created_at": "2026-01-02T00:00:00Z",
+        "channel_web": "normandy",
+    }
+    mgr._local_users_path().write_text(json.dumps({"users": [local_user]}), encoding="utf-8")
+
+    class _Connector:
+        @staticmethod
+        def query(_query):
+            return [{"user": neo4j_user}]
+
+    mgr.connector = _Connector()
+
+    UserManager._migrate_legacy_identities(mgr)
+
+    assert mgr.identity_store.get_by_username("local-user")["user_id"] == "local-id"
+    assert mgr.identity_store.get_by_username("commander-shepard")["user_id"] == "graph-id"
+    assert mgr.identity_store.get_channels("graph-id") == {"web": "normandy"}
+
+
+def test_missing_legacy_identity_retries_pending_neo4j_migration(tmp_path, monkeypatch):
+    mgr = _make_manager(tmp_path)
+    mgr._legacy_neo4j_pending = True
+    mgr._legacy_retry_after = 0.0
+    calls = []
+
+    def _migrate(*, retry_neo4j=False):
+        calls.append(retry_neo4j)
+        mgr.identity_store.create(
+            {
+                "user_id": "graph-id",
+                "username": "commander-shepard",
+                "password_hash": "graph-hash",
+                "agent_name": "EDI",
+                "created_at": "2026-01-02T00:00:00Z",
+            }
+        )
+        mgr._legacy_neo4j_pending = False
+
+    monkeypatch.setattr(mgr, "_migrate_legacy_identities", _migrate)
+
+    user = UserManager.get_user_by_username(mgr, "commander-shepard")
+
+    assert calls == [True]
+    assert user["user_id"] == "graph-id"

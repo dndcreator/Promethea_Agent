@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from gateway.official_tools.web_search_runtime import (
+from agentkit.tools.standard.web_search_runtime import (
     WebSearchError,
     WebSearchProvider,
     WebSearchRuntime,
     WebSearchSettings,
 )
-from gateway.official_tools.web_tools import WebSearchTool
+from agentkit.tools.standard.web_tools import WebSearchTool
 from gateway.events import EventEmitter
 from gateway.runtime_event_log import RuntimeEventLog
 from gateway.capability_service import ToolInvocationContext, CapabilityService
@@ -184,7 +184,7 @@ async def test_public_tool_keeps_provider_policy_out_of_model_args(monkeypatch, 
     runtime = WebSearchRuntime([configured])
     tool = WebSearchTool(runtime=runtime)
     monkeypatch.setattr(
-        "gateway.official_tools.web_tools.resolve_search_runtime_settings",
+        "agentkit.tools.standard.web_tools.resolve_search_runtime_settings",
         lambda _user_id: {"provider": "configured"},
     )
 
@@ -203,7 +203,7 @@ async def test_search_result_projection_is_persisted_without_raw_provider_payloa
     runtime = WebSearchRuntime([_Provider("configured")])
     tool = WebSearchTool(runtime=runtime)
     monkeypatch.setattr(
-        "gateway.official_tools.web_tools.resolve_search_runtime_settings",
+        "agentkit.tools.standard.web_tools.resolve_search_runtime_settings",
         lambda _user_id: {"provider": "configured"},
     )
     event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))

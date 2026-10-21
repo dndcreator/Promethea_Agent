@@ -7,7 +7,7 @@ This directory contains Promethea plugin extensions.
 | Type | Purpose | Where it lives |
 | --- | --- | --- |
 | Host plugin | Drop-in package that registers channels or non-tool services. | `extensions/*` |
-| Tool | Callable action exposed through `CapabilityService` and policy. | `gateway/official_tools/*`, `agentkit/tools/*`, or an extension |
+| Tool | Callable action exposed through `CapabilityService` and policy. | Manifest packages in `agentkit/tools/*` or `extensions/community/*`, or an external MCP provider |
 | Skill | Reusable task instruction and metadata, expanded on demand. | `skills/packs/official/*` |
 
 Host plugins and executable tools are separate. Use a skill for reusable guidance,

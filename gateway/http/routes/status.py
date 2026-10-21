@@ -106,7 +106,7 @@ async def get_bootstrap_status():
     configured_backend = str(getattr(config.memory, "store_backend", "neo4j") or "neo4j").strip().lower()
     neo4j_available = bool(getattr(user_manager, "connector", None))
     can_register, reason = user_manager.can_register()
-    auth_backend = "neo4j" if configured_backend == "neo4j" else "local_file"
+    auth_backend = "identity_sqlite"
     neo4j_error = Neo4jConnectionPool.get_last_error()
     return {
         "status": "success",
@@ -452,34 +452,6 @@ async def get_tools_status():
         "total": len(catalog),
         "by_type": by_type,
         "tools": catalog,
-    }
-
-
-@router.get("/status/tools/official")
-async def get_official_tools_status():
-    gateway_server = _ensure_capability_service()
-    registered = getattr(gateway_server.capability_service, "_registered_tools", {}) or {}
-    items = []
-    domains: dict[str, int] = {}
-    for tool_id, tool in registered.items():
-        if not bool(getattr(tool, "official", False)):
-            continue
-        domain = str(getattr(tool, "official_domain", "misc") or "misc")
-        domains[domain] = domains.get(domain, 0) + 1
-        items.append(
-            {
-                "tool_id": tool_id,
-                "name": str(getattr(tool, "name", tool_id)),
-                "description": str(getattr(tool, "description", "")),
-                "domain": domain,
-            }
-        )
-    items.sort(key=lambda x: (x["domain"], x["tool_id"]))
-    return {
-        "status": "success",
-        "total": len(items),
-        "by_domain": domains,
-        "tools": items,
     }
 
 

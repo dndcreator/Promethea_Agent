@@ -89,13 +89,13 @@ async def test_login_exposes_api_key_warning_when_global_key_missing(monkeypatch
 @pytest.mark.asyncio
 async def test_register_reports_neo4j_backend_unavailable(monkeypatch):
     monkeypatch.setattr(auth.user_manager, "create_user", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(auth.user_manager, "can_register", lambda: (False, "neo4j_user_backend_unavailable"))
+    monkeypatch.setattr(auth.user_manager, "can_register", lambda: (False, "identity_store_unavailable"))
 
     with pytest.raises(HTTPException) as ei:
         await auth.register(UserRegister(username="neo", password="pw", agent_name="Promethea"))
 
     assert ei.value.status_code == 503
-    assert ei.value.detail["code"] == "neo4j_user_backend_unavailable"
+    assert ei.value.detail["code"] == "identity_store_unavailable"
 
 
 @pytest.mark.asyncio

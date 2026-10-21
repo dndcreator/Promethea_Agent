@@ -15,6 +15,11 @@ class RunContext(BaseModel):
     trace_id: str
     task_id: Optional[str] = None
     run_id: Optional[str] = None
+    task_run_id: Optional[str] = None
+    execution_token: Dict[str, Any] = Field(default_factory=dict)
+    workflow_run_id: Optional[str] = None
+    conversation_turn_id: Optional[str] = None
+    action_loop_id: Optional[str] = None
     session_state: SessionState
     user_identity: Dict[str, Any] = Field(default_factory=dict)
     input_payload: Dict[str, Any] = Field(default_factory=dict)
@@ -23,6 +28,7 @@ class RunContext(BaseModel):
     self_model_context: Dict[str, Any] = Field(default_factory=dict)
     cognition_snapshot: Dict[str, Any] = Field(default_factory=dict)
     tool_availability: Dict[str, Any] = Field(default_factory=dict)
+    registered_tools: list[Dict[str, Any]] = Field(default_factory=list)
     tool_policy: Dict[str, Any] = Field(default_factory=dict)
     reasoning_state: Dict[str, Any] = Field(default_factory=dict)
     prompt_blocks: Dict[str, Any] = Field(default_factory=dict)
@@ -34,7 +40,9 @@ class RunContext(BaseModel):
     token_budget: Optional[int] = None
     cost_budget: Optional[float] = None
     workspace_handle: Dict[str, Any] = Field(default_factory=dict)
+    runtime_blocks: list[Dict[str, Any]] = Field(default_factory=list)
     action_state: Dict[str, Any] = Field(default_factory=dict)
+    goal_gaps: Dict[str, Any] = Field(default_factory=dict)
     event_buffer: list[Dict[str, Any]] = Field(default_factory=list)
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -15,6 +15,9 @@ async def test_chat_route_normalizes_non_dict_args(monkeypatch):
         return {
             "response": "ok",
             "session_id": "s1",
+            "trace_id": "trace-kept",
+            "request_id": "request-kept",
+            "run_id": "run-kept",
             "status": "needs_confirmation",
             "tool_call_id": "tc1",
             "tool_name": "execute_command",
@@ -41,6 +44,7 @@ async def test_chat_route_normalizes_non_dict_args(monkeypatch):
     )
 
     assert out.status == "needs_confirmation"
+    assert (out.trace_id, out.request_id, out.run_id) == ("trace-kept", "request-kept", "run-kept")
     assert isinstance(out.args, dict)
     assert out.args == {"_args_list": ["command", "description", "service_name", "agentType"]}
     assert isinstance(out.memory_write_summary, dict)
@@ -69,6 +73,7 @@ async def test_chat_route_passes_attachments_without_prompt_merging(monkeypatch)
             requested_mode="deep",
             requested_skill="research",
             requested_workflow="source-review",
+            task_id="task-owned",
             metadata={"origin": "sdk-test"},
             attachments=[{"file_id": "f1"}],
         ),
@@ -82,6 +87,7 @@ async def test_chat_route_passes_attachments_without_prompt_merging(monkeypatch)
     assert captured["requested_mode"] == "deep"
     assert captured["requested_skill"] == "research"
     assert captured["requested_workflow"] == "source-review"
+    assert captured["task_id"] == "task-owned"
     assert captured["metadata"] == {"origin": "sdk-test"}
 
 
@@ -115,7 +121,11 @@ async def test_chat_route_keeps_image_attachment_as_structured_input(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monkeypatch):
+@pytest.mark.parametrize("run_status", ["success", "error", "needs_confirmation"])
+async def test_streaming_chat_routes_through_conversation_service(monkeypatch, run_status):
+    commits = []
+    aborted = []
+    confirmations = []
     class _MessageManager:
         def get_session(self, session_id, user_id=None):
             _ = (session_id, user_id)
@@ -126,11 +136,14 @@ async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monk
             return True
 
         def commit_turn(self, **kwargs):
-            _ = kwargs
+            commits.append(kwargs)
             return True
 
         def abort_turn(self, *args, **kwargs):
-            _ = (args, kwargs)
+            aborted.append((args, kwargs))
+
+        def set_pending_confirmation(self, session_id, pending, **kwargs):
+            confirmations.append(pending)
 
         def get_recent_messages(self, *args, **kwargs):
             _ = (args, kwargs)
@@ -138,7 +151,6 @@ async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monk
 
     class _ConversationService:
         def __init__(self):
-            self.stream_called = False
             self.run_called = False
             self.run_kwargs = {}
 
@@ -147,22 +159,25 @@ async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monk
             return {
                 "messages": [{"role": "system", "content": "sys"}, {"role": "user", "content": "calc"}],
                 "user_config": {},
-                "reasoning": {},
+                "reasoning": {"tree_id": "tree-1"},
                 "prompt_policy": {"need_tools": True, "tool_budget": 2},
                 "execution_budget": {"tool_budget": 2},
             }
-
-        async def call_llm_stream(self, *args, **kwargs):
-            self.stream_called = True
-            _ = (args, kwargs)
-            yield '{"action":"tool_call","tool_name":"calculator.calculate",'
-            yield '"args":{"expression":"2 + 2"}}'
 
         async def run_chat_loop(self, *args, **kwargs):
             self.run_called = True
             self.run_kwargs = dict(kwargs)
             _ = args
-            return {"status": "success", "content": "tool-backed answer"}
+            if run_status == "success":
+                await kwargs["reasoning_sink"]({"step_id": "step-1", "source": "provider", "delta": "checking"})
+            return {
+                "status": run_status,
+                "content": "tool-backed answer",
+                "tool_call_id": "call-1",
+                "tool_name": "code.run",
+                "error": {"message": "provider unavailable"},
+                "reasoning_steps": [{"step_id": "step-1", "source": "provider", "content": "checking"}],
+            }
 
     conversation_service = _ConversationService()
     captured_context = {}
@@ -197,6 +212,7 @@ async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monk
             requested_mode="deep",
             requested_skill="calculator",
             requested_workflow="analysis",
+            task_id="task-stream",
             metadata={"origin": "sdk-test"},
         ),
         raw_request=SimpleNamespace(),
@@ -209,22 +225,33 @@ async def test_streaming_chat_uses_tool_loop_when_prompt_policy_needs_tools(monk
     payload = "".join(chunks)
 
     assert conversation_service.run_called is True
-    assert conversation_service.stream_called is True
     assert conversation_service.run_kwargs.get("max_recursion") == 2
-    assert conversation_service.run_kwargs.get("initial_response") == {
-        "content": '{"action":"tool_call","tool_name":"calculator.calculate",'
-        '"args":{"expression":"2 + 2"}}'
-    }
+    assert "initial_response" not in conversation_service.run_kwargs
     assert conversation_service.run_kwargs.get("run_context").requested_mode == "deep"
     assert captured_context["requested_skill"] == "calculator"
     assert captured_context["requested_workflow"] == "analysis"
+    assert captured_context["task_id"] == "task-stream"
+    assert '"task_id": "task-stream"' in payload
     assert captured_context["metadata"] == {"origin": "sdk-test"}
     assert "id: http_stream_" in payload
     assert "event: session_started" in payload
     assert '"event_type": "session_started"' in payload
     assert '"type": "session_started"' in payload
-    assert "tool_meta" in payload
-    assert "tool-backed answer" in payload
+    if run_status == "success":
+        assert "tool-backed answer" in payload
+        assert "event: reasoning" in payload
+        assert '"delta": "checking"' in payload
+        assert commits[0]["reasoning_tree_id"] == "tree-1"
+        assert commits[0]["reasoning_steps"][0]["content"] == "checking"
+        assert not aborted
+    elif run_status == "error":
+        assert "provider unavailable" in payload
+        assert not commits
+        assert aborted
+    else:
+        assert confirmations[0]["reasoning_tree_id"] == "tree-1"
+        assert not commits
+        assert 'event: text' not in payload
 
 
 @pytest.mark.asyncio
@@ -260,12 +287,3 @@ async def test_chat_confirm_route_normalizes_non_dict_args(monkeypatch):
     assert out.status == "needs_confirmation"
     assert out.args == {"_args_list": ["command", "description"]}
     assert out.memory_write_summary.get("enabled") is True
-
-
-def test_stream_prefix_classifier_only_buffers_runtime_envelopes():
-    assert chat_routes._is_incomplete_routing_envelope('  {"action"') is True
-    assert chat_routes._is_incomplete_routing_envelope('{"tool_name":"web.search"') is True
-    assert chat_routes._is_incomplete_routing_envelope('```json\n{"action":"tool_call"') is True
-    assert chat_routes._is_incomplete_routing_envelope('```python\nprint("hello")') is False
-    assert chat_routes._is_incomplete_routing_envelope('{"result": 42') is False
-    assert chat_routes._is_incomplete_routing_envelope('Normal streamed answer') is False

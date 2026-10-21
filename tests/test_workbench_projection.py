@@ -41,6 +41,36 @@ def test_workbench_projects_task_scoped_runtime_timeline(tmp_path: Path):
     assert snapshot["cursor"] > 0
 
 
+def test_workbench_run_scope_matches_task_run_across_action_events(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Scoped action", session_id="s1")
+    event_log.append(
+        event_type=EventType.ACTION_OBSERVATION_COMMITTED.value,
+        payload={
+            "user_id": "u1",
+            "session_id": "s1",
+            "task_id": task["task_id"],
+            "task_run_id": "task-run-1",
+            "action_loop_id": "action-1",
+            "tool_call_id": "call-1",
+            "tool_name": "web.search",
+            "status": "completed",
+        },
+        durable=False,
+    )
+
+    snapshot = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", task_id=task["task_id"], run_id="task-run-1")
+
+    assert snapshot["timeline"]
+    assert snapshot["timeline"][0]["run_id"] == "task-run-1"
+
+
 def test_workbench_session_scope_does_not_fall_back_to_another_task(tmp_path: Path):
     tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
     workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
@@ -56,6 +86,28 @@ def test_workbench_session_scope_does_not_fall_back_to_another_task(tmp_path: Pa
     assert snapshot["task"] is None
     assert snapshot["scope"]["task_id"] is None
     assert snapshot["scope"]["session_id"] == "new-session"
+
+
+def test_workbench_home_scope_does_not_surface_settled_history(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Old task", session_id="s1")
+    tasks.transition_task(task_id=task["task_id"], user_id="u1", status="completed")
+    event_log.append(
+        event_type="tool.call.result",
+        payload={"user_id": "u1", "session_id": "s1", "tool_call_id": "old", "tool_id": "web.search"},
+        durable=False,
+    )
+
+    snapshot = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1")
+
+    assert snapshot["task"] is None
+    assert snapshot["timeline"] == []
 
 
 async def test_workbench_projection_follows_runtime_events_incrementally(tmp_path: Path):
@@ -154,6 +206,141 @@ def test_workbench_coalesces_tool_lifecycle_and_compatibility_events(tmp_path: P
     assert snapshot["timeline"][0]["status"] == "completed"
     assert snapshot["timeline"][0]["summary"] == "Found 8 sources"
     assert snapshot["timeline"][0]["detail"]["result_metadata"]["provider"] == "brave"
+    assert snapshot["timeline"][0]["references"] == [{
+        "reference_id": "url:https://example.com",
+        "kind": "url",
+        "label": "Promethea",
+        "target": "https://example.com",
+        "metadata": {},
+    }]
+
+
+def test_workbench_projects_tool_identity_arguments_and_description(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Calculate", session_id="s1")
+    common = {
+        "user_id": "u1",
+        "session_id": "s1",
+        "task_id": task["task_id"],
+        "conversation_turn_id": "turn-1",
+        "tool_call_id": "call-1",
+        "tool_id": "math.calculate",
+    }
+    event_log.append(
+        event_type="tool.call.start",
+        payload={
+            **common,
+            "args": {"expression": "2+2"},
+            "tool_spec": {"description": "Evaluate a mathematical expression."},
+        },
+        durable=False,
+    )
+    event_log.append(
+        event_type="tool.call.result",
+        payload={**common, "status": "completed", "result_summary": {"type": "number", "value": 4}},
+        durable=False,
+    )
+
+    activity = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", session_id="s1")["timeline"][0]
+
+    assert activity["subject"] == "math.calculate"
+    assert activity["conversation_turn_id"] == "turn-1"
+    assert activity["detail"]["arguments"] == {"expression": "2+2"}
+    assert activity["detail"]["description"] == "Evaluate a mathematical expression."
+    assert activity["detail"]["result_summary"] == {"type": "number", "value": 4}
+
+
+def test_workbench_projects_runtime_owned_presentation_and_interactive_references(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Research", session_id="s1")
+    common = {
+        "user_id": "u1",
+        "session_id": "s1",
+        "task_id": task["task_id"],
+        "tool_call_id": "call-presented",
+        "tool_id": "web.fetch_text",
+        "presentation": {
+            "kind": "web",
+            "title": "Fetch page",
+            "title_i18n": {"zh": "读取网页", "en": "Fetch page"},
+            "subject": "https://example.com/article",
+            "references": [{
+                "kind": "url",
+                "target": "https://example.com/article",
+                "label": "https://example.com/article",
+                "metadata": {},
+            }],
+        },
+    }
+    event_log.append(event_type="tool.call.start", payload=common, durable=False)
+    event_log.append(
+        event_type="tool.call.result",
+        payload={
+            **common,
+            "status": "completed",
+            "presentation": {**common["presentation"], "summary": "HTTP 200 · 1200 characters"},
+        },
+        durable=False,
+    )
+
+    activity = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", task_id=task["task_id"])["timeline"][0]
+
+    assert activity["subject"] == "Fetch page · https://example.com/article"
+    assert activity["subject_i18n"]["zh"] == "读取网页 · https://example.com/article"
+    assert activity["summary"] == "HTTP 200 · 1200 characters"
+    assert activity["references"][0]["kind"] == "url"
+    assert activity["references"][0]["target"] == "https://example.com/article"
+
+
+def test_workbench_ignores_non_web_url_references():
+    assert WorkbenchProjection._references(
+        {"result_metadata": {"url": "javascript:alert(1)"}},
+        kind="tool",
+    ) == []
+
+
+def test_workbench_prefers_tool_lifecycle_over_duplicate_action_observation(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Inspect", session_id="s1")
+    common = {
+        "user_id": "u1",
+        "session_id": "s1",
+        "task_id": task["task_id"],
+        "conversation_turn_id": "turn-1",
+    }
+    event_log.append(
+        event_type="tool.call.result",
+        payload={**common, "tool_call_id": "runtime-call", "tool_name": "runtime.services", "status": "completed"},
+        durable=False,
+    )
+    event_log.append(
+        event_type=EventType.ACTION_OBSERVATION_COMMITTED.value,
+        payload={**common, "tool_call_id": "model-call", "tool_name": "runtime.services", "status": "completed"},
+        durable=False,
+    )
+
+    timeline = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", session_id="s1")["timeline"]
+
+    assert len(timeline) == 1
+    assert timeline[0]["event_type"] == "tool.call.result"
 
 
 def test_workbench_hides_transport_and_execution_bookkeeping(tmp_path: Path):
@@ -172,6 +359,47 @@ def test_workbench_hides_transport_and_execution_bookkeeping(tmp_path: Path):
     ).snapshot(user_id="u1", task_id=task["task_id"])
 
     assert snapshot["timeline"] == []
+
+
+def test_workbench_projects_committed_observation_not_action_bookkeeping(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Observe", session_id="s1")
+    common = {
+        "user_id": "u1",
+        "session_id": "s1",
+        "task_id": task["task_id"],
+        "action_loop_id": "action-1",
+    }
+    event_log.append(
+        event_type=EventType.ACTION_STATE_CHANGED.value,
+        payload={**common, "from": "executing", "to": "observing"},
+        durable=False,
+    )
+    event_log.append(
+        event_type=EventType.ACTION_OBSERVATION_COMMITTED.value,
+        payload={
+            **common,
+            "observation_id": "obs-1",
+            "tool_call_id": "call-1",
+            "tool_name": "web.search",
+            "status": "completed",
+            "structured_result": {"summary": "Found current sources"},
+        },
+        durable=False,
+    )
+
+    snapshot = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", task_id=task["task_id"])
+
+    assert len(snapshot["timeline"]) == 1
+    assert snapshot["timeline"][0]["kind"] == "tool"
+    assert snapshot["timeline"][0]["subject"] == "web.search"
+    assert snapshot["timeline"][0]["summary"] == "Found current sources"
 
 
 def test_workbench_keeps_reasoning_as_readable_state_not_raw_nodes(tmp_path: Path):
@@ -227,6 +455,11 @@ def test_workbench_correlates_memory_completion_without_repeating_query(tmp_path
         payload={**common, "status": "completed", "selected": 3},
         durable=False,
     )
+    event_log.append(
+        event_type="memory.recalled",
+        payload={**common, "selected": 3},
+        durable=False,
+    )
 
     snapshot = WorkbenchProjection(
         task_service=tasks,
@@ -238,6 +471,9 @@ def test_workbench_correlates_memory_completion_without_repeating_query(tmp_path
     assert snapshot["timeline"][0]["activity_id"] == "memory:memory_request_1"
     assert snapshot["timeline"][0]["subject"] == "preferred writing style"
     assert snapshot["timeline"][0]["status"] == "completed"
+    assert snapshot["timeline"][0]["started_at"]
+    assert snapshot["timeline"][0]["completed_at"]
+    assert snapshot["timeline"][0]["requires_attention"] is False
 
 
 def test_workbench_projects_interrupted_environment_as_recovery_action(tmp_path: Path):
@@ -275,3 +511,69 @@ def test_workbench_projects_interrupted_environment_as_recovery_action(tmp_path:
         "task_id": task["task_id"],
         "status": "interrupted",
     }
+
+
+def test_workbench_keeps_distinct_artifacts_in_the_same_task(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Draft", session_id="s1")
+    common = {"user_id": "u1", "session_id": "s1", "task_id": task["task_id"], "status": "completed"}
+    event_log.append(event_type="workspace.artifact.written", payload={**common, "path": "a.md"}, durable=False)
+    event_log.append(event_type="workspace.artifact.written", payload={**common, "path": "b.md"}, durable=False)
+
+    snapshot = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", task_id=task["task_id"])
+
+    assert [item["subject"] for item in snapshot["artifacts"]] == ["a.md", "b.md"]
+    assert snapshot["artifacts"][0]["references"][0]["target"] == "a.md"
+    assert snapshot["artifacts"][1]["references"][0]["target"] == "b.md"
+
+
+def test_workbench_groups_repeated_presented_tools_within_one_turn(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Research", session_id="s1")
+    common = {
+        "user_id": "u1",
+        "session_id": "s1",
+        "task_id": task["task_id"],
+        "conversation_turn_id": "turn-1",
+        "tool_name": "web.fetch_text",
+        "status": "completed",
+    }
+    for index, url in enumerate(("https://example.com/a", "https://example.com/b"), start=1):
+        event_log.append(
+            event_type="tool.call.result",
+            payload={
+                **common,
+                "tool_call_id": f"fetch-{index}",
+                "presentation": {
+                    "kind": "web",
+                    "title": "Fetch page",
+                    "title_i18n": {"zh": "读取网页", "en": "Fetch page"},
+                    "subject": url,
+                    "references": [{"kind": "url", "target": url, "label": url}],
+                },
+            },
+            durable=False,
+        )
+
+    timeline = WorkbenchProjection(
+        task_service=tasks,
+        workflow_engine=workflows,
+        event_log=event_log,
+    ).snapshot(user_id="u1", session_id="s1")["timeline"]
+
+    assert len(timeline) == 1
+    assert timeline[0]["subject"] == "Fetch page"
+    assert timeline[0]["subject_i18n"]["zh"] == "读取网页"
+    assert timeline[0]["occurrence_count"] == 2
+    assert [item["target"] for item in timeline[0]["references"]] == [
+        "https://example.com/a",
+        "https://example.com/b",
+    ]

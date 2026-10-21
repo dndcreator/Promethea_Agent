@@ -1,12 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import uuid
 from typing import Any, Dict
 
 from loguru import logger
-
-from agentkit.mcp.tool_call import ToolConfirmationRequired, execute_tool_calls
 
 from .protocol import ConversationRunInput, EventType, GatewayProtocol, GatewayResponse
 
@@ -111,6 +110,7 @@ async def handle_chat(self, connection, request):
             )
 
         turn_id = str(uuid.uuid4())
+        run_context.conversation_turn_id = turn_id
         began = self.message_manager.begin_turn(
             session_id=session_id,
             turn_id=turn_id,
@@ -199,10 +199,13 @@ async def handle_chat(self, connection, request):
             run_result = await run_result if inspect.isawaitable(run_result) else run_result
             tool_call_outcome = run_result if isinstance(run_result, dict) else {"status": "success", "content": ""}
 
+        reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
+        tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
         if tool_call_outcome.get("status") == "needs_confirmation":
             pending = dict(tool_call_outcome)
-            pending["current_messages"] = messages
+            pending.setdefault("current_messages", messages)
             pending["turn_id"] = turn_id
+            pending["reasoning_tree_id"] = tree_id
             self.message_manager.set_pending_confirmation(
                 session_id, pending, user_id=user_id
             )
@@ -239,20 +242,30 @@ async def handle_chat(self, connection, request):
                 )
             return GatewayProtocol.create_response(request.id, True, payload)
 
+        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed"}:
+            error = tool_call_outcome.get("error")
+            self.message_manager.abort_turn(
+                session_id, turn_id, user_id=user_id,
+                error=error if isinstance(error, dict) else {"message": str(error)},
+                reasoning_tree_id=tree_id, reasoning_steps=tool_call_outcome.get("reasoning_steps"),
+            )
+            detail = error.get("message") if isinstance(error, dict) else str(error or "agent run failed")
+            return GatewayProtocol.create_response(request.id, False, error=detail)
+
         final_content = tool_call_outcome.get("content", "")
         committed = self.message_manager.commit_turn(
             session_id=session_id,
             turn_id=turn_id,
             assistant_content=final_content,
             user_id=user_id,
+            reasoning_tree_id=tree_id,
+            reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or []),
         )
         if not committed:
             return GatewayProtocol.create_response(
                 request.id, False, error="failed to commit turn"
             )
 
-        reasoning_meta = prepared.get("reasoning", {}) if isinstance(prepared, dict) else {}
-        tree_id = reasoning_meta.get("tree_id") if isinstance(reasoning_meta, dict) else None
         if self.reasoning_service and tree_id:
             assessment = await self.reasoning_service.assess_outcome(
                 tree_id=tree_id,
@@ -366,6 +379,7 @@ async def handle_chat(self, connection, request):
 
 async def handle_chat_confirm(self, connection, request):
     """Handle tool-confirmation continuation for chat turn."""
+    consumed_turn_id = None
     try:
         if not self.message_manager:
             return GatewayProtocol.create_response(
@@ -441,117 +455,18 @@ async def handle_chat_confirm(self, connection, request):
                 },
             )
 
-        if action == "reject":
-            turn_id = pending.get("turn_id")
-            if turn_id:
-                self.message_manager.abort_turn(session_id, turn_id, user_id=user_id)
-            self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
-            return GatewayProtocol.create_response(
-                request.id,
-                True,
-                {"status": "rejected", "trace_id": run_context.trace_id, "session_id": session_id, "response": "Tool execution rejected."},
-            )
-        if action != "approve":
+        if action not in {"approve", "reject"}:
             return GatewayProtocol.create_response(
                 request.id, False, error="action must be approve or reject"
             )
 
-        # Consume before execution so concurrent confirmation requests cannot
-        # replay the same saved tool batch.
+        # Consume before resume so concurrent confirmation requests cannot replay it.
         self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
-        current_messages = pending.get("current_messages", [])
         turn_id = pending.get("turn_id")
-        tool_result_blocks = []
-        try:
-            all_tool_calls = pending.get("pending_tool_calls", [])
-            if not all_tool_calls:
-                all_tool_calls = [
-                    {
-                        "name": pending.get("tool_name"),
-                        "args": pending.get("args", {}),
-                        "id": pending.get("tool_call_id"),
-                    }
-                ]
-
-            if not self.mcp_manager:
-                raise RuntimeError("mcp manager not initialized")
-            capability_service = getattr(self, "capability_service", None)
-            user_config = self.config_service.get_merged_config(user_id) if self.config_service else None
-            confirmation_resolver = None
-            if callable(getattr(capability_service, "requires_confirmation", None)):
-                confirmation_resolver = lambda name, payload: capability_service.requires_confirmation(
-                    name,
-                    payload,
-                    run_context=run_context,
-                    user_config=user_config,
-                )
-            tool_result_blocks = await execute_tool_calls(
-                all_tool_calls,
-                session_id=session_id,
-                approved_call_ids=set(pending.get("approved_call_ids") or ()) | {tool_call_id},
-                tool_executor=lambda name, payload: self._execute_tool_for_chat(
-                    name,
-                    payload,
-                    session_id=session_id,
-                    user_id=user_id,
-                    request_id=request.id,
-                    connection_id=connection.connection_id,
-                    run_context=run_context,
-                    user_config=user_config,
-                ),
-                confirmation_resolver=confirmation_resolver,
-            )
-        except Exception as e:
-            if isinstance(e, ToolConfirmationRequired):
-                new_pending = {
-                    "status": "needs_confirmation",
-                    "tool_call_id": e.tool_call_id,
-                    "tool_name": e.tool_name,
-                    "args": e.tool_args,
-                    "current_messages": current_messages,
-                    "pending_tool_calls": e.all_tool_calls,
-                    "approved_call_ids": sorted(e.approved_call_ids),
-                    "content": pending.get("content", ""),
-                    "turn_id": turn_id,
-                }
-                self.message_manager.set_pending_confirmation(
-                    session_id, new_pending, user_id=user_id
-                )
-                return GatewayProtocol.create_response(
-                    request.id,
-                    True,
-                    {
-                        "status": "needs_confirmation",
-                        "trace_id": run_context.trace_id,
-                        "session_id": session_id,
-                        "tool_call_id": e.tool_call_id,
-                        "tool_name": e.tool_name,
-                        "args": e.tool_args,
-                        "response": f"Tool `{e.tool_name}` requires confirmation.",
-                    },
-                )
-            logger.error(f"resume tool execution failed: {e}")
-            tool_result_blocks = [{"type": "text", "text": f"tool execution error: {e}"}]
-
-        tool_result_blocks.append(
-            {"type": "text", "text": "User approved tool execution. Continue based on these results."}
-        )
-        observation_message = {"role": "user", "content": tool_result_blocks}
-
-        messages = list(current_messages)
-        messages.append({"role": "assistant", "content": pending.get("content", "")})
-        messages.append(observation_message)
-
+        run_context.conversation_turn_id = turn_id
+        consumed_turn_id = turn_id
         user_config = self.config_service.get_merged_config(user_id) if self.config_service else None
-        self.message_manager.clear_pending_confirmation(session_id, user_id=user_id)
-
-        conversation_input = ConversationRunInput(
-            messages=messages,
-            user_config=user_config,
-            session_id=session_id,
-            user_id=user_id,
-            run_context=run_context,
-            tool_executor=lambda name, payload: self._execute_tool_for_chat(
+        tool_executor = lambda name, payload: self._execute_tool_for_chat(
                 name,
                 payload,
                 session_id=session_id,
@@ -560,34 +475,31 @@ async def handle_chat_confirm(self, connection, request):
                 connection_id=connection.connection_id,
                 run_context=run_context,
                 user_config=user_config,
-            ),
-        )
-        await self._emit_gateway_event(
-            event_type=EventType.CONVERSATION_RUN_STARTED,
-            trace_id=run_context.trace_id,
-            request_id=request.id,
-            session_id=session_id,
-            user_id=user_id,
-            payload={"service": "conversation_service"},
-            tags=["conversation"],
-        )
-        conversation_output = await self.conversation_service.run_conversation(conversation_input)
-        if isinstance(conversation_output, dict):
-            tool_call_outcome = conversation_output
+            )
+        if action == "approve":
+            tool_call_outcome = await self.conversation_service.resume_action(
+                pending=pending,
+                approved_call_id=tool_call_id,
+                user_config=user_config,
+                session_id=session_id,
+                user_id=user_id,
+                run_context=run_context,
+                tool_executor=tool_executor,
+            )
         else:
-            raw_payload = getattr(conversation_output, "raw", None)
-            if isinstance(raw_payload, dict):
-                tool_call_outcome = raw_payload
-            else:
-                tool_call_outcome = {
-                    "status": str(getattr(conversation_output, "status", "success") or "success"),
-                    "content": str(getattr(conversation_output, "content", "") or ""),
-                }
+            tool_call_outcome = await self.conversation_service.reject_pending_action(
+                pending=pending,
+                user_config=user_config,
+                session_id=session_id,
+                user_id=user_id,
+                run_context=run_context,
+                tool_executor=tool_executor,
+            )
 
         if tool_call_outcome.get("status") == "needs_confirmation":
             next_pending = dict(tool_call_outcome)
-            next_pending["current_messages"] = messages
             next_pending["turn_id"] = turn_id
+            next_pending["reasoning_tree_id"] = pending.get("reasoning_tree_id")
             self.message_manager.set_pending_confirmation(
                 session_id, next_pending, user_id=user_id
             )
@@ -605,6 +517,17 @@ async def handle_chat_confirm(self, connection, request):
                 },
             )
 
+        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed"}:
+            if turn_id:
+                self.message_manager.abort_turn(
+                    session_id, turn_id, user_id=user_id,
+                    error=tool_call_outcome.get("error") if isinstance(tool_call_outcome.get("error"), dict) else {"message": str(tool_call_outcome.get("error"))},
+                    reasoning_tree_id=pending.get("reasoning_tree_id"), reasoning_steps=tool_call_outcome.get("reasoning_steps"),
+                )
+            error = tool_call_outcome.get("error")
+            detail = error.get("message") if isinstance(error, dict) else str(error or "agent run failed")
+            return GatewayProtocol.create_response(request.id, False, error=detail)
+
         final_content = tool_call_outcome.get("content", "")
         if turn_id:
             committed = self.message_manager.commit_turn(
@@ -612,20 +535,34 @@ async def handle_chat_confirm(self, connection, request):
                 turn_id=turn_id,
                 assistant_content=final_content,
                 user_id=user_id,
+                reasoning_tree_id=pending.get("reasoning_tree_id"),
+                reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or pending.get("reasoning_steps") or []),
             )
             if not committed:
                 return GatewayProtocol.create_response(
                     request.id, False, error="failed to commit confirmed turn"
                 )
         else:
-            self.message_manager.add_message(session_id, "assistant", final_content, user_id)
+            self.message_manager.add_message(
+                session_id,
+                "assistant",
+                final_content,
+                user_id,
+                reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or []),
+            )
 
         return GatewayProtocol.create_response(
             request.id,
             True,
             {"status": "success", "trace_id": run_context.trace_id, "session_id": session_id, "response": final_content},
         )
+    except asyncio.CancelledError:
+        if consumed_turn_id:
+            self.message_manager.abort_turn(session_id, consumed_turn_id, user_id=user_id)
+        raise
     except Exception as e:
+        if consumed_turn_id:
+            self.message_manager.abort_turn(session_id, consumed_turn_id, user_id=user_id)
         logger.error(f"Error handling chat confirm: {e}")
         return GatewayProtocol.create_response(request.id, False, error=str(e))
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -16,6 +17,8 @@ from ..user_manager import user_manager
 from ...avatar_service import avatar_service
 from ..personal_workspace_archive import build_archive, read_archive, rebind_user_scope
 from .auth import get_current_user_id
+from .projects import get_project_store
+from ..project_store import ProjectStore
 
 
 router = APIRouter()
@@ -71,10 +74,15 @@ def _build_workspace_payload(*, gateway_server: Any, user_id: str) -> Dict[str, 
     workflow_engine = getattr(gateway_server, "workflow_engine", None)
     task_service = getattr(gateway_server, "task_service", None)
     reasoning_service = getattr(gateway_server, "reasoning_service", None)
+    learning = getattr(getattr(reasoning_service, "template_memory", None), "learning", None)
+    from computer.canvas_document import export_canvas_library
+    workspace_service = getattr(gateway_server, "workspace_service", None)
+    library = workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id="_canvas_library") if workspace_service else None
     return {
         "schema_version": 2,
         "config": _portable_config(user_manager.get_user_config(user_id)),
         "sessions": message_manager.export_user_sessions(user_id=user_id, include_messages=True),
+        "projects": get_project_store().list(user_id),
         "memory": {"mef": mef},
         "memory_audit": memory_service.export_user_audit_records(user_id=user_id) if memory_service else {},
         "files": user_file_store.export_user_bundle(user_id=user_id, include_content=True, limit=5000),
@@ -82,12 +90,18 @@ def _build_workspace_payload(*, gateway_server: Any, user_id: str) -> Dict[str, 
         "workflows": workflow_engine.export_user_state(user_id=user_id) if workflow_engine else {},
         "tasks": task_service.export_user_state(user_id=user_id) if task_service else {},
         "reasoning_history": reasoning_service.tree_history.export_user_history(user_id=user_id) if reasoning_service else [],
+        "moirai_learning": learning.export_user_state(user_id) if learning else {},
+        "canvas_apps": export_canvas_library(Path(library.root_path)) if library else [],
     }
 
 
 async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any, user_id: str, payload: Dict[str, Any], merge: bool) -> Dict[str, Any]:
     source_user_id = str(payload.get("source_user_id") or user_id)
     scoped = rebind_user_scope(payload, source_user_id=source_user_id, target_user_id=user_id)
+    try:
+        project_rows = ProjectStore.validate_records(scoped["projects"]) if "projects" in scoped else None
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
     message_manager = getattr(gateway_server, "message_manager", None)
     memory_service = getattr(gateway_server, "memory_service", None)
     adapter = getattr(memory_service, "memory_adapter", None) if memory_service else None
@@ -104,6 +118,16 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
         message_manager.import_user_sessions(user_id=user_id, sessions=sessions, merge=True)
         if merge else message_manager.replace_user_sessions(user_id=user_id, sessions=sessions)
     )
+    if project_rows is not None:
+        owned_ids = {
+            str(row.get("session_id")) for row in sessions
+            if isinstance(row, dict) and row.get("session_id")
+            and message_manager.get_session(str(row["session_id"]), user_id=user_id) is not None
+        }
+        get_project_store().import_records(user_id, project_rows, merge=merge, owned_session_ids=owned_ids)
+        result["applied"]["projects"] = {"count": len(project_rows)}
+    elif not merge:
+        get_project_store().clear_user(user_id)
     files = scoped.get("files") if isinstance(scoped.get("files"), dict) else {}
     if not merge:
         user_file_store.clear_user_bundle(user_id=user_id)
@@ -129,6 +153,16 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
         result["applied"]["tasks"] = task_service.import_user_state(user_id=user_id, payload=tasks, merge=merge)
     if reasoning_service:
         result["applied"]["reasoning_history"] = reasoning_service.tree_history.import_user_history(user_id=user_id, rows=scoped.get("reasoning_history") or [], merge=merge)
+        learning = getattr(getattr(reasoning_service, "template_memory", None), "learning", None)
+        if learning is not None and "moirai_learning" in scoped:
+            await learning.interrupt(user_id)
+            learning.import_user_state(user_id, scoped["moirai_learning"], merge=merge)
+            result["applied"]["moirai_learning"] = True
+    if "canvas_apps" in scoped:
+        from .canvas import restore_canvas_library
+        if scoped["canvas_apps"] or getattr(gateway_server, "workspace_service", None):
+            # App data is opaque content, not Runtime ownership metadata.
+            result["applied"]["canvas_apps"] = await restore_canvas_library(user_id, payload["canvas_apps"], merge=merge)
     return result
 
 
@@ -424,6 +458,7 @@ async def export_personal_bundle(
                 "effective_config": effective_config,
             },
             "sessions": sessions,
+            "projects": get_project_store().list(user_id),
             "files": files_payload,
             "memory": memory_payload,
         },
@@ -485,6 +520,10 @@ async def import_personal_bundle(
 
     bundle = request.bundle if isinstance(request.bundle, dict) else {}
     payload = bundle.get("payload") if isinstance(bundle.get("payload"), dict) else {}
+    try:
+        project_rows = ProjectStore.validate_records(payload["projects"]) if request.restore_sessions and "projects" in payload else None
+    except ValueError as exc:
+        raise HTTPException(422, detail=str(exc)) from exc
     result: Dict[str, Any] = {"status": "success", "user_id": user_id, "applied": {}}
 
     if request.restore_config:
@@ -503,6 +542,10 @@ async def import_personal_bundle(
             sessions=rows,
             merge=bool(request.merge),
         )
+        if project_rows is not None:
+            owned_ids = {str(row["session_id"]) for row in rows if isinstance(row, dict) and row.get("session_id") and message_manager.get_session(str(row["session_id"]), user_id=user_id) is not None}
+            get_project_store().import_records(user_id, project_rows, merge=bool(request.merge), owned_session_ids=owned_ids)
+            result["applied"]["projects"] = {"count": len(project_rows)}
 
     if request.restore_files:
         files_bundle = payload.get("files") if isinstance(payload.get("files"), dict) else {}

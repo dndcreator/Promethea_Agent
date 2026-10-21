@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import os
+import inspect
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 from openai import AsyncOpenAI, OpenAI
 
-from agentkit.mcp.tool_call import tool_call_loop
 from config import config
 from gateway.multimodal_service import ModelEndpoint, multimodal_service
 from gateway.user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
@@ -87,61 +87,11 @@ class PrometheaConversation:
             kwargs["base_url"] = normalized
         return AsyncOpenAI(**kwargs)
 
-    def prepare_messages(self, messages: List[Dict]) -> List[Dict]:
-        return self._inject_system_prompt(messages)
-
-    def _inject_system_prompt(self, messages: List[Dict]) -> List[Dict]:
-        system_prompt = (
-            "You are Promethea, an assistant that can call tools.\n"
-            "When you need tools, output only one strict JSON object and no prose in that assistant turn.\n"
-            "For action turns, use a lightweight ReAct loop: Action, runtime Observation, then minimal verification before claiming success.\n"
-            "Use keys: tool_name, agentType, service_name, and args (object). "
-            "For official built-in tools use agentType=\"local\" and service_name equal to tool_name.\n"
-            "Never write fake function syntax such as math.calculate(...), web_search(...), or file_create(...). "
-            "Never claim a tool ran unless a runtime observation/result is present. "
-            "Use only tools declared by the runtime tool block for this turn."
-        )
-
-        new_messages = list(messages)
-        if new_messages and new_messages[0].get("role") == "system":
-            new_messages[0]["content"] = f"{new_messages[0].get('content', '')}\n\n{system_prompt}"
-        else:
-            new_messages.insert(0, {"role": "system", "content": system_prompt})
-
-        return new_messages
-
     @staticmethod
     def _safe_user_segment(user_id: Optional[str]) -> str:
         uid = str(user_id or "default_user").strip() or "default_user"
         safe = "".join(ch if ch.isalnum() or ch in ("-", "_", ".") else "_" for ch in uid)
         return safe[:128] or "default_user"
-
-    async def run_chat_loop(
-        self,
-        messages: List[Dict],
-        user_config: Optional[Dict[str, Any]] = None,
-        session_id: str = None,
-        user_id: Optional[str] = None,
-        tool_executor=None,
-        confirmation_resolver=None,
-        max_recursion: Optional[int] = None,
-        initial_response: Optional[Dict[str, Any]] = None,
-    ) -> Dict:
-        messages_with_tools = self._inject_system_prompt(messages)
-        llm_caller = lambda msgs: self.call_llm(msgs, user_config, user_id=user_id)
-
-        final_response = await tool_call_loop(
-            messages=messages_with_tools,
-            llm_caller=llm_caller,
-            is_streaming=False,
-            max_recursion=max_recursion,
-            session_id=session_id,
-            tool_executor=tool_executor,
-            confirmation_resolver=confirmation_resolver,
-            initial_response=initial_response,
-        )
-
-        return final_response
 
     def _get_client_params(
         self,
@@ -250,7 +200,9 @@ class PrometheaConversation:
                 )
 
                 content = ""
+                finish_reason = None
                 if resp.choices and len(resp.choices) > 0:
+                    finish_reason = getattr(resp.choices[0], "finish_reason", None)
                     message = getattr(resp.choices[0], "message", None)
                     if message:
                         content = getattr(message, "content", "") or ""
@@ -265,9 +217,15 @@ class PrometheaConversation:
                 }
                 _record_llm_metrics(time.perf_counter() - started, usage)
 
+                code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content.strip() else None
                 result = {
                     "content": content,
-                    "status": "success",
+                    "status": "error" if code else "success",
+                    "code": code,
+                    "error": code,
+                    "finish_reason": finish_reason,
+                    "request_id": getattr(resp, "id", None),
+                    "max_tokens": max_tokens,
                     "model_used": endpoint.model,
                     "model_route": endpoint.source,
                     "model_attempts": attempts,
@@ -322,6 +280,8 @@ class PrometheaConversation:
         messages: List[Dict],
         user_config: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
+        reasoning_sink: Optional[Callable[[str], Awaitable[None]]] = None,
+        result_sink: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ):
         api_key, base_url, model, temperature, max_tokens, failover_models = self._get_client_params(
             user_config,
@@ -359,6 +319,7 @@ class PrometheaConversation:
                 errors.append(f"{endpoint.model}: cached unsupported modality")
                 continue
             attempts += 1
+            emitted_stream_content = False
             try:
                 client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
                 started = time.perf_counter()
@@ -391,23 +352,58 @@ class PrometheaConversation:
                         )
                 usage = {"prompt_tokens": 0, "completion_tokens": 0}
                 first_token_recorded = False
+                finish_reason = None
+                provider_request_id = None
+                content_chars = 0
+                reasoning_chars = 0
                 async for chunk in stream:
+                    provider_request_id = getattr(chunk, "id", None) or provider_request_id
+                    if chunk.choices:
+                        finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage:
                         usage = {
                             "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
                             "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
                         }
-                    if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta if chunk.choices else None
+                    reasoning_delta = getattr(delta, "reasoning_content", None) if delta is not None else None
+                    reasoning_chars += len(str(reasoning_delta or ""))
+                    if reasoning_delta and reasoning_sink is not None:
+                        emitted_stream_content = True
+                        pending = reasoning_sink(str(reasoning_delta))
+                        if inspect.isawaitable(pending):
+                            await pending
+                    if delta is not None and delta.content:
+                        emitted_stream_content = True
+                        content_chars += len(delta.content)
                         if not first_token_recorded:
                             _record_llm_first_token_metrics(time.perf_counter() - started)
                             first_token_recorded = True
-                        yield chunk.choices[0].delta.content
+                        yield delta.content
                 _record_llm_metrics(time.perf_counter() - started, usage)
+                code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content_chars else None
+                result = {
+                    "status": "error" if code else "success", "code": code,
+                    "finish_reason": finish_reason, "request_id": provider_request_id,
+                    "model_used": endpoint.model, "usage": usage, "max_tokens": max_tokens,
+                    "content_chars": content_chars, "reasoning_chars": reasoning_chars,
+                }
+                if result_sink is not None:
+                    await result_sink(result)
+                if code:
+                    yield f"[error] {code}"
                 return
             except Exception as e:
                 err = str(e)
                 errors.append(f"{endpoint.model}: {err}")
+                if emitted_stream_content:
+                    if result_sink is not None:
+                        await result_sink({"status": "error", "code": "MODEL_STREAM_INTERRUPTED", "error": err,
+                                           "model_used": endpoint.model, "usage": usage, "max_tokens": max_tokens,
+                                           "request_id": provider_request_id, "finish_reason": finish_reason})
+                    yield f"[error] {err}"
+                    return
                 if endpoint.source == "main" and modalities and multimodal_service.is_unsupported_modality_error(e):
                     multimodal_service.mark_unsupported(endpoint, modalities)
                     allow_multimodal_fallback = True

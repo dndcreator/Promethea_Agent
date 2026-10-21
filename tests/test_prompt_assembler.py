@@ -131,7 +131,7 @@ def test_tools_block_uses_live_registered_tool_snapshot():
     )
 
     tools_block = next(b for b in blocks if b.block_type == PromptBlockType.TOOLS)
-    assert "Runtime registered tools (structured JSON)" in tools_block.content
+    assert "Runtime capabilities:" in tools_block.content
     assert "computer_control.write_file" in tools_block.content
     assert '"callable_now":true' in tools_block.content
     assert "math.calculate" not in tools_block.content
@@ -257,6 +257,8 @@ def test_assemble_outputs_debug_and_updates_run_context_prompt_blocks():
     assert "used_dynamic_block_ids" in out["debug"]
     assert isinstance(run_context.prompt_blocks, dict)
     assert "estimated_total_tokens" in run_context.prompt_blocks
+    assert "runtime_action_protocol" in run_context.prompt_blocks["used_block_ids"]
+    assert run_context.prompt_blocks["block_manifest"]["runtime_action_protocol"]["content_hash"]
 
 
 def test_compact_blocks_respects_protect_list():

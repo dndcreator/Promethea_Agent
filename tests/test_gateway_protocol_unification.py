@@ -78,7 +78,9 @@ def test_gateway_event_serialization():
 @pytest.mark.asyncio
 async def test_conversation_service_structured_io_roundtrip():
     conversation_core = MagicMock()
-    conversation_core.run_chat_loop = AsyncMock(return_value={"status": "success", "content": "done"})
+    conversation_core.call_llm = AsyncMock(
+        return_value={"status": "success", "content": '{"action":"answer","content":"done"}'}
+    )
 
     service = ConversationService(
         conversation_core=conversation_core,
@@ -113,7 +115,7 @@ async def test_server_chat_uses_gateway_response_payload_shape():
         return_value={
             "messages": [{"role": "user", "content": "hello"}],
             "user_config": {},
-            "reasoning": {},
+            "reasoning": {"tree_id": "tree-1"},
         }
     )
     conversation_service.run_conversation = AsyncMock(
@@ -140,6 +142,7 @@ async def test_server_chat_uses_gateway_response_payload_shape():
     assert response.payload["session_id"] == "s1"
     assert response.payload["response_text"] == "ok"
     assert response.payload["response"] == "ok"
+    assert message_manager.commit_turn.call_args.kwargs["reasoning_tree_id"] == "tree-1"
 
 
 def test_canonical_gateway_event_types_centralized():
@@ -209,6 +212,7 @@ async def test_capability_service_mirrors_canonical_tool_events():
         tool_id = "local.echo"
         name = "Echo"
         description = "echo"
+        side_effect_level = "read_only"
 
         async def invoke(self, args, ctx=None):
             return {"ok": True}

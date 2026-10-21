@@ -83,8 +83,184 @@
       "title": "Attachment",
       "type": "object"
     },
+    "CanvasButton": {
+      "additionalProperties": false,
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/CanvasMutation"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Actions",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "type": {
+          "const": "button",
+          "title": "Type",
+          "type": "string"
+        },
+        "variant": {
+          "default": "primary",
+          "enum": [
+            "primary",
+            "secondary"
+          ],
+          "title": "Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "label",
+        "actions"
+      ],
+      "title": "CanvasButton",
+      "type": "object"
+    },
+    "CanvasCheckbox": {
+      "additionalProperties": false,
+      "properties": {
+        "bind": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Bind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "type": {
+          "const": "checkbox",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "label",
+        "bind"
+      ],
+      "title": "CanvasCheckbox",
+      "type": "object"
+    },
+    "CanvasDocument": {
+      "additionalProperties": false,
+      "properties": {
+        "initial_state": {
+          "maxProperties": 64,
+          "patternProperties": {
+            "^[a-zA-Z][a-zA-Z0-9_]{0,63}$": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "title": "Initial State",
+          "type": "object"
+        },
+        "language": {
+          "default": "en",
+          "pattern": "^[a-zA-Z]{2,8}(?:-[a-zA-Z0-9]{1,8})*$",
+          "title": "Language",
+          "type": "string"
+        },
+        "root": {
+          "discriminator": {
+            "mapping": {
+              "button": "#/$defs/CanvasButton",
+              "checkbox": "#/$defs/CanvasCheckbox",
+              "input": "#/$defs/CanvasInput",
+              "select": "#/$defs/CanvasSelect",
+              "stack": "#/$defs/CanvasStack",
+              "table": "#/$defs/CanvasTable",
+              "text": "#/$defs/CanvasText"
+            },
+            "propertyName": "type"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/CanvasText"
+            },
+            {
+              "$ref": "#/$defs/CanvasInput"
+            },
+            {
+              "$ref": "#/$defs/CanvasCheckbox"
+            },
+            {
+              "$ref": "#/$defs/CanvasSelect"
+            },
+            {
+              "$ref": "#/$defs/CanvasButton"
+            },
+            {
+              "$ref": "#/$defs/CanvasTable"
+            },
+            {
+              "$ref": "#/$defs/CanvasStack"
+            }
+          ],
+          "title": "Root"
+        },
+        "title": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "version": {
+          "const": "canvas.ui.v1",
+          "default": "canvas.ui.v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "title",
+        "root"
+      ],
+      "title": "CanvasDocument",
+      "type": "object"
+    },
     "CanvasEnvironment": {
       "properties": {
+        "content_revision": {
+          "default": "",
+          "title": "Content Revision",
+          "type": "string"
+        },
         "created_at": {
           "anyOf": [
             {
@@ -96,6 +272,14 @@
           ],
           "default": null,
           "title": "Created At"
+        },
+        "diagnostics": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Diagnostics",
+          "type": "array"
         },
         "entrypoint": {
           "default": "index.html",
@@ -126,6 +310,15 @@
           ],
           "default": null,
           "title": "Last Command Digest"
+        },
+        "lifetime": {
+          "default": "session",
+          "enum": [
+            "session",
+            "reusable"
+          ],
+          "title": "Lifetime",
+          "type": "string"
         },
         "name": {
           "title": "Name",
@@ -261,6 +454,420 @@
         "workspace_id"
       ],
       "title": "CanvasEnvironmentList",
+      "type": "object"
+    },
+    "CanvasInput": {
+      "additionalProperties": false,
+      "properties": {
+        "bind": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Bind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "input_type": {
+          "default": "text",
+          "enum": [
+            "text",
+            "number"
+          ],
+          "title": "Input Type",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "type": {
+          "const": "input",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "label",
+        "bind"
+      ],
+      "title": "CanvasInput",
+      "type": "object"
+    },
+    "CanvasMutation": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "anyOf": [
+            {
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Field"
+        },
+        "inputs": {
+          "items": {
+            "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "title": "Inputs",
+          "type": "array"
+        },
+        "op": {
+          "enum": [
+            "set",
+            "increment",
+            "toggle",
+            "reset",
+            "calculate"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "enum": [
+                "sum",
+                "difference",
+                "product",
+                "ratio"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Operation"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "CanvasMutation",
+      "type": "object"
+    },
+    "CanvasOption": {
+      "additionalProperties": false,
+      "properties": {
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 500,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "label",
+        "value"
+      ],
+      "title": "CanvasOption",
+      "type": "object"
+    },
+    "CanvasSelect": {
+      "additionalProperties": false,
+      "properties": {
+        "bind": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Bind",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/CanvasOption"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Options",
+          "type": "array"
+        },
+        "type": {
+          "const": "select",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "label",
+        "bind",
+        "options"
+      ],
+      "title": "CanvasSelect",
+      "type": "object"
+    },
+    "CanvasStack": {
+      "additionalProperties": false,
+      "properties": {
+        "children": {
+          "items": {
+            "discriminator": {
+              "mapping": {
+                "button": "#/$defs/CanvasButton",
+                "checkbox": "#/$defs/CanvasCheckbox",
+                "input": "#/$defs/CanvasInput",
+                "select": "#/$defs/CanvasSelect",
+                "stack": "#/$defs/CanvasStack",
+                "table": "#/$defs/CanvasTable",
+                "text": "#/$defs/CanvasText"
+              },
+              "propertyName": "type"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/CanvasText"
+              },
+              {
+                "$ref": "#/$defs/CanvasInput"
+              },
+              {
+                "$ref": "#/$defs/CanvasCheckbox"
+              },
+              {
+                "$ref": "#/$defs/CanvasSelect"
+              },
+              {
+                "$ref": "#/$defs/CanvasButton"
+              },
+              {
+                "$ref": "#/$defs/CanvasTable"
+              },
+              {
+                "$ref": "#/$defs/CanvasStack"
+              }
+            ]
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Children",
+          "type": "array"
+        },
+        "direction": {
+          "default": "column",
+          "enum": [
+            "row",
+            "column"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "stack",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "children"
+      ],
+      "title": "CanvasStack",
+      "type": "object"
+    },
+    "CanvasState": {
+      "properties": {
+        "revision": {
+          "default": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "value": {
+          "additionalProperties": true,
+          "title": "Value",
+          "type": "object"
+        }
+      },
+      "title": "CanvasState",
+      "type": "object"
+    },
+    "CanvasStateWrite": {
+      "properties": {
+        "expected_revision": {
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "value": {
+          "additionalProperties": true,
+          "title": "Value",
+          "type": "object"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "value"
+      ],
+      "title": "CanvasStateWrite",
+      "type": "object"
+    },
+    "CanvasTable": {
+      "additionalProperties": false,
+      "properties": {
+        "columns": {
+          "items": {
+            "maxLength": 200,
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "rows": {
+          "items": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "maxItems": 100,
+          "title": "Rows",
+          "type": "array"
+        },
+        "type": {
+          "const": "table",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "columns"
+      ],
+      "title": "CanvasTable",
+      "type": "object"
+    },
+    "CanvasText": {
+      "additionalProperties": false,
+      "properties": {
+        "bind": {
+          "anyOf": [
+            {
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bind"
+        },
+        "emphasis": {
+          "default": "body",
+          "enum": [
+            "heading",
+            "body",
+            "caption"
+          ],
+          "title": "Emphasis",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 4000,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "type": {
+          "const": "text",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "title": "CanvasText",
       "type": "object"
     },
     "CognitionBundle": {
@@ -621,6 +1228,260 @@
       "title": "FileUploadResponse",
       "type": "object"
     },
+    "GapChange": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "blocked",
+            "resolved"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ],
+      "title": "GapChange",
+      "type": "object"
+    },
+    "GapCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "title": "Expected"
+        },
+        "pointer": {
+          "maxLength": 300,
+          "pattern": "^(?:/(?:[^~]|~[01])*)*$",
+          "title": "Pointer",
+          "type": "string"
+        },
+        "tool_name": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_name",
+        "pointer",
+        "expected"
+      ],
+      "title": "GapCheck",
+      "type": "object"
+    },
+    "GapDelta": {
+      "additionalProperties": false,
+      "properties": {
+        "create": {
+          "items": {
+            "$ref": "#/$defs/GapSpec"
+          },
+          "maxItems": 8,
+          "title": "Create",
+          "type": "array"
+        },
+        "focus": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 4,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Focus"
+        },
+        "revision": {
+          "minimum": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "updates": {
+          "items": {
+            "$ref": "#/$defs/GapChange"
+          },
+          "maxItems": 8,
+          "title": "Updates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "title": "GapDelta",
+      "type": "object"
+    },
+    "GapSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GapCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "epistemic",
+            "achievement"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "requirement": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Requirement",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "requirement"
+      ],
+      "title": "GapSpec",
+      "type": "object"
+    },
+    "GoalGap": {
+      "additionalProperties": false,
+      "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GapCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "declared_at": {
+          "title": "Declared At",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "epistemic",
+            "achievement"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "requirement": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Requirement",
+          "type": "string"
+        },
+        "state": {
+          "default": "open",
+          "enum": [
+            "open",
+            "blocked",
+            "resolved"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "support": {
+          "default": "none",
+          "enum": [
+            "none",
+            "inferred",
+            "checked"
+          ],
+          "title": "Support",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "requirement"
+      ],
+      "title": "GoalGap",
+      "type": "object"
+    },
+    "GoalGapView": {
+      "description": "Public projection omits internal repetition-monitor frames.",
+      "properties": {
+        "focus": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Focus",
+          "type": "array"
+        },
+        "gaps": {
+          "items": {
+            "$ref": "#/$defs/GoalGap"
+          },
+          "title": "Gaps",
+          "type": "array"
+        },
+        "revision": {
+          "default": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "version": {
+          "const": "goal.gaps.v1",
+          "default": "goal.gaps.v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "title": "GoalGapView",
+      "type": "object"
+    },
     "MemoryRecallSummary": {
       "properties": {
         "dropped_count": {
@@ -747,6 +1608,69 @@
       "title": "MemoryWriteProposalSummary",
       "type": "object"
     },
+    "Project": {
+      "properties": {
+        "created_at": {
+          "title": "Created At",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "string"
+        },
+        "session_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Session Ids",
+          "type": "array"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "name",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "Project",
+      "type": "object"
+    },
+    "ProjectList": {
+      "properties": {
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/Project"
+          },
+          "title": "Projects",
+          "type": "array"
+        }
+      },
+      "title": "ProjectList",
+      "type": "object"
+    },
+    "ProjectWrite": {
+      "properties": {
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ProjectWrite",
+      "type": "object"
+    },
     "RunRequest": {
       "properties": {
         "attachments": {
@@ -817,6 +1741,18 @@
           "default": false,
           "title": "Stream",
           "type": "boolean"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
         }
       },
       "required": [
@@ -1002,6 +1938,24 @@
       "title": "Session",
       "type": "object"
     },
+    "SessionProjectWrite": {
+      "properties": {
+        "project_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Id"
+        }
+      },
+      "title": "SessionProjectWrite",
+      "type": "object"
+    },
     "Task": {
       "properties": {
         "completed_at": {
@@ -1027,6 +1981,17 @@
           ],
           "default": null,
           "title": "Created At"
+        },
+        "goal_gaps": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoalGapView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "objective": {
           "default": "",
@@ -1476,6 +2441,30 @@
           "title": "Activity Id",
           "type": "string"
         },
+        "completed_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Completed At"
+        },
+        "conversation_turn_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Turn Id"
+        },
         "detail": {
           "additionalProperties": true,
           "title": "Detail",
@@ -1513,6 +2502,23 @@
           "default": null,
           "title": "Occurred At"
         },
+        "occurrence_count": {
+          "default": 1,
+          "title": "Occurrence Count",
+          "type": "integer"
+        },
+        "references": {
+          "items": {
+            "$ref": "#/$defs/WorkbenchReference"
+          },
+          "title": "References",
+          "type": "array"
+        },
+        "requires_attention": {
+          "default": false,
+          "title": "Requires Attention",
+          "type": "boolean"
+        },
         "run_id": {
           "anyOf": [
             {
@@ -1530,6 +2536,18 @@
           "title": "Seq",
           "type": "integer"
         },
+        "started_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Started At"
+        },
         "status": {
           "title": "Status",
           "type": "string"
@@ -1538,10 +2556,24 @@
           "title": "Subject",
           "type": "string"
         },
+        "subject_i18n": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Subject I18N",
+          "type": "object"
+        },
         "summary": {
           "default": "",
           "title": "Summary",
           "type": "string"
+        },
+        "summary_i18n": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Summary I18N",
+          "type": "object"
         },
         "task_id": {
           "anyOf": [
@@ -1566,6 +2598,18 @@
           ],
           "default": null,
           "title": "Trace Id"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Updated At"
         }
       },
       "required": [
@@ -1576,6 +2620,39 @@
         "status"
       ],
       "title": "WorkbenchActivity",
+      "type": "object"
+    },
+    "WorkbenchReference": {
+      "properties": {
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        },
+        "reference_id": {
+          "title": "Reference Id",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reference_id",
+        "kind",
+        "label",
+        "target"
+      ],
+      "title": "WorkbenchReference",
       "type": "object"
     },
     "WorkbenchScope": {

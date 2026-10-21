@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List
+import hashlib
+import json
 import uuid
 
 
@@ -50,6 +52,48 @@ def normalize_runtime_blocks(values: Iterable[Any]) -> List[RuntimeBlock]:
 
 class ContextCompiler:
     """Compile RuntimeBlocks into provider-compatible chat message content."""
+
+    @staticmethod
+    def project_observations(messages: List[Dict[str, Any]], observations: List[Dict[str, Any]], *, per_result_chars: int, total_chars: int) -> List[Dict[str, Any]]:
+        known = {item["observation_id"] for item in observations}
+        found = []
+        for message_index, message in enumerate(messages):
+            if message.get("role") != "user" or not isinstance(message.get("content"), list):
+                continue
+            for block_index, block in enumerate(message["content"]):
+                if block.get("type") != "text":
+                    continue
+                try:
+                    fact = json.loads(block.get("text") or "")
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(fact, dict) and fact.get("observation_id") in known:
+                    found.append((message_index, block_index, fact))
+        allowance = min(per_result_chars, max(1, total_chars // max(1, len(found))))
+        result = [dict(message, content=[dict(block) for block in message["content"]])
+                  if isinstance(message.get("content"), list) else dict(message) for message in messages]
+        for message_index, block_index, fact in found:
+            fact = dict(fact)
+            for field in ("result", "error"):
+                value = fact.get(field)
+                if value is None:
+                    continue
+                encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+                if len(encoded) <= allowance:
+                    continue
+                reference = {"tool_name": "runtime.read_observation", "args": {
+                    "observation_id": fact["observation_id"], "field": field,
+                    "max_chars": min(8000, max(100, allowance // 2)),
+                }}
+                preview = {"truncated": True, "total_chars": len(encoded),
+                           "content_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+                           "preview": encoded[:allowance], "read_more": reference}
+                if field == "error" and isinstance(value, dict):
+                    preview.update({key: value[key] for key in ("code", "category", "retryable") if key in value})
+                    preview["message"] = str(value.get("message") or "")[:400]
+                fact[field] = preview
+            result[message_index]["content"][block_index]["text"] = json.dumps(fact, ensure_ascii=False, sort_keys=True)
+        return result
 
     def compile_user_content(
         self,

@@ -28,6 +28,10 @@ for await (const event of client.runs.stream({ message: 'Research this' })) {
 
 const session = await client.sessions.get(response.session_id!)
 
+const project = await client.projects.create({ name: 'Research' })
+await client.projects.assignSession(response.session_id!, project.project_id)
+const projects = await client.projects.list()
+
 for await (const snapshot of client.workbench.watch({ taskId: 'task_123' })) {
   console.log(snapshot.task?.status, snapshot.current_activity)
 }
@@ -60,7 +64,8 @@ The first release supports:
 - Session lookup
 - Task lookup/list, detached Run start, and revision-aware pause, resume, and cancel commands
 - Workbench snapshot queries and cursor-resumable SSE subscriptions
-- Canvas environment discovery and authenticated preview URLs
+- Canvas discovery, app-state reads/optimistic writes, retain/delete, diagnostics,
+  and a restricted opaque-frame bridge; no arbitrary tool execution from apps
 - bearer-token injection
 - structured and legacy error mapping
 - `AbortSignal`

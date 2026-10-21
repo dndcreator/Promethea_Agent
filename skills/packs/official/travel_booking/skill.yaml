@@ -1,0 +1,13 @@
+{
+  "skill_id": "travel_booking",
+  "name": "Travel and Reservations",
+  "description": "Research travel and reservation options using live providers or the existing browser, with explicit purchase boundaries.",
+  "when_to_use": "Use for booking, changing, or comparing tickets, hotels, transport, and other reservations.",
+  "category": "personal_assistant",
+  "model_invocable": true,
+  "execution_context": "inline",
+  "permission_profile": "default",
+  "default_mode": "fast",
+  "version": "1.0.0",
+  "enabled": true
+}

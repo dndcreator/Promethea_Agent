@@ -263,11 +263,13 @@ class MCPManager:
                 "requires_capability": raw.get("requires_capability"),
                 "requires_config": raw.get("requires_config"),
                 "owner_user_id": raw.get("owner_user_id"),
+                "presentation": raw.get("presentation") or {},
             }
         return {
             "name": str(getattr(raw, "name", "") or ""),
             "description": str(getattr(raw, "description", "") or ""),
             "input_schema": getattr(raw, "inputSchema", {}) or getattr(raw, "input_schema", {}) or {},
+            "presentation": getattr(raw, "presentation", {}) or {},
         }
 
     async def call_service_tool(self, service_name: str, tool_name: str, args: dict):
@@ -378,10 +380,22 @@ class MCPManager:
         mcp_services = []
         services_info = get_all_services_info()
         for name, info in services_info.items():
-            cached_tools = [
-                self._catalog_tool(item)
-                for item in (self.tools_cache.get(name) or [])
-            ]
+            declared_tools = {
+                str(item.get("name") or ""): item
+                for item in (info.get("available_tools") or [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            cached_tools = []
+            for item in self.tools_cache.get(name) or []:
+                projected = self._catalog_tool(item)
+                declared = declared_tools.get(str(projected.get("name") or ""), {})
+                for key in (
+                    "presentation", "side_effect_level", "side_effect_selector",
+                    "requires_capability", "requires_config", "owner_user_id",
+                ):
+                    if declared.get(key) not in (None, {}, ""):
+                        projected[key] = declared[key]
+                cached_tools.append(projected)
             service_info = {
                 "name": name,
                 "description": info.get("description", ""),

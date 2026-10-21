@@ -182,9 +182,11 @@ This side loop does not block current turn latency.
 ### Enterprise Context (Org Brain)
 
 - optional `org_brain` capability, disabled by default
-- org-scoped ingest and recall (`org_id`) via dedicated API routes
+- backend-neutral organization membership, source revision, review, audit, and migration state in SQLite
+- optional Neo4j knowledge-graph projection; it is rebuildable and is not the organization authority
+- org-scoped ingest and recall through membership-checked API routes and `organization.recall`
 - prompt injection only when `org_brain.enabled=true` and recall returns context
-- no coupling to personal mode when disabled
+- personal Memory remains separately owned; optional collaboration is context-only with no cross-scope writes
 
 ### Tools and MCP
 

@@ -6,7 +6,11 @@
                    "debug":  false,
                    "log_level":  "INFO",
                    "log_model_payloads": false,
-                   "timezone": "auto"
+                   "timezone": "auto",
+                   "browser_channel": "",
+                   "browser_auto_install": true,
+                   "browser_install_timeout_s": 120,
+                   "browser_install_retry_delay_s": 60
                },
     "api":  {
                 "temperature":  0.7,
@@ -16,8 +20,20 @@
                 "retry_count": null
             },
     "action": {
-                  "max_steps": 5
+                  "max_steps": 5,
+                  "max_parallel_tool_calls": 4,
+                  "observation_chars": 16000,
+                  "observation_history_chars": 96000,
+                  "gaps": {"enabled": true, "max_gaps": 12, "max_updates": 6, "window": 4, "context_chars": 2400}
               },
+    "moirai_learning": {
+        "enabled": true,
+        "distillation_enabled": true,
+        "min_episodes": 8,
+        "interval_seconds": 3600,
+        "idle_seconds": 60,
+        "timeout_seconds": 30
+    },
     "memory":  {
                    "enabled":  true,
                    "profile": "balanced",
@@ -179,10 +195,14 @@
         "summary_max_items": 8,
         "extract_text_max_chars": 5000,
         "heuristic_max_lines": 30,
-        "heuristic_max_items": 15
+        "heuristic_max_items": 15,
+        "chunk_chars": 5000,
+        "max_chunks": 20,
+        "personal_memory_collaboration": "context_only"
     },
     "self_evolve": {
         "enabled": false,
+        "browser_channel": "",
         "max_tasks_list": 50,
         "max_context_chars_per_file": 4000
     },

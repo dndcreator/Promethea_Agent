@@ -1,8 +1,10 @@
 import json
+import mimetypes
+from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from gateway.public_contracts import WorkbenchSnapshot
 from gateway.public_views import public_workbench
@@ -47,6 +49,38 @@ async def get_workbench_snapshot(
     )
 
 
+@router.get("/artifact")
+async def get_workbench_artifact(
+    workspace_id: str,
+    path: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    workspace_service = getattr(get_gateway_server(), "workspace_service", None)
+    if workspace_service is None:
+        raise HTTPException(status_code=503, detail="Workspace service not initialized")
+    handle = workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id=workspace_id)
+    root = Path(handle.root_path).resolve()
+    target = (root / str(path or "")).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Artifact path escapes workspace") from exc
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Artifact not found")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    active_document = media_type in {"text/html", "application/xhtml+xml", "image/svg+xml", "text/xml", "application/xml"}
+    headers = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+    if active_document:
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type=media_type,
+        content_disposition_type="attachment" if active_document else "inline",
+        headers=headers,
+    )
+
+
 @router.get("/stream")
 async def stream_workbench(
     request: Request,
@@ -65,11 +99,11 @@ async def stream_workbench(
         while not await request.is_disconnected():
             snapshot = _snapshot(
                 projection=projection, user_id=user_id, task_id=task_id, run_id=run_id,
-                session_id=session_id, after_seq=cursor, limit=limit,
+                session_id=session_id, after_seq=0, limit=limit,
             )
             timeline = snapshot.get("timeline") or []
             next_cursor = max(cursor, int(snapshot.get("cursor") or 0))
-            if first or timeline:
+            if first or next_cursor > cursor:
                 cursor = next_cursor
                 body = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                 yield f"id: {cursor}\nevent: snapshot\ndata: {body}\n\n"

@@ -50,6 +50,11 @@ The memory adapter supports backend switching through config:
 
 Neo4j is the intended full graph backend for the public preview. Fallback backends are explicit degraded/local alternatives, not silent replacements.
 
+User identity is not a Memory backend concern. Accounts remain in the Runtime's
+independent identity store; backend changes move governed memory for the same
+stable `user_id`. A Neo4j `User` node is only the ownership anchor for that
+backend's memory graph.
+
 Migration controls:
 
 - `memory.migration.mode = off | dual_write | cutover`
@@ -58,6 +63,9 @@ Migration controls:
 - `memory.migration.checkpoint`
 
 All backends expose `export_mef()` / `import_mef()` using a common Memory Exchange Format (MEF) envelope.
+Backend changes are explicit migrations, not continuous synchronization. Treat
+each cutover as a new lineage generation, retain the source until verification,
+and expect backend-specific graph or retrieval quality to differ after transfer.
 
 ## Example
 

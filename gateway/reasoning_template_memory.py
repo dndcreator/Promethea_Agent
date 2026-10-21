@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from config import config as global_config
+from agentkit.tools.moirai.learning import MoiraiLearning
 
 
 class ReasoningTemplateMemory:
@@ -35,6 +36,7 @@ class ReasoningTemplateMemory:
         self.basal_ganglia_dir.mkdir(parents=True, exist_ok=True)
         self.moirai_store_dir.mkdir(parents=True, exist_ok=True)
         self.max_templates_per_user = max(20, int(max_templates_per_user))
+        self.learning = MoiraiLearning(self.basal_ganglia_dir / "moirai_learning")
 
     def match_template(self, *, user_id: str, task: str) -> Dict[str, Any]:
         templates = self._load_templates(user_id)
@@ -146,6 +148,108 @@ class ReasoningTemplateMemory:
             self._append_opro_trial(user_id=user_id, template=template, profile=profile)
         except Exception as e:
             logger.debug("ReasoningTemplateMemory: record_success failed: {}", e)
+
+    def record_action_success(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        user_message: str,
+        assistant_output: str,
+        execution_path: List[Dict[str, Any]],
+    ) -> None:
+        """Retain an observation-backed ActionService path as a reusable candidate."""
+        try:
+            path = [dict(item) for item in (execution_path or []) if isinstance(item, dict)]
+            successful_calls = [
+                item for item in path if item.get("kind") == "tool_call" and bool(item.get("ok"))
+            ]
+            if not successful_calls:
+                return
+
+            latest_intent: Dict[str, Any] = {}
+            steps: List[Dict[str, Any]] = []
+            tools: List[Dict[str, str]] = []
+            actions: List[Dict[str, Any]] = []
+            for item in path:
+                if item.get("kind") == "capability_request":
+                    latest_intent = item
+                    steps.append(
+                        {
+                            "title": str(item.get("objective") or "capability resolution"),
+                            "goal": str(item.get("objective") or "resolve runtime capability"),
+                            "requires_memory": False,
+                            "memory_query": "",
+                            "requires_tools": True,
+                            "tool_intent": " ".join(item.get("required_capabilities") or []),
+                            "notes": "runtime capability resolution",
+                        }
+                    )
+                    continue
+                if item.get("kind") != "tool_call" or not bool(item.get("ok")):
+                    continue
+                full_name = str(item.get("tool_name") or "").strip()
+                service_name, _, tool_name = full_name.partition(".")
+                if not tool_name:
+                    tool_name = service_name
+                    service_name = ""
+                tools.append({"service_name": service_name, "tool_name": tool_name})
+                required = [str(value) for value in (latest_intent.get("required_capabilities") or [])]
+                actions.append(
+                    {
+                        "service_name": service_name,
+                        "tool_name": tool_name,
+                        "args": dict(item.get("args") or {}),
+                        "action_intent": str(latest_intent.get("objective") or full_name),
+                        "capability": required[0] if required else "",
+                        "status": "succeeded",
+                        "verification": {
+                            "ok": True,
+                            "confidence": 1.0,
+                            "reason": "runtime_observation_committed",
+                        },
+                    }
+                )
+
+            template = {
+                "template_id": uuid.uuid4().hex,
+                "user_id": user_id,
+                "session_id": session_id,
+                "created_at": time.time(),
+                "last_used_at": time.time(),
+                "success_count": 1,
+                "task": user_message,
+                "task_tokens": self._tokenize(user_message),
+                "assistant_preview": (assistant_output or "")[:300],
+                "gate": {
+                    "source": "runtime_action_machine",
+                    "observation_backed": True,
+                    "promotion": "candidate",
+                },
+                "policy_snapshot": {},
+                "steps": steps[:20],
+                "tools": tools[:20],
+                "actions": actions[:30],
+                "execution_mind_graph": self._build_execution_mind_graph(
+                    task=user_message,
+                    steps=steps,
+                    actions=actions,
+                ),
+                "stats": {
+                    "iterations": len(path),
+                    "memory_calls": 0,
+                    "tool_calls": len(successful_calls),
+                    "think_calls": 0,
+                },
+            }
+            audit = {"source": "action_loop", "execution_path": path}
+            self._append_success_path_log(user_id=user_id, payload={"template": template, "tree": audit})
+            self._upsert_template(user_id=user_id, template=template)
+            self._recompute_profile(user_id=user_id)
+            profile = self._load_profile(user_id)
+            self._append_opro_trial(user_id=user_id, template=template, profile=profile)
+        except Exception as e:
+            logger.debug("ReasoningTemplateMemory: record_action_success failed: {}", e)
 
     def _build_template(
         self,

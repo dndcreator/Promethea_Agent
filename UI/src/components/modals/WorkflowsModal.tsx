@@ -1,7 +1,10 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { ArrowLeft, RefreshCw, X } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { getWorkflowCheckpoints, getWorkflowRun, listPersonalWorkflowRuns, listWorkflowRecovery, listWorkflows, pauseWorkflowRun, resumeWorkflowRun } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
+import FeatureSurface from '../FeatureSurface'
+import { readApiResponse } from '../../services/api'
 
 type Tab = 'definitions' | 'runs' | 'recovery'
 
@@ -19,7 +22,7 @@ type WorkflowRow = {
   [key: string]: unknown
 }
 
-export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
+export default function WorkflowsModal({ onClose, embedded = false }: { onClose: () => void; embedded?: boolean }) {
   const { t } = useLanguage()
   const [tab, setTab] = useState<Tab>('runs')
   const [definitions, setDefinitions] = useState<WorkflowRow[]>([])
@@ -27,53 +30,78 @@ export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
   const [recovery, setRecovery] = useState<WorkflowRow[]>([])
   const [detail, setDetail] = useState<WorkflowRow | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
+  const epoch = useRef(0)
+  const detailEpoch = useRef(0)
 
   const refresh = async (nextTab = tab) => {
+    const current = ++epoch.current
     setLoading(true)
+    setError('')
     try {
       if (nextTab === 'definitions') {
-        const data = await listWorkflows().then((res) => res.json())
+        const data = await listWorkflows().then(readApiResponse)
+        if (current !== epoch.current) return
         setDefinitions(data.workflows || data.items || [])
       } else if (nextTab === 'recovery') {
-        const data = await listWorkflowRecovery().then((res) => res.json())
+        const data = await listWorkflowRecovery().then(readApiResponse)
+        if (current !== epoch.current) return
         setRecovery(data.runs || [])
       } else {
-        const data = await listPersonalWorkflowRuns().then((res) => res.json())
+        const data = await listPersonalWorkflowRuns().then(readApiResponse)
+        if (current !== epoch.current) return
         setRuns(data.runs || [])
       }
+    } catch (cause) {
+      if (current === epoch.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (current === epoch.current) setLoading(false)
     }
   }
 
   useEffect(() => {
+    setDetail(null)
+    setBusy(false)
     void refresh(tab)
+    return () => { epoch.current += 1; detailEpoch.current += 1 }
   }, [tab])
 
   const openRun = async (runId: string) => {
-    const data = await getWorkflowRun(runId).then((res) => res.json())
-    setDetail(data.run || data)
+    const current = ++detailEpoch.current
+    try {
+      const data = await getWorkflowRun(runId).then(readApiResponse)
+      if (current === detailEpoch.current) setDetail(data.run || data)
+    } catch (cause) { if (current === detailEpoch.current) setError(String(cause)) }
   }
 
   const action = async (runId: string, kind: 'pause' | 'resume') => {
-    if (kind === 'pause') await pauseWorkflowRun(runId)
-    if (kind === 'resume') await resumeWorkflowRun(runId)
-    await refresh(tab)
+    const current = detailEpoch.current
+    setBusy(true)
+    try {
+      await (kind === 'pause' ? pauseWorkflowRun(runId) : resumeWorkflowRun(runId)).then(readApiResponse)
+      if (current !== detailEpoch.current) return
+      await refresh(tab)
+      if (current === detailEpoch.current) await openRun(runId)
+    } catch (cause) { if (current === detailEpoch.current) setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setBusy(false) }
   }
 
   const openCheckpoints = async (runId: string) => {
-    const data = await getWorkflowCheckpoints(runId).then((res) => res.json())
-    setDetail((prev) => ({ ...(prev || { workflow_run_id: runId }), checkpoints: data.checkpoints || data }))
+    const current = detailEpoch.current
+    try {
+      const data = await getWorkflowCheckpoints(runId).then(readApiResponse)
+      if (current === detailEpoch.current) setDetail((prev) => ({ ...(prev || { workflow_run_id: runId }), checkpoints: data.checkpoints || data }))
+    } catch (cause) { if (current === detailEpoch.current) setError(String(cause)) }
   }
 
   const rows = tab === 'definitions' ? definitions : tab === 'recovery' ? recovery : runs
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-8">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-[1100px] h-[78vh] flex flex-col overflow-hidden">
+    <FeatureSurface embedded={embedded} onClose={onClose} label={t('工作流', 'Workflows')}>
         <div className="px-6 py-4 border-b border-black/5 flex justify-between items-center bg-gray-50/50">
           <h2 className="text-lg font-bold text-text-strong">{t('工作流', 'Workflows')}</h2>
-          <button type="button" onClick={onClose} className="text-2xl leading-none text-text-muted hover:text-text-strong">&times;</button>
+          <button type="button" onClick={onClose} className="icon-button" title={t('关闭', 'Close')} aria-label={t('关闭', 'Close')}><X size={17} /></button>
         </div>
 
         <div className="flex border-b border-black/5 bg-white px-4 pt-2 gap-4">
@@ -81,12 +109,13 @@ export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
           <TabButton active={tab === 'recovery'} onClick={() => setTab('recovery')}>{t('待恢复', 'Recovery')}</TabButton>
           <TabButton active={tab === 'definitions'} onClick={() => setTab('definitions')}>{t('定义', 'Definitions')}</TabButton>
           <button type="button" onClick={() => refresh()} className="ml-auto px-3 py-2 text-sm text-brand-600 hover:text-brand-700">
-            {loading ? t('加载中...', 'Loading...') : t('刷新', 'Refresh')}
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} aria-label={t('刷新', 'Refresh')} />
           </button>
         </div>
 
-        <div className="flex-1 overflow-hidden grid grid-cols-[380px_1fr] bg-bg-page">
-          <aside className="border-r border-black/5 p-4 overflow-y-auto">
+        {error && <div role="alert" className="page-error"><span>{error}</span><button type="button" onClick={() => void refresh()}>{t('重试', 'Retry')}</button></div>}
+        <div className="min-h-0 flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-[minmax(220px,35%)_1fr] bg-bg-page">
+          <aside className={`border-r border-black/5 p-4 overflow-y-auto ${detail ? 'hidden lg:block' : ''}`}>
             <div className="flex flex-col gap-2">
               {rows.map((row) => {
                 const runId = row.workflow_run_id || row.run_id || row.id
@@ -95,7 +124,7 @@ export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
                   <button
                     key={runId || workflowId}
                     type="button"
-                    onClick={() => (runId ? openRun(runId) : setDetail(row))}
+                    onClick={() => { if (tab !== 'definitions' && runId) void openRun(runId); else { detailEpoch.current += 1; setDetail(row) } }}
                     className="p-3 bg-white border border-black/5 rounded-xl text-left hover:border-brand-300"
                   >
                     <div className="text-sm font-semibold text-text-strong truncate">{row.name || workflowId || runId}</div>
@@ -103,17 +132,18 @@ export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
                   </button>
                 )
               })}
-              {rows.length === 0 && <div className="text-sm text-text-muted text-center mt-20">{t('暂无工作流数据。', 'No workflow data.')}</div>}
+              {!loading && !error && rows.length === 0 && <div className="text-sm text-text-muted text-center mt-20">{t('暂无工作流数据。', 'No workflow data.')}</div>}
             </div>
           </aside>
 
-          <section className="p-6 overflow-y-auto">
+          <section className={`p-5 overflow-y-auto ${detail ? '' : 'hidden lg:block'}`}>
+            {detail && <button type="button" className="icon-button mb-3 lg:hidden" title={t('返回列表', 'Back to list')} aria-label={t('返回列表', 'Back to list')} onClick={() => { detailEpoch.current += 1; setDetail(null) }}><ArrowLeft size={16} /></button>}
             {typeof detail?.workflow_run_id === 'string' && (() => {
               const runId = detail.workflow_run_id
               return (
                 <div className="flex gap-2 mb-4">
-                  <button type="button" onClick={() => action(runId, 'pause')} className="px-3 py-1.5 bg-gray-100 rounded-lg text-sm">{t('暂停', 'Pause')}</button>
-                  <button type="button" onClick={() => action(runId, 'resume')} className="px-3 py-1.5 bg-brand-50 text-brand-600 rounded-lg text-sm">{t('恢复', 'Resume')}</button>
+                  <button type="button" disabled={busy} onClick={() => action(runId, 'pause')} className="px-3 py-1.5 bg-gray-100 rounded-lg text-sm">{t('暂停', 'Pause')}</button>
+                  <button type="button" disabled={busy} onClick={() => action(runId, 'resume')} className="px-3 py-1.5 bg-brand-50 text-brand-600 rounded-lg text-sm">{t('恢复', 'Resume')}</button>
                   <button type="button" onClick={() => openCheckpoints(runId)} className="px-3 py-1.5 bg-white border border-black/10 rounded-lg text-sm">{t('检查点', 'Checkpoints')}</button>
                 </div>
               )
@@ -121,8 +151,7 @@ export default function WorkflowsModal({ onClose }: { onClose: () => void }) {
             {detail ? <WorkflowDetail detail={detail} /> : <EmptyState>{t('选择一条工作流查看详情。', 'Select a workflow item to inspect.')}</EmptyState>}
           </section>
         </div>
-      </div>
-    </div>
+    </FeatureSurface>
   )
 }
 

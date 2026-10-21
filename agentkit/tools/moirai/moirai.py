@@ -10,6 +10,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from .learning import MoiraiLearning
+
 
 class MoiraiService:
     """Persistent workflow engine for recoverable multi-step runs."""
@@ -20,6 +22,7 @@ class MoiraiService:
         self.workspace_root = root.resolve()
         self.store_dir = self.workspace_root / "memory" / "moirai_runs"
         self.store_dir.mkdir(parents=True, exist_ok=True)
+        self.learning = MoiraiLearning(self.workspace_root / "brain" / "basal_ganglia" / "moirai_learning")
         self._tool_executor: Optional[Callable[..., Awaitable[Any]]] = None
         self._confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], bool]] = None
 

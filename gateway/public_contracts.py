@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Literal, Optional, Type
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+from computer.canvas_components import CanvasDocument
+from gateway.goal_gaps import GoalGapView, GapDelta
 
 
 PUBLIC_CONTRACT_VERSION = "1.0"
@@ -81,6 +83,9 @@ class CanvasEnvironment(PublicContract):
     preview_url: str
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
+    lifetime: Literal["session", "reusable"] = "session"
+    content_revision: str = ""
+    diagnostics: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class CanvasEnvironmentList(PublicContract):
@@ -88,9 +93,20 @@ class CanvasEnvironmentList(PublicContract):
     environments: List[CanvasEnvironment] = Field(default_factory=list)
 
 
+class CanvasState(PublicContract):
+    revision: int = 0
+    value: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CanvasStateWrite(PublicContract):
+    expected_revision: int = Field(ge=0)
+    value: Dict[str, Any]
+
+
 class RunRequest(PublicContract):
     message: str
     session_id: Optional[str] = None
+    task_id: Optional[str] = None
     stream: bool = False
     requested_mode: Optional[str] = None
     requested_skill: Optional[str] = None
@@ -139,6 +155,26 @@ class Session(PublicContract):
     pinned: bool = False
 
 
+class Project(PublicContract):
+    project_id: str
+    name: str
+    created_at: str
+    updated_at: str
+    session_ids: List[str] = Field(default_factory=list)
+
+
+class ProjectList(PublicContract):
+    projects: List[Project] = Field(default_factory=list)
+
+
+class ProjectWrite(PublicContract):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class SessionProjectWrite(PublicContract):
+    project_id: Optional[str] = None
+
+
 class Event(PublicContract):
     event_id: str = Field(default_factory=lambda: f"evt_{uuid4().hex}")
     event_type: str
@@ -177,6 +213,7 @@ class Task(PublicContract):
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     completed_at: Optional[str] = None
+    goal_gaps: Optional[GoalGapView] = None
 
 
 class TaskControlRequest(PublicContract):
@@ -217,6 +254,14 @@ class WorkbenchScope(PublicContract):
     run_id: Optional[str] = None
 
 
+class WorkbenchReference(PublicContract):
+    reference_id: str
+    kind: str
+    label: str
+    target: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkbenchActivity(PublicContract):
     activity_id: str
     event_id: Optional[str] = None
@@ -225,12 +270,21 @@ class WorkbenchActivity(PublicContract):
     event_type: str
     kind: str
     subject: str
+    subject_i18n: Dict[str, str] = Field(default_factory=dict)
     summary: str = ""
+    summary_i18n: Dict[str, str] = Field(default_factory=dict)
     status: str
+    started_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    requires_attention: bool = False
     task_id: Optional[str] = None
     run_id: Optional[str] = None
+    conversation_turn_id: Optional[str] = None
     trace_id: Optional[str] = None
+    occurrence_count: int = 1
     detail: Dict[str, Any] = Field(default_factory=dict)
+    references: List[WorkbenchReference] = Field(default_factory=list)
 
 
 class WorkbenchWaitingAction(PublicContract):
@@ -338,9 +392,18 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         FileUploadResponse,
         CanvasEnvironment,
         CanvasEnvironmentList,
+        CanvasState,
+        CanvasStateWrite,
+        CanvasDocument,
+        GoalGapView,
+        GapDelta,
         RunRequest,
         RunResponse,
         Session,
+        Project,
+        ProjectList,
+        ProjectWrite,
+        SessionProjectWrite,
         Event,
         ToolCall,
         ToolResult,
@@ -353,6 +416,7 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         TaskListResponse,
         TaskRunResponse,
         WorkbenchScope,
+        WorkbenchReference,
         WorkbenchActivity,
         WorkbenchWaitingAction,
         WorkflowStepSummary,

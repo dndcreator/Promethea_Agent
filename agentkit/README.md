@@ -14,13 +14,13 @@ AgentKit supplies tool implementations, external MCP transport, tool-call orches
 - `agentkit/mcp/mcp_manager.py`: MCP manager
 - `agentkit/mcp/mcpregistry.py`: MCP-backed service registry
 - `agentkit/mcp/agent_manager.py`: agent coordination
-- `agentkit/mcp/tool_call.py`: tool-call pipeline
+- `gateway/action/`: Runtime-owned model/action/observation state machine
 - `agentkit/mcp/tool_result.py`: canonical tool result and error mapping
 - `agentkit/security/approval.py`: exact-call approval scope
 - `agentkit/security/sandbox.py`: workspace and host capability policy
 - `agentkit/security/process_sandbox.py`: platform process sandbox selection
 - `agentkit/tools/computer/*`: computer tool definitions
-- `gateway/official_tools/*`: built-in local tools, including the canonical `web.search` capability
+- `agentkit/tools/standard/*`: manifest-discovered tools, including `web.search`, using the same loader and policy as installed tool packages
 - `agentkit/tools/FEWSHOT_TOOL_SCRIPT_EXAMPLE.md`: LLM-ready few-shot template for generating new tools
 
 ## Workflow

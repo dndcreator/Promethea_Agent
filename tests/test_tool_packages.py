@@ -1,0 +1,572 @@
+import os
+import importlib
+import inspect
+import pkgutil
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from agentkit.security.sandbox import SandboxPolicy
+from agentkit.security.approval import approval_scope
+from gateway.events import EventEmitter
+import agentkit.tools.standard as standard_tools_package
+from gateway.capability_service import ToolInvocationContext, CapabilityService
+from gateway.workflow_engine import WorkflowEngine
+from gateway.workspace_service import WorkspaceSandboxError, WorkspaceService
+
+
+def _load_tools(*, capability_service, **bindings):
+    capability_service.bind_tool_runtime(**bindings)
+    capability_service.ensure_discovered_tools()
+
+
+async def _call_confirmed(service, name, args, **kwargs):
+    with approval_scope(name, args, confirmed=True):
+        return await service.call_tool(name, args, **kwargs)
+
+
+def _build_services(tmp_path: Path) -> tuple[CapabilityService, WorkspaceService]:
+    workspace_service = WorkspaceService(base_dir=str(tmp_path / "ws"))
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    _load_tools(capability_service=capability_service, workspace_service=workspace_service)
+    return capability_service, workspace_service
+
+
+def test_every_standard_tool_declares_model_input_schema():
+    missing = []
+    for module_info in pkgutil.iter_modules(standard_tools_package.__path__):
+        if not module_info.name.endswith("_tools"):
+            continue
+        module = importlib.import_module(f"agentkit.tools.standard.{module_info.name}")
+        for name, value in inspect.getmembers(module, inspect.isclass):
+            if value.__module__ != module.__name__ or not name.endswith("Tool") or name.startswith("_"):
+                continue
+            schema = getattr(value, "input_schema", None)
+            if not isinstance(schema, dict) or schema.get("type") != "object":
+                missing.append(f"{module_info.name}.{name}")
+    assert missing == []
+
+
+class _DummyMessageManager:
+    def get_recent_messages(self, session_id, count=None, user_id=None):
+        _ = count
+        return [{"role": "user", "content": f"hello:{session_id}:{user_id}"}]
+
+    def get_session_info(self, session_id, user_id=None):
+        return {"session_id": session_id, "user_id": user_id, "title": "demo"}
+
+    def get_all_sessions_info(self, user_id=None):
+        return {
+            f"{user_id}::s1": {"session_id": "s1", "user_id": user_id, "last_activity": 2},
+            f"{user_id}::s2": {"session_id": "s2", "user_id": user_id, "last_activity": 1},
+        }
+
+
+class _DummyMemoryService:
+    async def get_context(self, query, session_id, user_id=None, run_context=None):
+        _ = run_context
+        return f"ctx:{user_id}:{session_id}:{query}"
+
+    def list_entries(self, **kwargs):
+        return {"ok": True, "entries": [{"memory_id": "m1", "content": "x"}], "args": kwargs}
+
+    def create_entry(self, **kwargs):
+        return {"ok": True, "args": kwargs}
+
+    async def summarize_session(self, session_id, user_id=None, incremental=False):
+        return {"session_id": session_id, "user_id": user_id, "incremental": bool(incremental)}
+
+    def list_recall_runs(self, **kwargs):
+        return [{"request_id": "r1", "kwargs": kwargs}]
+
+
+class _DummyConversationService:
+    def get_processing_stats(self):
+        return {"sessions_with_queue": 0, "queued_messages": 0}
+
+
+class _DummyGatewayServer:
+    def __init__(self, *, workflow_engine=None, capability_service=None):
+        self.conversation_service = _DummyConversationService()
+        self.workflow_engine = workflow_engine
+        self.capability_service = capability_service
+
+    def get_services_health(self):
+        return {"capability_service": True, "memory_service": True, "conversation_service": True}
+
+
+@pytest.mark.asyncio
+async def test_workspace_program_execution_observation_and_isolation(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr("agentkit.security.sandbox._SANDBOX_POLICY", SandboxPolicy(enabled=False))
+    capability_service, _ = _build_services(tmp_path)
+    ctx = ToolInvocationContext(session_id="session", user_id="alice")
+    script = "from pathlib import Path\nPath('result.txt').write_text('observed', encoding='utf-8')\nprint('done')\n"
+    await capability_service.call_tool("workspace.write_file", {"path": "program.py", "content": script}, ctx=ctx)
+    command = (subprocess.list2cmdline([sys.executable, "program.py"])
+               if os.name == "nt" else shlex.join([sys.executable, "program.py"]))
+    result = await _call_confirmed(capability_service, "runtime.exec_command", {"command": command}, ctx=ctx)
+    assert result["ok"] is True
+    assert result["stdout"].strip() == "done"
+    artifact = await capability_service.call_tool("workspace.read_file", {"path": "result.txt"}, ctx=ctx)
+    assert artifact["content"] == "observed"
+
+    with pytest.raises(PermissionError):
+        await _call_confirmed(capability_service, "runtime.exec_command", {"command": command, "cwd": ".."}, ctx=ctx)
+    with pytest.raises(PermissionError):
+        await _call_confirmed(
+            capability_service, "runtime.exec_command", {"command": command, "user_id": "bob"}, ctx=ctx,
+        )
+    with pytest.raises(PermissionError):
+        await capability_service.call_tool(
+            "workspace.read_file", {"path": "result.txt", "user_id": "bob"}, ctx=ctx,
+        )
+    with pytest.raises(WorkspaceSandboxError):
+        await _call_confirmed(
+            capability_service, "runtime.exec_command", {"command": command, "workspace_id": ".."}, ctx=ctx,
+        )
+    with pytest.raises(WorkspaceSandboxError):
+        await capability_service.call_tool(
+            "workspace.read_file", {"path": "result.txt", "workspace_id": ".."}, ctx=ctx,
+        )
+    other = await capability_service.call_tool(
+        "workspace.list_files", {}, ctx=ToolInvocationContext(session_id="session", user_id="bob"),
+    )
+    assert other["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_registered(tmp_path: Path):
+    capability_service, _ = _build_services(tmp_path)
+    catalog = await capability_service.get_tool_catalog()
+    assert any(row.get("tool_name") == "data.csv_to_json" for row in catalog)
+    assert any(row.get("tool_name") == "data.json_to_csv" for row in catalog)
+    assert any(row.get("tool_name") == "math.calculate" for row in catalog)
+    assert not any(row.get("tool_name") == "memory.get_context" for row in catalog)
+    assert any(row.get("tool_name") == "web.fetch_text" for row in catalog)
+    assert any(row.get("tool_name") == "web.extract_links" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.copy_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.move_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.delete_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.list_files" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.read_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.write_file" for row in catalog)
+    assert any(row.get("tool_name") == "computer_control.browser_action" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.search_text" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.ensure_dir" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.read_files" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.file_info" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.tail_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.replace_text" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.glob_files" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.diff_file" for row in catalog)
+    assert any(row.get("tool_name") == "workspace.apply_patch" for row in catalog)
+    assert any(row.get("tool_name") == "code.run_python" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_create" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_list" for row in catalog)
+    assert any(row.get("tool_name") == "archive.zip_extract" for row in catalog)
+    assert any(row.get("tool_name") == "text.word_stats" for row in catalog)
+    assert any(row.get("tool_name") == "text.find_matches" for row in catalog)
+    assert any(row.get("tool_name") == "text.normalize_json" for row in catalog)
+    assert any(row.get("tool_name") == "utils.now" for row in catalog)
+    assert any(row.get("tool_name") == "utils.uuid" for row in catalog)
+    assert any(row.get("tool_name") == "utils.hash_text" for row in catalog)
+    assert any(row.get("tool_name") == "web.fetch_json" for row in catalog)
+    assert any(row.get("tool_name") == "web.search" for row in catalog)
+    assert any(row.get("tool_name") == "web.download_to_workspace" for row in catalog)
+    assert any(row.get("tool_name") == "runtime.exec_command" for row in catalog)
+    assert any(row.get("tool_name") == "runtime.read_env" for row in catalog)
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_workspace_roundtrip(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agentkit.security.sandbox._SANDBOX_POLICY",
+        SandboxPolicy(enabled=False),
+    )
+    capability_service, _ = _build_services(tmp_path)
+    ctx = ToolInvocationContext(session_id="s1", user_id="u1")
+
+    write_res = await capability_service.call_tool(
+        "workspace.write_file",
+        {"path": "notes/today.txt", "content": "alpha\nbeta\ngamma"},
+        ctx=ctx,
+    )
+    assert write_res["operation"] in {"create", "update"}
+
+    read_res = await capability_service.call_tool(
+        "workspace.read_file",
+        {"path": "notes/today.txt"},
+        ctx=ctx,
+    )
+    assert "alpha" in read_res["content"]
+
+    search_res = await capability_service.call_tool(
+        "workspace.search_text",
+        {"query": "beta"},
+        ctx=ctx,
+    )
+    assert search_res["count"] >= 1
+    assert search_res["hits"][0]["path"] == "notes/today.txt"
+
+    list_res = await capability_service.call_tool(
+        "workspace.list_files",
+        {},
+        ctx=ctx,
+    )
+    assert any(item.get("path") == "notes/today.txt" for item in list_res["files"])
+
+    copy_res = await capability_service.call_tool(
+        "workspace.copy_file",
+        {"src_path": "notes/today.txt", "dst_path": "notes/today_copy.txt"},
+        ctx=ctx,
+    )
+    assert copy_res["path"] == "notes/today_copy.txt"
+
+    move_res = await capability_service.call_tool(
+        "workspace.move_file",
+        {"src_path": "notes/today_copy.txt", "dst_path": "notes/today_moved.txt"},
+        ctx=ctx,
+    )
+    assert move_res["path"] == "notes/today_moved.txt"
+
+    del_res = await capability_service.call_tool(
+        "workspace.delete_file",
+        {"path": "notes/today_moved.txt"},
+        ctx=ctx,
+    )
+    assert del_res["deleted"] is True
+
+    await capability_service.call_tool("workspace.ensure_dir", {"path": "logs/archive"}, ctx=ctx)
+    await capability_service.call_tool(
+        "workspace.write_file",
+        {"path": "logs/archive/run.log", "content": "l1\nl2\nl3"},
+        ctx=ctx,
+    )
+    tail = await capability_service.call_tool(
+        "workspace.tail_file",
+        {"path": "logs/archive/run.log", "lines": 2},
+        ctx=ctx,
+    )
+    assert tail["lines"] == 2
+    repl = await capability_service.call_tool(
+        "workspace.replace_text",
+        {"path": "logs/archive/run.log", "pattern": "l2", "replacement": "L2"},
+        ctx=ctx,
+    )
+    assert repl["replacements"] >= 1
+    info = await capability_service.call_tool("workspace.file_info", {"path": "logs/archive/run.log"}, ctx=ctx)
+    assert info["size"] > 0
+    reads = await capability_service.call_tool(
+        "workspace.read_files",
+        {"paths": ["logs/archive/run.log", "missing.txt"]},
+        ctx=ctx,
+    )
+    assert reads["count"] == 2
+    globs = await capability_service.call_tool("workspace.glob_files", {"pattern": "logs/**/*.log"}, ctx=ctx)
+    assert globs["count"] >= 1
+
+    diff = await capability_service.call_tool(
+        "workspace.diff_file",
+        {"path": "logs/archive/run.log", "content": "l1\nL2\nl3\nl4"},
+        ctx=ctx,
+    )
+    assert diff["changed"] is True
+    assert "+l4" in diff["diff"]
+    patched = await capability_service.call_tool(
+        "workspace.apply_patch",
+        {"path": "logs/archive/run.log", "old_text": "l3", "new_text": "L3"},
+        ctx=ctx,
+    )
+    assert patched["patched"] is True
+
+    py = await _call_confirmed(
+        capability_service,
+        "code.run_python",
+        {"code": "print(2 + 3)"},
+        ctx=ctx,
+    )
+    assert py["ok"] is True
+    assert "5" in py["stdout"]
+    assert list((tmp_path / "ws" / "u1" / "s1" / ".runtime" / "code").glob("snippet-*.py")) == []
+
+    archive = await capability_service.call_tool(
+        "archive.zip_create",
+        {"output_path": "bundle.zip", "paths": ["logs"]},
+        ctx=ctx,
+    )
+    assert archive["count"] >= 1
+    listed = await capability_service.call_tool("archive.zip_list", {"path": "bundle.zip"}, ctx=ctx)
+    assert listed["count"] >= 1
+    extracted = await capability_service.call_tool(
+        "archive.zip_extract",
+        {"path": "bundle.zip", "dest_dir": "unpacked"},
+        ctx=ctx,
+    )
+    assert extracted["count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_text_and_utils(tmp_path: Path):
+    capability_service, _ = _build_services(tmp_path)
+
+    stats = await capability_service.call_tool(
+        "text.word_stats",
+        {"text": "alpha beta\ngamma"},
+    )
+    assert stats["words"] == 3
+    assert stats["lines"] == 2
+
+    matches = await capability_service.call_tool(
+        "text.find_matches",
+        {"text": "a b a b a", "query": "a", "max_results": 2},
+    )
+    assert matches["count"] == 2
+
+    normalized = await capability_service.call_tool(
+        "text.normalize_json",
+        {"text": "{\"b\":2,\"a\":1}", "sort_keys": True},
+    )
+    assert normalized["valid"] is True
+    assert "\"a\": 1" in normalized["normalized"]
+
+    now = await capability_service.call_tool("utils.now", {})
+    assert "utc_iso" in now
+    assert now["epoch_ms"] > 0
+
+    uuids = await capability_service.call_tool("utils.uuid", {"count": 2})
+    assert uuids["count"] == 2
+    assert len(uuids["uuids"]) == 2
+
+    digest = await capability_service.call_tool(
+        "utils.hash_text",
+        {"text": "hello", "algo": "sha256"},
+    )
+    assert digest["algo"] == "sha256"
+    assert len(digest["digest"]) == 64
+
+    calc = await capability_service.call_tool(
+        "math.calculate",
+        {"expression": "(2 + 3) * 4 - 1"},
+    )
+    assert calc["value"] == 19.0
+
+    csv_to_json = await capability_service.call_tool(
+        "data.csv_to_json",
+        {"text": "a,b\n1,2\n3,4\n"},
+    )
+    assert csv_to_json["count"] == 2
+    assert csv_to_json["rows"][0]["a"] == "1"
+
+    json_to_csv = await capability_service.call_tool(
+        "data.json_to_csv",
+        {"rows": [{"a": 1, "b": 2}, {"a": 3, "b": 4}]},
+    )
+    assert "a,b" in json_to_csv["csv"]
+    assert json_to_csv["count"] == 2
+
+    links = await capability_service.call_tool(
+        "web.extract_links",
+        {"html": '<a href="https://example.com">x</a><a href="/docs">y</a>'},
+    )
+    assert links["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_register_without_workspace_service():
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    _load_tools(capability_service=capability_service, workspace_service=None)
+
+    catalog = await capability_service.get_tool_catalog()
+    names = {str(row.get("tool_name") or "") for row in catalog}
+    assert "text.word_stats" in names
+    assert "utils.now" in names
+    assert "math.calculate" in names
+    assert "data.csv_to_json" in names
+    assert "web.extract_links" in names
+    assert "workspace.read_file" not in names
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_register_memory_session_runtime(tmp_path: Path):
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    workflow_engine = WorkflowEngine(
+        capability_service=capability_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
+    _load_tools(
+        capability_service=capability_service,
+        workspace_service=None,
+        memory_service=_DummyMemoryService(),
+        message_manager=_DummyMessageManager(),
+        gateway_server=_DummyGatewayServer(workflow_engine=workflow_engine, capability_service=capability_service),
+    )
+    catalog = await capability_service.get_tool_catalog()
+    names = {str(row.get("tool_name") or "") for row in catalog}
+    assert "memory.get_context" in names
+    assert "memory.list_entries" in names
+    assert "session.recent_messages" in names
+    assert "runtime.services" in names
+    assert "runtime.list_tools" in names
+    assert "workflow.define" in names
+    assert "workflow.start" in names
+    assert "workflow.status" in names
+
+    ctx = ToolInvocationContext(session_id="s1", user_id="u1")
+    recall = await capability_service.call_tool("memory.get_context", {"query": "q"}, ctx=ctx)
+    assert "ctx:u1:s1:q" in recall["context"]
+    recent = await capability_service.call_tool("session.recent_messages", {}, ctx=ctx)
+    assert recent["count"] == 1
+    runtime = await capability_service.call_tool("runtime.services", {})
+    assert runtime["status"] == "healthy"
+    assert runtime["service_count"] == 3
+    assert runtime["healthy_count"] == 3
+    assert runtime["unhealthy_services"] == []
+    listed = await capability_service.call_tool("runtime.list_tools", {"domain": "memory"})
+    assert listed["ok"] is True
+    assert listed["count"] == 5
+    assert all(item["domain"] == "memory" for item in listed["tools"])
+    recall_runs = await capability_service.call_tool("memory.recall_runs", {}, ctx=ctx)
+    assert recall_runs["available"] is True
+    assert recall_runs["scope"] == {"user_id": "u1", "session_id": "s1"}
+
+
+@pytest.mark.asyncio
+async def test_standard_tools_runtime_exec_and_workflow_tools(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(
+        "agentkit.security.sandbox._SANDBOX_POLICY",
+        SandboxPolicy(enabled=False),
+    )
+    workspace_service = WorkspaceService(base_dir=str(tmp_path / "ws"))
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    workflow_engine = WorkflowEngine(
+        capability_service=capability_service,
+        workspace_service=workspace_service,
+        storage_path=str(tmp_path / "workflow_state.json"),
+    )
+    gateway = _DummyGatewayServer(workflow_engine=workflow_engine, capability_service=capability_service)
+    _load_tools(
+        capability_service=capability_service,
+        workspace_service=workspace_service,
+        gateway_server=gateway,
+    )
+    ctx = ToolInvocationContext(session_id="s1", user_id="u1")
+    cmd = await _call_confirmed(
+        capability_service,
+        "runtime.exec_command",
+        {"command": "cmd /c echo hello"},
+        ctx=ctx,
+    )
+    assert cmd["returncode"] == 0
+    assert "hello" in (cmd["stdout"] or "").lower()
+    assert cmd["workspace_id"] == "s1"
+    assert Path(cmd["cwd"]) == tmp_path / "ws" / "u1" / "s1"
+
+    define = await capability_service.call_tool(
+        "workflow.define",
+        {
+            "workflow_id": "wf_demo",
+            "name": "wf_demo",
+            "steps": [{"step_id": "s1", "step_type": "summary_step", "name": "s1", "inputs": {"summary": "ok"}}],
+        },
+        ctx=ctx,
+    )
+    assert define["workflow"]["workflow_id"] == "wf_demo"
+    started = await capability_service.call_tool("workflow.start", {"workflow_id": "wf_demo"}, ctx=ctx)
+    run_id = started["run"]["workflow_run_id"]
+    status = await capability_service.call_tool("workflow.status", {"workflow_run_id": run_id}, ctx=ctx)
+    assert status["run"]["workflow_run_id"] == run_id
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_text_rejects_non_http_scheme(tmp_path: Path):
+    capability_service, _ = _build_services(tmp_path)
+    with pytest.raises(ValueError, match="only http/https URLs are supported"):
+        await capability_service.call_tool(
+            "web.fetch_text",
+            {"url": "file:///tmp/a.txt"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_text_respects_sandbox_url_policy(tmp_path: Path, monkeypatch):
+    capability_service, _ = _build_services(tmp_path)
+
+    class _Decision:
+        allowed = False
+        reason = "network disabled"
+
+    class _Policy:
+        def check_url(self, _url):
+            return _Decision()
+
+    monkeypatch.setattr("agentkit.tools.standard.web_tools.get_sandbox_policy", lambda: _Policy())
+
+    with pytest.raises(PermissionError, match="sandbox blocked url"):
+        await capability_service.call_tool(
+            "web.fetch_text",
+            {"url": "https://example.com"},
+        )
+
+@pytest.mark.asyncio
+async def test_standard_skill_run_tool_returns_instruction():
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, capability_service=capability_service)
+    from skills import build_default_skill_registry
+
+    gateway.skill_registry = build_default_skill_registry()
+    _load_tools(capability_service=capability_service, workspace_service=None, gateway_server=gateway)
+
+    catalog = await capability_service.get_tool_catalog()
+    names = {str(row.get("tool_name") or "") for row in catalog}
+    assert "skill.run" in names
+
+    out = await capability_service.call_tool(
+        "skill.run",
+        {"skill_id": "coding_copilot"},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert out.get("ok") is True
+    assert (out.get("skill") or {}).get("skill_id") == "coding_copilot"
+    assert isinstance(out.get("instruction"), str)
+    assert len(out.get("instruction") or "") > 0
+
+@pytest.mark.asyncio
+async def test_skill_run_respects_model_invocable_gate():
+    capability_service = CapabilityService(event_emitter=EventEmitter())
+    gateway = _DummyGatewayServer(workflow_engine=None, capability_service=capability_service)
+
+    from skills.registry import SkillRegistry
+    from skills.schema import SkillSpec
+
+    registry = SkillRegistry(packs_root="")
+    registry.register(
+        SkillSpec(
+            skill_id="manual_only",
+            name="Manual Only",
+            model_invocable=False,
+            execution_context="inline",
+            system_instruction="manual skill",
+        )
+    )
+    gateway.skill_registry = registry
+
+    _load_tools(capability_service=capability_service, workspace_service=None, gateway_server=gateway)
+
+    blocked = await capability_service.call_tool(
+        "skill.run",
+        {"skill_id": "manual_only"},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert blocked.get("ok") is False
+    assert blocked.get("reason") == "model_invocation_disabled"
+
+    allowed = await capability_service.call_tool(
+        "skill.run",
+        {"skill_id": "manual_only", "allow_manual": True},
+        ctx=ToolInvocationContext(session_id="s1", user_id="u1"),
+    )
+    assert allowed.get("ok") is True
+    assert (allowed.get("skill") or {}).get("skill_id") == "manual_only"

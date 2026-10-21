@@ -41,14 +41,14 @@ SUITE_FILES: dict[str, list[str]] = {
     "business": [
         "tests/test_business_journeys.py",
         "tests/test_mvp_business_smoke.py",
-        "tests/test_official_tools.py",
+        "tests/test_tool_packages.py",
         "tests/test_voice_routes.py",
         "tests/test_ops_readiness.py",
     ],
     "business_plus": [
         "tests/test_business_journeys.py",
         "tests/test_mvp_business_smoke.py",
-        "tests/test_official_tools.py",
+        "tests/test_tool_packages.py",
         "tests/test_voice_routes.py",
         "tests/test_ops_readiness.py",
         "tests/business_plus/test_business_plus_flows.py",

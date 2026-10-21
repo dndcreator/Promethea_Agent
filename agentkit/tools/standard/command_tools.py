@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+import os
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from agentkit.security.process_sandbox import SandboxedProcessRunner
+from gateway.capability_service import ToolInvocationContext
+from gateway.tools.schema import array, boolean, input_object, integer, text
+from .workspace_tools import _resolve_identity
+
+
+class RuntimeExecCommandTool:
+    input_schema = input_object(
+        {
+            "command": text(),
+            "cwd": text(),
+            "timeout_s": integer(minimum=1, maximum=600),
+            "max_output_chars": integer(minimum=200, maximum=500000),
+        },
+        required=("command",),
+    )
+    tool_id = "runtime.exec_command"
+    name = "runtime.exec_command"
+    description = "Execute a shell command under sandbox policy."
+    domain = "runtime"
+    side_effect_level = "privileged_host_action"
+
+    def __init__(self, *, workspace_service: Any) -> None:
+        self.workspace_service = workspace_service
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        command = str((args or {}).get("command") or "").strip()
+        if not command:
+            raise ValueError("command is required")
+        user_id, workspace_id = _resolve_identity(args, ctx)
+        handle = self.workspace_service.resolve_workspace_handle(user_id=user_id, workspace_id=workspace_id)
+        root = Path(handle.root_path)
+        cwd = str((args or {}).get("cwd") or ".").strip() or "."
+        timeout_s = int((args or {}).get("timeout_s") or 60)
+        timeout_s = max(1, min(timeout_s, 600))
+
+        started = time.time()
+        proc = await SandboxedProcessRunner().run_async(
+            command, cwd=cwd, workspace_root=root, shell=True, timeout=timeout_s,
+            session_id=ctx.session_id if ctx else None,
+        )
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        max_chars = int((args or {}).get("max_output_chars") or 20000)
+        max_chars = max(200, min(max_chars, 500000))
+        return {
+            "ok": proc.returncode == 0,
+            "command": command,
+            "cwd": str((root / cwd).resolve()),
+            "workspace_id": handle.workspace_id,
+            "returncode": proc.returncode,
+            "sandbox": proc.sandbox,
+            "stdout": stdout[:max_chars],
+            "stderr": stderr[:max_chars],
+            "truncated_stdout": len(stdout) > max_chars,
+            "truncated_stderr": len(stderr) > max_chars,
+            "duration_ms": int((time.time() - started) * 1000),
+            "session_id": (ctx.session_id if ctx else None),
+            "user_id": (ctx.user_id if ctx else None),
+        }
+
+
+class RuntimeReadEnvTool:
+    input_schema = input_object(
+        {
+            "names": array(text()),
+            "prefixes": array(text()),
+            "include_empty": boolean(),
+            "redact_sensitive": boolean(),
+        }
+    )
+    tool_id = "runtime.read_env"
+    side_effect_level = "privileged_host_action"
+    name = "runtime.read_env"
+    description = "Read environment variables by allowlisted names or prefixes."
+    domain = "runtime"
+
+    SENSITIVE_FRAGMENTS = ("KEY", "TOKEN", "SECRET", "PASSWORD")
+
+    @staticmethod
+    def _should_redact(key: str) -> bool:
+        upper = str(key or "").upper()
+        return any(x in upper for x in RuntimeReadEnvTool.SENSITIVE_FRAGMENTS)
+
+    async def invoke(self, args: Dict[str, Any], ctx: Optional[ToolInvocationContext] = None) -> Any:
+        _ = ctx
+        names = (args or {}).get("names") or []
+        prefixes = (args or {}).get("prefixes") or []
+        include_empty = bool((args or {}).get("include_empty", False))
+        redact_sensitive = bool((args or {}).get("redact_sensitive", True))
+        if not isinstance(names, list):
+            names = []
+        if not isinstance(prefixes, list):
+            prefixes = []
+        rows: Dict[str, str] = {}
+        for raw in names:
+            key = str(raw or "").strip()
+            if not key:
+                continue
+            val = os.getenv(key, "")
+            if (val == "") and (not include_empty):
+                continue
+            if redact_sensitive and self._should_redact(key) and val:
+                val = "***"
+            rows[key] = val
+        if prefixes:
+            for key, val in os.environ.items():
+                for raw_prefix in prefixes:
+                    prefix = str(raw_prefix or "").strip()
+                    if not prefix:
+                        continue
+                    if key.startswith(prefix):
+                        out = val
+                        if redact_sensitive and self._should_redact(key) and out:
+                            out = "***"
+                        if (out == "") and (not include_empty):
+                            continue
+                        rows[key] = out
+                        break
+        return {"count": len(rows), "env": dict(sorted(rows.items(), key=lambda kv: kv[0]))}

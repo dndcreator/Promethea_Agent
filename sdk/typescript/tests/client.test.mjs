@@ -34,6 +34,23 @@ test('runs.run serializes the public request and authorization header', async ()
 })
 
 
+test('runs preserve explicit task scope without changing the HTTP endpoint', async () => {
+  const bodies = []
+  const client = new PrometheaClient({
+    baseUrl: 'http://localhost:8000',
+    fetch: async (url, init) => {
+      assert.equal(url, 'http://localhost:8000/api/chat')
+      bodies.push(JSON.parse(init.body))
+      return jsonResponse({ response: 'ok', session_id: 's1', status: 'success' })
+    },
+  })
+  await client.runs.run({ message: 'continue', task_id: 'task-owned' })
+  for await (const event of client.runs.stream({ message: 'continue', task_id: 'task-owned' })) {
+    assert.equal(event.event_type, 'done')
+  }
+  assert.deepEqual(bodies.map(body => [body.task_id, body.stream]), [['task-owned', false], ['task-owned', true]])
+})
+
 test('files.upload returns an attachment-ready generated UserFile', async () => {
   const calls = []
   const client = new PrometheaClient({
@@ -314,6 +331,25 @@ test('workbench.get serializes scope and returns the generated snapshot', async 
 
   assert.equal(snapshot.cursor, 7)
   assert.equal(calls[0].url, 'http://localhost:8000/api/workbench/snapshot?session_id=s1&task_id=t1&after_seq=5&limit=20')
+})
+
+
+test('workbench.artifact retrieves an authenticated workspace artifact', async () => {
+  const calls = []
+  const client = new PrometheaClient({
+    baseUrl: 'http://localhost:8000',
+    token: 'secret',
+    fetch: async (url, init) => {
+      calls.push({ url, init })
+      return new Response('# Draft', { status: 200, headers: { 'Content-Type': 'text/markdown' } })
+    },
+  })
+
+  const artifact = await client.workbench.artifact('session 1', 'draft/report.md')
+
+  assert.equal(await artifact.text(), '# Draft')
+  assert.equal(calls[0].url, 'http://localhost:8000/api/workbench/artifact?workspace_id=session+1&path=draft%2Freport.md')
+  assert.equal(new Headers(calls[0].init.headers).get('Authorization'), 'Bearer secret')
 })
 
 

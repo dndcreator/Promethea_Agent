@@ -124,6 +124,10 @@ class EventType(str, Enum):
     TOOL_CALL_RESULT = "tool.call.result"
     TOOL_CALL_ERROR = "tool.call.error"
     ACTION_STATE_CHANGED = "action.state.changed"
+    ACTION_OBSERVATION_COMMITTED = "action.observation.committed"
+    GOAL_GAPS_UPDATED = "goal.gaps.updated"
+    MODEL_CALL_RECORDED = "model.call.recorded"
+    CAPABILITY_SNAPSHOT_CREATED = "capability.snapshot.created"
     # Conversation lifecycle events
     CONVERSATION_START = "conversation.start"      # Conversation started
     CONVERSATION_COMPLETE = "conversation.complete"  # Conversation completed

@@ -2922,6 +2922,18 @@ class MemoryService:
                     "user_id": request.user_id,
                     "query": request.query_text,
                     "mode": policy.get("mode"),
+                    "presentation": {
+                        "kind": "memory",
+                        "title": "Recall memory",
+                        "title_i18n": {"zh": "回忆", "en": "Recall memory"},
+                        "subject": request.query_text,
+                        "references": [{
+                            "kind": "memory",
+                            "target": request.query_text,
+                            "label": request.query_text,
+                            "metadata": {},
+                        }],
+                    },
                     **correlation,
                 },
             )
@@ -3069,6 +3081,13 @@ class MemoryService:
                 "context_length": len(result.formatted_context or ""),
                 "selected": len(result.memory_records),
                 "dropped": len(result.dropped_candidates),
+                "presentation": {
+                    "kind": "memory",
+                    "title": "Recall memory",
+                    "title_i18n": {"zh": "回忆", "en": "Recall memory"},
+                    "subject": request.query_text,
+                    "summary": result.formatted_context[:600],
+                },
                 **correlation,
             }
             await self.event_emitter.emit(EventType.MEMORY_RECALL_FINISHED, payload)

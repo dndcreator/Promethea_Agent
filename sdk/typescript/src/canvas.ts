@@ -1,4 +1,4 @@
-import type { CanvasEnvironment, CanvasEnvironmentList } from './generated/public-contracts.js'
+import type { CanvasEnvironment, CanvasEnvironmentList, CanvasState, CanvasStateWrite } from './generated/public-contracts.js'
 import { HttpTransport } from './transport/http.js'
 
 export class CanvasClient {
@@ -12,5 +12,29 @@ export class CanvasClient {
 
   previewUrl(environment: CanvasEnvironment): string {
     return environment.preview_url
+  }
+
+  private path(environment: Pick<CanvasEnvironment, 'workspace_id' | 'environment_id'>): string {
+    return `/api/canvas/${encodeURIComponent(environment.workspace_id)}/${encodeURIComponent(environment.environment_id)}`
+  }
+
+  getState(environment: CanvasEnvironment): Promise<CanvasState> {
+    return this.transport.json(`${this.path(environment)}/state`)
+  }
+
+  setState(environment: CanvasEnvironment, state: CanvasStateWrite): Promise<CanvasState> {
+    return this.transport.json(`${this.path(environment)}/state`, { method: 'PUT', body: JSON.stringify(state) })
+  }
+
+  retain(environment: CanvasEnvironment): Promise<CanvasEnvironment> {
+    return this.transport.json(`${this.path(environment)}/retain`, { method: 'POST' })
+  }
+
+  remove(environment: CanvasEnvironment): Promise<unknown> {
+    return this.transport.json(this.path(environment), { method: 'DELETE' })
+  }
+
+  reportError(environment: CanvasEnvironment, message: string): Promise<unknown> {
+    return this.transport.json(`${this.path(environment)}/diagnostics`, { method: 'POST', body: JSON.stringify({ message: message.slice(0, 2000) }) })
   }
 }

@@ -79,6 +79,17 @@ def test_update_user_secrets_does_not_clear_on_empty_input(tmp_path, monkeypatch
     assert "API__MODEL=new-model" in text
 
 
+def test_user_secrets_cannot_override_process_memory_backend(tmp_path, monkeypatch):
+    users_dir = tmp_path / "config" / "users"
+    monkeypatch.setattr(user_secrets, "ENV_FILE", tmp_path / ".env")
+    monkeypatch.setattr(user_secrets, "USER_SECRETS_DIR", users_dir)
+
+    user_secrets.update_user_secrets("u5", {"MEMORY__STORE_BACKEND": "flat_memory"})
+
+    text = user_secrets.user_secrets_path("u5").read_text(encoding="utf-8")
+    assert "MEMORY__STORE_BACKEND" not in text
+
+
 def test_multimodal_runtime_inherits_main_endpoint_when_only_model_is_configured(tmp_path, monkeypatch):
     root_env = tmp_path / ".env"
     root_env.write_text("", encoding="utf-8")

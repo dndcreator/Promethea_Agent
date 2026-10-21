@@ -69,11 +69,12 @@ async def test_ingest_and_recall_with_fallback():
         audience="business",
         register="operational",
         use_llm=False,
+        user_id="u1",
     )
     assert out["success"] is True
     assert out["accepted"] >= 1
     assert out["core_capability"] == "graph_structure"
-    assert "fallback mode" in str(out.get("notice") or "").lower()
+    assert out["backend"] == "sqlite"
 
     recalled = await svc.recall_org_context(
         org_id="org_a",
@@ -84,9 +85,9 @@ async def test_ingest_and_recall_with_fallback():
         user_id="u1",
     )
     assert recalled["recalled"] is True
-    assert recalled["backend"] == "in_memory_fallback"
+    assert recalled["backend"] == "sqlite"
     assert recalled["core_capability"] == "graph_structure"
-    assert "fallback mode" in str(recalled.get("notice") or "").lower()
+    assert "persistent" in str(recalled.get("notice") or "").lower()
     assert "summary_text" in recalled
 
 
@@ -132,10 +133,11 @@ async def test_visual_graph_with_fallback():
         audience="business",
         register="operational",
         use_llm=False,
+        user_id="u1",
     )
     payload = await svc.get_visual_graph(org_id="org_a", topic="strategy", audience="business", limit_nodes=100, user_id="u1")
-    assert payload["backend"] == "in_memory_fallback"
+    assert payload["backend"] == "sqlite"
     assert payload["core_capability"] == "graph_structure"
-    assert "fallback mode" in str(payload.get("notice") or "").lower()
+    assert "persistent" in str(payload.get("notice") or "").lower()
     assert payload["stats"]["nodes"] >= 2
     assert payload["stats"]["edges"] >= 1

@@ -20,14 +20,16 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 - [CLI](./cli-reference.md)
 - [Protocol Surface](./reference/protocol-surface.md)
 - [Configuration Contract](./reference/config-contract.md)
-- [Official Tools](./official-tools.md)
+- [Tool Catalog](./tools.md)
 - [Extensions](./extensions.md)
 
 ## Architecture
 - [Conversation Pipeline](./architecture/conversation-pipeline.md)
 - [Protocol Boundaries](./architecture/protocol-boundaries.md)
 - [Task Runtime](./architecture/task-runtime.md)
+- [Goal Gaps](./architecture/goal-gaps.md)
 - [Memory Model](./architecture/memory-model.md)
+- [Organization Brain](./architecture/organization-brain.md)
 - [Tool Runtime](./architecture/tool-runtime.md)
 - [Skill Layer](./architecture/skill-layer.md)
 - [Runtime IO](./architecture/runtime-io.md)
@@ -35,10 +37,12 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 - [Prompt Assembly](./architecture/prompt-assembly.md)
 - [Security Model](./architecture/security-model.md)
 - [Workspace Model](./architecture/workspace-model.md)
+- [Intelligent Canvas](./architecture/intelligent-canvas.md)
 - [Reasoning Model](./architecture/reasoning-model.md)
 - [Observability](./architecture/observability.md)
 
 ## Playbooks
+- [Personal Assistant Accounts](./playbooks/personal-assistant.md)
 - [Add a Tool](./playbooks/how-to-add-a-tool.md)
 - [Add a Skill](./playbooks/how-to-add-a-skill.md)
 - [Add a Channel](./playbooks/how-to-add-a-channel.md)

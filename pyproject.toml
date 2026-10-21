@@ -49,6 +49,7 @@ dependencies = [
 promethea = "promethea_cli.main:main"
 
 [project.optional-dependencies]
+productivity = ["caldav>=2.2.6,<3"]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
@@ -84,6 +85,11 @@ markers = [
 where = ["."]
 include = ["*"]
 exclude = ["tests*", "UI*"]
+
+[tool.setuptools.package-data]
+"agentkit.tools" = ["**/agent-manifest.json"]
+computer = ["canvas_bridge.js", "canvas_components.js"]
+skills = ["packs/official/*/*.yaml", "packs/official/*/*.md", "packs/official/*/*.json"]
 
 [tool.coverage.run]
 source = ["agentkit", "gateway", "computer", "memory", "core", "channels"]

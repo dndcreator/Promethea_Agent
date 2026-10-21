@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
 type Lang = 'zh' | 'en'
@@ -16,6 +16,7 @@ export function LanguageProvider({ children }: { children: ReactNode }) {
     const stored = localStorage.getItem('promethea_ui_lang')
     return stored === 'en' ? 'en' : 'zh'
   })
+  useEffect(() => { document.documentElement.lang = lang }, [lang])
 
   const value = useMemo<LanguageContextValue>(() => ({
     lang,

@@ -36,6 +36,46 @@ def test_registry_register_and_resolve_local():
     assert spec.source == ToolSource.LOCAL
 
 
+def test_mcp_refresh_rejects_native_collision_without_partial_changes():
+    registry = ToolRegistry()
+    native = registry.register_local_tool(_DummyLocalTool())
+    registry.register_mcp_services({"mcp_services": [{
+        "name": "remote", "available_tools": [{"name": "old"}],
+    }]})
+    before = {spec.full_name: spec for spec in registry.list_specs()}
+    with pytest.raises(ValueError, match="another execution source"):
+        registry.replace_mcp_services({"mcp_services": [
+            {"name": "remote", "available_tools": [{"name": "new"}]},
+            {"name": "local", "available_tools": [{"name": "echo", "side_effect_level": "read_only"}]},
+        ]})
+    assert {spec.full_name: spec for spec in registry.list_specs()} == before
+    assert registry.resolve(tool_name="local.echo", params={}) is native
+
+
+def test_explicit_native_registration_replaces_only_inferred_placeholder():
+    registry = ToolRegistry()
+    placeholder = registry.resolve(tool_name="local.echo", params={"service_name": "local", "tool_name": "echo"})
+    assert placeholder.metadata["inferred"] is True
+    native = registry.register_local_tool(_DummyLocalTool())
+    assert registry.resolve(tool_name="local.echo", params={}) is native
+    assert native.source is ToolSource.LOCAL
+
+
+def test_mcp_refresh_validation_error_preserves_previous_snapshot():
+    registry = ToolRegistry()
+    registry.register_mcp_services({"mcp_services": [{
+        "name": "remote", "available_tools": [{"name": "old"}],
+    }]})
+    before = registry.list_specs()
+    with pytest.raises(ValueError):
+        registry.replace_mcp_services({"mcp_services": [{
+            "name": "remote", "available_tools": [
+                {"name": "new"}, {"name": "broken", "side_effect_level": "not_a_level"},
+            ],
+        }]})
+    assert registry.list_specs() == before
+
+
 def test_policy_allow_deny():
     policy = ToolPolicy()
     spec = ToolSpec(

@@ -31,9 +31,11 @@ class ToolSpec(BaseModel):
     timeout_ms: int = 30000
     retry_policy: Dict[str, Any] = Field(default_factory=lambda: {"max_retries": 0})
     idempotency_hint: str = "unknown"
+    concurrency_safe: bool = False
     source: ToolSource = ToolSource.LOCAL
     enabled: bool = True
     service_name: Optional[str] = None
+    presentation: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @property

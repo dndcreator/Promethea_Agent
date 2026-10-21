@@ -3,6 +3,7 @@
 from typing import Any, Dict, List, Optional, Tuple
 
 from .spec import SideEffectLevel, ToolSource, ToolSpec
+from .presentation import validate_presentation_declaration
 
 
 class ToolRegistry:
@@ -12,6 +13,9 @@ class ToolRegistry:
         self._specs: Dict[str, ToolSpec] = {}
 
     def register_spec(self, spec: ToolSpec) -> None:
+        existing = self._specs.get(spec.full_name)
+        if existing is not None and not existing.metadata.get("inferred") and existing.source != spec.source:
+            raise ValueError(f"tool id belongs to another execution source: {spec.full_name}")
         self._specs[spec.full_name] = spec
 
     def unregister_spec(self, full_name: str) -> None:
@@ -38,8 +42,10 @@ class ToolRegistry:
             timeout_ms=int(getattr(tool, "timeout_ms", 30000) or 30000),
             retry_policy=dict(getattr(tool, "retry_policy", {}) or {"max_retries": 0}),
             idempotency_hint=str(getattr(tool, "idempotency_hint", "unknown") or "unknown"),
+            concurrency_safe=getattr(tool, "concurrency_safe", False) is True,
             source=source,
             capability_type="extension" if source == ToolSource.EXTENSION else "local",
+            presentation=validate_presentation_declaration(getattr(tool, "presentation", None)),
             metadata={
                 "tool_id": tool_id,
                 "declared_side_effect": bool(getattr(tool, "side_effect_level", None)),
@@ -72,6 +78,7 @@ class ToolRegistry:
                     side_effect_level=SideEffectLevel.PRIVILEGED_HOST_ACTION,
                     source=ToolSource.MCP,
                     capability_type="mcp",
+                    presentation=validate_presentation_declaration(svc.get("presentation")),
                 )
                 self.register_spec(spec)
                 continue
@@ -91,6 +98,8 @@ class ToolRegistry:
                     source=ToolSource.MCP,
                     capability_type="mcp",
                     input_schema=action.get("input_schema") or {},
+                    concurrency_safe=action.get("concurrency_safe") is True,
+                    presentation=validate_presentation_declaration(action.get("presentation")),
                     metadata={
                         "declared_side_effect": bool(action.get("side_effect_level")),
                         "side_effect_selector": action.get("side_effect_selector") or {},
@@ -102,10 +111,12 @@ class ToolRegistry:
                 self.register_spec(spec)
 
     def replace_mcp_services(self, services: Dict[str, Any]) -> None:
-        for full_name, spec in list(self._specs.items()):
-            if spec.source == ToolSource.MCP:
-                self._specs.pop(full_name, None)
-        self.register_mcp_services(services)
+        staged = ToolRegistry()
+        for spec in self._specs.values():
+            if spec.source != ToolSource.MCP:
+                staged.register_spec(spec)
+        staged.register_mcp_services(services)
+        self._specs = staged._specs
 
     def normalize_call(self, *, tool_name: str, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
         """Normalize model-produced tool calls to a registered canonical tool id.

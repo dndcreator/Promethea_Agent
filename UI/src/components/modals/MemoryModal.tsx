@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, Brain, CircleAlert, Database, Pencil, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import {
@@ -9,47 +9,61 @@ import {
   getMemoryWriteProposals,
   searchMemoryEntries,
   updateMemoryEntry,
+  readApiResponse,
 } from '../../services/api'
 import type { CognitionBundle, MemoryProposalAction } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
 import CognitionSpace from './memory/CognitionSpace'
+import FeatureSurface from '../FeatureSurface'
 
-type Tab = 'cognition' | 'entries' | 'proposals'
+export type MemoryModalTab = 'cognition' | 'entries' | 'proposals'
 
-export default function MemoryModal({ onClose }: { onClose: () => void }) {
+export default function MemoryModal({ onClose, embedded = false, initialTab = 'cognition', initialQuery = '' }: { onClose: () => void; embedded?: boolean; initialTab?: MemoryModalTab; initialQuery?: string }) {
   const { t } = useLanguage()
-  const [activeTab, setActiveTab] = useState<Tab>('cognition')
+  const [activeTab, setActiveTab] = useState<MemoryModalTab>(initialTab)
   const [cognition, setCognition] = useState<CognitionBundle | null>(null)
   const [entries, setEntries] = useState<any[]>([])
   const [proposals, setProposals] = useState<any[]>([])
   const [selectedEntry, setSelectedEntry] = useState<any>(null)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(initialQuery)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const requestEpoch = useRef(0)
+
+  useEffect(() => { setActiveTab(initialTab); setQuery(initialQuery); setSelectedEntry(null) }, [initialTab, initialQuery])
 
   useEffect(() => {
     void refresh(activeTab)
+    return () => { requestEpoch.current += 1 }
   }, [activeTab])
 
-  const refresh = async (tab = activeTab) => {
+  const refresh = async (tab: MemoryModalTab = activeTab) => {
+    const epoch = ++requestEpoch.current
     setLoading(true)
+    setError('')
     try {
       if (tab === 'cognition') {
         const [bundle, proposalData] = await Promise.all([
           getCognitionBundle(),
-          getMemoryWriteProposals('pending').then((response) => response.json()),
+          getMemoryWriteProposals('pending').then(readApiResponse),
         ])
+        if (epoch !== requestEpoch.current) return
         setCognition(bundle)
         setProposals(proposalData.proposals || [])
       } else if (tab === 'entries') {
         const response = query.trim() ? await searchMemoryEntries(query, 200) : await getMemoryEntries()
-        const data = await response.json()
+        const data = await readApiResponse(response)
+        if (epoch !== requestEpoch.current) return
         setEntries(data.entries || [])
       } else {
-        const data = await getMemoryWriteProposals('pending').then((response) => response.json())
+        const data = await getMemoryWriteProposals('pending').then(readApiResponse)
+        if (epoch !== requestEpoch.current) return
         setProposals(data.proposals || [])
       }
+    } catch (cause) {
+      if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (epoch === requestEpoch.current) setLoading(false)
     }
   }
 
@@ -57,31 +71,34 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
     if (!selectedEntry?.memory_id) return
     const next = window.prompt(t('编辑记忆内容', 'Edit memory content'), selectedEntry.content || '')
     if (next === null || !next.trim()) return
-    await updateMemoryEntry(selectedEntry.memory_id, next.trim())
-    setSelectedEntry({ ...selectedEntry, content: next.trim() })
-    await refresh('entries')
+    try {
+      await updateMemoryEntry(selectedEntry.memory_id, next.trim()).then(readApiResponse)
+      setSelectedEntry({ ...selectedEntry, content: next.trim() })
+      await refresh('entries')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
   }
 
   const deleteSelected = async () => {
     if (!selectedEntry?.memory_id || !window.confirm(t('删除这条记忆？', 'Delete this memory entry?'))) return
-    await deleteMemoryEntry(selectedEntry.memory_id)
-    setSelectedEntry(null)
-    await refresh('entries')
+    try {
+      await deleteMemoryEntry(selectedEntry.memory_id).then(readApiResponse)
+      setSelectedEntry(null)
+      await refresh('entries')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
   }
 
   const decideProposal = async (proposalId: string, action: MemoryProposalAction) => {
-    await decideMemoryWriteProposal(proposalId, action)
+    await decideMemoryWriteProposal(proposalId, action).then(readApiResponse)
     await refresh('proposals')
     setCognition(await getCognitionBundle())
     if (action === 'confirm_write' || action === 'confirm_write_keep_existing') {
-      const data = await getMemoryEntries().then((response) => response.json())
+      const data = await getMemoryEntries().then(readApiResponse)
       setEntries(data.entries || [])
     }
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/35 p-2 backdrop-blur-sm sm:p-6">
-      <div className="flex h-[94vh] w-full max-w-[1280px] flex-col overflow-hidden rounded-lg border border-white/70 bg-[#f7f8f5] shadow-[0_28px_90px_rgba(31,33,31,0.22)] sm:h-[84vh]">
+    <FeatureSurface embedded={embedded} onClose={onClose} label={t('认知工作台', 'Cognition Workbench')}>
         <header className="flex min-h-[64px] items-center border-b border-black/5 bg-white/85 px-3 sm:px-5">
           <div className="hidden shrink-0 sm:block">
             <div className="text-[10px] font-semibold uppercase text-text-muted">Self Model</div>
@@ -108,6 +125,7 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
           </div>
         </header>
 
+        {error && <div role="alert" className="page-error"><span>{error}</span><button type="button" onClick={() => void refresh()}>{t('重试', 'Retry')}</button></div>}
         <main className="min-h-0 flex-1">
           {activeTab === 'cognition' && (
             <CognitionSpace
@@ -133,8 +151,7 @@ export default function MemoryModal({ onClose }: { onClose: () => void }) {
             <ProposalReview proposals={proposals.slice().reverse()} onDecide={decideProposal} />
           )}
         </main>
-      </div>
-    </div>
+    </FeatureSurface>
   )
 }
 
@@ -223,26 +240,31 @@ function MemoryEntries({
 function ProposalReview({ proposals, onDecide }: { proposals: any[]; onDecide: (proposalId: string, action: MemoryProposalAction) => Promise<void> }) {
   const { t } = useLanguage()
   const [busyId, setBusyId] = useState('')
+  const [error, setError] = useState('')
   if (proposals.length === 0) return <div className="h-full bg-[#f1f2ef] p-8"><EmptyState>{t('暂无待确认认知。', 'No cognition requires review.')}</EmptyState></div>
 
   const decide = async (proposalId: string, action: MemoryProposalAction) => {
     setBusyId(`${proposalId}:${action}`)
+    setError('')
     try {
       await onDecide(proposalId, action)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       setBusyId('')
     }
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-[#f1f2ef] px-6 py-5">
+    <div className="h-full overflow-y-auto bg-bg-page px-4 py-5 sm:px-6">
+      {error && <p role="alert" className="page-error">{error}</p>}
       <div className="mx-auto max-w-4xl divide-y divide-black/5 border-y border-black/5 bg-white/55">
         {proposals.map((proposal) => {
           const proposalId = String(proposal.proposal_id || '')
           const conflicts = Array.isArray(proposal.conflict_candidates) ? proposal.conflict_candidates : []
           return (
             <article key={proposalId} className="px-5 py-5">
-              <div className="flex items-start justify-between gap-6">
+              <div className="flex flex-wrap items-start justify-between gap-6">
                 <div className="min-w-0 flex-1">
                   <div className="mb-2 flex gap-3 text-[11px] text-text-muted">
                     <span className="font-semibold uppercase">{proposal.memory_type || 'memory'}</span>
@@ -257,7 +279,7 @@ function ProposalReview({ proposals, onDecide }: { proposals: any[]; onDecide: (
                   )}
                 </div>
                 <div className="flex shrink-0 flex-col items-end gap-2">
-                  <button type="button" disabled={!proposalId || Boolean(busyId)} onClick={() => void decide(proposalId, 'confirm_write')} className="border-b border-[#356c68] pb-1 text-xs font-semibold text-[#285956] disabled:opacity-40">
+                  <button type="button" disabled={!proposalId || Boolean(busyId)} onClick={() => void decide(proposalId, 'confirm_write')} className="border-b border-brand-500 pb-1 text-xs font-semibold text-brand-600 disabled:opacity-40">
                     {t('确认并更新', 'Confirm & update')}
                   </button>
                   <button type="button" disabled={!proposalId || Boolean(busyId)} onClick={() => void decide(proposalId, 'confirm_write_keep_existing')} className="text-xs text-text-normal disabled:opacity-40">
@@ -278,7 +300,7 @@ function ProposalReview({ proposals, onDecide }: { proposals: any[]; onDecide: (
 
 function TabButton({ active, onClick, icon, count, children }: { active: boolean; onClick: () => void; icon: ReactNode; count?: number; children: ReactNode }) {
   return (
-    <button type="button" onClick={onClick} className={`flex shrink-0 items-center gap-2 border-b-2 px-2 text-sm font-medium sm:px-4 ${active ? 'border-[#356c68] text-[#285956]' : 'border-transparent text-text-muted hover:text-text-strong'}`}>
+    <button type="button" onClick={onClick} className={`flex shrink-0 items-center gap-2 border-b-2 px-2 text-sm font-medium sm:px-4 ${active ? 'border-brand-500 text-brand-600' : 'border-transparent text-text-muted hover:text-text-strong'}`}>
       {icon}<span>{children}</span>{Boolean(count) && <span className="text-[10px] text-amber-700">{count}</span>}
     </button>
   )

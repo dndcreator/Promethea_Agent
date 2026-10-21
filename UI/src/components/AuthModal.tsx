@@ -1,24 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { X } from 'lucide-react'
-import { authFetch, getBootstrap } from '../services/api'
+import { authFetch } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
-
-type BootstrapStatus = {
-  configured_backend?: string
-  auth_backend?: string
-  neo4j_available?: boolean
-  neo4j_error?: { code?: string; message?: string }
-  can_register?: boolean
-  reason?: string
-  fallback_backends?: string[]
-}
+import FeatureSurface from './FeatureSurface'
 
 type NoticeKind = 'error' | 'success'
 
 function parseErrorDetail(payload: unknown): { code: string; message: string } {
-  const detail = (payload as { detail?: unknown })?.detail
+  const record = payload as { error_detail?: unknown; detail?: unknown; error?: unknown }
+  const detail = record?.error_detail || record?.detail || record?.error
   if (typeof detail === 'string') return { code: '', message: detail }
   if (detail && typeof detail === 'object') {
     const record = detail as { code?: unknown; message?: unknown }
@@ -30,7 +22,7 @@ function parseErrorDetail(payload: unknown): { code: string; message: string } {
   return { code: '', message: '' }
 }
 
-export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: () => void; onClose?: () => void }) {
+export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: () => void; onClose?: () => void }) {
   const { login } = useAuth()
   const { t } = useLanguage()
   const [isRegister, setIsRegister] = useState(false)
@@ -40,47 +32,15 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
   const [remember, setRemember] = useState(true)
   const [notice, setNotice] = useState('')
   const [noticeKind, setNoticeKind] = useState<NoticeKind>('error')
-  const [bootstrap, setBootstrap] = useState<BootstrapStatus | null>(null)
   const [loading, setLoading] = useState(false)
+  const request = useRef<AbortController | null>(null)
 
   useEffect(() => {
-    getBootstrap()
-      .then((res) => res.json())
-      .then((data) => setBootstrap(data))
-      .catch(() => setBootstrap(null))
+    return () => { request.current?.abort() }
   }, [])
-
-  useEffect(() => {
-    if (!onClose) return
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onClose])
-
-  const backendLabel = bootstrap?.configured_backend || 'neo4j'
-  const neo4jReason = bootstrap?.reason || bootstrap?.neo4j_error?.code || ''
-  const registerBlockedByNeo4j = isRegister && (
-    neo4jReason === 'neo4j_user_backend_unavailable'
-    || neo4jReason === 'neo4j_unavailable'
-    || neo4jReason === 'neo4j_authentication_failed'
-  )
-  const neo4jAuthFailed = neo4jReason === 'neo4j_authentication_failed'
+  const close = () => { request.current?.abort(); onClose?.() }
 
   function getLocalizedFailure(resStatus: number, code: string, message: string): string {
-    if (code === 'neo4j_authentication_failed') {
-      return t(
-        'Neo4j 已启动，但 Neo4j 用户名或密码认证失败。请检查 .env 里的 Neo4j 配置，然后重启 Promethea。',
-        'Neo4j is running, but its username or password authentication failed. Check the Neo4j settings in .env, then restart Promethea.',
-      )
-    }
-    if (code === 'neo4j_user_backend_unavailable' || code === 'neo4j_unavailable') {
-      return t(
-        '当前用户后端是 Neo4j，但无法连接到 Neo4j。请先启动 Neo4j，或切换到 sqlite_graph / flat_memory 后重启再注册。',
-        'The current user backend is Neo4j, but Neo4j is unavailable. Start Neo4j first, or switch to sqlite_graph / flat_memory and restart before registering.',
-      )
-    }
     if (code === 'username_exists_or_system_error') {
       return t('用户名已存在，或注册服务暂时不可用。', 'The username already exists, or the registration service is temporarily unavailable.')
     }
@@ -95,6 +55,9 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
+    if (loading) return
+    const controller = new AbortController()
+    request.current = controller
     setNotice('')
     setNoticeKind('error')
     setLoading(true)
@@ -106,10 +69,12 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
         : { username, password, remember_me: remember }
 
       const res = await authFetch(endpoint, {
+        signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (controller.signal.aborted) return
 
       if (!res.ok) {
         const errorData = await res.json().catch(() => ({}))
@@ -123,6 +88,7 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
         setNotice(t('注册成功，请登录。', 'Registration successful. Please sign in.'))
       } else {
         const data = await res.json()
+        if (controller.signal.aborted) return
         login(
           data.access_token,
           {
@@ -135,60 +101,38 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
         onClose?.()
       }
     } catch (err: unknown) {
+      if (controller.signal.aborted) return
       setNotice(err instanceof Error ? err.message : String(err))
       setNoticeKind('error')
     } finally {
-      setLoading(false)
+      if (!controller.signal.aborted) setLoading(false)
     }
   }
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/40 p-4 backdrop-blur-sm">
-      {onClose && <button type="button" aria-label={t('关闭登录', 'Close sign in')} onClick={onClose} className="absolute inset-0 cursor-default" />}
-      <div className="relative max-h-[calc(100vh-2rem)] w-full max-w-[400px] overflow-y-auto rounded-2xl bg-white shadow-xl">
+    <FeatureSurface onClose={close} label={isRegister ? t('注册', 'Sign Up') : t('登录', 'Sign In')} size="compact">
+      <div className="auth-form overflow-y-auto">
         <div className="flex items-center justify-between border-b border-black/5 px-6 py-4">
           <h2 className="text-xl font-bold text-text-strong">
             {isRegister ? t('注册', 'Sign Up') : t('登录', 'Sign In')}
           </h2>
           {onClose && (
-            <button type="button" onClick={onClose} title={t('关闭', 'Close')} aria-label={t('关闭登录', 'Close sign in')} className="grid h-9 w-9 place-items-center rounded-lg text-text-muted hover:bg-gray-100 hover:text-text-strong">
+            <button type="button" onClick={close} title={t('关闭', 'Close')} aria-label={t('关闭登录', 'Close sign in')} className="icon-button">
               <X size={18} />
             </button>
           )}
         </div>
         <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
           {notice && (
-            <div className={`text-xs p-3 rounded-lg ${noticeKind === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
+            <div role={noticeKind === 'success' ? 'status' : 'alert'} className={`text-xs p-3 rounded-lg ${noticeKind === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
               {notice}
             </div>
           )}
 
-          <div className={`text-xs p-3 rounded-lg border ${registerBlockedByNeo4j ? 'bg-amber-50 text-amber-800 border-amber-100' : 'bg-gray-50 text-text-muted border-black/5'}`}>
-            <div className="font-semibold text-text-strong mb-1">
-              {t('启动状态', 'Startup status')}
-            </div>
-            <div>
-              {t('当前后端', 'Current backend')}: <span className="font-mono">{backendLabel}</span>
-              {bootstrap?.neo4j_available === false && backendLabel === 'neo4j' ? ` · ${t('Neo4j 未就绪', 'Neo4j not ready')}` : ''}
-            </div>
-            {registerBlockedByNeo4j && (
-              <div className="mt-2 leading-relaxed">
-                {neo4jAuthFailed
-                  ? t(
-                    'Neo4j 已响应，但账号或密码认证失败。Promethea 不会静默注册到 fallback，请修正 Neo4j 配置或进入设置/诊断模式切换后端后重启。',
-                    'Neo4j responded, but authentication failed. Promethea will not silently register into a fallback backend. Fix Neo4j settings, or enter setup/diagnostics mode, switch backend, then restart.',
-                  )
-                  : t(
-                    'Neo4j 是默认和核心图结构后端。当前没有连接到 Neo4j，因此不会静默注册到 fallback。你可以启动 Neo4j 后重试，或进入设置/诊断模式切换到其他后端后重启。',
-                    'Neo4j is the default and core graph backend. It is currently unavailable, so Promethea will not silently register into a fallback backend. Start Neo4j and retry, or enter setup/diagnostics mode, switch backend, then restart.',
-                  )}
-              </div>
-            )}
-          </div>
-
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-semibold text-text-strong">{t('用户名', 'Username')}</label>
+            <label htmlFor="auth-username" className="text-xs font-semibold text-text-strong">{t('用户名', 'Username')}</label>
             <input
+              id="auth-username" autoComplete="username" disabled={loading}
               type="text"
               required
               value={username}
@@ -199,8 +143,9 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
           </div>
 
           <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-semibold text-text-strong">{t('密码', 'Password')}</label>
+            <label htmlFor="auth-password" className="text-xs font-semibold text-text-strong">{t('密码', 'Password')}</label>
             <input
+              id="auth-password" autoComplete={isRegister ? 'new-password' : 'current-password'} disabled={loading}
               type="password"
               required
               value={password}
@@ -224,8 +169,9 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
 
           {isRegister && (
             <div className="flex flex-col gap-1.5">
-              <label className="text-xs font-semibold text-text-strong">{t('Agent 名称（可选）', 'Agent Name (Optional)')}</label>
+              <label htmlFor="auth-agent-name" className="text-xs font-semibold text-text-strong">{t('Agent 名称（可选）', 'Agent Name (Optional)')}</label>
               <input
+                id="auth-agent-name" disabled={loading}
                 type="text"
                 value={agentName}
                 onChange={(e) => setAgentName(e.target.value)}
@@ -246,24 +192,16 @@ export default function AuthModal({ onEnterSetup, onClose }: { onEnterSetup?: ()
           <div className="text-center mt-2">
             <button
               type="button"
+              disabled={loading}
               onClick={() => { setIsRegister(!isRegister); setNotice('') }}
               className="text-xs text-brand-600 hover:underline"
             >
               {isRegister ? t('已有账号？登录', 'Already have an account? Sign in') : t('还没有账号？注册', "Don't have an account? Sign up")}
             </button>
           </div>
-
-          {registerBlockedByNeo4j && (
-            <button
-              type="button"
-              onClick={onEnterSetup}
-              className="text-xs px-3 py-2 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100"
-            >
-              {t('进入设置 / 诊断模式', 'Enter setup / diagnostics mode')}
-            </button>
-          )}
+          {onEnterSetup && <button type="button" className="text-button self-center" onClick={() => { request.current?.abort(); onEnterSetup() }}>{t('系统诊断', 'Diagnostics')}</button>}
         </form>
       </div>
-    </div>
+    </FeatureSurface>
   )
 }

@@ -18,8 +18,9 @@ class SelfEvolveCreateTaskRequest(BaseModel):
     capability_id: str = Field(min_length=2, max_length=48)
     version: str = Field(default="1.0.0", min_length=1, max_length=32)
     description: str = Field(min_length=1, max_length=500)
-    commands: List[Dict[str, Any]] = Field(min_length=1)
+    commands: List[Dict[str, Any]] = Field(default_factory=list)
     acceptance_criteria: Optional[List[str]] = None
+    canvas: Optional[Dict[str, Any]] = None
 
 
 class SelfEvolveContextRequest(BaseModel):
@@ -101,6 +102,7 @@ async def self_evolve_create_task(
             description=request.description,
             commands=list(request.commands),
             acceptance_criteria=list(request.acceptance_criteria or []),
+            **({"canvas": request.canvas} if request.canvas is not None else {}),
             user_id=current_user_id,
         )
         return {"status": "success", "user_id": current_user_id, **out}

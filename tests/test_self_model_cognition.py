@@ -70,6 +70,24 @@ class _CandidateMemoryService(_MemoryService):
             ],
         }
 
+    def search_entries(self, **kwargs):
+        self.queries.append(kwargs["query"])
+        return {
+            "ok": True,
+            "total": 1,
+            "entries": [
+                {
+                    "memory_id": "candidate-1",
+                    "content": "The current project uses Neo4j.",
+                    "memory_type": "project_state",
+                    "source_layer": "warm",
+                    "importance": 0.9,
+                    "relevance_score": 0.95,
+                    "metadata": {"community_id": "project-db"},
+                }
+            ],
+        }
+
     async def offer_cognition_snapshot(self, **kwargs):
         metrics = kwargs.get("snapshot", {}).get("metrics", {})
         if int(metrics.get("llm_calls") or 0) <= 0 or metrics.get("degraded"):

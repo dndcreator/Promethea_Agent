@@ -5,7 +5,9 @@ import json
 import os
 import threading
 from collections import deque
+from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional
 from uuid import uuid4
@@ -38,7 +40,24 @@ def _redact(value: Any) -> Any:
         return [_redact(item) for item in value]
     if isinstance(value, tuple):
         return [_redact(item) for item in value]
-    return value
+    if isinstance(value, (set, frozenset)):
+        items = [_redact(item) for item in value]
+        return sorted(items, key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, default=str))
+    if isinstance(value, Enum):
+        return _redact(value.value)
+    if isinstance(value, (datetime, Path)):
+        return value.isoformat() if isinstance(value, datetime) else str(value)
+    if is_dataclass(value) and not isinstance(value, type):
+        return _redact(asdict(value))
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _redact(model_dump(mode="json"))
+        except TypeError:
+            return _redact(model_dump())
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 class RuntimeEventLog:
@@ -80,7 +99,16 @@ class RuntimeEventLog:
                 "user_id": body.get("user_id"),
                 "session_id": body.get("session_id"),
                 "task_id": body.get("task_id"),
-                "run_id": body.get("run_id") or body.get("workflow_run_id") or body.get("action_run_id"),
+                "run_id": body.get("run_id") or body.get("task_run_id") or body.get("workflow_run_id") or body.get("action_run_id"),
+                "task_run_id": body.get("task_run_id"),
+                "workflow_run_id": body.get("workflow_run_id"),
+                "conversation_turn_id": body.get("conversation_turn_id"),
+                "action_loop_id": body.get("action_loop_id") or body.get("action_run_id"),
+                "model_step_id": body.get("model_step_id"),
+                "model_call_id": body.get("model_call_id"),
+                "provider_request_id": body.get("provider_request_id"),
+                "tool_call_id": body.get("tool_call_id"),
+                "observation_id": body.get("observation_id"),
                 "trace_id": body.get("trace_id"),
                 "request_id": body.get("request_id"),
                 "source": body.get("source_module") or body.get("source") or "gateway",
@@ -103,6 +131,7 @@ class RuntimeEventLog:
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
         event_type: Optional[str] = None,
+        observation_id: Optional[str] = None,
         after_seq: int = 0,
         limit: int = 200,
         oldest_first: bool = False,
@@ -121,6 +150,8 @@ class RuntimeEventLog:
                     if task_id and row.get("task_id") != task_id:
                         continue
                     if event_type and row.get("event_type") != event_type:
+                        continue
+                    if observation_id and row.get("observation_id") != observation_id:
                         continue
                     rows.append(row)
                     if oldest_first and len(rows) >= resolved_limit:

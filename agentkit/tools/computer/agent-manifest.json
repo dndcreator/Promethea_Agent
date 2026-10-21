@@ -84,6 +84,7 @@
       },
       {
         "command": "perception_action",
+        "requiresCapability": "computer.screen",
         "sideEffectLevel": "privileged_host_action",
         "sideEffectSelector": {
           "parameter": "mode",

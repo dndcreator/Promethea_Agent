@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from dotenv import dotenv_values
 
@@ -25,6 +25,10 @@ class SystemConfig(BaseSettings):
     log_model_payloads: bool = Field(default=False)
     timezone: str = Field(default="auto")
     session_ttl_hours: int = Field(default=0, ge=0)
+    browser_channel: str = ""
+    browser_auto_install: bool = True
+    browser_install_timeout_s: float = Field(default=120, ge=5, le=600)
+    browser_install_retry_delay_s: float = Field(default=60, ge=0, le=3600)
 
     @field_validator("log_level")
     @classmethod
@@ -237,6 +241,22 @@ class MemoryConfig(BaseSettings):
         return value
 
 
+class MoiraiLearningConfig(BaseSettings):
+    enabled: bool = True
+    distillation_enabled: bool = True
+    min_episodes: int = Field(default=8, ge=2, le=32)
+    interval_seconds: float = Field(default=3600, ge=0)
+    idle_seconds: float = Field(default=60, ge=0)
+    timeout_seconds: float = Field(default=30, ge=1, le=300)
+
+
+class SelfEvolveConfig(BaseSettings):
+    enabled: bool = False
+    max_tasks_list: int = Field(default=50, ge=1, le=500)
+    max_context_chars_per_file: int = Field(default=4000, ge=200, le=20000)
+    browser_channel: str = ""
+
+
 class ReasoningConfig(BaseSettings):
     enabled: bool = Field(default=True)
     mode: str = Field(default="react_tot")
@@ -308,6 +328,9 @@ class OrgBrainConfig(BaseSettings):
     extract_text_max_chars: int = Field(default=5000, ge=500, le=200000)
     heuristic_max_lines: int = Field(default=30, ge=1, le=1000)
     heuristic_max_items: int = Field(default=15, ge=1, le=200)
+    chunk_chars: int = Field(default=5000, ge=500, le=50000)
+    max_chunks: int = Field(default=20, ge=1, le=200)
+    personal_memory_collaboration: str = Field(default="context_only")
 
     @field_validator("recall_priority")
     @classmethod
@@ -315,6 +338,14 @@ class OrgBrainConfig(BaseSettings):
         value = (v or "blend").strip().lower()
         if value not in {"blend", "override_persona"}:
             raise ValueError("org_brain.recall_priority must be one of: blend, override_persona")
+        return value
+
+    @field_validator("personal_memory_collaboration")
+    @classmethod
+    def validate_personal_memory_collaboration(cls, v: str) -> str:
+        value = (v or "context_only").strip().lower()
+        if value not in {"off", "context_only"}:
+            raise ValueError("org_brain.personal_memory_collaboration must be one of: off, context_only")
         return value
 
     @field_validator("allowed_suffixes", mode="before")
@@ -446,14 +477,39 @@ class SystemPrompts(BaseSettings):
     )
 
 
+class GoalGapConfig(BaseSettings):
+    enabled: bool = True
+    max_gaps: int = Field(default=12, ge=1, le=32)
+    max_updates: int = Field(default=6, ge=1, le=8)
+    window: int = Field(default=4, ge=2, le=16)
+    context_chars: int = Field(default=2400, ge=1200, le=8000)
+
+    @model_validator(mode="after")
+    def capacity_fits_context(self):
+        if self.context_chars < self.max_gaps * 100 + 800:
+            raise ValueError("action.gaps.context_chars must fit all gap identities (max_gaps * 100 + 800)")
+        return self
+
+
+class ActionConfig(BaseSettings):
+    max_steps: int = Field(default=5, ge=1, le=50)
+    max_parallel_tool_calls: int = Field(default=4, ge=1, le=32)
+    observation_chars: int = Field(default=16000, ge=1000, le=100000)
+    observation_history_chars: int = Field(default=96000, ge=4000, le=1000000)
+    gaps: GoalGapConfig = Field(default_factory=GoalGapConfig)
+
+
 class PrometheaConfig(BaseSettings):
     config_version: str = Field(default="1")
     system: SystemConfig = Field(default_factory=SystemConfig)
     api: APIConfig = Field(default_factory=APIConfig)
+    action: ActionConfig = Field(default_factory=ActionConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     self_model: SelfModelConfig = Field(default_factory=SelfModelConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
+    moirai_learning: MoiraiLearningConfig = Field(default_factory=MoiraiLearningConfig)
+    self_evolve: SelfEvolveConfig = Field(default_factory=SelfEvolveConfig)
     org_brain: OrgBrainConfig = Field(default_factory=OrgBrainConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
 

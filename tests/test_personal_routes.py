@@ -95,7 +95,12 @@ async def test_personal_workflow_recovery_filters_recoverable(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_personal_export_and_import_bundle(monkeypatch):
+async def test_personal_export_and_import_bundle(monkeypatch, tmp_path):
+    from gateway.http.project_store import ProjectStore
+    store = ProjectStore(tmp_path / "projects.sqlite3")
+    project = store.create("u1", "Notes")
+    store.assign("u1", "s1", project["project_id"])
+    monkeypatch.setattr(personal, "get_project_store", lambda: store)
     class _Cfg:
         def get_merged_config(self, user_id):
             _ = user_id
@@ -106,6 +111,9 @@ async def test_personal_export_and_import_bundle(monkeypatch):
             return {"success": True, "message": "ok"}
 
     class _MM:
+        def get_session(self, session_id, user_id):
+            return {} if session_id == "s1" and user_id == "u1" else None
+
         def export_user_sessions(self, user_id, include_messages=True):
             _ = (user_id, include_messages)
             return [{"session_id": "s1", "messages": [{"role": "user", "content": "hi"}]}]
@@ -150,6 +158,8 @@ async def test_personal_export_and_import_bundle(monkeypatch):
     assert bundle["payload"]["sessions"][0]["session_id"] == "s1"
     assert bundle["payload"]["files"]["stats"]["total_files"] == 1
     assert bundle["payload"]["memory"]["included"] is True
+    assert bundle["payload"]["projects"][0]["session_ids"] == ["s1"]
+    store.clear_user("u1")
 
     imported = await personal.import_personal_bundle(
         personal.PersonalImportRequest(
@@ -166,3 +176,4 @@ async def test_personal_export_and_import_bundle(monkeypatch):
     assert imported["applied"]["sessions"]["imported_sessions"] == 1
     assert imported["applied"]["files"]["imported_files"] == 1
     assert imported["applied"]["memory"]["ok"] is True
+    assert store.list("u1")[0]["session_ids"] == ["s1"]

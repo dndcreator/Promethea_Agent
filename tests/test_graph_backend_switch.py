@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from memory.adapter import MemoryAdapter
 from memory.backends.sqlite_graph import SqliteGraphMemoryStore
+from memory.migration_lineage import MigrationLineageStore
 
 
 def test_backend_switch_sqlite_to_flat_with_mef(tmp_path):
@@ -18,8 +19,15 @@ def test_backend_switch_sqlite_to_flat_with_mef(tmp_path):
     adapter._idle_timer_lock = None
     adapter._idle_timers = {}
     adapter._maintenance_state = {}
-    adapter._migration_state = {"mode": "off", "source_backend": None, "target_backend": None, "checkpoint": None, "updated_at": None}
+    adapter._migration_state = {
+        "mode": "off",
+        "source_backend": None,
+        "target_backend": None,
+        "checkpoint": None,
+        "updated_at": None,
+    }
     adapter._dual_write_store = None
+    adapter._migration_lineage = MigrationLineageStore(tmp_path / "migrations")
     adapter.store_backend = "sqlite_graph"
     adapter._config = SimpleNamespace(
         memory=SimpleNamespace(
@@ -40,26 +48,48 @@ def test_backend_switch_sqlite_to_flat_with_mef(tmp_path):
 
     out = adapter.migrate_backend("flat_memory", mode="cutover")
     assert out.get("ok") is True
+    assert out.get("generation_id")
     assert adapter.store_backend == "flat_memory"
+    lineage = adapter.get_migration_lineage()
+    assert lineage["active_generation"] == out["generation_id"]
+    assert lineage["generations"][-1]["status"] == "completed"
 
     context = adapter.get_context(query="tokio", session_id="s2", user_id="u1")
     assert "tokio" in context.lower()
 
 
-def test_backend_switch_does_not_cutover_when_import_fails(monkeypatch):
+def test_backend_switch_does_not_cutover_when_import_fails(tmp_path):
     adapter = MemoryAdapter.__new__(MemoryAdapter)
     adapter.store_backend = "sqlite_graph"
     adapter._dual_write_store = None
+    adapter._migration_lineage = MigrationLineageStore(tmp_path / "migrations")
     adapter._migration_state = {"mode": "off"}
     adapter.store = object()
     adapter._build_store = lambda _backend: SimpleNamespace(
-        import_mef=lambda payload, merge=True: {"ok": False, "reason": "write_error", "imported": {"memory_items": 0}}
+        import_mef=lambda payload, merge=True: {
+            "ok": False,
+            "reason": "write_error",
+            "imported": {"memory_items": 0},
+        }
     )
-    adapter.export_mef = lambda: {"source_backend": "sqlite_graph", "memory_items": [{"id": "m1"}]}
+    adapter.export_mef = lambda: {
+        "source_backend": "sqlite_graph",
+        "memory_items": [{"id": "m1"}],
+    }
 
     out = adapter.migrate_backend("flat_memory", mode="cutover")
     assert out.get("ok") is False
     assert "import failed" in str(out.get("reason") or "")
     assert out.get("active_backend") == "sqlite_graph"
     assert adapter.store_backend == "sqlite_graph"
+    assert adapter.get_migration_lineage()["generations"][-1]["status"] == "failed"
 
+
+def test_backend_switch_rejects_unknown_mode_before_building_target():
+    adapter = MemoryAdapter.__new__(MemoryAdapter)
+    adapter.store_backend = "sqlite_graph"
+    adapter._build_store = lambda _backend: (_ for _ in ()).throw(AssertionError("must not build target"))
+
+    out = adapter.migrate_backend("flat_memory", mode="typo")
+
+    assert out == {"ok": False, "reason": "unsupported migration mode: typo"}

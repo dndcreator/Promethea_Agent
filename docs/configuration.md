@@ -21,13 +21,49 @@ Per-user layout:
 ```text
 .env                                 # root default sensitive config
 config/default.json                  # root default basic/advanced config
+config/users/identity.sqlite3        # stable local accounts and channel bindings
 config/users/<user_id>/secrets.env   # user sensitive config, copied from root .env when missing
 config/users/<user_id>/config.json   # user basic/advanced config, copied from default config
 ```
 
 Existing user files are never overwritten by startup or registration helpers.
+Personal mail and calendar account keys are an exception to root inheritance:
+they must be configured explicitly in the user's `secrets.env` or Settings and
+never copy the operator's personal account. See
+[Personal Assistant Accounts](playbooks/personal-assistant.md).
+The identity database is independent of `memory.store_backend`; switching or
+migrating Memory never changes which users can sign in. Legacy Neo4j and
+`_local_users.json` accounts are imported idempotently while preserving their
+user IDs and password hashes.
 
 ---
+
+## Browser Preparation
+
+Browser tools and Canvas verification share `computer/browser_runtime.py`.
+Automatic mode first tries Playwright's matching Chromium, then installed Edge
+or Chrome, and only downloads managed Chromium when none is present. Download
+uses the current Python interpreter and the official Playwright CLI, inherits
+its proxy/cache settings (including `PLAYWRIGHT_BROWSERS_PATH`), and never
+installs OS packages or replaces an installed Edge/Chrome. Explicit channels
+are strict and do not trigger a different browser installation.
+
+| JSON field | Environment variable | Default |
+| --- | --- | --- |
+| `system.browser_channel` | `SYSTEM__BROWSER_CHANNEL` | empty / automatic |
+| `system.browser_auto_install` | `SYSTEM__BROWSER_AUTO_INSTALL` | `true` |
+| `system.browser_install_timeout_s` | `SYSTEM__BROWSER_INSTALL_TIMEOUT_S` | `120` |
+| `system.browser_install_retry_delay_s` | `SYSTEM__BROWSER_INSTALL_RETRY_DELAY_S` | `60` |
+
+These are host runtime settings, not Agent-generated policy. Concurrent callers
+in one event loop share installation, failed preparation has a retry cooldown,
+and timeout/cancellation terminates the installer process tree. Browser startup
+options and sandbox policy are preserved for every candidate. Linux hosts may
+still require administrator-installed system libraries; Promethea does not
+silently escalate privileges. Canvas verification allows its existing 45-second
+limit plus the configured preparation allowance. `self_evolve.browser_channel`
+remains an optional explicit Canvas override; ordinary users can leave it on
+Automatic. Self Evolve enablement is independent of browser availability.
 
 ## Quick setup
 
@@ -53,7 +89,7 @@ Controls every LLM call made by the runtime.
 ### Multimodal model routing
 
 Image input remains part of the Conversation model I/O path; it is not an
-official tool and does not pass through tool routing. Promethea sends an image
+tool and does not pass through tool routing. Promethea sends an image
 request to the main model first. If the provider explicitly reports that the
 model does not support the requested modality, the runtime remembers that
 capability result for the process lifetime and uses the configured multimodal
@@ -126,7 +162,7 @@ or `config/users/<user_id>/config.json`.
 
 ## Sensitive section: web search provider (`.env` / `secrets.env`)
 
-`web.search` is a stable official tool. The provider is selected at runtime from
+`web.search` is a stable tool. The provider is selected at runtime from
 the current user's secret settings, so the router and prompt only need to reason
 about one web-search capability.
 
@@ -184,11 +220,11 @@ SEARCH__SEARXNG_URL=http://127.0.0.1:8888
 
 Provider implementation rule:
 
-- The official tool remains `web.search`.
+- The public tool remains `web.search`.
 - Provider-specific code belongs in the web-search runtime/provider layer.
 - Providers register by stable id; selection does not depend on import or
   registration order.
-- Do not register separate official tools such as `brave.search` or
+- Do not register separate tools such as `brave.search` or
   `tavily.search` for the same general web-search capability.
 - Additional providers should return the normalized result shape:
   `{query, provider, count, results: [{title, url, snippet, source}]}`.
@@ -380,7 +416,7 @@ Reading files does not grant mouse or keyboard control of the desktop.
 
 Runtime tool calls and Gateway computer requests resolve computer controllers
 from the authenticated user and workspace, using the same `WorkspaceService`
-as official file and command tools. Browser storage and managed processes are
+as file and command tools. Browser storage and managed processes are
 owned by that workspace. Idle controller sets can be evicted; active operations
 and running managed processes are never evicted to make room. Desktop input
 still targets the shared host desktop and is not isolated by workspace ownership.
@@ -435,9 +471,42 @@ Denied command fragments (always active when sandbox is enabled):
 
 ## Section: `action` - Main-model control loop
 
-`action.max_steps` bounds the number of tool actions the main model may take during one
+`action.max_steps` bounds the number of model decisions during one
 turn. The default is `5`; per-user JSON configuration can lower or raise it without
 changing routing code. Runtime validation keeps the value between `1` and `50`.
+Inspection and recovery consume the same budget. A final answer-only model
+request is allowed after exhaustion, without authorizing further tool actions.
+
+| JSON Key | Environment Variable | Default |
+|---|---|---|
+| `max_parallel_tool_calls` | `ACTION__MAX_PARALLEL_TOOL_CALLS` | `4` |
+| `observation_chars` | `ACTION__OBSERVATION_CHARS` | `16000` |
+| `observation_history_chars` | `ACTION__OBSERVATION_HISTORY_CHARS` | `96000` |
+
+Parallelism applies only to tools explicitly declared concurrency-safe. Other
+calls form exclusive barriers in model order. Result budgets bound the text
+payload projected into each request, not user instructions, tool schemas,
+images, or identity/error metadata; they are character limits, not token counts.
+They do not enable semantic conversation summarization. Retained text results
+can be paged through `runtime.read_observation` under the authenticated owner.
+Runtime log rotation still limits availability; older truncated records remain
+explicitly truncated. All values use the existing root-env/per-user JSON rules.
+
+`action.gaps` enables lightweight goal-relative state inside that same loop.
+It adds no separate model reviewer. JSON keys and their env equivalents:
+
+| JSON Key | Environment Variable | Default |
+|---|---|---|
+| `enabled` | `ACTION__GAPS__ENABLED` | `true` |
+| `max_gaps` | `ACTION__GAPS__MAX_GAPS` | `12` |
+| `max_updates` | `ACTION__GAPS__MAX_UPDATES` | `6` |
+| `window` | `ACTION__GAPS__WINDOW` | `4` |
+| `context_chars` | `ACTION__GAPS__CONTEXT_CHARS` | `2400` |
+
+The context budget is characters, not tokens; capacity must fit all gap identities
+(`context_chars >= max_gaps * 100 + 800`). Turning updates off does not delete
+existing Task requirements. See [Goal Gaps](./architecture/goal-gaps.md) for
+verification semantics, cost controls and limitations.
 
 ---
 
@@ -487,12 +556,11 @@ See:
 
 ---
 
-## Section: `extensions` - official/community tool exposure
+## Section: `extensions` - tool package exposure
 
 Promethea exposes all user-callable tools through a unified Extension Catalog:
 
-- Official local tools are registered from `gateway/official_tools`.
-- Built-in manifest packs under `agentkit/tools` are treated as official local tools.
+- Tool packages in `agentkit/tools` and `extensions/community` are discovered from their manifests through the same loader; package origin does not change policy. The standard toolbox lives in `agentkit/tools/standard`.
 - Community tools are dropped into `extensions/community/<extension_id>` with an
   `agent-manifest.json` file and can be hot-reloaded.
 - External MCP manifests declare a stdio `transport` and remain out of process.
@@ -658,18 +726,20 @@ in the job timezone; offset-aware values retain their stated instant.
     "org_id": "",
     "recall_priority": "blend",
     "confirmation_queue": true,
-    "audience_default": "business_department"
+    "audience_default": "business_department",
+    "personal_memory_collaboration": "context_only"
   }
 }
 ```
 
 Fields:
 - `enabled`: master switch.
-- The Web UI hides enterprise upload/recall/graph entrypoints when this is `false`. After changing it, restart the service so runtime modules and prompt injection state are aligned.
+- The Web UI hides enterprise operations and Runtime rejects organization capabilities when this is `false`.
 - `org_id`: organization namespace id.
 - `recall_priority`: `blend` or `override_persona`.
-- `confirmation_queue`: reserve switch for human confirmation flow.
+- `confirmation_queue`: keep extracted revisions pending until an organization administrator approves them.
 - `audience_default`: default audience when turn metadata does not specify one.
+- `personal_memory_collaboration`: `context_only` supplies personal and organization context as isolated prompt blocks; `off` suppresses personal-memory context while organization knowledge is active. Neither mode copies or dual-writes data across scopes.
 - `max_upload_bytes`: max file size accepted by `/api/org-brain/ingest-file`.
 - `allowed_suffixes`: accepted file suffix list for upload ingest.
 - `recall_top_k_default`: default `top_k` for recall API when omitted.
@@ -679,9 +749,18 @@ Fields:
 - `summary_label` / `summary_max_items`: summary rendering behavior.
 - `extract_text_max_chars`: max chars sent into extraction prompt.
 - `heuristic_max_lines` / `heuristic_max_items`: fallback extraction limits.
+- `chunk_chars` / `max_chunks`: bounded document extraction window and chunk count.
 
 API:
 - `GET /api/org-brain/status`
 - `POST /api/org-brain/ingest`
 - `POST /api/org-brain/ingest-file` (upload file and auto-extract text before ingest)
 - `POST /api/org-brain/recall`
+- `POST /api/org-brain/graph`
+- `GET /api/org-brain/documents`
+- `DELETE /api/org-brain/documents/{document_id}`
+- `POST /api/org-brain/review`
+- `GET/POST /api/org-brain/members`
+- `GET /api/org-brain/audit`
+- `GET /api/org-brain/export`
+- `POST /api/org-brain/import`

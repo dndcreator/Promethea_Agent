@@ -109,6 +109,7 @@ class SelfEvolveModule:
         commands: List[Dict[str, Any]],
         acceptance_criteria: Optional[List[str]],
         user_id: str,
+        canvas: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with bind_invocation_context({"user_id": user_id}):
             return await self.service.evolve_create_task(
@@ -118,6 +119,7 @@ class SelfEvolveModule:
                 description=description,
                 commands=commands,
                 acceptance_criteria=acceptance_criteria,
+                canvas=canvas,
             )
 
     async def list_tasks(self, *, limit: int, status: str = "", user_id: str) -> Dict[str, Any]:

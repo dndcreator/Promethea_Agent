@@ -1,176 +1,160 @@
-﻿import { useEffect, useRef, useState } from 'react'
-import { listUserFiles, uploadUserFile } from '../../services/api'
+import { useEffect, useRef, useState } from 'react'
+import { ArrowLeft, File, FileText, Image, Paperclip, RefreshCw, Search, Upload, X } from 'lucide-react'
+import { listUserFiles, readApiResponse, uploadUserFile } from '../../services/api'
 import type { ChatAttachment } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
+import FeatureSurface from '../FeatureSurface'
 
 type FileRecord = {
-  file_id?: string
-  filename?: string
-  path?: string
-  content_type?: string
-  size?: number
+  file_id: string
+  filename: string
   bytes?: number
+  size?: number
+  content_type?: string
+  uploaded_at?: number | null
   preview?: string
+  snippet?: string
   modality?: string
   text_extraction_status?: string
 }
-
-function apiMessage(data: any, fallback: string): string {
-  if (!data) return fallback
-  const candidates = [data.message, data.detail, data.error]
-  for (const candidate of candidates) {
-    if (!candidate) continue
-    if (typeof candidate === 'string') return candidate
-    if (typeof candidate?.message === 'string') return candidate.message
-    if (typeof candidate?.detail === 'string') return candidate.detail
-  }
-  try {
-    return JSON.stringify(data)
-  } catch {
-    return fallback
-  }
-}
-
-export default function FilesModal({
-  sessionId,
-  onClose,
-  onAttach,
-}: {
+type Props = {
   sessionId: string | null
   onClose: () => void
   onAttach?: (file: ChatAttachment) => void
-}) {
-  const { t } = useLanguage()
-  const fileRef = useRef<HTMLInputElement | null>(null)
-  const [query, setQuery] = useState('')
+  embedded?: boolean
+  initialQuery?: string
+  initialFileId?: string
+}
+
+function attachment(file: FileRecord): ChatAttachment {
+  return {
+    file_id: file.file_id,
+    filename: file.filename,
+    modality: file.modality,
+    content_type: file.content_type,
+    size: file.bytes ?? file.size,
+    text_extraction_status: file.text_extraction_status,
+  }
+}
+
+function formatBytes(value?: number): string {
+  if (value === undefined) return '-'
+  if (value < 1024) return `${value} B`
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
+  return `${(value / 1024 / 1024).toFixed(1)} MB`
+}
+
+function FileIcon({ file }: { file: FileRecord }) {
+  return file.modality === 'image' ? <Image size={17} /> : file.preview || file.snippet ? <FileText size={17} /> : <File size={17} />
+}
+
+export default function FilesModal({ sessionId, onClose, onAttach, embedded = false, initialQuery = '', initialFileId = '' }: Props) {
+  const { t, lang } = useLanguage()
+  const fileRef = useRef<HTMLInputElement>(null)
+  const requestEpoch = useRef(0)
+  const lifetime = useRef(0)
+  const [query, setQuery] = useState(initialQuery)
   const [files, setFiles] = useState<FileRecord[]>([])
-  const [loading, setLoading] = useState(false)
-  const [message, setMessage] = useState('')
-  const [messageTone, setMessageTone] = useState<'success' | 'error'>('success')
+  const [selectedId, setSelectedId] = useState(initialFileId)
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const selected = files.find((file) => file.file_id === selectedId)
 
   const load = async (nextQuery = query) => {
+    const epoch = ++requestEpoch.current
     setLoading(true)
+    setError('')
     try {
-      const res = await listUserFiles(nextQuery)
-      const data = await res.json().catch(() => ({}))
-      setFiles(Array.isArray(data.files) ? data.files : [])
-      if (!res.ok) {
-        setMessageTone('error')
-        setMessage(apiMessage(data, t('文件列表加载失败。', 'Failed to load files.')))
-      }
+      const data = await listUserFiles(nextQuery).then(readApiResponse<{ files?: FileRecord[] }>)
+      if (epoch !== requestEpoch.current) return
+      const rows = data.files || []
+      setFiles(rows)
+      setSelectedId((current) => rows.some((file) => file.file_id === current) ? current : '')
+    } catch (cause) {
+      if (epoch === requestEpoch.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (epoch === requestEpoch.current) setLoading(false)
     }
   }
 
   useEffect(() => {
-    void load('')
+    void load(initialQuery)
+    return () => { requestEpoch.current += 1; lifetime.current += 1 }
   }, [])
 
   const upload = async () => {
-    const file = fileRef.current?.files?.[0]
-    if (!file) return
-    setLoading(true)
+    if (!uploadFile || uploading) return
+    const epoch = lifetime.current
+    setUploading(true)
+    setError('')
+    setNotice('')
     try {
-      const saved = await uploadUserFile(file, file.name, sessionId)
-      setMessageTone('success')
-      setMessage(t('文件已保存，可被搜索、导出，也可附加到下一次对话。', 'File saved for search/export and can be attached to the next turn.'))
-      if (saved.file_id && onAttach) {
-        onAttach({
-          file_id: saved.file_id,
-          filename: saved.filename,
-          modality: saved.modality,
-          content_type: saved.content_type,
-          size: saved.bytes,
-          text_extraction_status: saved.text_extraction_status,
-        })
-      }
+      const saved = await uploadUserFile(uploadFile, uploadFile.name, sessionId)
+      if (epoch !== lifetime.current) return
+      setUploadFile(null)
       if (fileRef.current) fileRef.current.value = ''
+      if (onAttach) { onAttach(attachment(saved)); return }
+      setNotice(t('文件已保存', 'File saved'))
+      setQuery('')
       await load('')
-    } catch (error) {
-      setMessageTone('error')
-      setMessage(apiMessage(error, t('文件上传失败。', 'File upload failed.')))
+    } catch (cause) {
+      if (epoch === lifetime.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
-      setLoading(false)
+      if (epoch === lifetime.current) setUploading(false)
     }
   }
 
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-8">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-[900px] h-[72vh] flex flex-col overflow-hidden">
-        <div className="px-6 py-4 border-b border-black/5 flex justify-between items-center bg-gray-50/50">
-          <h2 className="text-lg font-bold text-text-strong">{t('文件', 'Files')}</h2>
-          <button type="button" onClick={onClose} className="text-2xl leading-none text-text-muted hover:text-text-strong">&times;</button>
-        </div>
-
-        <div className="p-4 border-b border-black/5 flex flex-col gap-3">
-          <div className="flex gap-2">
-            <input ref={fileRef} type="file" accept=".txt,.md,.markdown,.csv,.json,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif" className="flex-1 text-sm" />
-            <button type="button" onClick={upload} disabled={loading} className="px-4 py-2 bg-brand-500 text-white rounded-lg text-sm font-medium disabled:opacity-50">
-              {t('上传', 'Upload')}
-            </button>
-          </div>
-          <div className="flex gap-2">
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              onKeyDown={(event) => event.key === 'Enter' && load(query)}
-              placeholder={t('搜索文件名或文本内容...', 'Search file names or extracted text...')}
-              className="flex-1 px-3 py-2 border border-black/10 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-brand-100"
-            />
-            <button type="button" onClick={() => load(query)} className="px-4 py-2 bg-gray-100 rounded-lg text-sm">
-              {t('搜索', 'Search')}
-            </button>
-          </div>
-          {message && (
-            <div className={`text-xs rounded-lg px-3 py-2 border ${messageTone === 'error' ? 'text-rose-700 bg-rose-50 border-rose-100' : 'text-green-700 bg-green-50 border-green-100'}`}>
-              {message}
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-4 bg-bg-page">
-          {files.length === 0 ? (
-            <div className="text-sm text-text-muted text-center mt-20">{loading ? t('加载中...', 'Loading...') : t('暂无文件。', 'No files yet.')}</div>
-          ) : (
-            <div className="grid grid-cols-2 gap-3">
-              {files.map((file) => (
-                <div key={file.file_id || file.path || file.filename} className="bg-white border border-black/5 rounded-xl p-4 text-sm shadow-sm">
-                  <div className="font-semibold text-text-strong truncate" title={file.filename}>{file.filename || file.file_id}</div>
-                  <div className="text-xs text-text-muted mt-1">{file.content_type || file.modality || 'file'} · {formatBytes(file.size || file.bytes || 0)}</div>
-                  {file.text_extraction_status && file.text_extraction_status !== 'ok' && (
-                    <div className="mt-2 rounded-lg bg-amber-50 px-2 py-1 text-xs text-amber-700">
-                      {t('已保存，但没有可用文本；没有 OCR/视觉模型时不能作为聊天上下文。', 'Stored, but no text is available; without OCR/vision it cannot be used as chat context.')}
-                    </div>
-                  )}
-                  {file.preview && <p className="text-xs text-text-normal mt-3 line-clamp-3">{file.preview}</p>}
-                  {file.file_id && onAttach && (
-                    <button
-                      type="button"
-                      onClick={() => onAttach({
-                        file_id: file.file_id || '',
-                        filename: file.filename,
-                        modality: file.modality,
-                        text_extraction_status: file.text_extraction_status,
-                      })}
-                      className="mt-3 rounded-lg bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-600 hover:bg-brand-100"
-                    >
-                      {t('附加到对话', 'Attach to chat')}
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+  return <FeatureSurface embedded={embedded} onClose={onClose} label={t('文件', 'Files')}>
+    <header className="page-heading">
+      <div><FileText size={19} /><h1>{t('文件', 'Files')}</h1><span>{files.length}</span></div>
+      <button type="button" className="icon-button" onClick={onClose} aria-label={t('关闭', 'Close')} title={t('关闭', 'Close')}><X size={17} /></button>
+    </header>
+    <div className="file-toolbar">
+      <form className="file-search" onSubmit={(event) => { event.preventDefault(); void load() }}>
+        <Search size={15} />
+        <input aria-label={t('搜索文件', 'Search files')} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('搜索文件', 'Search files')} />
+        <button type="submit" className="icon-button" title={t('搜索', 'Search')} aria-label={t('搜索', 'Search')}><Search size={14} /></button>
+      </form>
+      <button type="button" className="icon-button" onClick={() => void load()} title={t('刷新', 'Refresh')} aria-label={t('刷新', 'Refresh')}><RefreshCw size={15} className={loading ? 'animate-spin' : ''} /></button>
+      <label className="secondary-button file-picker"><Upload size={14} />{t('选择文件', 'Choose file')}
+        <input ref={fileRef} type="file" className="sr-only" disabled={uploading}
+          accept=".txt,.md,.markdown,.csv,.json,.docx,.pdf,.png,.jpg,.jpeg,.webp,.gif"
+          onChange={(event) => setUploadFile(event.target.files?.[0] || null)} />
+      </label>
+      {uploadFile && <><span className="file-upload-name" title={uploadFile.name}>{uploadFile.name}</span>
+        <button type="button" className="primary-button" disabled={uploading} onClick={() => void upload()}><Upload size={14} />
+          {uploading ? t('上传中', 'Uploading') : onAttach ? t('上传并附加', 'Upload & attach') : t('上传', 'Upload')}
+        </button>
+      </>}
     </div>
-  )
-}
-
-function formatBytes(value: number) {
-  if (!value) return '0 B'
-  if (value < 1024) return `${value} B`
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`
-  return `${(value / 1024 / 1024).toFixed(1)} MB`
+    {error && <div role="alert" className="page-error"><span>{error}</span></div>}
+    {notice && <div role="status" className="operation-notice">{notice}</div>}
+    <div className={`file-columns ${selected ? 'has-selection' : ''}`}>
+      <div className="file-list">
+        {files.map((file) => <button type="button" key={file.file_id} onClick={() => setSelectedId(file.file_id)}
+          className={`file-row ${selectedId === file.file_id ? 'is-selected' : ''}`}>
+          <FileIcon file={file} /><span><strong>{file.filename}</strong><small>{file.content_type || file.modality || ''} · {formatBytes(file.bytes ?? file.size)}</small></span>
+        </button>)}
+        {!files.length && !error && <div className="empty-state"><FileText size={24} />
+          <span>{loading ? t('正在加载', 'Loading') : query ? t('没有匹配文件', 'No matching files') : t('暂无文件', 'No files')}</span>
+        </div>}
+      </div>
+      <section className="file-detail">
+        {selected ? <>
+          <div className="file-detail-heading"><button type="button" className="icon-button file-back" title={t('返回文件列表', 'Back to files')} aria-label={t('返回文件列表', 'Back to files')} onClick={() => setSelectedId('')}><ArrowLeft size={16} /></button><FileIcon file={selected} /><h2>{selected.filename}</h2></div>
+          <dl className="file-metadata"><div><dt>{t('大小', 'Size')}</dt><dd>{formatBytes(selected.bytes ?? selected.size)}</dd></div>
+            <div><dt>{t('类型', 'Type')}</dt><dd>{selected.content_type || '-'}</dd></div>
+            {selected.uploaded_at !== undefined && selected.uploaded_at !== null && <div><dt>{t('上传时间', 'Uploaded')}</dt><dd>{new Date(selected.uploaded_at * 1000).toLocaleString(lang === 'zh' ? 'zh-CN' : 'en-US')}</dd></div>}
+          </dl>
+          {onAttach && <button type="button" className="primary-button" onClick={() => onAttach(attachment(selected))}><Paperclip size={14} />{t('附加到对话', 'Attach to chat')}</button>}
+          <section className="file-text-preview"><h3>{t('文本预览', 'Text preview')}</h3>
+            {selected.preview || selected.snippet ? <p>{selected.preview || selected.snippet}</p> : <span>{t('暂无文本预览', 'No text preview')}</span>}
+          </section>
+        </> : <div className="empty-state"><File size={26} /><span>{t('选择文件', 'Select a file')}</span></div>}
+      </section>
+    </div>
+  </FeatureSurface>
 }

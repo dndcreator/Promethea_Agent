@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import defaultdict, deque
 from datetime import timezone
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,14 @@ from .protocol import EventType
 
 ACTIVE_TASK_STATES = {"open", "running", "waiting_user", "paused"}
 VISIBLE_ACTIVITY_KINDS = {"task", "workflow", "tool", "memory", "reasoning", "artifact", "environment"}
+TERMINAL_ACTIVITY_STATES = {
+    "complete", "completed", "finished", "success", "succeeded",
+    "failed", "cancelled", "canceled", "stopped", "interrupted",
+}
+ATTENTION_ACTIVITY_STATES = {
+    "waiting", "waiting_confirmation", "waiting_user", "waiting_human",
+    "paused", "failed", "interrupted",
+}
 
 
 class WorkbenchProjection:
@@ -53,7 +62,11 @@ class WorkbenchProjection:
             "user_id": user_id,
             "session_id": payload.get("session_id"),
             "task_id": payload.get("task_id"),
-            "run_id": payload.get("run_id") or payload.get("workflow_run_id") or payload.get("action_run_id"),
+            "run_id": payload.get("run_id") or payload.get("task_run_id") or payload.get("workflow_run_id") or payload.get("action_run_id"),
+            "task_run_id": payload.get("task_run_id"),
+            "workflow_run_id": payload.get("workflow_run_id"),
+            "conversation_turn_id": payload.get("conversation_turn_id"),
+            "action_loop_id": payload.get("action_loop_id") or payload.get("action_run_id"),
             "trace_id": payload.get("trace_id"),
             "payload": payload,
         }
@@ -134,6 +147,8 @@ class WorkbenchProjection:
         if run_id:
             query_args["run_id"] = str(run_id)
         rows = self._query_events(**query_args)
+        if not any((task_id, run_id, resolved_session_id, resolved_task_id)):
+            rows = []
         timeline = self._project_activities(rows)
 
         runs = list((active_task or {}).get("runs") or [])
@@ -203,7 +218,7 @@ class WorkbenchProjection:
         elif session_id:
             rows = [row for row in rows if str(row.get("session_id") or "") == session_id]
         if run_id:
-            rows = [row for row in rows if self._event_run_id(row) == run_id]
+            rows = [row for row in rows if run_id in self._event_run_ids(row)]
         if after_seq:
             return rows[:limit]
         return rows[-limit:]
@@ -252,12 +267,41 @@ class WorkbenchProjection:
             candidates = session_matches
         else:
             candidates = tasks
-        return next((task for task in candidates if str(task.get("status") or "") in ACTIVE_TASK_STATES), candidates[0] if candidates else None)
+        active = next((task for task in candidates if str(task.get("status") or "") in ACTIVE_TASK_STATES), None)
+        if session_id:
+            return active or (candidates[0] if candidates else None)
+        return active
 
     @staticmethod
     def _event_run_id(row: Dict[str, Any]) -> str:
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        return str(row.get("run_id") or payload.get("run_id") or payload.get("workflow_run_id") or "")
+        return str(
+            row.get("task_run_id")
+            or payload.get("task_run_id")
+            or row.get("workflow_run_id")
+            or payload.get("workflow_run_id")
+            or row.get("run_id")
+            or payload.get("run_id")
+            or row.get("action_loop_id")
+            or payload.get("action_loop_id")
+            or ""
+        )
+
+    @staticmethod
+    def _event_run_ids(row: Dict[str, Any]) -> set[str]:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        values = (
+            row.get("run_id"),
+            row.get("task_run_id"),
+            row.get("workflow_run_id"),
+            row.get("action_loop_id"),
+            payload.get("run_id"),
+            payload.get("task_run_id"),
+            payload.get("workflow_run_id"),
+            payload.get("action_loop_id"),
+            payload.get("action_run_id"),
+        )
+        return {str(value) for value in values if value not in (None, "")}
 
     @classmethod
     def _activity(cls, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -266,7 +310,8 @@ class WorkbenchProjection:
         kind = cls._kind(event_type, payload)
         subject = cls._subject(event_type, payload)
         status = str(payload.get("status") or cls._status_from_event(event_type))
-        return {
+        occurred_at = row.get("occurred_at")
+        activity = {
             "activity_id": cls._activity_id(row, kind=kind, subject=subject),
             "event_id": row.get("event_id"),
             "seq": int(row.get("seq") or 0),
@@ -274,19 +319,52 @@ class WorkbenchProjection:
             "event_type": event_type,
             "kind": kind,
             "subject": subject,
+            "subject_i18n": cls._localized_text(payload, "title_i18n", subject=subject),
             "summary": cls._summary(payload, subject=subject),
+            "summary_i18n": cls._localized_text(payload, "summary_i18n"),
             "status": status,
+            "started_at": occurred_at if status in {"running", "pending"} else None,
+            "updated_at": occurred_at,
+            "completed_at": occurred_at if status in TERMINAL_ACTIVITY_STATES else None,
+            "requires_attention": status in ATTENTION_ACTIVITY_STATES,
             "task_id": row.get("task_id"),
             "run_id": cls._event_run_id(row) or None,
+            "conversation_turn_id": row.get("conversation_turn_id") or payload.get("conversation_turn_id"),
             "trace_id": row.get("trace_id"),
+            "occurrence_count": 1,
             "detail": cls._detail(payload),
+            "references": cls._references(payload, kind=kind),
         }
+        presentation = payload.get("presentation") if isinstance(payload.get("presentation"), dict) else {}
+        presented_title = str(presentation.get("title") or "").strip()
+        execution_scope = str(
+            activity.get("conversation_turn_id")
+            or row.get("action_loop_id")
+            or payload.get("action_loop_id")
+            or ""
+        )
+        if kind == "tool" and presented_title and execution_scope:
+            tool_identity = str(payload.get("tool_name") or payload.get("tool_id") or presented_title)
+            activity["_group_key"] = f"{execution_scope}:{tool_identity}:{presented_title}"
+            activity["_group_subject"] = presented_title
+            activity["_group_subject_i18n"] = cls._localized_group_title(presentation)
+        return activity
 
     @classmethod
     def _project_activities(cls, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         activities: Dict[str, Dict[str, Any]] = {}
         order: List[str] = []
+        projected_tool_keys = {
+            cls._tool_projection_key(row)
+            for row in rows
+            if str(row.get("event_type") or "").startswith("tool.")
+        }
         for row in rows:
+            if (
+                str(row.get("event_type") or "") == EventType.ACTION_OBSERVATION_COMMITTED.value
+                and cls._tool_projection_key(row) in projected_tool_keys
+            ):
+                continue
             activity = cls._activity(row)
             if not cls._is_visible_activity(activity):
                 continue
@@ -296,15 +374,111 @@ class WorkbenchProjection:
                 activities[activity_id] = activity
                 order.append(activity_id)
                 continue
+            terminal_previous = str(previous.get("status") or "") in TERMINAL_ACTIVITY_STATES
+            terminal_current = str(activity.get("status") or "") in TERMINAL_ACTIVITY_STATES
             activities[activity_id] = {
                 **previous,
                 **activity,
+                "status": previous.get("status") if terminal_previous and not terminal_current else activity.get("status"),
                 "occurred_at": previous.get("occurred_at") or activity.get("occurred_at"),
+                "started_at": previous.get("started_at") or activity.get("started_at"),
+                "updated_at": activity.get("updated_at") or previous.get("updated_at"),
+                "completed_at": activity.get("completed_at") or previous.get("completed_at"),
+                "requires_attention": (
+                    previous.get("requires_attention")
+                    if terminal_previous and not terminal_current
+                    else activity.get("requires_attention")
+                ),
                 "subject": activity.get("subject") or previous.get("subject"),
+                "subject_i18n": {
+                    **dict(previous.get("subject_i18n") or {}),
+                    **dict(activity.get("subject_i18n") or {}),
+                },
                 "summary": activity.get("summary") or previous.get("summary"),
+                "summary_i18n": {
+                    **dict(previous.get("summary_i18n") or {}),
+                    **dict(activity.get("summary_i18n") or {}),
+                },
                 "detail": {**dict(previous.get("detail") or {}), **dict(activity.get("detail") or {})},
+                "references": cls._merge_references(
+                    list(previous.get("references") or []),
+                    list(activity.get("references") or []),
+                ),
             }
-        return [activities[key] for key in order]
+        return cls._coalesce_presentation_groups([activities[key] for key in order])
+
+    @classmethod
+    def _coalesce_presentation_groups(cls, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for row in rows:
+            group_key = str(row.get("_group_key") or "")
+            output_key = f"group:{group_key}" if group_key else f"activity:{row.get('activity_id')}"
+            previous = grouped.get(output_key)
+            if previous is None:
+                initial = dict(row)
+                if group_key:
+                    initial["activity_id"] = f"tool-group:{hashlib.sha256(group_key.encode('utf-8')).hexdigest()[:20]}"
+                grouped[output_key] = initial
+                order.append(output_key)
+                continue
+            count = int(previous.get("occurrence_count") or 1) + int(row.get("occurrence_count") or 1)
+            statuses = {str(previous.get("status") or ""), str(row.get("status") or "")}
+            if statuses & {"running", "pending", "waiting", "waiting_user", "waiting_human"}:
+                status = next(item for item in ("waiting_user", "waiting_human", "waiting", "running", "pending") if item in statuses)
+            elif statuses & {"failed", "error", "interrupted"}:
+                status = next(item for item in ("failed", "error", "interrupted") if item in statuses)
+            else:
+                status = str(row.get("status") or previous.get("status") or "observed")
+            grouped[output_key] = {
+                **previous,
+                "activity_id": f"tool-group:{hashlib.sha256(group_key.encode('utf-8')).hexdigest()[:20]}",
+                "seq": max(int(previous.get("seq") or 0), int(row.get("seq") or 0)),
+                "status": status,
+                "subject": previous.get("_group_subject") or previous.get("subject"),
+                "subject_i18n": dict(previous.get("_group_subject_i18n") or previous.get("subject_i18n") or {}),
+                "summary": row.get("summary") or previous.get("summary"),
+                "summary_i18n": {**dict(previous.get("summary_i18n") or {}), **dict(row.get("summary_i18n") or {})},
+                "updated_at": row.get("updated_at") or previous.get("updated_at"),
+                "completed_at": row.get("completed_at") or previous.get("completed_at"),
+                "requires_attention": bool(previous.get("requires_attention") or row.get("requires_attention")),
+                "occurrence_count": count,
+                "detail": {**dict(previous.get("detail") or {}), **dict(row.get("detail") or {}), "count": count},
+                "references": cls._merge_references(
+                    list(previous.get("references") or []),
+                    list(row.get("references") or []),
+                ),
+            }
+        output = []
+        for key in order:
+            item = dict(grouped[key])
+            item.pop("_group_key", None)
+            item.pop("_group_subject", None)
+            item.pop("_group_subject_i18n", None)
+            output.append(item)
+        return output
+
+    @classmethod
+    def _localized_group_title(cls, presentation: Dict[str, Any]) -> Dict[str, str]:
+        values = presentation.get("title_i18n") if isinstance(presentation.get("title_i18n"), dict) else {}
+        return {
+            str(language): cls._display_text(value)[:600]
+            for language, value in values.items()
+            if cls._display_text(value)
+        }
+
+    @classmethod
+    def _tool_projection_key(cls, row: Dict[str, Any]) -> tuple[str, str]:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        execution_scope = str(
+            row.get("conversation_turn_id")
+            or payload.get("conversation_turn_id")
+            or row.get("action_loop_id")
+            or payload.get("action_loop_id")
+            or ""
+        )
+        subject = cls._subject(str(row.get("event_type") or ""), payload)
+        return execution_scope, subject
 
     @staticmethod
     def _is_visible_activity(activity: Dict[str, Any]) -> bool:
@@ -331,9 +505,11 @@ class WorkbenchProjection:
             f"{run_id}:{payload.get('step_id')}" if run_id and payload.get("step_id") else None,
             payload.get("proposal_id"),
             payload.get("decision_id"),
+            payload.get("artifact_id"),
             payload.get("tree_id"),
             payload.get("environment_id"),
             payload.get("request_id"),
+            payload.get("path") if kind == "artifact" else None,
             run_id,
             row.get("task_id"),
             row.get("event_id"),
@@ -349,6 +525,8 @@ class WorkbenchProjection:
         payload_kind = str((payload or {}).get("kind") or "").strip().lower()
         if payload_kind in VISIBLE_ACTIVITY_KINDS:
             return payload_kind
+        if event_type == EventType.ACTION_OBSERVATION_COMMITTED.value:
+            return "tool"
         if len(parts) > 1 and prefix == "reasoning" and parts[1] in {"tool", "memory"}:
             return parts[1]
         return {
@@ -368,8 +546,29 @@ class WorkbenchProjection:
     @staticmethod
     def _subject(event_type: str, payload: Dict[str, Any]) -> str:
         declared_kind = str(payload.get("kind") or "").strip().lower()
-        for key in ("title", "name", "step_name", "tool_name", "tool_id", "service_name", "query", "workflow_id", "path", "action", "goal", "memory_type"):
-            value = payload.get(key)
+        presentation = payload.get("presentation") if isinstance(payload.get("presentation"), dict) else {}
+        presented_title = str(presentation.get("title") or "").strip()
+        presented_subject = str(presentation.get("subject") or "").strip()
+        if presented_title:
+            return WorkbenchProjection._join_title(presented_title, presented_subject)
+        tool_spec = payload.get("tool_spec") if isinstance(payload.get("tool_spec"), dict) else {}
+        tool_metadata = tool_spec.get("metadata") if isinstance(tool_spec.get("metadata"), dict) else {}
+        for value in (
+            payload.get("title"),
+            payload.get("name"),
+            payload.get("step_name"),
+            tool_metadata.get("display_name"),
+            tool_metadata.get("title"),
+            payload.get("tool_name"),
+            payload.get("tool_id"),
+            payload.get("service_name"),
+            payload.get("query"),
+            payload.get("workflow_id"),
+            payload.get("path"),
+            payload.get("action"),
+            payload.get("goal"),
+            payload.get("memory_type"),
+        ):
             if value:
                 return str(value)
         if declared_kind in VISIBLE_ACTIVITY_KINDS:
@@ -378,11 +577,58 @@ class WorkbenchProjection:
 
     @classmethod
     def _summary(cls, payload: Dict[str, Any], *, subject: str) -> str:
-        for key in ("observation", "summary", "result_summary", "query", "goal", "reason", "decision", "error_detail", "error"):
+        presentation = payload.get("presentation") if isinstance(payload.get("presentation"), dict) else {}
+        presented = cls._display_text(presentation.get("summary"))
+        if presented and presented != subject:
+            return presented[:600]
+        for key in (
+            "observation",
+            "summary",
+            "result_summary",
+            "structured_result",
+            "query",
+            "goal",
+            "reason",
+            "decision",
+            "error_detail",
+            "error",
+        ):
             text = cls._display_text(payload.get(key))
             if text and text != subject:
                 return text[:280]
+        tool_spec = payload.get("tool_spec") if isinstance(payload.get("tool_spec"), dict) else {}
+        description = cls._display_text(tool_spec.get("description"))
+        if description and description != subject:
+            return description[:280]
         return ""
+
+    @classmethod
+    def _localized_text(
+        cls,
+        payload: Dict[str, Any],
+        field: str,
+        *,
+        subject: str = "",
+    ) -> Dict[str, str]:
+        presentation = payload.get("presentation") if isinstance(payload.get("presentation"), dict) else {}
+        values = presentation.get(field) if isinstance(presentation.get(field), dict) else {}
+        presented_subject = str(presentation.get("subject") or "").strip()
+        output: Dict[str, str] = {}
+        for language, value in values.items():
+            text = cls._display_text(value)
+            if not text:
+                continue
+            if field == "title_i18n":
+                text = cls._join_title(text, presented_subject)
+            if text != subject:
+                output[str(language)] = text[:600]
+        return output
+
+    @staticmethod
+    def _join_title(title: str, subject: str) -> str:
+        if not subject or subject.casefold() in title.casefold():
+            return title
+        return f"{title} · {subject}"
 
     @classmethod
     def _display_text(cls, value: Any) -> str:
@@ -397,9 +643,6 @@ class WorkbenchProjection:
                 text = cls._display_text(value.get(key))
                 if text:
                     return text
-            keys = value.get("keys")
-            if isinstance(keys, list):
-                return ", ".join(str(item) for item in keys[:6])
             return ""
         if isinstance(value, (list, tuple)):
             return " · ".join(filter(None, (cls._display_text(item) for item in value[:3])))
@@ -426,12 +669,116 @@ class WorkbenchProjection:
     @staticmethod
     def _detail(payload: Dict[str, Any]) -> Dict[str, Any]:
         allowed = (
+            "tool_name", "tool_call_id", "observation_id", "error", "usage", "finish_reason", "max_tokens",
             "from_status", "to_status", "reason", "current_step_id", "operation",
             "path", "size", "decision", "persisted", "result_summary", "observation",
             "error_detail", "required_capability", "result_metadata",
             "environment_id", "workspace_id", "entrypoint", "port", "revision", "action",
+            "selected", "dropped", "count", "attempt_count",
         )
-        return {key: payload[key] for key in allowed if payload.get(key) not in (None, "")}
+        detail = {key: payload[key] for key in allowed if payload.get(key) not in (None, "")}
+        arguments = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+        if arguments:
+            detail["arguments"] = arguments
+        tool_spec = payload.get("tool_spec") if isinstance(payload.get("tool_spec"), dict) else {}
+        description = str(tool_spec.get("description") or "").strip()
+        if description:
+            detail["description"] = description
+        result_summary = payload.get("result_summary")
+        if result_summary not in (None, ""):
+            detail["result_summary"] = result_summary
+        return detail
+
+    @classmethod
+    def _references(cls, payload: Dict[str, Any], *, kind: str) -> List[Dict[str, Any]]:
+        references: List[Dict[str, Any]] = []
+
+        def add(reference_kind: str, target: Any, label: Any = "", **metadata: Any) -> None:
+            normalized_target = str(target or "").strip()
+            if not normalized_target:
+                return
+            if reference_kind == "url" and not normalized_target.lower().startswith(("http://", "https://")):
+                return
+            normalized_label = str(label or normalized_target).strip() or normalized_target
+            reference_id = f"{reference_kind}:{normalized_target}"
+            references.append({
+                "reference_id": reference_id,
+                "kind": reference_kind,
+                "label": normalized_label[:180],
+                "target": normalized_target,
+                "metadata": {key: value for key, value in metadata.items() if value not in (None, "")},
+            })
+
+        path = payload.get("path")
+        if path and kind == "artifact":
+            add("artifact", path, path, workspace_id=payload.get("workspace_id"))
+
+        environment_id = payload.get("environment_id")
+        if environment_id:
+            add(
+                "canvas",
+                environment_id,
+                payload.get("name") or payload.get("title") or environment_id,
+                workspace_id=payload.get("workspace_id"),
+            )
+
+        proposal_id = payload.get("proposal_id")
+        if proposal_id:
+            add("memory_review", proposal_id, payload.get("title") or proposal_id)
+
+        result_metadata = payload.get("result_metadata")
+        if isinstance(result_metadata, dict):
+            direct_url = result_metadata.get("url")
+            if direct_url:
+                add("url", direct_url, result_metadata.get("title") or direct_url)
+            direct_path = result_metadata.get("path") or result_metadata.get("output_path")
+            if direct_path:
+                add("artifact", direct_path, result_metadata.get("title") or direct_path, workspace_id=result_metadata.get("workspace_id"))
+
+            for source in result_metadata.get("sources") or []:
+                if isinstance(source, dict) and source.get("url"):
+                    add(
+                        "url",
+                        source.get("url"),
+                        source.get("title") or source.get("source") or source.get("url"),
+                        source=source.get("source"),
+                    )
+            for collection_name in ("artifacts", "files"):
+                for item in result_metadata.get(collection_name) or []:
+                    if isinstance(item, dict):
+                        item_path = item.get("path") or item.get("output_path")
+                        if item_path:
+                            add("artifact", item_path, item.get("title") or item.get("name") or item_path, workspace_id=item.get("workspace_id"))
+
+        presentation = payload.get("presentation")
+        if isinstance(presentation, dict):
+            for reference in presentation.get("references") or []:
+                if not isinstance(reference, dict):
+                    continue
+                add(
+                    str(reference.get("kind") or "reference"),
+                    reference.get("target"),
+                    reference.get("label"),
+                    **dict(reference.get("metadata") or {}),
+                )
+
+        return cls._merge_references([], references)[:24]
+
+    @staticmethod
+    def _merge_references(*groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        for group in groups:
+            for reference in group:
+                if not isinstance(reference, dict):
+                    continue
+                reference_id = str(reference.get("reference_id") or "").strip()
+                if not reference_id:
+                    continue
+                if reference_id not in merged:
+                    order.append(reference_id)
+                merged[reference_id] = {**merged.get(reference_id, {}), **reference}
+        return [merged[reference_id] for reference_id in order]
 
     @staticmethod
     def _waiting_actions(

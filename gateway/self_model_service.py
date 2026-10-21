@@ -367,6 +367,35 @@ class SelfModelService:
             run_context=run_context,
         )
 
+    def _passive_candidate_pool(
+        self,
+        *,
+        user_id: str,
+        query: str,
+        limit: int,
+    ) -> Dict[str, Any]:
+        """Deterministic high-precision recall for passive self-model projection."""
+        if self.memory_service is None:
+            return {"ok": False, "reason": "memory_service_unavailable", "candidates": []}
+        search = getattr(self.memory_service, "search_entries", None)
+        if not callable(search):
+            return {"ok": False, "reason": "deterministic_search_unavailable", "candidates": []}
+        result = search(user_id=user_id, query=query, limit=limit)
+        if not isinstance(result, dict) or not result.get("ok"):
+            return {
+                "ok": False,
+                "reason": str((result or {}).get("reason") or "deterministic_search_failed"),
+                "candidates": [],
+            }
+        return {
+            "ok": True,
+            "query": query,
+            "user_id": user_id,
+            "candidates": list(result.get("entries") or []),
+            "total": int(result.get("total") or 0),
+            "retrieval_mode": "passive_deterministic",
+        }
+
     async def _call_cognitive_llm(
         self,
         *,
@@ -555,12 +584,10 @@ class SelfModelService:
             policy = CognitiveRecallPolicy.from_config(config)
             session_id = str(getattr(run_context, "session_id", None) or "default")
             pool = await asyncio.to_thread(
-                self._candidate_pool,
+                self._passive_candidate_pool,
                 user_id=user_id,
-                session_id=session_id,
                 query=normalized_query,
                 limit=policy.fast_candidate_limit,
-                run_context=run_context,
             )
             proposals = self.memory_service.list_write_proposals(
                 user_id=user_id,

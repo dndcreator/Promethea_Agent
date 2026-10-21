@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -21,9 +22,7 @@ def _authenticated_user():
 
 
 def _make_workspace() -> Path:
-    base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / "self-evolve-work"
-    if base.exists():
-        shutil.rmtree(base, ignore_errors=True)
+    base = Path(os.environ.get("PROMETHEA_TEST_TMP_ROOT", ".tmp/pytest-runtime")) / f"self-evolve-work-{uuid.uuid4().hex}"
     (base / "extensions" / "community").mkdir(parents=True, exist_ok=True)
     return base.resolve()
 
@@ -50,6 +49,10 @@ async def _create_echo_task(service: SelfEvolveService, *, version: str = "1.0.0
                 "command": "echo",
                 "description": "Return the supplied text",
                 "test_args": {"text": "hello"},
+                "presentation": {
+                    "title": "Echo text",
+                    "subject_arg": "text",
+                },
             }
         ],
     )
@@ -109,6 +112,9 @@ async def test_self_evolve_validates_publishes_and_invokes_generated_tool(monkey
         assert published["tool_ids"] == [f"{service_name}.echo"]
         capability_service = service._test_capability_service
         assert f"{service_name}.echo" in capability_service._registered_tools
+        assert capability_service.tool_registry.resolve(
+            tool_name=f"{service_name}.echo", params={}
+        ).presentation["title"] == "Echo text"
         params = {"text": "approved"}
         with approval_scope(f"{service_name}.echo", params, confirmed=True):
             result = await capability_service.call_tool(

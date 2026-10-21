@@ -1,4 +1,5 @@
 import { confirmToolCall } from '../../services/api';
+import { useRef, useState } from 'react';
 import { useLanguage } from '../../store/LanguageContext';
 
 interface ConfirmModalProps {
@@ -6,18 +7,31 @@ interface ConfirmModalProps {
   toolArgs: string;
   sessionId: string;
   toolCallId: string;
-  onClose: (approved: boolean) => void;
+  onClose: (approved: boolean, result: Record<string, any>) => void;
 }
 
 export default function ConfirmModal({ toolName, toolArgs, sessionId, toolCallId, onClose }: ConfirmModalProps) {
   const { t } = useLanguage();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const submitting = useRef(false);
   const handleAction = async (action: 'approve' | 'reject') => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError('');
     try {
-      await confirmToolCall(sessionId, toolCallId, action);
-      onClose(action === 'approve');
+      const response = await confirmToolCall(sessionId, toolCallId, action);
+      const result = await response.json();
+      if (!response.ok || !['success', 'ok', 'completed', 'rejected', 'needs_confirmation'].includes(result.status)) {
+        throw new Error(result.error_detail?.message || result.detail || result.error || t('操作未完成', 'Operation failed'));
+      }
+      onClose(action === 'approve', result);
     } catch (error) {
-      console.error(error);
-      onClose(false);
+      setError(error instanceof Error ? error.message : String(error));
+    } finally {
+      submitting.current = false;
+      setBusy(false);
     }
   };
 
@@ -34,9 +48,10 @@ export default function ConfirmModal({ toolName, toolArgs, sessionId, toolCallId
             <span className="text-text-normal">{toolArgs}</span>
           </div>
           <div className="flex justify-end gap-3 mt-4">
-            <button onClick={() => handleAction('reject')} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-sm font-medium rounded-lg text-text-normal">{t('拒绝', 'Reject')}</button>
-            <button onClick={() => handleAction('approve')} className="px-4 py-2 bg-red-500 hover:bg-red-600 text-sm font-medium rounded-lg text-white">{t('批准', 'Approve')}</button>
+            <button disabled={busy} onClick={() => handleAction('reject')} className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-sm font-medium rounded-lg text-text-normal disabled:opacity-50">{t('拒绝', 'Reject')}</button>
+            <button disabled={busy} onClick={() => handleAction('approve')} className="px-4 py-2 bg-red-500 hover:bg-red-600 text-sm font-medium rounded-lg text-white disabled:opacity-50">{busy ? t('处理中', 'Processing') : t('批准', 'Approve')}</button>
           </div>
+          {error && <p role="alert" className="break-words text-sm text-red-600">{error}</p>}
         </div>
       </div>
     </div>

@@ -47,11 +47,24 @@ Events:
 - `workspace.artifact.written`
 - `workspace.write.blocked`
 
-## Extension Path
+## Canvas Applications
 
-This v1 baseline is designed for follow-up integration with:
+The Canvas shell hosts workspace-owned applications without changing the main
+chat UI or Agent Core. `EnvironmentController` owns environment identity and
+app-state revisions; `CapabilityService` remains the execution boundary. The
+TypeScript SDK provides authenticated state/lifecycle requests and a restricted
+MessageChannel bridge for opaque-origin frames, not a second tool executor.
 
-- canvas/desktop artifact editing
-- workflow output routing
-- richer workspace permissions and versioning
+Self Evolve builds and verifies applications before deploying them. Session
+applications remain conversation-scoped; retained copies live in the user's
+`_canvas_library` workspace and enter personal workspace archives with their
+static files and app data. Running processes and credentials are never restored.
+
+See [Self Evolve](../../agentkit/tools/self_evolve/README.md) for authoring,
+verification, repair, and browser requirements.
+
+Simple applications may use schema-validated component documents rather than
+model-written page code. Both paths produce verified artifacts in the same
+Canvas lifecycle. See [Intelligent Canvas](./intelligent-canvas.md) for the
+implemented grammar, security boundaries, and persistence contract.
 
