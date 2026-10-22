@@ -5,8 +5,13 @@ export { type FileUploadOptions } from './files.js'
 export { type WorkbenchQuery, type WorkbenchWatchOptions } from './workbench.js'
 export { CognitionClient } from './cognition.js'
 export { CanvasClient } from './canvas.js'
+export { AmbientClient } from './ambient.js'
 export { connectCanvasFrame } from './canvas-bridge.js'
 export type {
+  AmbientSettings,
+  AmbientState,
+  AmbientFeedback,
+  AmbientConfirmation,
   Attachment,
   GuestChatMessage,
   GuestChatRequest,

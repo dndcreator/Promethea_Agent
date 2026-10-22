@@ -163,6 +163,12 @@ class TemporalSchedulerService:
             "last_error": "",
             "run_count": 0,
         }
+        from .ambient_state import current_ambient
+
+        ambient = current_ambient()
+        if ambient is not None:
+            _, situation = ambient.service.assert_execution()
+            row["execution_context"]["ambient_scope"] = {"task_id": situation.task_id, "generation": situation.generation}
         with self._lock():
             jobs = self._load_jobs()
             jobs.append(row)
@@ -274,7 +280,7 @@ class TemporalSchedulerService:
                 self._finish_claim(job, lease_id=lease_id, now=now, error="")
                 ran.append({"job_id": job.get("job_id"), "ok": True, "result": result})
             except Exception as exc:
-                self._finish_claim(job, lease_id=lease_id, now=now, error=str(exc))
+                self._finish_claim(job, lease_id=lease_id, now=now, error=str(exc), pause=isinstance(exc, PermissionError) and bool(job.get("execution_context", {}).get("ambient_scope")))
                 ran.append({"job_id": job.get("job_id"), "ok": False, "error": str(exc)})
         return {"ok": True, "ran": ran, "count": len(ran)}
 
@@ -313,7 +319,7 @@ class TemporalSchedulerService:
             self._save_jobs(jobs)
         return claims
 
-    def _finish_claim(self, claimed: Dict[str, Any], *, lease_id: str, now: float, error: str) -> None:
+    def _finish_claim(self, claimed: Dict[str, Any], *, lease_id: str, now: float, error: str, pause: bool = False) -> None:
         with self._lock():
             jobs = self._load_jobs()
             row = next((item for item in jobs if item.get("job_id") == claimed.get("job_id")), None)
@@ -325,8 +331,11 @@ class TemporalSchedulerService:
             row["run_count"] = int(row.get("run_count") or 0) + 1
             row.pop("lease_id", None)
             row.pop("lease_expires_at", None)
-            self._advance(row, now=now)
-            if error and not row.get("enabled"):
+            if pause:
+                row["enabled"], row["status"] = False, "paused"
+            else:
+                self._advance(row, now=now)
+            if error and not row.get("enabled") and not pause:
                 row["status"] = "failed"
             self._save_jobs(jobs)
 

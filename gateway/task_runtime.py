@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import Context
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -38,6 +39,49 @@ class TaskRuntime:
         if run_type in self._drivers:
             raise ValueError(f"execution driver already registered: {run_type}")
         self._drivers[run_type] = driver
+
+    async def continue_confirmation(self, *, task_id, user_id, run_id, call_id, operation):
+        """Reacquire a fenced run for one exact, explicit approval/rejection."""
+        task = self._require_task(task_id, user_id)
+        run = next((row for row in task["runs"] if row["run_id"] == run_id), None)
+        if self._shutting_down or task["status"] in {"paused", "cancelled"} or run is None or run["status"] != "waiting_human" or run_id in self.active_run_ids():
+            raise TaskExecutionConflict("run is not available for confirmation")
+        pending = deepcopy(run["metadata"].get("pending_action") or {})
+        driver = self._drivers.get(run["run_type"])
+        if not pending or pending.get("tool_call_id") != call_id or not callable(getattr(driver, "finish", None)):
+            raise TaskExecutionConflict("confirmation does not match the pending action")
+        token = self.task_service.claim_execution(task_id=task_id, user_id=user_id, run_id=run_id, owner_id=self.runtime_id, lease_seconds=self.lease_seconds)
+        pending.setdefault("task_checkpoint", {})["execution_token"] = token
+        self._tokens[run_id] = token
+
+        async def continue_run():
+            outcome = "interrupted"
+            try:
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="running")
+                result = await self._run_with_heartbeat(operation(task, run, token, pending), task_id=task_id, user_id=user_id, token=token)
+                self.task_service.assert_action_execution(task_id=task_id, user_id=user_id, expected_objective=task["objective"], task_run_id=run_id, execution_token=token)
+                settled = driver.finish(task, run, result)
+                outcome = settled["status"]
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status=outcome, detail=settled.get("detail"))
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Uncertain effects require explicit recovery, not a supervisor retry.
+                self.task_service.assert_execution(task_id=task_id, user_id=user_id, token=token)
+                outcome = "paused"
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="paused", detail={"error": "confirmation continuation interrupted; inspect checkpoint before resuming"})
+                raise
+            finally:
+                try:
+                    self.task_service.settle_execution(task_id=task_id, user_id=user_id, token=token, status=outcome, reason="confirmation_boundary")
+                except (KeyError, TaskExecutionConflict):
+                    pass
+
+        job = asyncio.create_task(continue_run(), name=f"task-runtime:{run_id}", context=Context())
+        self._jobs[run_id] = job
+        job.add_done_callback(lambda completed: self._on_done(run_id, completed))
+        return await asyncio.shield(job)
 
     def schedule_run(self, *, task_id: str, user_id: str, run_id: str) -> None:
         if self._shutting_down:
@@ -245,6 +289,9 @@ class TaskRuntime:
             if item.get("run_type") in self._drivers and item["status"] == "paused":
                 self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="pending")
                 scheduled += 1
+                continue
+            if item.get("run_type") in self._drivers and item["status"] == "waiting_human":
+                waiting = True
                 continue
             run = self.workflow_engine.get_run(run_id)
             if run is None:

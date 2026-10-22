@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from gateway.runtime_event_log import RuntimeEventLog
 from gateway.events import EventEmitter
@@ -132,6 +133,46 @@ async def test_workbench_projection_follows_runtime_events_incrementally(tmp_pat
 
     assert snapshot["timeline"][-1]["kind"] == "memory"
     assert snapshot["timeline"][-1]["event_type"] == "memory.recall.started"
+
+
+async def test_home_projection_advances_cursor_without_selecting_a_task(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    event_log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    task = tasks.create_task(user_id="u1", title="Still working", session_id="s1")
+    event_log.append(
+        event_type="tool.execution.started",
+        payload={"user_id": "u1", "session_id": "s1", "task_id": task["task_id"]},
+        durable=False,
+    )
+    projection = WorkbenchProjection(
+        task_service=tasks, workflow_engine=workflows, event_log=event_log,
+    )
+
+    snapshot = projection.snapshot(user_id="u1")
+
+    assert snapshot["task"] is None
+    assert snapshot["timeline"] == []
+    assert snapshot["scope"]["session_id"] is None
+    assert snapshot["cursor"] > 0
+    assert await projection.wait_for_change(
+        user_id="u1", after_seq=snapshot["cursor"], timeout=0.1,
+    ) is False
+
+
+def test_workbench_active_runtime_runs_are_owner_scoped(tmp_path: Path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    workflows = WorkflowEngine(storage_path=str(tmp_path / "workflows.json"), task_service=tasks)
+    own = tasks.create_task(user_id="u1", title="Own task")
+    other = tasks.create_task(user_id="u2", title="Other task")
+    tasks.start_run(task_id=own["task_id"], user_id="u1", run_id="own-run", run_type="ambient")
+    tasks.start_run(task_id=other["task_id"], user_id="u2", run_id="other-run", run_type="ambient")
+    snapshot = WorkbenchProjection(
+        task_service=tasks, workflow_engine=workflows, event_log=None,
+        task_runtime=SimpleNamespace(active_run_ids=lambda: ["own-run", "other-run"]),
+    ).snapshot(user_id="u1")
+
+    assert snapshot["active_runtime_runs"] == ["own-run"]
 
 
 async def test_workbench_projection_wakes_matching_stream_subscriber(tmp_path: Path):

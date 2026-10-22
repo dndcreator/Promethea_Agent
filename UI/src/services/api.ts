@@ -12,9 +12,13 @@ import {
   type WorkbenchSnapshot,
   type GuestChatMessage,
   type GuestChatStatus,
+  type AmbientSettings,
+  type AmbientFeedback,
+  type AmbientConfirmation,
 } from '@promethea/sdk'
 
 export type {
+  AmbientState,
   Event as RuntimeEvent,
   GuestChatStatus,
   ErrorDetail as RuntimeError,
@@ -33,6 +37,11 @@ export type {
   CanvasEnvironment,
   CanvasEnvironmentList,
 } from '@promethea/sdk'
+
+export const getAmbient = (sessionId: string | null, signal?: AbortSignal) => sdkCall((client) => client.ambient.get(sessionId, signal))
+export const setAmbient = (sessionId: string | null, settings: AmbientSettings) => sdkCall((client) => client.ambient.configure(sessionId, settings))
+export const sendAmbientFeedback = (sessionId: string, feedback: AmbientFeedback) => sdkCall((client) => client.ambient.feedback(sessionId, feedback))
+export const confirmAmbient = (sessionId: string | null, command: AmbientConfirmation) => sdkCall((client) => client.ambient.confirm(sessionId, command))
 
 const DEFAULT_API_BASE = ''
 
@@ -205,9 +214,11 @@ export function getBootstrap(): Promise<Response> {
   return authFetch('/api/bootstrap')
 }
 
-export function getWelcome(lang?: string): Promise<Response> {
-  const query = lang ? `?lang=${encodeURIComponent(lang)}` : ''
-  return authFetch(`/api/welcome${query}`)
+export function getWelcome(lang?: string, visitId?: string, signal?: AbortSignal): Promise<Response> {
+  const query = new URLSearchParams()
+  if (lang) query.set('lang', lang)
+  if (visitId) query.set('visit_id', visitId)
+  return authFetch(`/api/welcome?${query}`, { signal })
 }
 
 export function getCurrentAvatar(): Promise<Response> {

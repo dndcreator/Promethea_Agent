@@ -30,6 +30,7 @@ from .routes.task import router as task_router
 from .routes.avatar import router as avatar_router
 from .routes.workbench import router as workbench_router
 from .routes.canvas import router as canvas_router
+from .routes.ambient import router as ambient_router
 
 router = APIRouter()
 
@@ -61,6 +62,7 @@ router.include_router(task_router)
 router.include_router(avatar_router)
 router.include_router(workbench_router)
 router.include_router(canvas_router)
+router.include_router(ambient_router)
 
 
 

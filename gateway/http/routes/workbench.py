@@ -96,6 +96,7 @@ async def stream_workbench(
     async def events() -> AsyncIterator[str]:
         cursor = max(0, int(after_seq or 0))
         first = True
+        ambient_version = None
         while not await request.is_disconnected():
             snapshot = _snapshot(
                 projection=projection, user_id=user_id, task_id=task_id, run_id=run_id,
@@ -103,7 +104,9 @@ async def stream_workbench(
             )
             timeline = snapshot.get("timeline") or []
             next_cursor = max(cursor, int(snapshot.get("cursor") or 0))
-            if first or next_cursor > cursor:
+            version = json.dumps(snapshot.get("ambient"), sort_keys=True)
+            if first or next_cursor > cursor or version != ambient_version:
+                ambient_version = version
                 cursor = next_cursor
                 body = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
                 yield f"id: {cursor}\nevent: snapshot\ndata: {body}\n\n"
@@ -116,7 +119,7 @@ async def stream_workbench(
                 task_id=task_id,
                 run_id=run_id,
                 session_id=session_id,
-                timeout=15.0,
+                timeout=3.0 if (snapshot.get("ambient") or {}).get("settings", {}).get("enabled") else 15.0,
             )
             if not changed:
                 yield ": keepalive\n\n"

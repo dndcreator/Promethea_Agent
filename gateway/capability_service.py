@@ -13,7 +13,7 @@ from loguru import logger
 from agentkit.mcp.mcp_manager import MCPManager, get_mcp_manager
 from agentkit.mcp.invocation_context import bind_invocation_context
 from agentkit.mcp.tool_result import error_from_exception, normalize_tool_result
-from agentkit.security.approval import approval_scope, matches_approved_call
+from agentkit.security.approval import approval_scope, consume_approved_call, matches_approved_call
 
 from .events import EventEmitter
 from .protocol import EventType
@@ -102,6 +102,7 @@ class CapabilityService:
         self._tool_discovery_initialized = False
         self._tool_runtime_bindings: Dict[str, Any] = {}
         self._mcp_registry_error: Optional[str] = None
+        self.autonomy_validator: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
     def bind_tool_runtime(self, **bindings: Any) -> None:
         """Refresh trusted host dependencies, never model-supplied arguments."""
@@ -158,6 +159,10 @@ class CapabilityService:
     ) -> Any:
         trusted = dict(invocation_context or {})
         user_id = str(trusted.get("user_id") or "").strip()
+        if trusted.get("ambient_scope"):
+            if self.autonomy_validator is None:
+                raise PermissionError("autonomous execution authority is unavailable")
+            self.autonomy_validator(user_id, trusted["ambient_scope"])
         user_config = self.config_provider(user_id) if user_id and callable(self.config_provider) else None
         ctx = ToolInvocationContext(
             session_id=str(trusted.get("session_id") or "") or None,
@@ -1012,9 +1017,10 @@ class CapabilityService:
 
     def _workspace_scope(self, params: Dict[str, Any], context_fields: Dict[str, Any]):
         from .delegation import current_delegation
+        from .ambient_state import current_ambient
 
         delegation = current_delegation()
-        if delegation is not None and (delegation.depth or delegation.background_notification) and delegation.workspace_id:
+        if delegation is not None and (delegation.depth or delegation.background_notification or current_ambient() is not None) and delegation.workspace_id:
             if params.get("workspace_id") and str(params["workspace_id"]) != delegation.workspace_id:
                 raise ToolPolicyViolationError("tool workspace exceeds the delegated workspace scope")
             context_fields = {**context_fields, "workspace_id": delegation.workspace_id}
@@ -1138,7 +1144,9 @@ class CapabilityService:
             )
             try:
                 approved = await require_confirmation()
-                with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved):
+                if approved and not consume_approved_call(approval_name, approval_params):
+                    raise ToolConfirmationRequiredError(spec.full_name, decision)
+                with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved, dispatch=False):
                     result = await local_tool.invoke(params, ctx)
                 result_summary, result_metadata = self._project_local_result(local_tool, result)
                 result_presentation = project_tool_result(
@@ -1315,7 +1323,9 @@ class CapabilityService:
 
         try:
             approved = await require_confirmation()
-            with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved):
+            if approved and not consume_approved_call(approval_name, approval_params):
+                raise ToolConfirmationRequiredError(spec.full_name, decision)
+            with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved, dispatch=False):
                 result = await self.mcp_manager.call_service_tool(
                     service_name=service_name,
                     tool_name=actual_tool_name,

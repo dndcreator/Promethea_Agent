@@ -388,6 +388,48 @@ class CognitionResponse(PublicContract):
     cognition: CognitionBundle
 
 
+class AmbientSettings(PublicContract):
+    enabled: bool = False
+    direction: str = Field(default="", max_length=2000)
+    ui_language: str = Field(default="zh", max_length=20)
+    timezone: str = Field(default="", max_length=80)
+
+
+class AmbientApproval(PublicContract):
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+    args: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AmbientFeedback(PublicContract):
+    annotation_id: str
+    decision: Literal["accepted", "dismissed"]
+    comment: str = Field(default="", max_length=2000)
+
+
+class AmbientConfirmation(PublicContract):
+    run_id: str
+    tool_call_id: str
+    action: Literal["approve", "reject"]
+
+
+class AmbientState(PublicContract):
+    session_id: Optional[str] = None
+    user_id: str = ""
+    scope: Literal["personal"] = "personal"
+    available: bool = False
+    settings: AmbientSettings = Field(default_factory=AmbientSettings)
+    revision: int = 0
+    status: str = "disabled"
+    task_id: Optional[str] = None
+    attention: List[str] = Field(default_factory=list)
+    questions: List[str] = Field(default_factory=list)
+    reflection: str = ""
+    next_check_at: Optional[float] = None
+    pending: Optional[AmbientApproval] = None
+
+
 class WorkbenchSnapshot(PublicContract):
     version: str = "workbench.v1"
     scope: WorkbenchScope
@@ -404,6 +446,7 @@ class WorkbenchSnapshot(PublicContract):
     recovery_items: List[WorkflowRunSummary] = Field(default_factory=list)
     active_runtime_runs: List[str] = Field(default_factory=list)
     cursor: int = 0
+    ambient: Optional[AmbientState] = None
 
 
 PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
@@ -453,6 +496,11 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         CognitionItem,
         CognitionBundle,
         CognitionResponse,
+        AmbientSettings,
+        AmbientApproval,
+        AmbientFeedback,
+        AmbientConfirmation,
+        AmbientState,
         WorkbenchSnapshot,
     )
 }

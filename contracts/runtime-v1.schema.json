@@ -1,5 +1,218 @@
 {
   "$defs": {
+    "AmbientApproval": {
+      "properties": {
+        "args": {
+          "additionalProperties": true,
+          "title": "Args",
+          "type": "object"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "title": "Tool Call Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_call_id",
+        "tool_name"
+      ],
+      "title": "AmbientApproval",
+      "type": "object"
+    },
+    "AmbientConfirmation": {
+      "properties": {
+        "action": {
+          "enum": [
+            "approve",
+            "reject"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "title": "Tool Call Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_call_id",
+        "action"
+      ],
+      "title": "AmbientConfirmation",
+      "type": "object"
+    },
+    "AmbientFeedback": {
+      "properties": {
+        "annotation_id": {
+          "title": "Annotation Id",
+          "type": "string"
+        },
+        "comment": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Comment",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "accepted",
+            "dismissed"
+          ],
+          "title": "Decision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "annotation_id",
+        "decision"
+      ],
+      "title": "AmbientFeedback",
+      "type": "object"
+    },
+    "AmbientSettings": {
+      "properties": {
+        "direction": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Direction",
+          "type": "string"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "timezone": {
+          "default": "",
+          "maxLength": 80,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "ui_language": {
+          "default": "zh",
+          "maxLength": 20,
+          "title": "Ui Language",
+          "type": "string"
+        }
+      },
+      "title": "AmbientSettings",
+      "type": "object"
+    },
+    "AmbientState": {
+      "properties": {
+        "attention": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Attention",
+          "type": "array"
+        },
+        "available": {
+          "default": false,
+          "title": "Available",
+          "type": "boolean"
+        },
+        "next_check_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Next Check At"
+        },
+        "pending": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AmbientApproval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "questions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Questions",
+          "type": "array"
+        },
+        "reflection": {
+          "default": "",
+          "title": "Reflection",
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "scope": {
+          "const": "personal",
+          "default": "personal",
+          "title": "Scope",
+          "type": "string"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "settings": {
+          "$ref": "#/$defs/AmbientSettings"
+        },
+        "status": {
+          "default": "disabled",
+          "title": "Status",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        },
+        "user_id": {
+          "default": "",
+          "title": "User Id",
+          "type": "string"
+        }
+      },
+      "title": "AmbientState",
+      "type": "object"
+    },
     "Attachment": {
       "properties": {
         "content_type": {
@@ -2804,6 +3017,17 @@
           },
           "title": "Active Runtime Runs",
           "type": "array"
+        },
+        "ambient": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AmbientState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "artifacts": {
           "items": {

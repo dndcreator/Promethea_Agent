@@ -16,6 +16,7 @@ import type { FollowupData, MessageData, TextSelection } from './chat/types'
 
 
 interface MainContentProps {
+  visible?: boolean
   sessionId: string | null
   setSessionId: (id: string | null) => void
   setTreeId: (id: string | null) => void
@@ -101,6 +102,7 @@ function tokenCountFromPayload(payload: StreamPayload): number | null {
 }
 
 export default function MainContent({
+  visible = true,
   sessionId,
   setSessionId,
   setTreeId,
@@ -137,8 +139,8 @@ export default function MainContent({
   const [followupDraft, setFollowupDraft] = useState<TextSelection | null>(null)
   const { snapshot: workbenchSnapshot } = useWorkbench()
   const completedAgentTurns = (workbenchSnapshot?.tasks || []).flatMap((task) => task.runs || [])
-    .filter((run) => run.run_type === 'agent_inbox' && run.status === 'completed' && run.session_id === sessionId)
-    .map((run) => run.run_id).sort().join(':')
+    .filter((run) => ['agent_inbox', 'ambient'].includes(run.run_type || '') && run.status === 'completed' && run.session_id === sessionId)
+    .map((run) => run.run_id).sort().join(':') + `:${workbenchSnapshot?.ambient?.revision || 0}`
   const syncedAgentTurnsRef = useRef('')
   const pendingReviewId = memoryReviewId || workbenchSnapshot?.memory_proposals?.find((proposal) => proposal.session_id === sessionId)?.proposal_id || null
   const processActivities = workbenchSnapshot?.timeline || []
@@ -158,6 +160,9 @@ export default function MainContent({
   const activeTreeIdRef = useRef<string | null>(null)
   const welcomeLoadedAtRef = useRef(0)
   const welcomeRequestRef = useRef(0)
+  const welcomeCycleRef = useRef('')
+  const welcomeInstanceRef = useRef(crypto.randomUUID())
+  const welcomeAbortRef = useRef<AbortController | null>(null)
   const selectionActionRef = useRef<HTMLButtonElement>(null)
   const observedMemoryReviewRef = useRef<string | null>(null)
   useEffect(() => {
@@ -271,8 +276,11 @@ export default function MainContent({
     const requestId = welcomeRequestRef.current + 1
     welcomeRequestRef.current = requestId
     const fallback = localWelcomeFallback
+    welcomeAbortRef.current?.abort()
+    const controller = new AbortController()
+    welcomeAbortRef.current = controller
     try {
-      const res = await getWelcome(lang)
+      const res = await getWelcome(lang, `${welcomeInstanceRef.current}:${welcomeRefreshToken}`, controller.signal)
       if (!res.ok) throw new Error(`welcome status ${res.status}`)
       const data = await res.json()
       if (welcomeRequestRef.current !== requestId) return
@@ -289,17 +297,23 @@ export default function MainContent({
     if (welcomeRequestRef.current === requestId) {
       welcomeLoadedAtRef.current = Date.now()
     }
-  }, [lang, localWelcomeFallback, user?.user_id])
+  }, [lang, localWelcomeFallback, user?.user_id, welcomeRefreshToken])
 
   useEffect(() => {
     if (!user?.user_id) {
       welcomeRequestRef.current += 1
       welcomeLoadedAtRef.current = 0
       setWelcome(null)
+      welcomeCycleRef.current = ''
+      welcomeAbortRef.current?.abort()
       return
     }
+    if (sessionId || !visible || isStreaming) return
+    const cycle = `${user.user_id}:${lang}:${welcomeRefreshToken}`
+    if (welcomeCycleRef.current === cycle) return
+    welcomeCycleRef.current = cycle
     void loadWelcome()
-  }, [loadWelcome, user?.user_id, welcomeRefreshToken])
+  }, [loadWelcome, user?.user_id, welcomeRefreshToken, sessionId, visible, isStreaming, lang])
 
   useEffect(() => {
     const refreshAfterLongIdle = () => {
@@ -812,6 +826,7 @@ export default function MainContent({
               time={msg.time}
               content={msg.content}
               messageId={msg.id}
+              sessionId={sessionId}
               followups={followups.filter((item) => item.message_id === msg.id)}
               onSelectText={(selection) => { if (user) setTextSelection(selection) }}
               reasoningTreeId={msg.reasoningTreeId}

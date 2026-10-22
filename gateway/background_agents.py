@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from copy import deepcopy
 from typing import Literal
 from uuid import uuid4
@@ -81,7 +82,7 @@ class BackgroundAgents:
             raise KeyError("child agent not found")
         descriptor = self._descriptor(task)
         scope = current_delegation()
-        if scope is not None and scope.depth:
+        if scope is not None and (scope.depth or scope.agent_task_id):
             authorized = not scope.closed and scope.agent_task_id and descriptor.get("parent_agent_task_id") == scope.agent_task_id
         else:
             authorized = not descriptor.get("parent_agent_task_id") and descriptor["parent_session_id"] == parent.session_id
@@ -90,10 +91,18 @@ class BackgroundAgents:
         return task
 
     def available(self, task):
+        ambient = self.conversation.ambient_service
+        if ambient is not None:
+            try:
+                ambient.descendant_authority(task)
+            except PermissionError:
+                return False
         user_config = self._config(task["user_id"])
         if not config.multi_agent.enabled or not user_config.get("multi_agent", {}).get("enabled", True):
             return False
         if task.get("source") == INBOX_RUN_TYPE:
+            if any(float(row.get("metadata", {}).get("delivery_retry_at") or 0) > time.time() for row in task["runs"] if row["status"] in {"pending", "running"}):
+                return False
             session = self._descriptor(task)["parent_session_id"]
             manager = self.conversation.message_manager
             if not (manager and manager.get_session(session, user_id=task["user_id"]) and not manager.has_active_turn(session, user_id=task["user_id"], exclude_turn_ids={row["run_id"] for row in task["runs"]}) and not self.conversation.agent_is_active(task["user_id"], session)):
@@ -110,6 +119,14 @@ class BackgroundAgents:
     def active_count(self):
         active = set(self.runtime.active_run_ids())
         return sum(run["run_id"] in active for kind in (RUN_TYPE, INBOX_RUN_TYPE) for task in self.tasks.execution_tasks(run_type=kind) for run in task["runs"])
+
+    def _ambient_execution(self, task, context):
+        from contextlib import nullcontext
+        from .ambient_state import AmbientExecution, bind_ambient
+
+        ambient = self.conversation.ambient_service
+        scene = ambient.descendant_authority(task) if ambient is not None else None
+        return bind_ambient(AmbientExecution(ambient, context, scene.generation)) if scene else nullcontext()
 
     def _config(self, user_id):
         service = self.conversation.config_service
@@ -257,7 +274,7 @@ class BackgroundAgents:
                 if previous["metadata"].get("message"):
                     history.append({"role": "user", "content": previous["metadata"]["message"]})
                 history.append({"role": "assistant", "content": previous["metadata"].get("output", "")})
-        with bind_delegation(scope):
+        with bind_delegation(scope), self._ambient_execution(task, context):
             try:
                 async with asyncio.timeout(limits["timeout_s"]):
                     result = await self.conversation.run_delegated_turn(
@@ -279,9 +296,9 @@ class BackgroundAgents:
         user, session = task["user_id"], descriptor["parent_session_id"]
         manager = self.conversation.message_manager
         async with self.conversation.agent_execution(user, session):
-            if manager.has_active_turn(session, user_id=user, exclude_turn_ids={run["run_id"]}):
+            if manager.has_active_user_turn(user):
                 return {"status": "pending", "detail": {}}
-            pending = self.messages.pending(user_id=user, session_id=session)
+            pending = self.messages.pending(user_id=user, session_id=None)
             if not pending:
                 return {"status": "completed", "detail": {}}
             if not manager.begin_turn(session, run["run_id"], "runtime", "", user):
@@ -306,7 +323,7 @@ class BackgroundAgents:
                 self.tasks.checkpoint_run(task_id=task["task_id"], user_id=user, run_id=run["run_id"], token=token, checkpoint={**value, "agent_message_ids": context.agent_message_ids})
 
             try:
-                with bind_delegation(scope), approval_scope("subagent.notification", {}, confirmed=False):
+                with bind_delegation(scope), self._ambient_execution(task, context), approval_scope("subagent.notification", {}, confirmed=False):
                     async with asyncio.timeout(delegation_limits(self._config(user))["timeout_s"]):
                         result = await self.conversation.run_agent_followup(
                             run_context=context, checkpoint=checkpoint, checkpoint_sink=save,
@@ -316,8 +333,15 @@ class BackgroundAgents:
                     return {"status": "failed", "detail": {"error": result.get("error") or "parent continuation did not complete"}}
                 ids = result.get("agent_message_ids", [])
                 self.tasks.assert_action_execution(task_id=task["task_id"], user_id=user, expected_objective=task["objective"], task_run_id=run["run_id"], execution_token=token)
+                admission = self.messages.communication_admission(user, result.get("content", ""), delivery_id=run["run_id"])
+                if not admission["allowed"]:
+                    if admission["status"] == "already_communicated":
+                        manager.discard_runtime_turn(session, run["run_id"], user_id=user, agent_message_ids=ids)
+                        return {"status": "completed", "detail": {"agent_message_ids": ids, "delivery_status": "already_communicated"}}
+                    return {"status": "pending", "detail": {"delivery_retry_at": time.time() + admission["retry_after_s"]}}
                 if not manager.commit_turn(session, run["run_id"], result.get("content", ""), user_id=user, reasoning_steps=result.get("reasoning_steps"), agent_message_ids=ids):
                     raise RuntimeError("could not commit parent continuation")
+                await self.messages.record_communication(user_id=user, session_id=session, kind="background_result", content=result.get("content", ""), delivery_id=run["run_id"])
             except asyncio.CancelledError:
                 # Keep the pending turn and checkpoint for the same durable run.
                 raise

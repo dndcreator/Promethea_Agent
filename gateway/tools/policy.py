@@ -33,6 +33,14 @@ class ToolPolicy:
         from gateway.delegation import current_delegation, delegation_enabled
 
         scope = current_delegation()
+        from gateway.ambient_state import current_ambient
+
+        ambient = current_ambient()
+        if ambient is not None:
+            try:
+                ambient.service.assert_execution()
+            except (PermissionError, ValueError, KeyError):
+                return ToolPolicyDecision(False, "ambient execution authority expired or was revoked", effective=effective)
         if scope is not None and (scope.depth > 0 or scope.background_notification):
             if scope.closed or scope.budget.closed:
                 return ToolPolicyDecision(False, "delegated execution has settled", effective=effective)
@@ -42,6 +50,8 @@ class ToolPolicy:
                 reason = "background notifications cannot grant external-write authority; ask the user in conversation" if scope.background_notification else "delegated agents cannot request approval"
                 return ToolPolicyDecision(False, reason, effective=effective)
         option = str(spec.metadata.get("requires_run_option") or "")
+        if option == "ambient" and (ambient is None or (scope is not None and (scope.depth or scope.background_notification))):
+            return ToolPolicyDecision(False, "requires an active Ambient Runtime", effective=effective)
         if option == "multi_agent" and not delegation_enabled(run_context, user_config):
             return ToolPolicyDecision(False, "multi-agent mode is disabled for this turn", effective=effective)
 

@@ -17,6 +17,8 @@ class _Approval:
     subject: str
     confirmed: bool
     active: bool = True
+    consumed: bool = False
+    dispatch: bool = True
 
 
 _current: ContextVar[_Approval | None] = ContextVar("tool_approval", default=None)
@@ -29,12 +31,19 @@ def call_is_approved() -> bool:
 
 def matches_approved_call(name: str, args: dict[str, Any]) -> bool:
     grant = _current.get()
-    return call_is_approved() and grant.subject == _subject(name, args)
+    return call_is_approved() and grant.dispatch and not grant.consumed and grant.subject == _subject(name, args)
+
+
+def consume_approved_call(name: str, args: dict[str, Any]) -> bool:
+    if not matches_approved_call(name, args):
+        return False
+    _current.get().consumed = True
+    return True
 
 
 @contextmanager
-def approval_scope(name: str, args: dict[str, Any], *, confirmed: bool = False):
-    grant = _Approval(_subject(name, args), confirmed)
+def approval_scope(name: str, args: dict[str, Any], *, confirmed: bool = False, dispatch: bool = True):
+    grant = _Approval(_subject(name, args), confirmed, dispatch=dispatch)
     token = _current.set(grant)
     try:
         yield

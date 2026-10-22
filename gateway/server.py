@@ -104,6 +104,7 @@ class GatewayServer:
         self.workspace_service: Optional[WorkspaceService] = None
         self.workflow_engine: Optional[Any] = None
         self.task_service: Optional[Any] = None
+        self.ambient_service: Optional[Any] = None
         self.task_runtime: Optional[Any] = None
         self.workbench_projection: Optional[Any] = None
         
@@ -453,11 +454,14 @@ class GatewayServer:
 
     def get_services_health(self) -> Dict[str, Any]:
         """Return service readiness/availability snapshot."""
+        from config import config
+
         return {
             "capability_service": bool(self.capability_service),
             "memory_service": bool(self.memory_service and self.memory_service.is_enabled()),
             "reasoning_service": bool(self.reasoning_service and self.reasoning_service.is_enabled()),
             "conversation_service": bool(self.conversation_service),
+            "ambient_service": bool(getattr(self, "ambient_service", None) and config.ambient.enabled),
             "config_service": bool(self.config_service),
             "org_context_service": bool(self.org_context_service),
             "self_model_service": bool(self.self_model_service),

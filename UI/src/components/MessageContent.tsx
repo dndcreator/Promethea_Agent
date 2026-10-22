@@ -5,7 +5,7 @@ import type { TextAnnotation } from '../utils/message-links'
 import { openWorkbenchArtifact } from '../services/artifacts'
 import { useLanguage } from '../store/LanguageContext'
 
-export default function MessageContent({ content, followups }: { content: string; followups: TextAnnotation[] }) {
+export default function MessageContent({ content, followups, onAnnotationClick }: { content: string; followups: TextAnnotation[]; onAnnotationClick?: (id: string) => void }) {
   const { t } = useLanguage()
   const [error, setError] = useState('')
   const links = useMemo(() => messageLinks(content), [content])
@@ -19,7 +19,7 @@ export default function MessageContent({ content, followups }: { content: string
       if (right <= left) continue
       if (left > cursor) children.push(content.slice(cursor, left))
       children.push(
-        <span key={item.id} title={`${item.query}\n\n${item.response}`} className="cursor-help rounded-sm bg-brand-100/80 underline decoration-brand-500 decoration-2 underline-offset-2">
+        <span key={item.id} title={`${item.query}\n\n${item.response}`} role={onAnnotationClick ? 'button' : undefined} tabIndex={onAnnotationClick ? 0 : undefined} onClick={(event) => { if (onAnnotationClick) { event.preventDefault(); event.stopPropagation(); onAnnotationClick(item.id) } }} onKeyDown={(event) => { if (onAnnotationClick && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); onAnnotationClick(item.id) } }} className="cursor-help rounded-sm bg-brand-100/80 underline decoration-brand-500 decoration-2 underline-offset-2">
           {content.slice(left, right)}
         </span>,
       )

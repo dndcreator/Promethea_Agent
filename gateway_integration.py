@@ -355,6 +355,8 @@ class GatewayIntegration:
             event_emitter=event_emitter,
             llm_client=conversation_core,
             workspace_root=str(Path(__file__).resolve().parent),
+            message_manager=message_manager,
+            workflow_engine=self.gateway_server.workflow_engine,
         )
         self.gateway_server.self_evolve_module = SelfEvolveModule(
             config_service=self.gateway_server.config_service,
@@ -414,8 +416,22 @@ class GatewayIntegration:
             task_service=self.gateway_server.task_service,
         )
         self.gateway_server.conversation_service.background_agents = background_agents
+        self.gateway_server.self_model_service.agent_messages = background_agents.messages
         self.gateway_server.task_runtime.register_driver("subagent", background_agents)
         self.gateway_server.task_runtime.register_driver("agent_inbox", background_agents)
+        from gateway.ambient_service import AmbientService
+
+        self.gateway_server.ambient_service = AmbientService(
+            conversation=self.gateway_server.conversation_service,
+            task_runtime=self.gateway_server.task_runtime,
+            task_service=self.gateway_server.task_service,
+        )
+        self.gateway_server.task_runtime.register_driver("ambient", self.gateway_server.ambient_service)
+        self.gateway_server.conversation_service.ambient_service = self.gateway_server.ambient_service
+        self.gateway_server.self_model_service.ambient_service = self.gateway_server.ambient_service
+        self.gateway_server.capability_service.autonomy_validator = self.gateway_server.ambient_service.validate_scheduled_scope
+        self.gateway_server.self_model_service.workflow_engine = self.gateway_server.workflow_engine
+        self.gateway_server.workbench_projection.ambient_service = self.gateway_server.ambient_service
         self.gateway_server.ensure_capability_service().ensure_discovered_tools()
 
         event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)

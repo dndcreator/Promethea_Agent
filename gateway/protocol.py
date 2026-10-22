@@ -134,6 +134,7 @@ class EventType(str, Enum):
     CONVERSATION_ERROR = "conversation.error"      # Conversation error
     # Full interaction event (user input + assistant output)
     INTERACTION_COMPLETED = "interaction.completed"
+    AGENT_COMMUNICATION_OFFERED = "agent.communication.offered"
     # Durable task-domain lifecycle events
     TASK_CREATED = "task.created"
     TASK_STATE_CHANGED = "task.state.changed"

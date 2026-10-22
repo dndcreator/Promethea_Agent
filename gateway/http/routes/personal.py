@@ -89,6 +89,7 @@ def _build_workspace_payload(*, gateway_server: Any, user_id: str) -> Dict[str, 
         "avatar": avatar_service.export_user_bundle(user_id=user_id),
         "workflows": workflow_engine.export_user_state(user_id=user_id) if workflow_engine else {},
         "tasks": task_service.export_user_state(user_id=user_id) if task_service else {},
+        "ambient": gateway_server.ambient_service.store.export_user_state(user_id) if getattr(gateway_server, "ambient_service", None) else {},
         "reasoning_history": reasoning_service.tree_history.export_user_history(user_id=user_id) if reasoning_service else [],
         "moirai_learning": learning.export_user_state(user_id) if learning else {},
         "canvas_apps": export_canvas_library(Path(library.root_path)) if library else [],
@@ -100,6 +101,10 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
     scoped = rebind_user_scope(payload, source_user_id=source_user_id, target_user_id=user_id)
     try:
         project_rows = ProjectStore.validate_records(scoped["projects"]) if "projects" in scoped else None
+        if "ambient" in scoped:
+            from gateway.ambient_state import Situation
+            for row in scoped["ambient"].get("situations", []):
+                Situation.model_validate(row)
     except ValueError as exc:
         raise HTTPException(422, detail=str(exc)) from exc
     message_manager = getattr(gateway_server, "message_manager", None)
@@ -109,6 +114,13 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
     task_service = getattr(gateway_server, "task_service", None)
     reasoning_service = getattr(gateway_server, "reasoning_service", None)
     result: Dict[str, Any] = {"status": "success", "user_id": user_id, "mode": "merge" if merge else "replace", "applied": {}}
+    ambient = getattr(gateway_server, "ambient_service", None)
+    if ambient and "ambient" in scoped:
+        for scene in list(ambient.store.scenes.values()):
+            if scene.user_id == user_id and scene.settings.enabled:
+                ambient.configure(user_id, None, scene.settings.model_copy(update={"enabled": False}))
+        ambient.store.import_user_state(user_id, scoped["ambient"], merge=merge)
+        result["applied"]["ambient"] = {"success": True, "enabled": False}
     config = scoped.get("config") if isinstance(scoped.get("config"), dict) else {}
     if config:
         updated = await config_service.update_user_config(user_id, config, validate=False)

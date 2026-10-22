@@ -43,6 +43,8 @@ class SelfModelService:
         event_emitter: Optional[Any] = None,
         llm_client: Optional[Any] = None,
         workspace_root: Optional[str] = None,
+        message_manager: Optional[Any] = None,
+        workflow_engine: Optional[Any] = None,
     ) -> None:
         self.memory_service = memory_service
         self.task_service = task_service
@@ -50,6 +52,10 @@ class SelfModelService:
         self.config_service = config_service
         self.event_emitter = event_emitter
         self.llm_client = llm_client
+        self.message_manager = message_manager
+        self.workflow_engine = workflow_engine
+        self.ambient_service = None
+        self.agent_messages = None
         root = Path(workspace_root) if workspace_root else Path.cwd()
         self.workspace_root = root.resolve()
         self.self_model_path = self.workspace_root / "memory" / "self_model.json"
@@ -118,6 +124,10 @@ class SelfModelService:
             "self_model": {
                 "modules": ["SelfModelService"],
                 "role": "project owned state into bounded self-knowledge and cognition",
+            },
+            "initiative": {
+                "modules": ["AmbientService", "AgentMessages"],
+                "role": "maintain personal-space attention and coordinate proactive participation through Runtime messaging",
             },
             "self_evolve": {
                 "modules": ["SelfEvolveService"],
@@ -632,6 +642,7 @@ class SelfModelService:
                     "revision": task.get("revision"),
                 }
 
+        runtime = self.runtime_projection(user_id)
         lines = [
             "Self model context:",
             "- Current cognition may guide continuity; uncertain cognition is not established fact.",
@@ -648,16 +659,59 @@ class SelfModelService:
             lines.append(f"{heading}:")
             for item in rows[:10]:
                 candidate = f"- [{item.get('domain')}] {item.get('content')}"
-                if sum(len(line) + 1 for line in lines) + len(candidate) > max(600, int(budget_chars)):
+                if sum(len(line) + 1 for line in lines) + len(candidate) > max(400, int(budget_chars) // (2 if runtime else 1)):
                     break
                 lines.append(candidate)
         prompt_text = "\n".join(lines) if len(lines) > 3 else ""
-        revision_source = "|".join(str(item.get("cognition_id") or "") + str(item.get("updated_at") or "") for item in items)
+        if runtime:
+            projection_lines = ["\nPersonal-space continuity (revisable data):", "Sources: " + ", ".join(runtime["coverage"])]
+            sources = [(name, value) for name, value in runtime.items() if name != "coverage"]
+            remaining = max(0, budget_chars - len(prompt_text) - sum(len(part) + 1 for part in projection_lines))
+            # Reserve room for every source; a large task/history cannot hide attention.
+            for index, (name, value) in enumerate(sources):
+                allowance = remaining // (len(sources) - index)
+                prefix = name + ": "
+                encoded = json.dumps(value, ensure_ascii=False, default=str)
+                marker = " ... [excerpt]"
+                available = max(0, allowance - len(prefix) - 1)
+                if len(encoded) > available:
+                    encoded = encoded[:max(0, available - len(marker))] + marker if available >= len(marker) else ""
+                line = prefix + encoded
+                if len(line) + 1 <= remaining:
+                    projection_lines.append(line)
+                    remaining -= len(line) + 1
+            prompt_text += "\n".join(projection_lines)
+        revision_source = json.dumps({"items": items, "runtime": runtime}, sort_keys=True, ensure_ascii=False, default=str)
         return {
             "version": "self_model.context.v1",
             "revision": hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:16],
             "user_id": str(user_id),
             "active": active, "task": task_summary,
             "current": current[:10], "evolving": evolving[:10], "uncertain": uncertain[:10],
+            "runtime": runtime,
             "prompt_text": prompt_text,
         }
+
+    def runtime_projection(self, user_id: str) -> Dict[str, Any]:
+        """Cover each owned source with bounded fields and explicit coverage."""
+        result: Dict[str, Any] = {"coverage": {}}
+        if self.task_service is not None:
+            tasks = self.task_service.list_tasks(user_id=user_id, limit=100)
+            active = [row for row in tasks if row.get("status") not in {"completed", "cancelled"} and row.get("source") not in {"ambient", "agent_inbox"}]
+            result["tasks"] = [{"task_id": row["task_id"], "title": str(row.get("title") or "")[:160], "objective": str(row.get("objective") or "")[:400], "status": row["status"], "revision": row.get("revision")} for row in active[:8]]
+            result["coverage"]["tasks"] = {"observed": len(tasks), "active": len(active), "included": len(result["tasks"])}
+        if self.workflow_engine is not None:
+            workflows = self.workflow_engine.list_runs(user_id=user_id, limit=100)
+            result["workflows"] = [{key: row.get(key) for key in ("workflow_run_id", "task_id", "session_id", "status")} for row in workflows if row.get("status") not in {"completed", "cancelled"}][:8]
+            result["coverage"]["workflows"] = {"observed": len(workflows), "included": len(result["workflows"])}
+        if self.message_manager is not None:
+            sessions = self.message_manager.list_sessions(user_id=user_id, limit=6)
+            result["conversations"] = [{"session_id": row["session_id"], "title": str(row.get("title") or "")[:160], "last_message": str(row.get("last_message") or "")[:300], "last_activity": row.get("last_activity")} for row in sessions]
+            result["coverage"]["conversations"] = {"included": len(sessions)}
+        if self.ambient_service is not None:
+            result["attention"] = self.ambient_service.context_projection(user_id, None)
+            result["coverage"]["attention"] = {"available": True}
+        if self.agent_messages is not None:
+            result["communication"] = self.agent_messages.communication_context(user_id)
+            result["coverage"]["communication"] = {"available": True}
+        return result if len(result) > 1 else {}

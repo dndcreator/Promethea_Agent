@@ -76,12 +76,15 @@ export type TextAnnotation = {
   selected_text: string
   query: string
   response: string
+  source?: string
+  state?: string
 }
 
 export function annotationRanges(content: string, annotations: TextAnnotation[]) {
   const offsets = [0]
   for (const char of content) offsets.push(offsets[offsets.length - 1] + char.length)
   return annotations.flatMap((item) => {
+    if (item.state === 'dismissed') return []
     if (!Number.isInteger(item.start_offset) || !Number.isInteger(item.end_offset)
       || item.start_offset < 0 || item.end_offset <= item.start_offset) return []
     let start = offsets[item.start_offset]

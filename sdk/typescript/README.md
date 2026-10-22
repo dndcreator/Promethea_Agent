@@ -39,6 +39,19 @@ for await (const snapshot of client.workbench.watch({ taskId: 'task_123' })) {
 const paused = await client.tasks.pause('task_123', { expected_revision: 4 })
 
 const canvases = await client.canvas.list('session-1')
+
+const ambient = await client.ambient.configure(response.session_id!, {
+  enabled: true,
+  direction: 'Notice and help with unresolved release blockers',
+})
+const personalAttention = await client.ambient.get()
+if (ambient.pending) {
+  await client.ambient.confirm(response.session_id!, {
+    run_id: ambient.pending.run_id,
+    tool_call_id: ambient.pending.tool_call_id,
+    action: 'approve',
+  })
+}
 ```
 
 ## Guest Chat
@@ -80,6 +93,7 @@ The first release supports:
 - Session lookup
 - Task lookup/list, detached Run start, and revision-aware pause, resume, and cancel commands
 - Workbench snapshot queries and cursor-resumable SSE subscriptions
+- opt-in Ambient state/configuration, annotation feedback, and exact sensitive-action confirmation
 - Canvas discovery, app-state reads/optimistic writes, retain/delete, diagnostics,
   and a restricted opaque-frame bridge; no arbitrary tool execution from apps
 - bearer-token injection

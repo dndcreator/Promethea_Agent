@@ -10,6 +10,7 @@ from .runtime_event_log import RuntimeEventLog
 logger = logging.getLogger("Gateway.Events")
 
 _DURABLE_RUNTIME_EVENTS = {
+    EventType.AGENT_COMMUNICATION_OFFERED,
     EventType.INTERACTION_COMPLETED,
     EventType.ACTION_STATE_CHANGED,
     EventType.ACTION_OBSERVATION_COMMITTED,

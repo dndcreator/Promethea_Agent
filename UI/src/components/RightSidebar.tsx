@@ -33,6 +33,7 @@ import { useWorkbench } from '../store/WorkbenchContext'
 import { useLanguage } from '../store/LanguageContext'
 import { openWorkbenchArtifact } from '../services/artifacts'
 import { taskStatusLabel } from '../utils/task-presentation'
+import AmbientPanel from './AmbientPanel'
 
 interface RightSidebarProps {
   sessionId: string | null
@@ -313,6 +314,7 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false, o
       </div>
 
       {(view === 'work' || content) && <div hidden={view !== 'work'} className={`workbench-content ${content ? 'has-preview' : ''}`}>
+        {!runId && <AmbientPanel sessionId={sessionId} snapshot={snapshot?.ambient} onObserve={(id) => void handleReference({ reference_id: `task:${id}`, kind: 'task', target: id, label: t('主动行动', 'Ambient actions') })} />}
         {content || <>
           {workbench.task?.objective && <section className="workbench-section"><h3>{t('目标', 'Objective')}</h3><p>{workbench.task.objective}</p></section>}
           {workbench.memoryProposals.length > 0 && <section className="workbench-section"><h3>{t('需要确认', 'Needs review')}</h3><button type="button" className="workbench-reference" onClick={() => onOpenMemoryReview?.()}><Database size={15} /><span>{t('记忆更新', 'Memory updates')}</span><span>{workbench.memoryProposals.length}</span><ChevronRight size={13} /></button></section>}

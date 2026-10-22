@@ -10,6 +10,8 @@ Its job is orchestration. Domain details should stay in the relevant service lay
 - `gateway/server.py`: main server orchestration entry
 - `gateway/config_service.py`: config merge, update, and reset logic
 - `gateway/conversation_service.py`: conversation/session orchestration
+- `gateway/ambient_service.py`: first-level continuous initiative service; owns shared attention and feedback, delegates all execution to TaskRuntime/ConversationService/ActionService and policy to CapabilityService
+- `gateway/ambient_state.py`: atomic, owner-scoped working-cognition and activation-admission storage; not a second Task or Memory store
 - `gateway/delegation.py`: optional bounded child admission and lifetime; children reuse ConversationService/ActionService, Registry, policy and Runtime events
 - `gateway/background_agents.py`: persistent child descriptors and FIFO message semantics over TaskService/TaskRuntime; no separate scheduler or model loop
 - `gateway/agent_messages.py`: direct-parent report admission, Runtime settlement and bounded inbox projections; TaskService owns message persistence, MessageManager commits conversation receipts, and TaskRuntime owns notification execution

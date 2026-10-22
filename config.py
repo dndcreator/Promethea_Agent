@@ -499,6 +499,18 @@ class ActionConfig(BaseSettings):
     gaps: GoalGapConfig = Field(default_factory=GoalGapConfig)
 
 
+class AmbientConfig(BaseSettings):
+    enabled: bool = True
+    interval_s: float = Field(default=3600, ge=10, le=86400)
+    cooldown_s: float = Field(default=30, ge=1, le=3600)
+    daily_cycles: int = Field(default=24, ge=1, le=1000)
+    max_parallel: int = Field(default=1, ge=1, le=8)
+    max_steps: int = Field(default=5, ge=1, le=20)
+    max_tokens: int = Field(default=2048, ge=256, le=8192)
+    timeout_s: float = Field(default=120, ge=1, le=600)
+    communication_cooldown_s: float = Field(default=30, ge=0, le=3600)
+
+
 class MultiAgentConfig(BaseSettings):
     enabled: bool = True
     max_children: int = Field(default=6, ge=1, le=32)
@@ -527,6 +539,7 @@ class PrometheaConfig(BaseSettings):
     system: SystemConfig = Field(default_factory=SystemConfig)
     guest_chat: GuestChatConfig = Field(default_factory=GuestChatConfig)
     multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
+    ambient: AmbientConfig = Field(default_factory=AmbientConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     action: ActionConfig = Field(default_factory=ActionConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)

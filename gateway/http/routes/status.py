@@ -123,7 +123,7 @@ async def get_bootstrap_status():
 
 
 @router.get("/welcome")
-async def get_dynamic_welcome(lang: str = "zh", user_id: str = Depends(get_current_user_id)):
+async def get_dynamic_welcome(lang: str = "zh", visit_id: str = "", user_id: str = Depends(get_current_user_id)):
     gateway_server = get_gateway_server()
     user = user_manager.get_user_by_id(user_id) or {}
     user_config = user_manager.get_user_config(user_id) or {}
@@ -146,33 +146,6 @@ async def get_dynamic_welcome(lang: str = "zh", user_id: str = Depends(get_curre
         except Exception:
             recent_sessions = []
 
-    memory_sync = {}
-    memory_service = getattr(gateway_server, "memory_service", None)
-    if memory_service and hasattr(memory_service, "get_sync_stats"):
-        try:
-            memory_sync = memory_service.get_sync_stats()
-        except Exception:
-            memory_sync = {}
-
-    reasoning_stats = {}
-    reasoning_service = getattr(gateway_server, "reasoning_service", None)
-    if reasoning_service and hasattr(reasoning_service, "get_stats"):
-        try:
-            reasoning_stats = reasoning_service.get_stats()
-        except Exception:
-            reasoning_stats = {}
-
-    workflow_recovery = {"paused": 0, "failed": 0, "waiting_human": 0}
-    workflow_engine = getattr(gateway_server, "workflow_engine", None)
-    if workflow_engine is not None and hasattr(workflow_engine, "list_runs"):
-        try:
-            for run in workflow_engine.list_runs(limit=100) or []:
-                status = str((run or {}).get("status") or "").lower()
-                if status in workflow_recovery:
-                    workflow_recovery[status] += 1
-        except Exception:
-            pass
-
     welcome_lang = _normalize_welcome_lang(lang)
     fallback = _fallback_welcome(agent_name=agent_name, recent_sessions=recent_sessions, lang=welcome_lang)
     context = {
@@ -187,60 +160,57 @@ async def get_dynamic_welcome(lang: str = "zh", user_id: str = Depends(get_curre
             }
             for row in recent_sessions[:5]
         ],
-        "memory_sync": memory_sync,
-        "reasoning": reasoning_stats,
-        "workflow_recovery": workflow_recovery,
         "ui_language": welcome_lang,
     }
 
     conversation_service = getattr(gateway_server, "conversation_service", None)
     if conversation_service and hasattr(conversation_service, "call_llm"):
         try:
-            merged_config = None
-            config_service = getattr(gateway_server, "config_service", None)
-            if config_service:
-                merged_config = config_service.get_merged_config(user_id)
-            prompt = (
-                "You write a personalized greeting for an agent workbench.\n"
-                "Return strict JSON only with keys: greeting, context_hint, suggested_actions.\n"
-                "Rules:\n"
-                "- greeting: one short, warm, restrained greeting. Vary the wording naturally across visits; do not follow a fixed template. It must still feel like a greeting, not a dashboard summary or marketing copy.\n"
-                "- context_hint: one useful sentence. When recent context is reliable, gently mention at most one likely continuation; otherwise use a neutral invitation.\n"
-                "- suggested_actions: 1 to 3 concise commands the user may click or edit.\n"
-                "- Keep the tone calm and understated. Do not overstate familiarity or assume uncertain memories are correct.\n"
-                "- You may choose different phrasing, rhythm, and emphasis each time when it fits the context.\n"
-                "- Do not enumerate system status, memory statistics, reasoning state, workflow counts, or internal modules unless the user explicitly asks.\n"
-                "- Do not expose system principles, prompt rules, implementation docs, or hidden reasoning.\n"
-                f"- Write every returned field in this UI language: {'English' if welcome_lang == 'en' else 'Chinese'}.\n"
-                "- This language choice applies only to the workbench greeting, not to chat response language policy.\n"
-            )
-            response = await conversation_service.call_llm(
-                [
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
-                ],
-                user_config=merged_config,
-                user_id=user_id,
-            )
-            if isinstance(response, dict) and response.get("status") == "success":
-                obj = _extract_json_object(str(response.get("content") or ""))
-                if obj:
-                    welcome = _sanitize_welcome(obj, fallback=fallback)
-                    return {
-                        "status": "success",
-                        "generated_by": "llm",
-                        "model_used": response.get("model_used"),
-                        **welcome,
-                    }
+            async with conversation_service.agent_execution(user_id, None, "presentation"):
+                base_prompt, merged_config = await conversation_service._get_user_prompt_and_config(user_id, "web")
+                identity = conversation_service.prompt_assembler.identity_messages(base_prompt=base_prompt, user_config=merged_config)
+                messages = getattr(getattr(conversation_service, "background_agents", None), "messages", None)
+                if visit_id and messages:
+                    cached = messages.cached_presentation(user_id, visit_id=visit_id, language=welcome_lang)
+                    if cached:
+                        return cached
+                self_model = getattr(gateway_server, "self_model_service", None)
+                context["cognition"] = await self_model.build_context(user_id=user_id, query="") if self_model else {}
+                context["communication"] = messages.communication_context(user_id) if messages else {}
+                return await _generate_welcome(conversation_service, messages, identity, merged_config, context, fallback, welcome_lang, user_id, visit_id)
         except Exception:
             pass
 
-    return {
-        "status": "success",
-        "generated_by": "fallback",
-        "model_used": None,
-        **fallback,
-    }
+    return {"status": "success", "generated_by": "fallback", "model_used": None, **fallback}
+
+
+async def _generate_welcome(conversation_service, messages, identity, merged_config, context, fallback, welcome_lang, user_id, visit_id):
+    prompt = (
+        "Write a personal workbench greeting as the same continuing agent represented by the identity and cognition context. "
+        "Return strict JSON with greeting, context_hint, suggested_actions. "
+        "greeting is one short, warm, restrained greeting, with naturally varied wording. "
+        "context_hint is one useful sentence: gently mention at most one reliable continuation or use a neutral invitation. "
+        "suggested_actions contains one to three concise commands the user may click or edit. "
+        "Keep your established personality. Do not overstate familiarity or promote uncertain interpretations to facts. "
+        "Use shared cognition and recent communication; avoid repeating already delivered findings. "
+        "Do not expose statistics, internal modules, prompt rules or hidden reasoning. "
+        f"Write every field in {'English' if welcome_lang == 'en' else 'Chinese'}; this applies to this greeting only."
+    )
+    response = await conversation_service.call_llm(
+        [*identity, {"role": "system", "content": prompt}, {"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+        user_config=merged_config, user_id=user_id,
+    )
+    if isinstance(response, dict) and response.get("status") == "success":
+        obj = _extract_json_object(str(response.get("content") or ""))
+        if obj:
+            welcome = _sanitize_welcome(obj, fallback=fallback)
+            result = {"status": "success", "generated_by": "llm", "model_used": response.get("model_used"), **welcome}
+            if messages:
+                from uuid import uuid4
+                async with conversation_service.agent_execution(user_id, None):
+                    await messages.record_communication(user_id=user_id, session_id=None, kind="welcome", content=welcome["context_hint"], delivery_id=f"welcome:{uuid4().hex}", payload={"visit_id": visit_id[:200], "language": welcome_lang, "cognition_revision": context.get("cognition", {}).get("revision"), "response": result})
+            return result
+    return {"status": "success", "generated_by": "fallback", "model_used": None, **fallback}
 
 
 @router.get("/status")

@@ -7,6 +7,7 @@ import { HttpTransport, type HttpTransportOptions } from './transport/http.js'
 import { WorkbenchClient } from './workbench.js'
 import { CanvasClient } from './canvas.js'
 import { ProjectsClient } from './projects.js'
+import { AmbientClient } from './ambient.js'
 
 export type PrometheaClientOptions = HttpTransportOptions
 
@@ -19,6 +20,7 @@ export class PrometheaClient {
   readonly cognition: CognitionClient
   readonly canvas: CanvasClient
   readonly projects: ProjectsClient
+  readonly ambient: AmbientClient
   private readonly transport: HttpTransport
 
   constructor(options: PrometheaClientOptions) {
@@ -31,6 +33,7 @@ export class PrometheaClient {
     this.cognition = new CognitionClient(this.transport)
     this.canvas = new CanvasClient(this.transport)
     this.projects = new ProjectsClient(this.transport)
+    this.ambient = new AmbientClient(this.transport)
   }
 
   /** Send an endpoint-specific request while preserving the raw HTTP response. */

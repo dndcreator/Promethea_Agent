@@ -1,5 +1,59 @@
 # Task Runtime
 
+## Ambient Service
+
+`AmbientService` is a first-level peer of Conversation, Memory and Task. It owns
+continuous shared attention, open questions, revisable interpretations, user
+feedback and durable activation admission. It does not own tool facts, Task
+transitions, memory governance, model execution or another scheduler.
+
+```text
+Runtime events / periodic wakeup
+  -> AmbientService (opt-in situation, coalescing, quota, foreground priority)
+  -> existing TaskRuntime registered driver + lease/epoch/checkpoint
+  -> ConversationService prompt/context assembly
+  -> ActionService model/action/observation state machine
+  -> CapabilityService policy and exact approval
+```
+
+One durable situation per personal space spans conversations and bounded activations. Each activation may
+inspect, recall, reason, act, update its working understanding, annotate a visible
+message span, communicate, or remain silent. There is no required task template,
+automatic chat response or suggestion-only restriction. Session ids identify
+owned execution/communication channels. They do not own identity or attention.
+Version-one per-session state converges to the personal state on load; redundant
+actors are cancelled rather than maintained as a second writable state path.
+
+`ambient.reflect`, `ambient.annotate` and `ambient.say` are ordinary
+manifest-discovered tools. Reflection updates working cognition, never Memory
+facts. Annotations reuse exact-span follow-up persistence and acceptance/dismissal
+feedback; chat notices use idempotent assistant-only Runtime turns. Foreground
+conversation context also receives a bounded, explicitly revisable projection.
+Model-generated relevance rules cannot grant permissions or assert tool outcomes.
+
+SelfModelService projects bounded owner-scoped Memory, tasks, workflows,
+conversations, attention and communications with source coverage. Greetings reuse
+identity/customization/Soul blocks and this same projection. AgentMessages reuses
+Task outboxes, root/child identity checks, runtime receipts and fenced execution;
+root result deliveries coalesce across conversations. A cooldown can defer a
+notice without losing it or repeating its model call. The communication event
+records an offer/commit, never an invented user-read receipt. Autonomous schedules
+carry their origin generation through CapabilityService so revocation also applies
+after the originating action ends.
+
+The existing TaskRuntime supervisor performs admission/recovery. Admission is
+persisted before idempotent Run creation, with per-account daily cycle ceilings.
+Checkpoints preserve Action observations. Waiting approvals use the same Action
+Run with a fresh fenced lease; grants are exact and consumed once at dispatch.
+Interruptions with uncertain outcomes pause for explicit recovery instead of
+creating a fresh uncontrolled retry. Disabling the situation revokes authority.
+Workbench projects actual Task state plus bounded shared attention, rather than
+maintaining a second execution state machine. SDK types remain generated.
+
+This is operational proactive collaboration, not evidence of consciousness or a
+verified performance advantage over another product. A running local server is
+required; no implicit external-application surveillance or cloud execution is added.
+
 `TaskService` is the durable work domain. It is separate from
 `ConversationService`: conversations are the interaction surface, while tasks
 represent user goals that may span conversations and execution attempts.

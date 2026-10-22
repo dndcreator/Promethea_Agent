@@ -1,0 +1,7 @@
+{
+  "name": "ambient",
+  "version": "1.0.0",
+  "label": "Ambient collaboration",
+  "serviceType": "tool",
+  "entryPoint": { "module": "agentkit.tools.ambient", "factory": "create_tools" }
+}

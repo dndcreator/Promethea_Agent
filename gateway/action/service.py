@@ -142,6 +142,7 @@ class ActionService:
         output_sink: Optional[OutputSink] = None,
         reasoning_sink: Optional[ReasoningSink] = None,
         prepare_messages: Optional[Callable] = None,
+        checkpoint_sink: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         transitions = [dict(item) for item in (pending.get("action_state_transitions") or [])]
         if str(approved_call_id) != str(pending.get("tool_call_id") or ""):
@@ -160,6 +161,7 @@ class ActionService:
                 run_context=run_context,
                 metadata={"source": "action_confirmation_resume"},
                 prepare_messages=prepare_messages,
+                checkpoint_sink=checkpoint_sink,
             ),
             budget=int(pending.get("budget") or 5),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
@@ -205,7 +207,9 @@ class ActionService:
             output_sink=output_sink,
             reasoning_sink=reasoning_sink,
         )
-        return result.to_chat_loop_result()
+        payload = result.to_chat_loop_result()
+        await self._checkpoint(action_run, payload.get("messages") or messages, payload.get("usage") or {}, result=payload)
+        return payload
 
     async def reject_pending_action(
         self,
@@ -222,6 +226,7 @@ class ActionService:
         output_sink: Optional[OutputSink] = None,
         reasoning_sink: Optional[ReasoningSink] = None,
         prepare_messages: Optional[Callable] = None,
+        checkpoint_sink: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Commit a human denial as an observation and let the model replan or answer."""
         transitions = [dict(item) for item in (pending.get("action_state_transitions") or [])]
@@ -239,6 +244,7 @@ class ActionService:
                 run_context=run_context,
                 metadata={"source": "action_confirmation_rejected"},
                 prepare_messages=prepare_messages,
+                checkpoint_sink=checkpoint_sink,
             ),
             budget=int(pending.get("budget") or 5),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
@@ -313,7 +319,9 @@ class ActionService:
             output_sink=output_sink,
             reasoning_sink=reasoning_sink,
         )
-        return result.to_chat_loop_result()
+        payload = result.to_chat_loop_result()
+        await self._checkpoint(action_run, payload.get("messages") or messages, payload.get("usage") or {}, result=payload)
+        return payload
 
     async def _run(
         self,

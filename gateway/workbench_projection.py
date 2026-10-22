@@ -147,6 +147,7 @@ class WorkbenchProjection:
         if run_id:
             query_args["run_id"] = str(run_id)
         rows = self._query_events(**query_args)
+        cursor = max([int(row.get("seq") or 0) for row in rows] or [int(after_seq or 0)])
         if not any((task_id, run_id, resolved_session_id, resolved_task_id)):
             rows = []
         timeline = self._project_activities(rows)
@@ -180,7 +181,12 @@ class WorkbenchProjection:
             (activity for activity in reversed(timeline) if activity["status"] in {"running", "pending", "waiting", "waiting_user", "waiting_human"}),
             timeline[-1] if timeline else None,
         )
-        cursor = max([int(row.get("seq") or 0) for row in rows] or [int(after_seq or 0)])
+        ambient = None
+        if getattr(self, "ambient_service", None) is not None:
+            try:
+                ambient = self.ambient_service.view(user_id, resolved_session_id or None)
+            except KeyError:
+                pass
 
         return {
             "version": "workbench.v1",
@@ -201,8 +207,12 @@ class WorkbenchProjection:
             "memory_proposals": proposals,
             "recall_runs": recalls,
             "recovery_items": recovery,
-            "active_runtime_runs": self.task_runtime.active_run_ids() if self.task_runtime else [],
+            "active_runtime_runs": [
+                run_id for run_id in self.task_runtime.active_run_ids()
+                if any(run.get("run_id") == run_id for task in tasks for run in task.get("runs", []))
+            ] if self.task_runtime else [],
             "cursor": cursor,
+            "ambient": ambient,
         }
 
     def _query_events(self, *, user_id: str, **filters: Any) -> List[Dict[str, Any]]:
@@ -262,15 +272,11 @@ class WorkbenchProjection:
                 (task for task in tasks if any(str(run.get("run_id") or "") == str(run_id) for run in task.get("runs", []))),
                 None,
             )
-        session_matches = [task for task in tasks if session_id and str(session_id) in (task.get("session_ids") or []) and task.get("source") not in {"subagent", "agent_inbox"}]
-        if session_id:
-            candidates = session_matches
-        else:
-            candidates = tasks
+        if not session_id:
+            return None
+        candidates = [task for task in tasks if str(session_id) in (task.get("session_ids") or []) and task.get("source") not in {"subagent", "agent_inbox", "ambient"}]
         active = next((task for task in candidates if str(task.get("status") or "") in ACTIVE_TASK_STATES), None)
-        if session_id:
-            return active or (candidates[0] if candidates else None)
-        return active
+        return active or (candidates[0] if candidates else None)
 
     @staticmethod
     def _event_run_id(row: Dict[str, Any]) -> str:

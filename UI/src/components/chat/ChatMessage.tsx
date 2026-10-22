@@ -1,4 +1,6 @@
 import MessageContent from '../MessageContent'
+import { useState } from 'react'
+import AgentNotes from './AgentNotes'
 import { sourceSelection } from '../../utils/message-links'
 import { useLanguage } from '../../store/LanguageContext'
 import type { WorkbenchActivity } from '../../services/api'
@@ -12,6 +14,7 @@ type MessageProps = {
   time?: string
   content: string
   messageId: string
+  sessionId?: string | null
   followups: FollowupData[]
   onSelectText: (selection: TextSelection) => void
   reasoningTreeId?: string
@@ -24,8 +27,10 @@ type MessageProps = {
   onRetry?: () => void
 }
 
-export default function ChatMessage({ role, avatar, name, time, content, messageId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry }: MessageProps) {
+export default function ChatMessage({ role, avatar, name, time, content, messageId, sessionId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry }: MessageProps) {
   const { t } = useLanguage()
+  const [selectedNote, setSelectedNote] = useState<string | null>(null)
+  const [noteFocus, setNoteFocus] = useState(0)
   const isAgent = role === 'agent' || role === 'assistant'
   const isTool = role === 'tool' || role === 'status'
 
@@ -106,8 +111,9 @@ export default function ChatMessage({ role, avatar, name, time, content, message
             })
           }}
         >
-          <MessageContent content={displayContent} followups={followups} />
+          <MessageContent content={displayContent} followups={followups} onAnnotationClick={sessionId ? (id) => { setSelectedNote(id); setNoteFocus((value) => value + 1) } : undefined} />
         </div>
+        {sessionId && <AgentNotes sessionId={sessionId} notes={followups} selectedId={selectedNote} focusVersion={noteFocus} />}
       </div>
     </div>
   )

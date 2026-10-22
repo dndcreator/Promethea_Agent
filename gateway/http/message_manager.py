@@ -46,6 +46,8 @@ class FollowUp(BaseModel):
     query: str = ""
     response: str = ""
     created_at: float = Field(default_factory=time.time)
+    source: str = "user"
+    state: str = "open"
 
 
 class Session(BaseModel):
@@ -277,6 +279,7 @@ class MessageManager:
         custom_query: Optional[str],
         query: str,
         response: str,
+        source: str = "user",
     ) -> Optional[Dict]:
         """Persist an annotation only when it is anchored to this user's message."""
         key = self._resolve_session_key(session_id, user_id=user_id)
@@ -300,11 +303,36 @@ class MessageManager:
             custom_query=custom_query,
             query=query,
             response=response,
+            source=source,
         )
+        previous = session.model_copy(deep=True)
         session.followups.append(followup)
         session.last_activity = time.time()
-        self.session_store.save_all(self.session)
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key] = previous
+            raise
         return _model_to_dict(followup)
+
+    def set_followup_state(self, session_id, *, user_id, followup_id, state):
+        if state not in {"accepted", "dismissed"}:
+            raise ValueError("invalid annotation feedback")
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key:
+            return None
+        session = self.session[key]
+        item = next((row for row in session.followups if row.id == followup_id and row.source == "agent"), None)
+        if item is None:
+            return None
+        previous = item.state
+        item.state = state
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            item.state = previous
+            raise
+        return _model_to_dict(item)
     
     def add_message(
         self,
@@ -504,9 +532,31 @@ class MessageManager:
         session = self.session[key]
         return bool(set(session.pending_turns) - set(exclude_turn_ids or [])) or bool(session.pending_confirmation)
 
-    def agent_message_receipts(self, session_id: str, *, user_id: str) -> set[str]:
+    def agent_message_receipts(self, session_id: Optional[str], *, user_id: str) -> set[str]:
+        if session_id is None:
+            return {receipt for key, session in self.session.items() if self._split_session_key(key)[0] == user_id for receipt in session.agent_receipts}
         key = self._resolve_session_key(session_id, user_id=user_id)
         return set(self.session[key].agent_receipts) if key else set()
+
+    def has_active_user_turn(self, user_id: str) -> bool:
+        return any(self._split_session_key(key)[0] == user_id and any(turn.get("user_role") != "runtime" for turn in session.pending_turns.values()) for key, session in self.session.items())
+
+    def discard_runtime_turn(self, session_id, turn_id, *, user_id, agent_message_ids):
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key:
+            raise KeyError("conversation not found")
+        session = self.session[key]
+        pending = session.pending_turns.get(turn_id)
+        if pending is not None and pending.get("user_role") != "runtime":
+            raise PermissionError("cannot discard a user turn")
+        previous = session.model_copy(deep=True)
+        session.pending_turns.pop(turn_id, None)
+        session.agent_receipts = list(dict.fromkeys([*session.agent_receipts, *agent_message_ids]))
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key] = previous
+            raise
 
     def abort_turn(
         self,

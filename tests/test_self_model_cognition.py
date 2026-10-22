@@ -179,6 +179,29 @@ async def test_passive_self_model_projection_uses_query_candidate_pool(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_passive_context_reserves_space_for_each_runtime_source(tmp_path):
+    service = SelfModelService(memory_service=_MemoryService(), workspace_root=str(tmp_path))
+    sources = {
+        "tasks": [{"objective": "long task " * 1000}],
+        "workflows": [{"status": "running"}],
+        "conversations": [{"title": "long history " * 1000}],
+        "attention": {"direction": "shared focus"},
+        "communication": {"pending_offers": [{"content": "retained notice"}]},
+    }
+    service.runtime_projection = lambda _user: {"coverage": dict.fromkeys(sources, {}), **sources}
+
+    context = await service.build_context(user_id="u1", budget_chars=2400)
+
+    assert len(context["prompt_text"]) <= 2400
+    assert "shared focus" in context["prompt_text"]
+    assert "retained notice" in context["prompt_text"]
+    assert "[excerpt]" in context["prompt_text"]
+    for source in sources:
+        assert f"\n{source}: " in context["prompt_text"]
+    assert context["runtime"]["tasks"] == sources["tasks"]
+
+
+@pytest.mark.asyncio
 async def test_active_cognition_recall_uses_shared_pool_and_supplied_facets(tmp_path):
     memory = _CandidateMemoryService()
     llm = _FakeLLM()

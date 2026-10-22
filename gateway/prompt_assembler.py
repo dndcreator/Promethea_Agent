@@ -12,6 +12,13 @@ from .tool_prompt_blocks import build_action_protocol_prompt, build_tool_executi
 class PromptAssembler:
     """Build system prompts from structured prompt blocks."""
 
+    def identity_messages(self, *, base_prompt: str, user_config: Optional[Dict[str, Any]]) -> List[Dict[str, str]]:
+        blocks = self.collect_blocks(
+            run_context=None, mode=ModeDecision(), plan=PlanResult(base_system_prompt=base_prompt),
+            memory_bundle=MemoryRecallBundle(), tools=ToolExecutionBundle(), user_config=user_config,
+        )
+        return self.render_messages(self.sort_blocks([block for block in blocks if block.block_id in {"identity", "customization", "soul_core"}]))
+
     @staticmethod
     def _normalize_block_name(value: Any) -> str:
         text = str(value or "").strip().lower()

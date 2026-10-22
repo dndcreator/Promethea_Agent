@@ -28,6 +28,8 @@ export type FollowupData = {
   query: string
   response: string
   created_at: number
+  source?: string
+  state?: string
 }
 
 export type TextSelection = {

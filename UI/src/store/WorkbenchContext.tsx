@@ -17,7 +17,7 @@ export function WorkbenchProvider({ sessionId, taskId, runId, children }: { sess
 
   useEffect(() => {
     const controller = new AbortController()
-    if (!user || (!sessionId && !taskId)) return () => controller.abort()
+    if (!user) return () => controller.abort()
     void (async () => {
       try {
         for await (const snapshot of watchWorkbenchSnapshots(sessionId, taskId, runId, controller.signal)) {

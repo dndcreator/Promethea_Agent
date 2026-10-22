@@ -1,5 +1,55 @@
 # Configuration Reference
 
+## Ambient Collaboration
+
+`AmbientService` is a first-level, in-process service. Its deployment switch is
+`AMBIENT__ENABLED=true`; each personal space remains **off until explicitly enabled**
+in Workbench / Work. The optional focus can be empty: relevance and the next
+action are model decisions, not a domain-specific rule table.
+
+Deployment ceilings follow the existing nested environment convention:
+`AMBIENT__INTERVAL_S=3600`, `AMBIENT__COOLDOWN_S=30`,
+`AMBIENT__DAILY_CYCLES=24`, `AMBIENT__MAX_PARALLEL=1`,
+`AMBIENT__MAX_STEPS=5`, `AMBIENT__MAX_TOKENS=2048`,
+`AMBIENT__TIMEOUT_S=120`, `AMBIENT__COMMUNICATION_COOLDOWN_S=30`.
+Daily cycles are per account, using UTC calendar days.
+Tokens are capped per provider response, not an exact daily billing allowance;
+delegation also remains subject to the existing multi-agent ceilings.
+
+Runtime events and periodic checks trigger bounded activations of the same
+personal-space situation across conversations. Foreground turns take admission priority. Only the running
+server can do work: stopping the process stops computation, while durable
+attention, Task checkpoints, annotations and feedback survive a restart.
+External applications are not implicitly monitored.
+
+Readonly investigation and owned-workspace work use existing tool policies.
+Sensitive effects wait for exact one-call approval. Disabling or changing the
+focus revokes the execution scope; uncertain interrupted effects are observations
+on recovery, never blindly replayed. Working interpretations are not automatically
+written as Memory facts. Personal archive transfer includes this state but does
+not transfer autonomy permission: imported situations start disabled.
+
+Self Model projects owned memory, tasks, workflows, recent conversations, working
+attention and communication receipts for every root entrypoint. Greetings use the
+same identity, customization and Soul blocks while retaining their own concise
+presentation. They generate only on an actual welcome visit/language change or
+long-idle return; the same visit receipt is idempotent. An offered greeting does
+not imply that the user read it.
+
+Existing AgentMessages IPC coordinates root notifications across conversations.
+Root action turns share the personal identity lock; independent children and
+read-only greeting preparation may progress concurrently. Communication receipts
+live in Runtime Event Log, duplicate notices are suppressed, and cooldown deferrals
+retain their original Task outbox/checkpoint for later consideration. Notices do
+not count as new user interactions. Autonomous schedules inherit revocable origin
+authority; explicitly user-created schedules remain independent.
+
+The SDK exposes `client.ambient.get/configure/feedback/confirm`; `/api/ambient`
+reads/configures the personal scope, while session-qualified routes select an owned
+communication channel without creating a second cognitive identity. Public types
+are generated from `gateway/public_contracts.py`. See
+[Runtime ownership](architecture/task-runtime.md#ambient-service) for the boundaries.
+
 ## Optional Multi-Agent Delegation
 
 The chat composer has a **Multi-agent** switch for authenticated users. It is off

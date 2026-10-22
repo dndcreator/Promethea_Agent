@@ -64,6 +64,8 @@ async def test_exact_scoped_confirmation_allows_one_dispatch(source):
     with approval_scope("risky.run", {"value": 1}, confirmed=True):
         assert await service.call_tool("risky.run", {"value": 1}) == {"ok": True}
         with pytest.raises(ToolPolicyViolationError):
+            await service.call_tool("risky.run", {"value": 1})
+        with pytest.raises(ToolPolicyViolationError):
             await service.call_tool("risky.run", {"value": 2, "approved": True})
     invoke.assert_awaited_once()
     with pytest.raises(ToolPolicyViolationError):

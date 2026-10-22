@@ -478,6 +478,48 @@ export interface CognitionResponse {
   cognition: CognitionBundle
 }
 
+export interface AmbientSettings {
+  enabled?: boolean
+  direction?: string
+  ui_language?: string
+  timezone?: string
+}
+
+export interface AmbientApproval {
+  run_id: string
+  tool_call_id: string
+  tool_name: string
+  args?: Record<string, unknown>
+}
+
+export interface AmbientFeedback {
+  annotation_id: string
+  decision: "accepted" | "dismissed"
+  comment?: string
+}
+
+export interface AmbientConfirmation {
+  run_id: string
+  tool_call_id: string
+  action: "approve" | "reject"
+}
+
+export interface AmbientState {
+  session_id?: string | null
+  user_id?: string
+  scope?: string
+  available?: boolean
+  settings?: AmbientSettings
+  revision?: number
+  status?: string
+  task_id?: string | null
+  attention?: Array<string>
+  questions?: Array<string>
+  reflection?: string
+  next_check_at?: number | null
+  pending?: AmbientApproval | null
+}
+
 export interface WorkbenchSnapshot {
   version?: string
   scope: WorkbenchScope
@@ -494,4 +536,5 @@ export interface WorkbenchSnapshot {
   recovery_items?: Array<WorkflowRunSummary>
   active_runtime_runs?: Array<string>
   cursor?: number
+  ambient?: AmbientState | null
 }

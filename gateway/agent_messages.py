@@ -10,11 +10,13 @@ from inspect import signature
 from typing import Literal
 from types import SimpleNamespace
 from uuid import uuid4
+import time
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from config import ActionConfig, config
 from .delegation import current_delegation
+from .protocol import EventType
 
 
 INBOX_RUN_TYPE = "agent_inbox"
@@ -72,12 +74,88 @@ class AgentMessage(BaseModel):
     received: bool = False
 
 
+class UserNotice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    message_id: str = Field(min_length=1, max_length=200)
+    kind: Literal["user-notice"]
+    session_id: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=8000)
+    received: bool = False
+
+
 class AgentMessages:
     """A component of BackgroundAgents, not another execution host or bus."""
 
     def __init__(self, agents):
         self.agents = agents
         self.tasks = agents.tasks
+
+    def communication_context(self, user_id):
+        """Read committed dialogue and offered presentations from their owners."""
+        manager = self.agents.conversation.message_manager
+        recent = []
+        if manager is not None:
+            for session in manager.list_sessions(user_id=user_id, limit=6):
+                recent.extend({"session_id": session["session_id"], "content": row["content"][:1000]} for row in manager.get_messages(session["session_id"], user_id=user_id)[-4:] if row.get("role") == "assistant")
+        log = getattr(self.agents.conversation.event_emitter, "event_log", None)
+        offers = log.query(user_id=user_id, event_type=EventType.AGENT_COMMUNICATION_OFFERED.value, limit=12) if log else []
+        return {"pending_offers": self.pending_communications(user_id), "recent_offers": [{"occurred_at": row["occurred_at"], **{key: value for key, value in row["payload"].items() if key != "presentation"}} for row in offers], "recent_assistant_messages": recent[-12:]}
+
+    def pending_communications(self, user_id):
+        result = []
+        ambient = self.agents.conversation.ambient_service
+        for task in self.tasks.execution_tasks(run_type="ambient"):
+            if task["user_id"] != user_id:
+                continue
+            try:
+                if ambient is None or ambient.descendant_authority(task) is None:
+                    continue
+            except PermissionError:
+                continue
+            for run in task["runs"]:
+                for row in run["metadata"].get("agent_outbox", []):
+                    try:
+                        notice = UserNotice.model_validate(row)
+                    except ValueError:
+                        continue
+                    if not notice.received:
+                        result.append({**notice.model_dump(), "task_id": task["task_id"], "run_id": run["run_id"]})
+        return result[-12:]
+
+    def defer_communication(self, context, *, session_id, content, delivery_id):
+        self.tasks.append_agent_message(task_id=context.task_id, user_id=context.user_id, run_id=context.task_run_id, token=context.execution_token, message={"message_id": delivery_id, "kind": "user-notice", "session_id": session_id, "content": content, "received": False})
+
+    def cached_presentation(self, user_id, *, visit_id, language):
+        log = getattr(self.agents.conversation.event_emitter, "event_log", None)
+        if log is None:
+            return None
+        for row in reversed(log.query(user_id=user_id, event_type=EventType.AGENT_COMMUNICATION_OFFERED.value, limit=24)):
+            presentation = row["payload"].get("presentation") or {}
+            if row["payload"].get("kind") == "welcome" and presentation.get("visit_id") == visit_id[:200] and presentation.get("language") == language:
+                return presentation.get("response")
+        return None
+
+    def communication_admission(self, user_id, content, *, delivery_id):
+        recent = self.communication_context(user_id)
+        normalized = " ".join(content.split())
+        for row in recent["recent_assistant_messages"]:
+            if " ".join(row["content"].split()) == normalized:
+                return {"allowed": False, "status": "already_communicated", "reason": "the same content is already in owned conversation history"}
+        for row in reversed(recent["recent_offers"]):
+            if row.get("delivery_id") == delivery_id:
+                return {"allowed": False, "status": "already_communicated", "reason": "delivery receipt already exists"}
+            if " ".join(str(row.get("content") or "").split()) == normalized:
+                return {"allowed": False, "status": "already_communicated", "reason": "the same content was already offered"}
+            offered = datetime.fromisoformat(row["occurred_at"].replace("Z", "+00:00")).timestamp()
+            remaining = config.ambient.communication_cooldown_s - (time.time() - offered)
+            if remaining > 0:
+                return {"allowed": False, "status": "deferred", "retry_after_s": remaining, "reason": "recent communication; retain the finding and choose a quieter channel or a later activation"}
+        return {"allowed": True}
+
+    async def record_communication(self, *, user_id, session_id, kind, content, delivery_id, payload=None):
+        emitter = self.agents.conversation.event_emitter
+        if emitter is not None:
+            await emitter.emit(EventType.AGENT_COMMUNICATION_OFFERED, {"user_id": user_id, "session_id": session_id, "kind": kind, "content": content, "delivery_id": delivery_id, "presentation": payload or {}})
 
     def _entry(self, task, run, *, kind, content, delivery, message_id=None, outcome=None):
         descriptor = self.agents._descriptor(task)
@@ -140,13 +218,13 @@ class AgentMessages:
         return sorted([
             row for task, row in self._rows()
             if task["user_id"] == user_id and not row["received"]
-            and row["session_id"] == session_id and row["recipient_task_id"] == agent_task_id
+            and (session_id is None or row["session_id"] == session_id) and row["recipient_task_id"] == agent_task_id
         ], key=lambda row: (row["created_at"], row["message_id"]))
 
     def project(self, context, messages, user_config=None):
         scope = current_delegation()
         address = scope.agent_task_id if scope is not None else None
-        rows = self.pending(user_id=context.user_id, session_id=context.session_id, agent_task_id=address)
+        rows = self.pending(user_id=context.user_id, session_id=context.session_id if scope is not None and scope.depth else None, agent_task_id=address)
         # An explicit per-step batch prevents repeated full status dumps and separates
         # Runtime lifecycle facts from child-authored text at user trust level.
         messages = [row for row in messages if not (row.get("role") == "user" and str(row.get("content") or "").startswith(MESSAGE_PREFIX))]
@@ -205,13 +283,19 @@ class AgentMessages:
                 recipient = self.tasks.get_task(address, user_id=task["user_id"])
                 receipts = {mid for run in (recipient or {}).get("runs", []) if run["status"] == "completed" for mid in run["metadata"].get("agent_message_ids", [])}
             elif manager is not None:
-                receipts = manager.agent_message_receipts(row["session_id"], user_id=task["user_id"])
+                receipts = manager.agent_message_receipts(None, user_id=task["user_id"])
             else:
                 receipts = set()
             if row["message_id"] in receipts:
                 by_user[task["user_id"]].add(row["message_id"])
         for user, ids in by_user.items():
             self.tasks.acknowledge_agent_messages(user_id=user, message_ids=list(ids))
+        if manager is not None:
+            for user in {task["user_id"] for task in self.tasks.execution_tasks(run_type="ambient")}:
+                committed = manager.agent_message_receipts(None, user_id=user)
+                ids = [row["message_id"] for row in self.pending_communications(user) if row["message_id"] in committed]
+                if ids:
+                    self.tasks.acknowledge_agent_messages(user_id=user, message_ids=ids)
 
     def recover(self):
         """Called by the existing TaskRuntime supervisor, including cold startup."""
@@ -222,7 +306,7 @@ class AgentMessages:
         groups = defaultdict(list)
         for task, row in self._rows():
             if not row["received"] and row["delivery"] == "wakeup":
-                groups[(task["user_id"], row["session_id"], row["recipient_task_id"])].append((task, row))
+                groups[(task["user_id"], row["session_id"] if row["recipient_task_id"] else None, row["recipient_task_id"])].append((task, row))
         for (user, session, address), entries in groups.items():
             if not config.multi_agent.enabled or not self.agents._config(user).get("multi_agent", {}).get("enabled", True):
                 continue
@@ -232,13 +316,22 @@ class AgentMessages:
                 target = self.tasks.get_task(address, user_id=user)
                 if target is None or target["status"] in {"paused", "cancelled"}:
                     continue
+                if target.get("source") == "ambient":
+                    ambient = self.agents.conversation.ambient_service
+                    if ambient is not None:
+                        try:
+                            ambient.wake_for_reports(target, sorted(row["message_id"] for _, row in entries))
+                        except PermissionError:
+                            pass
+                    continue
                 run_type = "subagent"
             else:
                 manager = self.agents.conversation.message_manager
+                session = entries[-1][1]["session_id"]
                 session_info = manager.get_session(session, user_id=user) if manager is not None else None
-                if not session_info or manager.has_active_turn(session, user_id=user):
+                if not session_info or manager.has_active_user_turn(user):
                     continue
-                target = next((item for item in self.tasks.execution_tasks(run_type=INBOX_RUN_TYPE) if item["user_id"] == user and session in item["session_ids"]), None)
+                target = next((item for item in self.tasks.execution_tasks(run_type=INBOX_RUN_TYPE) if item["user_id"] == user), None)
                 if target and target["status"] in {"paused", "cancelled"}:
                     continue
                 run_type = INBOX_RUN_TYPE
