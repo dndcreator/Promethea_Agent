@@ -44,6 +44,7 @@ class RunContext(BaseModel):
     action_state: Dict[str, Any] = Field(default_factory=dict)
     goal_gaps: Dict[str, Any] = Field(default_factory=dict)
     event_buffer: list[Dict[str, Any]] = Field(default_factory=list)
+    agent_message_ids: list[str] = Field(default_factory=list)
     debug_flags: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

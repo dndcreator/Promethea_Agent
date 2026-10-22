@@ -19,6 +19,7 @@ The `memory` module transforms raw conversation turns into long-lived structured
 - `memory/auto_recall.py`: retrieval logic and layer ranking
 - `memory/llm_extractor.py`: fact/entity extraction
 - `memory/session_scope.py`: user/session scoping helpers
+- `memory/graph_reader.py`: read-only backend graph views and normalization; no write governance or service lifecycle
 - `memory/neo4j_connector.py`: Neo4j access wrapper
 - `memory/models.py`: graph node/edge models
 

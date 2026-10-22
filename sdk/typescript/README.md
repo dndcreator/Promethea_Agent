@@ -41,6 +41,15 @@ const paused = await client.tasks.pause('task_123', { expected_revision: 4 })
 const canvases = await client.canvas.list('session-1')
 ```
 
+## Guest Chat
+
+`client.runs.guestStatus()` reads operator-owned availability and limits.
+`client.runs.guest({ messages: [{ role: 'user', content: 'Hello' }] })` performs
+temporary text-only chat without an account. It returns a complete model reply,
+not an Agent run or a persisted session. Supply an `AbortSignal` as the second
+argument to cancel. The server enforces all access and usage limits; the SDK adds
+no permissions or model policy. See [Guest Chat Configuration](../../docs/configuration.md#guest-chat).
+
 ## Commands
 
 ```bash
@@ -53,6 +62,13 @@ npm test
 
 The generated types in `src/generated/public-contracts.ts` come from
 `gateway/public_contracts.py` through JSON Schema. Do not edit them manually.
+
+Generation requires Python with Pydantic 2.5 or newer, not a running Gateway or
+computer/browser dependencies such as `psutil` and Playwright. The command uses
+`PYTHON` when set, then the parent workspace `.venv`, then Python on `PATH`.
+An interpreter that starts but lacks Pydantic fails explicitly rather than
+silently selecting a different environment. SDK consumers only need the built
+TypeScript package; Python is needed for maintaining the generated contracts.
 
 ## Scope
 

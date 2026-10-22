@@ -22,6 +22,7 @@ from .models import ActionContext, ActionResult, ActionRun
 from .observation import RuntimeObservation
 from .state_machine import ActionPhase
 from .state_machine import RuntimeActionStateMachine
+from .checkpoint import capture as capture_checkpoint, restore as restore_checkpoint
 
 
 CapabilityInspector = Callable[[List[str]], Awaitable[Dict[str, Any]]]
@@ -65,6 +66,8 @@ class ActionService:
         output_sink: Optional[OutputSink] = None,
         reasoning_sink: Optional[ReasoningSink] = None,
         prepare_messages: Optional[Callable] = None,
+        checkpoint_sink: Optional[Callable] = None,
+        checkpoint: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         action_run = ActionRun(
             goal=str(goal or ""),
@@ -76,11 +79,30 @@ class ActionService:
                 run_context=run_context,
                 metadata=dict(metadata or {}),
                 prepare_messages=prepare_messages,
+                checkpoint_sink=checkpoint_sink,
             ),
             budget=budget,
             approved_call_ids=set(approved_call_ids or ()),
         )
+        if checkpoint:
+            if checkpoint.get("result"):
+                return dict(checkpoint["result"])
+            action_run = restore_checkpoint(checkpoint, action_run.context)
         self._load_goal_gaps(action_run)
+        restored_messages = None
+        if checkpoint:
+            restored_messages = list(action_run.messages)
+            pending = checkpoint.get("pending_calls") or []
+            if pending:
+                calls = [ToolCallProposal(tool_name=row["tool_name"], arguments=dict(row["arguments"]), call_id=row["call_id"]) for row in pending]
+                action = ModelAction(kind="tool_calls", calls=calls)
+                results = [ToolExecutionResult(
+                    tool_name=call.tool_name, ok=False,
+                    error=ToolErrorInfo("TOOL_OUTCOME_UNKNOWN", "Runtime restarted during this call. It was not replayed; inspect actual state before retrying.", "recovery", False),
+                ) for call in calls]
+                observations = await self._record_tool_results(action_run, action, results, model_step_id="recovery", started_ids={call.call_id for call in calls})
+                restored_messages.extend(self._observation_messages("", observations))
+                await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="interrupted_calls_observed")
         result = await self._run(
             action_run,
             tool_executor=tool_executor,
@@ -89,8 +111,20 @@ class ActionService:
             capability_resolver=capability_resolver,
             output_sink=output_sink,
             reasoning_sink=reasoning_sink,
+            resume_messages=restored_messages,
+            resume_usage=(checkpoint or {}).get("usage"),
         )
-        return result.to_chat_loop_result()
+        payload = result.to_chat_loop_result()
+        await self._checkpoint(action_run, payload.get("messages") or restored_messages or messages, payload.get("usage") or {}, result=payload)
+        return payload
+
+    @staticmethod
+    async def _checkpoint(action_run, messages, usage, **options):
+        sink = action_run.context.checkpoint_sink
+        if sink is not None:
+            pending = sink(capture_checkpoint(action_run, messages, usage, **options))
+            if inspect.isawaitable(pending):
+                await pending
 
     async def resume_action(
         self,
@@ -310,6 +344,7 @@ class ActionService:
         try:
             while resumed_action is not None or action_run.step < budget:
                 self._assert_task_execution(action_run)
+                await self._checkpoint(action_run, messages, usage)
                 if resumed_action is not None:
                     action = resumed_action
                     resumed_action = None
@@ -468,7 +503,13 @@ class ActionService:
                         cause="tool_batch_started",
                         facts={"model_step_id": model_step_id, "call_count": len(action.calls)},
                     )
+                    await self._checkpoint(action_run, messages, usage, pending_calls=[{
+                        "tool_name": call.tool_name, "arguments": call.arguments, "call_id": call.call_id,
+                    } for call in action.calls])
                     results = await self._execute_batch(action_run, action, tool_executor, model_step_id=model_step_id)
+                from gateway.delegation import take_delegated_usage
+
+                self._merge_usage(usage, take_delegated_usage())
                 observations = await self._record_tool_results(
                     action_run, action, results, model_step_id=model_step_id,
                     started_ids={call.call_id for call in action.calls} if preparation_error is None else set(),
@@ -1148,7 +1189,18 @@ class ActionService:
             "task_run_id": getattr(run_context, "task_run_id", None),
             "workflow_run_id": getattr(run_context, "workflow_run_id", None),
             "conversation_turn_id": getattr(run_context, "conversation_turn_id", None),
+            "execution_epoch": (getattr(run_context, "execution_token", None) or {}).get("epoch"),
+            "attempt_id": (getattr(run_context, "execution_token", None) or {}).get("attempt_id"),
         }
+        from gateway.delegation import current_delegation
+
+        delegation = current_delegation()
+        if delegation is not None and delegation.depth:
+            identity.update(
+                parent_action_loop_id=delegation.parent_action_loop_id,
+                ancestor_action_loop_ids=list(delegation.ancestor_action_loop_ids),
+                delegation_depth=delegation.depth,
+            )
         await self.event_emitter.emit(event_type, {**identity, **_json_safe(payload)})
 
     @staticmethod

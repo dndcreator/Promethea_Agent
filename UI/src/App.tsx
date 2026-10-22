@@ -41,7 +41,7 @@ function Workspace() {
   const [running, setRunning] = useState(false)
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(() => window.innerWidth >= 900 && localStorage.getItem('session_sidebar_open') !== 'false')
-  const [workbenchOpen, setWorkbenchOpen] = useState(() => window.innerWidth >= 1400 && localStorage.getItem('workbench_open') !== 'false')
+  const [workbenchOpen, setWorkbenchOpen] = useState(() => Boolean(user) && window.innerWidth >= 1400 && localStorage.getItem('workbench_open') !== 'false')
   const [workbenchView, setWorkbenchView] = useState<'work' | 'activity'>('work')
   const [observedTask, setObservedTask] = useState<{ task: Task; runId?: string } | null>(null)
   const [canvas, setCanvas] = useState<{ workspaceId: string; environmentId?: string } | null>(null)
@@ -92,7 +92,7 @@ function Workspace() {
   const openMemory = (tab: MemoryModalTab, query = '') => { setMemoryTab(tab); setMemoryQuery(query); setView('memory'); if (window.innerWidth < 1200) setWorkbenchOpen(false) }
   const openCanvas = (workspaceId = sessionId || 'default', environmentId?: string) => { setCanvas({ workspaceId, environmentId }); setArtifact(null); setWorkbenchView('work'); toggleWorkbench(true) }
   const preview = canvas ? <CanvasModal key={`${canvas.workspaceId}:${canvas.environmentId}`} embedded compact workspaceId={canvas.workspaceId} initialEnvironmentId={canvas.environmentId} onClose={() => setCanvas(null)} /> : artifact ? <ArtifactPreview reference={artifact.reference} workspaceId={artifact.workspaceId} onClose={() => setArtifact(null)} /> : undefined
-  const workbench = <RightSidebar sessionId={observedTask ? null : sessionId} treeId={observedTask ? null : treeId} taskId={observedTask?.task.task_id} runId={observedTask?.runId} chatRunning={!observedTask && running} onOpenMemoryReview={() => openMemory('proposals')} onOpenMemory={openMemory} onOpenCanvas={openCanvas} onOpenArtifact={(reference, workspaceId) => { setArtifact({ reference, workspaceId }); setCanvas(null); setWorkbenchView('work') }} onOpenWorkflows={() => navigate('workflows')} view={workbenchView} onViewChange={setWorkbenchView} onClose={() => toggleWorkbench(false)} content={preview} />
+  const workbench = <RightSidebar sessionId={observedTask ? null : sessionId} treeId={observedTask ? null : treeId} taskId={observedTask?.task.task_id} runId={observedTask?.runId} chatRunning={!observedTask && running} onOpenMemoryReview={() => openMemory('proposals')} onOpenMemory={openMemory} onOpenCanvas={openCanvas} onOpenArtifact={(reference, workspaceId) => { setArtifact({ reference, workspaceId }); setCanvas(null); setWorkbenchView('work') }} onObserveTask={(task) => { setObservedTask({ task }); setCanvas(null); setArtifact(null); setWorkbenchView('activity') }} onOpenWorkflows={() => navigate('workflows')} view={workbenchView} onViewChange={setWorkbenchView} onClose={() => toggleWorkbench(false)} content={preview} />
   if (loading) return <div className="app-loading" role="status" aria-label={t('正在加载', 'Loading')}><div className="loading-spinner" /></div>
   return <WorkbenchProvider sessionId={sessionId}>
     <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>

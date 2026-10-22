@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -11,6 +10,13 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from .org_brain_store import OrgBrainStore
+from .org_context_extraction import (
+    as_float as _as_float,
+    as_int as _as_int,
+    normalize_text as _normalize_text,
+    chunk_text,
+    extract_context_items,
+)
 
 
 def _to_bool(value: Any, default: bool = False) -> bool:
@@ -33,30 +39,8 @@ def _utc_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def _normalize_text(value: Any) -> str:
-    text = str(value or "").strip()
-    text = re.sub(r"\s+", " ", text)
-    return text
 
 
-def _extract_json(text: str) -> Dict[str, Any]:
-    raw = str(text or "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return {}
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
 
 
 def _hash_id(prefix: str, payload: str) -> str:
@@ -64,22 +48,8 @@ def _hash_id(prefix: str, payload: str) -> str:
     return f"{prefix}_{digest}"
 
 
-def _as_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
 
 
-def _as_int(value: Any, default: int, *, minimum: int = 0, maximum: Optional[int] = None) -> int:
-    try:
-        out = int(value)
-    except Exception:
-        out = int(default)
-    out = max(minimum, out)
-    if maximum is not None:
-        out = min(maximum, out)
-    return out
 
 
 def _as_suffix_list(value: Any, default: List[str]) -> List[str]:
@@ -297,7 +267,7 @@ class OrgContextService:
             }
 
         extract_limit = int(profile.get("extract_text_max_chars") or 5000)
-        chunks = self._chunk_text(
+        chunks = chunk_text(
             content,
             chunk_chars=min(int(profile.get("chunk_chars") or 5000), extract_limit),
             max_chunks=int(profile.get("max_chunks") or 20),
@@ -305,7 +275,8 @@ class OrgContextService:
         extracted: List[Dict[str, Any]] = []
         for chunk in chunks:
             extracted.extend(
-                await self._extract_context_items(
+                await extract_context_items(
+                    llm_client=self.llm_client,
                     text=chunk,
                     audience=audience,
                     register=register,
@@ -755,126 +726,8 @@ class OrgContextService:
         except Exception as exc:
             logger.debug("OrgContextService: remove document projection failed: {}", exc)
 
-    async def _extract_context_items(
-        self,
-        *,
-        text: str,
-        audience: Optional[str],
-        register: Optional[str],
-        use_llm: bool,
-        extract_text_max_chars: int,
-        heuristic_max_lines: int,
-        heuristic_max_items: int,
-        user_config: Optional[Dict[str, Any]],
-        user_id: Optional[str],
-    ) -> List[Dict[str, Any]]:
-        aud = _normalize_text(audience or "")
-        reg = _normalize_text(register or "")
-        if use_llm and self.llm_client and hasattr(self.llm_client, "call_llm"):
-            prompt_system = (
-                "Extract enterprise expression context from document text.\n"
-                "Output strict JSON: {\"items\":[{\"concept\":\"...\",\"expression\":\"...\",\"knowledge_kind\":"
-                "\"fact|policy|style|terminology|template\",\"audience\":\"...\",\"register\":\"...\","
-                "\"terms_locked\":[...],\"confidence\":0.0-1.0}]}"
-            )
-            prompt_user = (
-                f"Document:\n{text[: max(1, int(extract_text_max_chars))]}\n\n"
-                f"Default audience: {aud or 'unknown'}\nDefault register: {reg or 'unknown'}\n"
-            )
-            try:
-                out = await self.llm_client.call_llm(
-                    [{"role": "system", "content": prompt_system}, {"role": "user", "content": prompt_user}],
-                    user_config=user_config,
-                    user_id=user_id,
-                )
-                data = _extract_json(str((out or {}).get("content") or ""))
-                rows = data.get("items") if isinstance(data.get("items"), list) else []
-                cleaned: List[Dict[str, Any]] = []
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    concept = _normalize_text(row.get("concept"))
-                    expr = _normalize_text(row.get("expression"))
-                    if not concept or not expr:
-                        continue
-                    cleaned.append(
-                        {
-                            "concept": concept,
-                            "expression": expr,
-                            "knowledge_kind": _normalize_text(row.get("knowledge_kind") or "fact").lower(),
-                            "audience": _normalize_text(row.get("audience") or aud),
-                            "register": _normalize_text(row.get("register") or reg),
-                            "terms_locked": [
-                                str(x).strip()
-                                for x in (row.get("terms_locked") or [])
-                                if str(x).strip()
-                            ],
-                            "confidence": _as_float(row.get("confidence", 0.6), 0.6),
-                        }
-                    )
-                if cleaned:
-                    return cleaned
-            except Exception as e:
-                logger.debug("OrgContextService: llm extract failed, fallback to heuristic: {}", e)
 
-        return self._heuristic_extract(
-            text=text,
-            audience=aud,
-            register=reg,
-            max_lines=_as_int(heuristic_max_lines, 30, minimum=1, maximum=1000),
-            max_items=_as_int(heuristic_max_items, 15, minimum=1, maximum=200),
-        )
 
-    @staticmethod
-    def _chunk_text(text: str, *, chunk_chars: int, max_chunks: int) -> List[str]:
-        content = str(text or "").strip()
-        if not content:
-            return []
-        size = max(500, int(chunk_chars))
-        limit = max(1, int(max_chunks))
-        chunks: List[str] = []
-        cursor = 0
-        while cursor < len(content) and len(chunks) < limit:
-            end = min(len(content), cursor + size)
-            if end < len(content):
-                boundary = content.rfind("\n", cursor + size // 2, end)
-                if boundary > cursor:
-                    end = boundary
-            chunk = content[cursor:end].strip()
-            if chunk:
-                chunks.append(chunk)
-            cursor = max(end, cursor + 1)
-        return chunks
-
-    @staticmethod
-    def _heuristic_extract(
-        *,
-        text: str,
-        audience: str,
-        register: str,
-        max_lines: int = 30,
-        max_items: int = 15,
-    ) -> List[Dict[str, Any]]:
-        lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
-        picked = []
-        for ln in lines[: max(1, int(max_lines))]:
-            if len(ln) < 6:
-                continue
-            concept = ln[:32].strip()
-            if not concept:
-                continue
-            picked.append(
-                {
-                    "concept": concept,
-                    "expression": ln[:200],
-                    "knowledge_kind": "fact",
-                    "audience": audience,
-                    "register": register,
-                    "terms_locked": [],
-                    "confidence": 0.45,
-                }
-            )
-        return picked[: max(1, int(max_items))]
 
     def _write_row_neo4j(
         self,

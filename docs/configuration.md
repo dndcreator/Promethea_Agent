@@ -1,5 +1,127 @@
 # Configuration Reference
 
+## Optional Multi-Agent Delegation
+
+The chat composer has a **Multi-agent** switch for authenticated users. It is off
+initially; enabling it allows the main model to choose bounded delegation. It does
+not force every request into multiple agents. Clients use the existing RunRequest
+extension field `metadata.multi_agent: true`; HTTP/SSE and Gateway WebSocket keep
+the same conversation execution path. Guest chat never enters this path.
+
+Deployment configuration follows the existing nested environment mechanism:
+
+```dotenv
+MULTI_AGENT__ENABLED=true
+MULTI_AGENT__MAX_CHILDREN=6
+MULTI_AGENT__MAX_PARALLEL=3
+MULTI_AGENT__MAX_PENDING=24
+MULTI_AGENT__MAX_DEPTH=1
+MULTI_AGENT__CHILD_STEPS=5
+MULTI_AGENT__CHILD_MAX_TOKENS=2048
+MULTI_AGENT__TIMEOUT_S=120
+MULTI_AGENT__RESULT_CHARS=12000
+```
+
+Deployment limits are ceilings; user `multi_agent` overrides can only narrow
+them. `max_children` counts admissions across the parent action and confirmation
+continuations, `max_parallel` also caps active children in this Runtime process,
+and depth is enforced at each delegation. Foreground work returns a blocker when
+capacity is occupied; durable background work waits in its persisted inbox.
+
+`subagent.delegate` is a normal manifest-discovered tool. Its `objective` must
+include the needed context, `label` identifies the work, and optional `tools`
+selects exact canonical tool names (`[]` gives no tools). `run_in_background`
+defaults to `true`: acceptance returns a durable `child_id` and message `run_id`
+without waiting for execution. Set it to `false` for foreground one-shot collection.
+Independent delegations can use the canonical `tool_calls` action's `calls` array.
+Children get fresh message/action state and share the parent's owned workspace,
+model configuration and sandbox restrictions; they are not separate OS sandboxes
+or isolated filesystem copies. Tool access can only narrow the parent's available
+catalog. Permission-requiring actions are blocked in children and returned to the
+parent to handle through the normal confirmation path.
+
+The design follows the local DeepSeek Harness `subagent-spawn-in-process`,
+`subagent-in-process-driver`, and `tool-subagent` ownership/isolation principles.
+It uses Promethea's existing ConversationService/ActionService rather than their
+implementation or a separate agent loop. Child events and model manifests retain
+parent action lineage in the existing Runtime log. Child model replies are not
+published as user turns or automatically extracted into personal memory; the
+parent receives their observations and produces the user-facing reply. Foreground
+child usage is included in parent totals; background usage belongs to its own
+Task run and model-call records. Cancelled/infrastructure-interrupted
+children may have incomplete provider usage, which remains visible in model-call
+events where supplied by the provider.
+
+Persistent child identity is owned by a durable Task, not a second session manager.
+Each accepted message is one Task run; TaskRuntime owns leases, heartbeats, FIFO
+activation, pause/resume/cancel and restart adoption. A completed message leaves
+the child ready for follow-ups, rather than permanently closing it. The process
+must be running to do work: shutdown preserves the inbox and durable Runtime
+state, not a live model connection. `max_pending` bounds admitted active/queued
+children per user; queued messages per child are also bounded.
+
+`subagent.control` supports `list`, `get`, `send`, `interrupt`, `resume` and `cancel`.
+Only the owning direct parent can address a child; account ownership alone does
+not authorize a different conversation or a sibling agent. Sending during work
+enqueues a later FIFO turn, not an edit of the active prompt. `interrupt` maps to
+the existing Task pause semantics, including queued turns; `resume` continues
+them, while `cancel` permanently closes the child. Existing Task UI controls are
+also available, and delegation cards link directly to that Task's Workbench.
+
+Action checkpoints retain messages, Observations, model steps and completed
+results. On restart, a tool call whose outcome was not checkpointed is never
+automatically dispatched again: Runtime supplies `TOOL_OUTCOME_UNKNOWN` and lets
+the agent inspect state and replan. This is not an exactly-once guarantee for
+external effects. Failed, cancelled and timed-out work stays traceable.
+
+### Parent/Child Communication
+
+Agent communication is in-process message passing with durable records, not an
+additional OS-process RPC server. Parent commands retain the existing per-child
+FIFO: acceptance returns a stable `message_id` (the Task run ID), and subsequent
+execution belongs to TaskRuntime rather than the originating HTTP request.
+
+An executing persistent child may call `subagent.report` with `content` and
+`delivery: "quiet" | "wakeup"`. Quiet reports wait for the parent's next model
+step; waking reports also request an idle parent's continuation. Sender identity
+comes from the current fenced execution, and the recipient comes from durable
+direct-parent lineage. Callers cannot select arbitrary users, siblings or sessions.
+Foreground one-shot children return their result directly and cannot report later.
+
+Runtime produces a separate `subagent-settled` notice when accepted child work
+becomes quiescent (completed, failed or cancelled), even if the child never
+explicitly reports. Queued turns settle together; pending descendant results
+reach their direct parent before that parent is considered quiescent.
+The notice's outcome comes from committed Task state; its closing text remains
+untrusted child-authored content. Stable IDs make settlement reconstruction
+idempotent after restart. Reports and notices share one outbox in Task persistence.
+
+Busy parents read bounded batches before the next model request. Idle child
+parents receive a normal FIFO Task turn; idle conversation parents resume through
+ConversationService and ActionService on the existing TaskRuntime. Multiple
+notifications to the same parent coalesce. A real pending conversation turn or
+confirmation takes precedence, and the same Agent's Action executions serialize.
+Only model-generated replies enter chat; notification content is not persisted as
+a user message and does not emit a synthetic user-memory interaction. The UI
+refreshes committed parent replies through its existing Workbench subscription.
+
+Outbox acceptance and receipt updates use atomic Task persistence. Conversation
+receipts commit with the assistant reply and survive personal-space transfer;
+child-parent receipts commit with the receiving child run. Uncommitted deliveries
+remain available after shutdown. Checkpointed final replies can be committed on
+resume without another model call. This is recoverable, at-least-once processing,
+not an exactly-once guarantee for model/provider requests or external effects.
+
+The module switch and existing capacity limits also apply to notification work.
+There is no idle-parent wake during shutdown, disabled operation or a paused/
+cancelled parent Task. An explicit Task pause/resume controls queued notification
+work. A notification infrastructure failure pauses its Task for inspection/resume
+instead of retrying indefinitely. Autonomous conversation notifications cannot
+inherit approval grants or perform external-write/privileged-host actions; such
+blockers must be brought back to the user. Accepted children still survive the
+parent reply and browser disconnect. No provider secrets or forked parent history
+are copied into child descriptors.
+
 Promethea uses a three-layer configuration system with a clear priority order:
 
 ```
@@ -37,6 +159,28 @@ migrating Memory never changes which users can sign in. Legacy Neo4j and
 user IDs and password hashes.
 
 ---
+
+## Guest Chat
+
+Guest chat uses the operator's main model through ConversationService. It does
+not create accounts or persistent sessions, retrieve or write memory, or execute
+tools, workflows, files or computer actions. Its transcript lives in the current
+page and is discarded on reload or sign-in; ordinary model/HTTP logging remains
+subject to the deployment's logging configuration.
+
+`guest_chat.enabled` (`GUEST_CHAT__ENABLED`) defaults to `true` for direct loopback
+connections only. Remote access requires explicit `guest_chat.allow_remote`
+(`GUEST_CHAT__ALLOW_REMOTE=true`). Proxy-forwarded requests and cross-origin
+browser requests are rejected by default. A publicly exposed reverse proxy must
+enforce its own trusted client/origin boundary; do not use a local proxy to bypass
+the remote-access switch. Guest model usage is charged to the operator.
+
+Limits are deployment-owned: `requests_per_minute=6`, `max_concurrent=2`,
+`timeout_s=60`, `max_messages=21`, `max_input_chars=16000`, and
+`max_output_tokens=1024`. Each supports the corresponding `GUEST_CHAT__...` env
+name. Rate/concurrency limits apply per worker; multi-worker public deployments
+should also limit requests at their proxy. User settings cannot enable this path
+or override these limits. Existing authenticated chat APIs still require login.
 
 ## Browser Preparation
 

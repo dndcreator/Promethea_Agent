@@ -12,6 +12,27 @@ export interface Error {
   details?: Record<string, unknown>
 }
 
+export interface GuestChatMessage {
+  role: "user" | "assistant"
+  content: string
+}
+
+export interface GuestChatRequest {
+  messages: Array<GuestChatMessage>
+}
+
+export interface GuestChatResponse {
+  response: string
+  usage?: Record<string, number>
+}
+
+export interface GuestChatStatus {
+  enabled: boolean
+  available: boolean
+  max_messages: number
+  max_input_chars: number
+}
+
 export interface Attachment {
   file_id?: string | null
   filename?: string | null

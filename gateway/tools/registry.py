@@ -52,6 +52,7 @@ class ToolRegistry:
                 "side_effect_selector": dict(getattr(tool, "side_effect_selector", {}) or {}),
                 "requires_capability": str(getattr(tool, "requires_capability", "") or ""),
                 "requires_config": getattr(tool, "requires_config", None),
+                "requires_run_option": str(getattr(tool, "requires_run_option", "") or ""),
                 "owner_user_id": str(getattr(tool, "owner_user_id", "") or ""),
                 "manifest_path": str(getattr(tool, "manifest_path", "") or ""),
                 "extension_id": str(getattr(tool, "extension_id", "") or ""),

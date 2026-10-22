@@ -1482,6 +1482,98 @@
       "title": "GoalGapView",
       "type": "object"
     },
+    "GuestChatMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 64000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "user",
+            "assistant"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "title": "GuestChatMessage",
+      "type": "object"
+    },
+    "GuestChatRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/GuestChatMessage"
+          },
+          "maxItems": 24,
+          "minItems": 1,
+          "title": "Messages",
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages"
+      ],
+      "title": "GuestChatRequest",
+      "type": "object"
+    },
+    "GuestChatResponse": {
+      "properties": {
+        "response": {
+          "title": "Response",
+          "type": "string"
+        },
+        "usage": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Usage",
+          "type": "object"
+        }
+      },
+      "required": [
+        "response"
+      ],
+      "title": "GuestChatResponse",
+      "type": "object"
+    },
+    "GuestChatStatus": {
+      "properties": {
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        },
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "max_input_chars": {
+          "title": "Max Input Chars",
+          "type": "integer"
+        },
+        "max_messages": {
+          "title": "Max Messages",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "available",
+        "max_messages",
+        "max_input_chars"
+      ],
+      "title": "GuestChatStatus",
+      "type": "object"
+    },
     "MemoryRecallSummary": {
       "properties": {
         "dropped_count": {

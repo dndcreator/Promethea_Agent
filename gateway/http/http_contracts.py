@@ -253,7 +253,7 @@ def _infer_domain(path: str) -> str:
 
 
 def _infer_auth_required(path: str) -> bool:
-    if path in {"/api/status", "/api/metrics", "/api/auth/login", "/api/auth/register"}:
+    if path in {"/api/status", "/api/metrics", "/api/auth/login", "/api/auth/register", "/api/guest", "/api/guest/chat"}:
         return False
     if path.startswith("/api/ops/"):
         return False

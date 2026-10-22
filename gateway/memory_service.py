@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -11,9 +10,11 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from core.services import get_memory_service
+from memory.graph_reader import read_session_graph, read_user_graph
 
 from .events import EventEmitter
 from .memory_gate import MemoryWriteGate, MemoryWriteRequest
+from .memory_extraction import classify_interaction, verify_candidates
 from .memory_recall_schema import (
     DroppedRecallCandidate,
     MemoryRecallRequest,
@@ -30,10 +31,7 @@ from .memory_recall_utils import (
     tokenize_text,
 )
 from .memory_text_utils import (
-    build_semantic_keys,
     extract_json_object,
-    extract_tokens,
-    normalize_candidates,
     normalize_content,
     normalize_memory_modality,
     normalize_memory_persistence,
@@ -349,44 +347,9 @@ class MemoryService:
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
         return extract_json_object(text)
 
-    def _extract_tokens(self, text: str) -> List[str]:
-        return extract_tokens(text)
 
-    def _build_semantic_keys(self, content: str, llm_keys: Optional[List[str]] = None) -> List[str]:
-        return build_semantic_keys(content, llm_keys=llm_keys)
 
-    def _normalize_candidates(self, candidates: Any) -> List[Dict[str, Any]]:
-        return normalize_candidates(candidates)
 
-    def _verify_candidates_fallback(
-        self,
-        user_input: str,
-        candidates: List[Dict[str, Any]],
-    ) -> List[Dict[str, Any]]:
-        """
-        Lightweight guard when verifier LLM is unavailable.
-        Keep candidates with minimum semantic overlap against user input.
-        """
-        user_tokens = set(self._extract_tokens(user_input))
-        if not user_tokens:
-            return []
-        accepted: List[Dict[str, Any]] = []
-        for c in candidates or []:
-            cand_tokens = set(self._extract_tokens(str(c.get("content", ""))))
-            if not cand_tokens:
-                continue
-            overlap = len(user_tokens.intersection(cand_tokens)) / max(1, len(cand_tokens))
-            if overlap < 0.25:
-                continue
-            row = dict(c)
-            row["verify_confidence"] = round(float(overlap), 3)
-            row["verify_reason"] = "fallback_overlap"
-            row["verify_evidence"] = ""
-            row["verify_attribution"] = "user"
-            row["modality"] = normalize_memory_modality(row.get("modality"))
-            row["persistence"] = normalize_memory_persistence(row.get("persistence"))
-            accepted.append(row)
-        return accepted
 
     async def _verify_candidates_with_llm(
         self,
@@ -396,102 +359,14 @@ class MemoryService:
         candidates: List[Dict[str, Any]],
         interaction_context: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Verify candidate meaning/attribution before writing to memory.
-        This prevents memory drift caused by assistant-side interpretations.
-        """
-        if not candidates:
-            return []
-        prompt = (
-            "You are a memory write verifier.\n"
-            "Given RECENT_CONTEXT, USER_INPUT, ASSISTANT_OUTPUT, candidate memories, and their RELATED_MEMORIES, "
-            "decide whether each candidate can be safely written.\n"
-            "Acceptance requirements:\n"
-            "1) Candidate meaning is supported by the current interaction or by immediate conversational context.\n"
-            "2) Attribution is correct: should not convert assistant explanation into user preference.\n"
-            "3) Short answers may be valid when they answer a direct prior question in RECENT_CONTEXT.\n"
-            "For every accepted candidate, verify its semantic scope:\n"
-            "- modality: actual for asserted state, plan for committed intention, hypothetical for possibilities, examples, roleplay, or uncommitted conditions.\n"
-            "- persistence: ephemeral for the current moment/turn/operation, bounded for state useful across turns but expected to expire or change, durable for long-lived state.\n"
-            "For each accepted candidate, classify its relationship to RELATED_MEMORIES as one of: "
-            "new, equivalent, compatible, updates, contradicts, unclear. "
-            "Shared topics are not contradictions. Contradicts means both statements cannot be true in the same scope and time.\n"
-            "Return strict JSON:\n"
-            "{\"decisions\":[{\"index\":0,\"accept\":true|false,\"confidence\":0..1,"
-            "\"reason\":\"...\",\"evidence\":\"...\",\"attribution\":\"user|assistant|project|unclear\","
-            "\"modality\":\"actual|plan|hypothetical\","
-            "\"persistence\":\"ephemeral|bounded|durable\","
-            "\"relationship\":\"new|equivalent|compatible|updates|contradicts|unclear\","
-            "\"related_indexes\":[0]}]}\n"
-            "Reject unsupported candidates, but let the deterministic write gate handle modality and persistence policy."
+        return await verify_candidates(
+            self._call_memory_classifier_llm,
+            user_id=user_id,
+            user_input=user_input,
+            assistant_output=assistant_output,
+            candidates=candidates,
+            interaction_context=interaction_context,
         )
-        cands_json = json.dumps(candidates, ensure_ascii=False)
-        context_json = json.dumps(interaction_context or [], ensure_ascii=False)
-        query = (
-            f"[RECENT_CONTEXT]\n{context_json}\n\n"
-            f"[USER_INPUT]\n{user_input}\n\n"
-            f"[ASSISTANT_OUTPUT]\n{assistant_output}\n\n"
-            f"[CANDIDATES]\n{cands_json}\n"
-        )
-        text = await self._call_memory_classifier_llm(user_id, prompt, query)
-        if not text:
-            return self._verify_candidates_fallback(user_input, candidates)
-        obj = self._extract_json(text)
-        if not isinstance(obj, dict):
-            return self._verify_candidates_fallback(user_input, candidates)
-        decisions = obj.get("decisions")
-        if not isinstance(decisions, list):
-            return self._verify_candidates_fallback(user_input, candidates)
-
-        accepted: List[Dict[str, Any]] = []
-        by_index: Dict[int, Dict[str, Any]] = {}
-        for d in decisions:
-            if not isinstance(d, dict):
-                continue
-            try:
-                idx = int(d.get("index"))
-            except Exception:
-                continue
-            by_index[idx] = d
-
-        for idx, c in enumerate(candidates):
-            d = by_index.get(idx, {})
-            accept = bool(d.get("accept", False))
-            conf = float(d.get("confidence", 0.0) or 0.0)
-            attribution = str(d.get("attribution", "unclear")).strip().lower()
-            if (not accept) or conf < 0.5 or attribution in {"assistant", "unclear"}:
-                continue
-            row = dict(c)
-            row["verify_confidence"] = round(conf, 3)
-            row["verify_reason"] = str(d.get("reason", "")).strip()[:300]
-            row["verify_evidence"] = str(d.get("evidence", "")).strip()[:500]
-            row["verify_attribution"] = attribution
-            row["modality"] = normalize_memory_modality(d.get("modality") or row.get("modality"))
-            row["persistence"] = normalize_memory_persistence(d.get("persistence") or row.get("persistence"))
-            related = row.get("related_memories") if isinstance(row.get("related_memories"), list) else []
-            relationship = str(d.get("relationship") or "").strip().lower()
-            allowed_relationships = {
-                "new",
-                "equivalent",
-                "compatible",
-                "updates",
-                "contradicts",
-                "unclear",
-            }
-            if relationship not in allowed_relationships:
-                relationship = "unclear" if related else "new"
-            related_indexes: List[int] = []
-            for value in d.get("related_indexes") or []:
-                try:
-                    index = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= index < len(related) and index not in related_indexes:
-                    related_indexes.append(index)
-            row["memory_relationship"] = relationship
-            row["relationship_indexes"] = related_indexes
-            accepted.append(row)
-        return accepted
 
     def _get_user_config(self, user_id: str) -> Optional[Dict[str, Any]]:
         if not self.config_service:
@@ -812,49 +687,13 @@ class MemoryService:
         if not self._should_run_memory_llm(user_input, assistant_output, user_id=user_id):
             return {"has_long_term_state": False, "candidates": []}
 
-        prompt = (
-            "You are a strict memory classifier. Input is one completed interaction "
-            "(recent context + user input + assistant output). Ignore tool logs and execution traces. "
-            "Extract user or project state that may be relevant to memory policy; the write gate decides whether it belongs in long-term memory.\n"
-            "Allowed types: goal, preference, constraint, identity, project_state.\n"
-            "Return strict JSON with this schema:\n"
-            "{\"has_long_term_state\": true|false, "
-            "\"candidates\": [{\"type\": \"...\", \"content\": \"...\", \"semantic_keys\": [\"...\"], "
-            "\"modality\": \"actual|plan|hypothetical\", \"persistence\": \"ephemeral|bounded|durable\"}]}\n"
-            "Rules:\n"
-            "- If no memory-relevant state exists, return has_long_term_state=false and empty candidates.\n"
-            "- Keep each content concise and factual.\n"
-            "- modality describes whether the state is asserted, a committed plan, or merely hypothetical/example/roleplay.\n"
-            "- persistence describes whether it lasts only for the current moment, for a bounded period, or is genuinely durable.\n"
-            "- semantic_keys should include cross-lingual equivalents when obvious (example: apple / 苹果).\n"
-            "- semantic_keys should be lower-case normalized concepts, not long sentences.\n"
-            "- Do not infer semantic scope from particular English words; interpret the interaction in its own language and context.\n"
-            "- Ignore raw tool/output details that do not describe user or project state.\n"
-            "- Candidate must reflect user/project meaning from the interaction; do not transform assistant explanation into user preference.\n"
-            "- If the current user input is a short answer to an immediate prior assistant question, use RECENT_CONTEXT to resolve what it means."
+        return await classify_interaction(
+            self._call_memory_classifier_llm,
+            user_input=user_input,
+            assistant_output=assistant_output,
+            user_id=user_id,
+            interaction_context=interaction_context,
         )
-        context_json = json.dumps(interaction_context or [], ensure_ascii=False)
-        query = (
-            f"[RECENT_CONTEXT]\n{context_json}\n\n"
-            f"[USER_INPUT]\n{user_input}\n\n"
-            f"[ASSISTANT_OUTPUT]\n{assistant_output}\n"
-        )
-        try:
-            text = await self._call_memory_classifier_llm(user_id, prompt, query)
-            if not text:
-                return {"has_long_term_state": False, "candidates": []}
-            obj = self._extract_json(text)
-            if not obj:
-                return {"has_long_term_state": False, "candidates": []}
-
-            has_state = bool(obj.get("has_long_term_state", False))
-            candidates = self._normalize_candidates(obj.get("candidates", []))
-            if not candidates:
-                return {"has_long_term_state": False, "candidates": []}
-            return {"has_long_term_state": has_state, "candidates": candidates}
-        except Exception as e:
-            logger.debug("MemoryService: LLM interaction classifier failed: {}", e)
-            return {"has_long_term_state": False, "candidates": []}
 
     def _should_run_memory_llm(
         self,
@@ -2261,249 +2100,12 @@ class MemoryService:
     def get_graph_global_for_user(self, *, user_id: str) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
             return {"ok": False, "reason": "memory_not_enabled"}
-        adapter = self.memory_adapter
-        backend = str(getattr(adapter, "store_backend", "")).strip().lower()
-        try:
-            if backend == "sqlite_graph":
-                snapshot = adapter.export_mef(user_id=user_id)
-                nodes_raw = snapshot.get("nodes") or []
-                edges_raw = snapshot.get("edges") or []
-                nodes = []
-                for n in nodes_raw:
-                    node_type = str(n.get("node_type") or n.get("type") or "").lower()
-                    nodes.append(
-                        {
-                            "id": n.get("id"),
-                            "type": node_type,
-                            "content": n.get("content", ""),
-                            "layer": 1 if node_type == "token" else 0,
-                            "importance": n.get("importance", 0.5),
-                            "access_count": 0,
-                            "created_at": n.get("created_at"),
-                            "role": "",
-                            "memory_type": "",
-                            "memory_source": "sqlite_graph",
-                            "semantic_level": "lightweight",
-                        }
-                    )
-                edges = [
-                    {
-                        "source": e.get("src_node_id") or e.get("source"),
-                        "target": e.get("dst_node_id") or e.get("target"),
-                        "type": e.get("edge_type") or e.get("type") or "",
-                        "weight": e.get("weight", 1.0),
-                    }
-                    for e in edges_raw
-                ]
-                return {
-                    "ok": True,
-                    "status": "success",
-                    "user_id": user_id,
-                    "graph_available": True,
-                    "graph_mode": "sqlite_graph",
-                    "graph_semantics": "lightweight",
-                    "semantic_graph_available": False,
-                    "nodes": nodes,
-                    "edges": edges,
-                    "stats": {
-                        "total_nodes": len(nodes),
-                        "total_edges": len(edges),
-                        "layers": {
-                            "hot": len([x for x in nodes if x.get("layer") == 0]),
-                            "warm": len([x for x in nodes if x.get("layer") == 1]),
-                            "cold": len([x for x in nodes if x.get("layer") == 2]),
-                        },
-                    },
-                }
-            if backend == "flat_memory":
-                return {
-                    "ok": True,
-                    "status": "success",
-                    "user_id": user_id,
-                    "graph_available": False,
-                    "graph_mode": "none",
-                    "graph_semantics": "none",
-                    "semantic_graph_available": False,
-                    "nodes": [],
-                    "edges": [],
-                    "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
-                }
-
-            if not getattr(adapter, "hot_layer", None):
-                return {"ok": False, "reason": "hot_layer_unavailable"}
-            connector = adapter.hot_layer.connector
-            uid = user_node_id(user_id)
-            nodes_query = """
-            MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
-            OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
-            OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
-            OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
-            OPTIONAL MATCH (sum:Summary)
-            WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
-            WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
-            UNWIND all_nodes AS node
-            WITH DISTINCT node
-            WHERE node IS NOT NULL
-            RETURN node.id AS id, labels(node)[0] AS type, node.content AS content,
-                   node.layer AS layer, node.importance AS importance,
-                   node.access_count AS access_count, node.created_at AS created_at,
-                   node.role AS role, node.memory_type AS memory_type, node.memory_source AS memory_source
-            """
-            edges_query = """
-            MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)
-            OPTIONAL MATCH (m:Message)-[:PART_OF_SESSION]->(s)
-            OPTIONAL MATCH (n)-[:FROM_MESSAGE]->(m)
-            OPTIONAL MATCH (c:Concept)-[:PART_OF_SESSION]->(s)
-            OPTIONAL MATCH (sum:Summary)
-            WHERE EXISTS { MATCH (sum)-[rel]->(s) WHERE type(rel) = 'SUMMARIZES' }
-            WITH collect(DISTINCT m) + collect(DISTINCT n) + collect(DISTINCT c) + collect(DISTINCT sum) AS all_nodes
-            UNWIND all_nodes AS node
-            WITH collect(DISTINCT node.id) AS node_ids
-            MATCH (a)-[r]->(b)
-            WHERE a.id IN node_ids AND b.id IN node_ids
-            RETURN a.id AS source, b.id AS target, type(r) AS type, r.weight AS weight
-            """
-            params = {"user_node_id": uid}
-            nodes_raw = connector.query(nodes_query, params)
-            edges_raw = connector.query(edges_query, params)
-            nodes = [
-                {
-                    "id": n.get("id"),
-                    "type": (n.get("type", "") or "").lower(),
-                    "content": n.get("content", ""),
-                    "layer": n.get("layer", 0),
-                    "importance": n.get("importance", 0.5),
-                    "access_count": n.get("access_count", 0),
-                    "created_at": n.get("created_at"),
-                    "role": n.get("role", ""),
-                    "memory_type": n.get("memory_type", ""),
-                    "memory_source": n.get("memory_source", ""),
-                    "semantic_level": "semantic",
-                }
-                for n in nodes_raw
-            ]
-            edges = [
-                {
-                    "source": e.get("source"),
-                    "target": e.get("target"),
-                    "type": e.get("type", ""),
-                    "weight": e.get("weight", 1.0),
-                }
-                for e in edges_raw
-            ]
-            layer_counts = {"hot": 0, "warm": 0, "cold": 0}
-            for node in nodes:
-                layer = node.get("layer", 0)
-                if layer == 0:
-                    layer_counts["hot"] += 1
-                elif layer == 1:
-                    layer_counts["warm"] += 1
-                elif layer == 2:
-                    layer_counts["cold"] += 1
-            return {
-                "ok": True,
-                "status": "success",
-                "user_id": user_id,
-                "graph_available": True,
-                "graph_mode": "neo4j",
-                "graph_semantics": "semantic",
-                "semantic_graph_available": True,
-                "nodes": nodes,
-                "edges": edges,
-                "stats": {
-                    "total_nodes": len(nodes),
-                    "total_edges": len(edges),
-                    "layers": layer_counts,
-                },
-            }
-        except Exception as e:
-            return {"ok": False, "reason": f"graph_global_failed:{e}"}
+        return read_user_graph(self.memory_adapter, user_id=user_id)
 
     def get_graph_for_session(self, *, session_id: str, user_id: str) -> Dict[str, Any]:
         if not self.enabled or not self.memory_adapter:
             return {"ok": False, "reason": "memory_not_enabled", "handled": False}
-        adapter = self.memory_adapter
-        backend = str(getattr(adapter, "store_backend", "")).strip().lower()
-        try:
-            if backend == "sqlite_graph":
-                scoped_sid = scoped_session_id(session_id, user_id)
-                snapshot = adapter.export_mef(user_id=user_id)
-                nodes_raw = [
-                    x
-                    for x in (snapshot.get("nodes") or [])
-                    if str(x.get("session_id") or "") in {"", scoped_sid}
-                ]
-                edges_raw = snapshot.get("edges") or []
-                allowed_node_ids = {str(x.get("id") or "") for x in nodes_raw}
-                edges = []
-                for e in edges_raw:
-                    src = e.get("src_node_id") or e.get("source")
-                    dst = e.get("dst_node_id") or e.get("target")
-                    if src in allowed_node_ids and dst in allowed_node_ids:
-                        edges.append(
-                            {
-                                "source": src,
-                                "target": dst,
-                                "type": e.get("edge_type") or e.get("type") or "",
-                                "weight": e.get("weight", 1.0),
-                            }
-                        )
-                nodes = []
-                for n in nodes_raw:
-                    node_type = str(n.get("node_type") or n.get("type") or "").lower()
-                    nodes.append(
-                        {
-                            "id": n.get("id"),
-                            "type": node_type,
-                            "content": n.get("content", ""),
-                            "layer": 1 if node_type == "token" else 0,
-                            "importance": n.get("importance", 0.5),
-                            "access_count": 0,
-                            "created_at": n.get("created_at"),
-                            "role": "",
-                            "memory_type": "",
-                            "memory_source": "sqlite_graph",
-                            "semantic_level": "lightweight",
-                        }
-                    )
-                return {
-                    "ok": True,
-                    "handled": True,
-                    "status": "success",
-                    "session_id": session_id,
-                    "graph_available": True,
-                    "graph_mode": "sqlite_graph",
-                    "graph_semantics": "lightweight",
-                    "semantic_graph_available": False,
-                    "nodes": nodes,
-                    "edges": edges,
-                    "stats": {
-                        "total_nodes": len(nodes),
-                        "total_edges": len(edges),
-                        "layers": {
-                            "hot": len([x for x in nodes if x.get("layer") == 0]),
-                            "warm": len([x for x in nodes if x.get("layer") == 1]),
-                            "cold": len([x for x in nodes if x.get("layer") == 2]),
-                        },
-                    },
-                }
-            if backend == "flat_memory":
-                return {
-                    "ok": True,
-                    "handled": True,
-                    "status": "success",
-                    "session_id": session_id,
-                    "graph_available": False,
-                    "graph_mode": "none",
-                    "graph_semantics": "none",
-                    "semantic_graph_available": False,
-                    "nodes": [],
-                    "edges": [],
-                    "stats": {"total_nodes": 0, "total_edges": 0, "layers": {"hot": 0, "warm": 0, "cold": 0}},
-                }
-            return {"ok": True, "handled": False}
-        except Exception as e:
-            return {"ok": False, "reason": f"graph_session_failed:{e}", "handled": False}
+        return read_session_graph(self.memory_adapter, session_id=session_id, user_id=user_id)
 
     def search_entries(
         self,

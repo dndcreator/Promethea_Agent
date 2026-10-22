@@ -66,6 +66,7 @@ class Session(BaseModel):
     pending_confirmation: Optional[Dict] = None
     pending_turns: Dict[str, Dict] = Field(default_factory=dict)
     completed_turn_ids: List[str] = Field(default_factory=list)
+    agent_receipts: List[str] = Field(default_factory=list)
     pinned: bool = False
 
     if field_validator:
@@ -418,6 +419,7 @@ class MessageManager:
         user_id: str = "default_user",
         reasoning_tree_id: Optional[str] = None,
         reasoning_steps: Optional[List[Dict[str, Any]]] = None,
+        agent_message_ids: Optional[List[str]] = None,
     ) -> bool:
         """
         Commit a turn: write user + assistant messages into the final message
@@ -435,18 +437,20 @@ class MessageManager:
         if turn_id in session.completed_turn_ids:
             return True
 
+        previous = session.model_copy(deep=True)
         turn = session.pending_turns.pop(turn_id, None)
         if not turn:
             logger.warning(f"commit_turn pending turn not found: {session_id}:{turn_id}")
             return False
 
-        session.messages.append(
-            Message(
-                role=turn.get("user_role", "user"),
-                content=turn.get("user_content", ""),
-                conversation_turn_id=turn_id,
+        if turn.get("user_role") != "runtime":
+            session.messages.append(
+                Message(
+                    role=turn.get("user_role", "user"),
+                    content=turn.get("user_content", ""),
+                    conversation_turn_id=turn_id,
+                )
             )
-        )
         session.messages.append(
             Message(
                 role="assistant",
@@ -465,10 +469,15 @@ class MessageManager:
         if len(session.completed_turn_ids) > 1000:
             session.completed_turn_ids = session.completed_turn_ids[-1000:]
 
-        self.session_store.save_all(self.session)
+        session.agent_receipts = list(dict.fromkeys([*session.agent_receipts, *(agent_message_ids or [])]))
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key] = previous
+            raise
 
         # Keep memory graph consistent with turn-based write path.
-        if self.memory_adapter and self.memory_adapter.is_enabled():
+        if turn.get("user_role") != "runtime" and self.memory_adapter and self.memory_adapter.is_enabled():
             import asyncio
 
             user_role = turn.get("user_role", "user")
@@ -488,6 +497,17 @@ class MessageManager:
                 logger.warning(f"Memory sync trigger from commit_turn failed: {e}")
         return True
 
+    def has_active_turn(self, session_id: str, *, user_id: str, exclude_turn_ids=None) -> bool:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key:
+            return False
+        session = self.session[key]
+        return bool(set(session.pending_turns) - set(exclude_turn_ids or [])) or bool(session.pending_confirmation)
+
+    def agent_message_receipts(self, session_id: str, *, user_id: str) -> set[str]:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        return set(self.session[key].agent_receipts) if key else set()
+
     def abort_turn(
         self,
         session_id: str,
@@ -505,13 +525,12 @@ class MessageManager:
         session = self.session[key]
         if turn_id in session.pending_turns:
             turn = session.pending_turns.pop(turn_id)
-            session.messages.extend([
-                Message(role=turn.get("user_role", "user"), content=turn.get("user_content", ""), conversation_turn_id=turn_id),
-                Message(role="status", content="", conversation_turn_id=turn_id,
-                        run_status="failed" if error else "interrupted",
-                        error=error, reasoning_tree_id=reasoning_tree_id,
-                        reasoning_steps=list(reasoning_steps or [])),
-            ])
+            if turn.get("user_role") != "runtime":
+                session.messages.append(Message(role=turn.get("user_role", "user"), content=turn.get("user_content", ""), conversation_turn_id=turn_id))
+            session.messages.append(Message(role="status", content="", conversation_turn_id=turn_id,
+                    run_status="failed" if error else "interrupted",
+                    error=error, reasoning_tree_id=reasoning_tree_id,
+                    reasoning_steps=list(reasoning_steps or [])))
             session.last_activity = time.time()
             self.session_store.save_all(self.session)
             return True
@@ -723,6 +742,8 @@ class MessageManager:
             session = self.session.get(self._resolve_session_key(sid, user_id=user_id) or "")
             if session:
                 item["followups"] = [_model_to_dict(followup) for followup in session.followups]
+                item["agent_receipts"] = list(session.agent_receipts)
+                item["completed_turn_ids"] = list(session.completed_turn_ids)
             rows.append(item)
         return rows
 
@@ -769,6 +790,10 @@ class MessageManager:
             session.title = str(row.get("title") or "New Chat")
             session.agent_type = str(row.get("agent_type") or "default")
             session.pinned = bool(row.get("pinned", False))
+            receipts = row.get("agent_receipts") if isinstance(row.get("agent_receipts"), list) else []
+            completed = row.get("completed_turn_ids") if isinstance(row.get("completed_turn_ids"), list) else []
+            session.agent_receipts = list(dict.fromkeys(mid for mid in receipts if isinstance(mid, str) and 0 < len(mid) <= 200))
+            session.completed_turn_ids = list(dict.fromkeys(mid for mid in completed if isinstance(mid, str) and 0 < len(mid) <= 200))[-1000:]
             session.messages = []
             for msg in src_messages:
                 if not isinstance(msg, dict):

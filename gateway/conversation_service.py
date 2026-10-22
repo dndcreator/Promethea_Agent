@@ -2,6 +2,8 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from contextlib import asynccontextmanager
+from weakref import WeakValueDictionary
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -12,6 +14,8 @@ from conversation_core import PrometheaConversation
 
 from .action import ActionService
 from .action.models import resolve_action_budget
+from .delegation import DelegationRuntime, current_delegation
+from .agent_messages import serialized_agent_turn
 from .events import EventEmitter
 from .prompt_assembler import PromptAssembler
 from .runtime_context import build_runtime_context_block
@@ -107,6 +111,10 @@ class ConversationService:
         self.self_model_service = self_model_service
         self.prompt_assembler = PromptAssembler()
         self.context_compiler = ContextCompiler()
+        self.delegation = DelegationRuntime()
+        self.background_agents = None
+        self._agent_locks = WeakValueDictionary()
+        self._active_agent_turns = {}
         self._session_queues: Dict[str, asyncio.Queue] = {}
         self._session_workers: Dict[str, asyncio.Task] = {}
         self._session_urgent: Dict[str, Dict[str, Any]] = {}
@@ -686,6 +694,24 @@ class ConversationService:
             logger.debug("ConversationService: org context recall skipped: {}", exc)
             return {"enabled": True, "recalled": False, "reason": "org_context_error"}
 
+    @asynccontextmanager
+    async def agent_execution(self, user_id, session_id, agent_task_id=None):
+        key = (user_id, session_id, agent_task_id)
+        owner = asyncio.current_task()
+        if self._active_agent_turns.get(key) is owner:
+            yield
+            return
+        lock = self._agent_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            self._active_agent_turns[key] = owner
+            try:
+                yield
+            finally:
+                self._active_agent_turns.pop(key, None)
+
+    def agent_is_active(self, user_id, session_id, agent_task_id=None):
+        return (user_id, session_id, agent_task_id) in self._active_agent_turns
+
     async def prepare_chat_turn(
         self,
         *,
@@ -697,6 +723,7 @@ class ConversationService:
         run_context: Optional[Any] = None,
         attachments: Optional[List[Dict[str, Any]]] = None,
         runtime_blocks: Optional[List[Dict[str, Any]]] = None,
+        runtime_followup: bool = False,
     ) -> Dict[str, Any]:
         preparation_started = time.perf_counter()
         preparation_latency_ms: Dict[str, float] = {}
@@ -779,9 +806,12 @@ class ConversationService:
 
         recent_messages: List[Dict[str, Any]] = []
         if include_recent and self.message_manager:
-            recent_messages = self.message_manager.get_recent_messages(
-                session_id, user_id=user_id
-            )
+            # A background parent may be committing a reply while a new user
+            # request is preparing. Read history after that continuation settles.
+            async with self.agent_execution(user_id, session_id):
+                recent_messages = self.message_manager.get_recent_messages(
+                    session_id, user_id=user_id
+                )
 
         input_metadata = (
             (getattr(assembler_context, "input_payload", {}) or {}).get("metadata", {})
@@ -927,7 +957,8 @@ class ConversationService:
             blocks=runtime_input_blocks,
             vision_enabled=vision_enabled,
         )
-        messages.append({"role": "user", "content": compiled_user_content})
+        if not runtime_followup:
+            messages.append({"role": "user", "content": compiled_user_content})
         preparation_latency_ms["total"] = round(
             (time.perf_counter() - preparation_started) * 1000,
             2,
@@ -1059,6 +1090,7 @@ class ConversationService:
                     user_id=user_id,
                     reasoning_tree_id=tree_id,
                     reasoning_steps=list(response_data.get("reasoning_steps") or []),
+                    agent_message_ids=response_data.get("agent_message_ids"),
                 )
                 if not committed:
                     raise RuntimeError(
@@ -1131,6 +1163,7 @@ class ConversationService:
     ) -> ConversationRunOutput:
         return await run_staged_pipeline(self, run_input)
 
+    @serialized_agent_turn
     async def run_chat_loop(
         self,
         messages: List[Dict],
@@ -1142,11 +1175,14 @@ class ConversationService:
         max_recursion: Optional[int] = None,
         output_sink=None,
         reasoning_sink=None,
+        checkpoint_sink=None,
+        checkpoint=None,
     ) -> Dict:
         if run_context is None:
             run_context = SimpleNamespace(user_id=user_id, session_id=session_id)
         learning = getattr(getattr(self.reasoning_service, "template_memory", None), "learning", None)
-        if learning is not None and user_id:
+        internal_followup = (getattr(run_context, "input_payload", {}) or {}).get("metadata", {}).get("origin") == "agent_inbox"
+        if learning is not None and user_id and not internal_followup and not (current_delegation() and current_delegation().depth):
             await learning.interrupt(user_id)
         messages = self._with_action_protocol(messages)
         confirmation_resolver = None
@@ -1167,38 +1203,43 @@ class ConversationService:
                 )
             except Exception:
                 goal = ""
-            result = await self.action_service.run_action(
-                goal=goal,
-                messages=messages,
-                user_config=user_config,
-                session_id=session_id,
-                user_id=user_id,
-                run_context=run_context,
-                tool_executor=tool_executor,
-                confirmation_resolver=confirmation_resolver,
-                capability_inspector=(
-                    lambda names: self._inspect_runtime_capabilities(
-                        names,
-                        run_context=run_context,
-                        user_config=user_config,
-                    )
-                ),
-                capability_resolver=(
-                    lambda intent: self._resolve_runtime_capabilities(
-                        intent,
-                        run_context=run_context,
-                        user_config=user_config,
-                        user_id=user_id,
-                    )
-                ),
-                budget=max_recursion,
-                metadata={"source": "conversation_service.run_chat_loop"},
-                output_sink=output_sink,
-                reasoning_sink=reasoning_sink,
-                prepare_messages=lambda current, observations: self._prepare_action_messages(
-                    current, observations, run_context=run_context, user_config=user_config,
-                ),
-            )
+            with self.delegation.turn() as delegation:
+                result = await self.action_service.run_action(
+                    goal=goal,
+                    messages=messages,
+                    user_config=user_config,
+                    session_id=session_id,
+                    user_id=user_id,
+                    run_context=run_context,
+                    tool_executor=tool_executor,
+                    confirmation_resolver=confirmation_resolver,
+                    capability_inspector=(
+                        lambda names: self._inspect_runtime_capabilities(
+                            names, run_context=run_context, user_config=user_config,
+                        )
+                    ),
+                    capability_resolver=(
+                        lambda intent: self._resolve_runtime_capabilities(
+                            intent, run_context=run_context, user_config=user_config, user_id=user_id,
+                        )
+                    ),
+                    budget=max_recursion,
+                    metadata={"source": "conversation_service.run_chat_loop"},
+                    output_sink=output_sink,
+                    reasoning_sink=reasoning_sink,
+                    checkpoint_sink=checkpoint_sink,
+                    checkpoint=checkpoint,
+                    prepare_messages=lambda current, observations: self._prepare_action_messages(
+                        current, observations, run_context=run_context, user_config=user_config,
+                    ),
+                )
+                if result.get("status") == "needs_confirmation":
+                    result["delegation_checkpoint"] = {
+                        "spent": delegation.budget.count,
+                        "enabled": (getattr(run_context, "input_payload", {}) or {}).get("metadata", {}).get("multi_agent") is True,
+                    }
+            if internal_followup or (current_delegation() and current_delegation().depth):
+                return result
             await self._record_action_episode(
                 result=result,
                 user_id=user_id,
@@ -1209,6 +1250,61 @@ class ConversationService:
             return result
         raise RuntimeError("ActionService is required for conversation execution")
 
+    async def run_delegated_turn(self, *, objective: str, label: str, run_context: Any, user_config: Dict[str, Any], max_steps: int, history=None, checkpoint_sink=None, checkpoint=None) -> Dict:
+        from agentkit.security.approval import approval_scope
+        from .capability_service import ToolInvocationContext
+
+        base_prompt, _ = await self._get_user_prompt_and_config(run_context.user_id, "web")
+        messages = [
+            {"role": "system", "content": self._append_language_policy(self._ensure_core_system_prompt(base_prompt))},
+            {"role": "system", "content": (
+                f"Delegated objective: {label}. You are a bounded child agent with a fresh context. "
+                "Use only the supplied objective and Runtime observations. Return findings and blockers to the parent. "
+                "You cannot obtain approvals or expand your tool/workspace permissions."
+            )},
+            *(history or []),
+            *([{"role": "user", "content": objective}] if objective else []),
+        ]
+        async def execute(name, arguments):
+            return await self.capability_service.call_tool(
+                name, arguments, run_context=run_context, user_config=user_config,
+                ctx=ToolInvocationContext(
+                    session_id=run_context.session_id, user_id=run_context.user_id, source="subagent",
+                    metadata={"run_context": run_context, "user_config": user_config},
+                ),
+            )
+
+        with approval_scope("subagent.child", {}, confirmed=False):
+            return await self.run_chat_loop(
+                messages, user_config=user_config, session_id=run_context.session_id,
+                user_id=run_context.user_id, run_context=run_context,
+                tool_executor=execute, max_recursion=max_steps,
+                checkpoint_sink=checkpoint_sink, checkpoint=checkpoint,
+            )
+
+    async def run_agent_followup(self, *, run_context, checkpoint_sink, checkpoint=None):
+        from .capability_service import ToolInvocationContext
+        from copy import deepcopy
+
+        prepared = await self.prepare_chat_turn(
+            session_id=run_context.session_id, user_id=run_context.user_id,
+            user_message="", channel="web", run_context=run_context, runtime_followup=True,
+        )
+        user_config = deepcopy(prepared["user_config"])
+        user_config.setdefault("action", {}).setdefault("gaps", {})["enabled"] = False
+
+        async def execute(name, arguments):
+            return await self.capability_service.call_tool(
+                name, arguments, run_context=run_context, user_config=user_config,
+                ctx=ToolInvocationContext(session_id=run_context.session_id, user_id=run_context.user_id, source="agent_inbox", metadata={"run_context": run_context, "user_config": user_config}),
+            )
+
+        return await self.run_chat_loop(
+            prepared["messages"], run_context=run_context, user_config=user_config,
+            session_id=run_context.session_id, user_id=run_context.user_id,
+            tool_executor=execute, checkpoint_sink=checkpoint_sink, checkpoint=checkpoint,
+        )
+
     async def _prepare_action_messages(self, messages: List[Dict[str, Any]], observations: List[Dict[str, Any]], *, run_context: Optional[Any], user_config: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
         from config import ActionConfig
 
@@ -1218,10 +1314,13 @@ class ConversationService:
             messages = self.prompt_assembler.refresh_tool_message(
                 messages, tools=tools, snapshot=getattr(run_context, "tool_availability", {}) or {}, run_context=run_context,
             )
-        return self.context_compiler.project_observations(
+        projected = self.context_compiler.project_observations(
             messages, observations, per_result_chars=policy.observation_chars,
             total_chars=policy.observation_history_chars,
         )
+        if self.background_agents is not None and getattr(run_context, "user_id", None):
+            projected = self.background_agents.messages.project(run_context, projected, user_config)
+        return projected
 
     @staticmethod
     def _with_action_protocol(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1349,6 +1448,7 @@ class ConversationService:
             execution_path=path,
         )
 
+    @serialized_agent_turn
     async def resume_action(
         self,
         *,
@@ -1372,30 +1472,32 @@ class ConversationService:
                 run_context=run_context,
                 user_config=user_config,
             )
-        result = await self.action_service.resume_action(
-            pending=pending,
-            approved_call_id=approved_call_id,
-            user_config=user_config,
-            session_id=session_id,
-            user_id=user_id,
-            run_context=run_context,
-            tool_executor=tool_executor,
-            confirmation_resolver=confirmation_resolver,
-            prepare_messages=lambda current, observations: self._prepare_action_messages(
-                current, observations, run_context=run_context, user_config=user_config,
-            ),
-            capability_inspector=lambda names: self._inspect_runtime_capabilities(
-                names,
-                run_context=run_context,
+        checkpoint = dict(pending.get("delegation_checkpoint") or {})
+        payload = getattr(run_context, "input_payload", None)
+        if isinstance(payload, dict):
+            payload.setdefault("metadata", {})["multi_agent"] = checkpoint.get("enabled") is True
+        with self.delegation.turn(spent=int(checkpoint.get("spent") or 0)) as delegation:
+            result = await self.action_service.resume_action(
+                pending=pending,
+                approved_call_id=approved_call_id,
                 user_config=user_config,
-            ),
-            capability_resolver=lambda intent: self._resolve_runtime_capabilities(
-                intent,
-                run_context=run_context,
-                user_config=user_config,
+                session_id=session_id,
                 user_id=user_id,
-            ),
-        )
+                run_context=run_context,
+                tool_executor=tool_executor,
+                confirmation_resolver=confirmation_resolver,
+                prepare_messages=lambda current, observations: self._prepare_action_messages(
+                    current, observations, run_context=run_context, user_config=user_config,
+                ),
+                capability_inspector=lambda names: self._inspect_runtime_capabilities(
+                    names, run_context=run_context, user_config=user_config,
+                ),
+                capability_resolver=lambda intent: self._resolve_runtime_capabilities(
+                    intent, run_context=run_context, user_config=user_config, user_id=user_id,
+                ),
+            )
+            if result.get("status") == "needs_confirmation":
+                result["delegation_checkpoint"] = {**checkpoint, "spent": delegation.budget.count}
         await self._record_action_episode(
             result=result,
             user_id=user_id,
@@ -1405,6 +1507,7 @@ class ConversationService:
         )
         return result
 
+    @serialized_agent_turn
     async def reject_pending_action(
         self,
         *,
@@ -1427,29 +1530,31 @@ class ConversationService:
                 run_context=run_context,
                 user_config=user_config,
             )
-        result = await self.action_service.reject_pending_action(
-            pending=pending,
-            user_config=user_config,
-            session_id=session_id,
-            user_id=user_id,
-            run_context=run_context,
-            tool_executor=tool_executor,
-            confirmation_resolver=confirmation_resolver,
-            prepare_messages=lambda current, observations: self._prepare_action_messages(
-                current, observations, run_context=run_context, user_config=user_config,
-            ),
-            capability_inspector=lambda names: self._inspect_runtime_capabilities(
-                names,
-                run_context=run_context,
+        checkpoint = dict(pending.get("delegation_checkpoint") or {})
+        payload = getattr(run_context, "input_payload", None)
+        if isinstance(payload, dict):
+            payload.setdefault("metadata", {})["multi_agent"] = checkpoint.get("enabled") is True
+        with self.delegation.turn(spent=int(checkpoint.get("spent") or 0)) as delegation:
+            result = await self.action_service.reject_pending_action(
+                pending=pending,
                 user_config=user_config,
-            ),
-            capability_resolver=lambda intent: self._resolve_runtime_capabilities(
-                intent,
-                run_context=run_context,
-                user_config=user_config,
+                session_id=session_id,
                 user_id=user_id,
-            ),
-        )
+                run_context=run_context,
+                tool_executor=tool_executor,
+                confirmation_resolver=confirmation_resolver,
+                prepare_messages=lambda current, observations: self._prepare_action_messages(
+                    current, observations, run_context=run_context, user_config=user_config,
+                ),
+                capability_inspector=lambda names: self._inspect_runtime_capabilities(
+                    names, run_context=run_context, user_config=user_config,
+                ),
+                capability_resolver=lambda intent: self._resolve_runtime_capabilities(
+                    intent, run_context=run_context, user_config=user_config, user_id=user_id,
+                ),
+            )
+            if result.get("status") == "needs_confirmation":
+                result["delegation_checkpoint"] = {**checkpoint, "spent": delegation.budget.count}
         await self._record_action_episode(
             result=result,
             user_id=user_id,

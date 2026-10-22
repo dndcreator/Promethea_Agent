@@ -18,6 +18,7 @@ UI/
     components/
     components/modals/
     components/avatar/
+    components/chat/
     store/
     services/
   package.json
@@ -31,6 +32,10 @@ The shell has an icon rail, a collapsible project/conversation sidebar, a centra
 Projects are owner-scoped conversation groups stored by the Gateway, not execution workspaces or directories. Deleting a group only removes memberships. Project metadata travels with personal workspace archives and session-bearing legacy bundles.
 
 The UI talks to the gateway HTTP API. Shared fetch/auth behavior lives in `UI/src/services/api.ts`; feature components should use that helper instead of duplicating token or base-url handling.
+
+`MainContent` owns the current conversation, drafts, stream and confirmation lifecycle. `components/chat/` owns message rendering, reasoning disclosure and follow-up dialogs, sharing their existing view types without duplicating session state or SDK transport.
+
+Guests use `runs.guest` through the same SDK HTTP transport for bounded text-only conversations. The page holds the temporary transcript; it does not use account session APIs, private memories or tools. Authenticated chat keeps its existing streaming/Runtime path. Guest availability and limits come from the server, not from client-side permissions. See [Guest Chat](../docs/configuration.md#guest-chat).
 
 Primary backend docs:
 

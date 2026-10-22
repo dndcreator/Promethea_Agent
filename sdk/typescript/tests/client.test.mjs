@@ -12,6 +12,22 @@ function jsonResponse(payload, init = {}) {
   })
 }
 
+test('guest chat uses bounded public contracts and the existing abortable HTTP transport', async () => {
+  const controller = new AbortController()
+  const calls = []
+  const client = new PrometheaClient({ baseUrl: 'http://localhost:8000', fetch: async (url, init) => {
+    calls.push({ url, init })
+    assert.equal(init.signal, controller.signal)
+    return jsonResponse(url.endsWith('/guest') ? { enabled: true, available: true, max_messages: 21, max_input_chars: 16000 } : { response: 'Hello', usage: {} })
+  } })
+  assert.equal((await client.runs.guestStatus(controller.signal)).available, true)
+  const messages = [{ role: 'user', content: 'Hi' }]
+  assert.equal((await client.runs.guest({ messages }, controller.signal)).response, 'Hello')
+  assert.equal(calls[1].url, 'http://localhost:8000/api/guest/chat')
+  assert.deepEqual(JSON.parse(calls[1].init.body), { messages })
+  assert.equal(new Headers(calls[1].init.headers).has('Authorization'), false)
+})
+
 
 test('runs.run serializes the public request and authorization header', async () => {
   const calls = []

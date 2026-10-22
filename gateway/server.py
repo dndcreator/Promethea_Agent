@@ -35,7 +35,7 @@ from channels.adapter_registry import build_default_adapter_registry
 from memory.session_scope import ensure_session_owned
 from .models import RunContext
 from skills import build_default_skill_registry
-from .config_protocol import normalize_config_update_params
+from .config_gateway_handler import ConfigGatewayHandler
 from .http_connection import HttpConnection
 from .request_validation import validate_gateway_request_params
 from .server_runtime_utils import (
@@ -178,12 +178,13 @@ class GatewayServer:
         self._handlers[RequestType.MCP_VISIBLE_TOOLS] = self._handle_mcp_visible_tools
         
         # Config handlers
-        self._handlers[RequestType.CONFIG_GET] = self._handle_config_get
-        self._handlers[RequestType.CONFIG_RELOAD] = self._handle_config_reload
-        self._handlers[RequestType.CONFIG_UPDATE] = self._handle_config_update
-        self._handlers[RequestType.CONFIG_RESET] = self._handle_config_reset
-        self._handlers[RequestType.CONFIG_SWITCH_MODEL] = self._handle_config_switch_model
-        self._handlers[RequestType.CONFIG_DIAGNOSE] = self._handle_config_diagnose
+        config_handler = ConfigGatewayHandler(lambda: self.config_service)
+        self._handlers[RequestType.CONFIG_GET] = config_handler.get
+        self._handlers[RequestType.CONFIG_RELOAD] = config_handler.reload
+        self._handlers[RequestType.CONFIG_UPDATE] = config_handler.update
+        self._handlers[RequestType.CONFIG_RESET] = config_handler.reset
+        self._handlers[RequestType.CONFIG_SWITCH_MODEL] = config_handler.switch_model
+        self._handlers[RequestType.CONFIG_DIAGNOSE] = config_handler.diagnose
 
         # Workspace sandbox handlers
         self._handlers[RequestType.WORKSPACE_CREATE_DOCUMENT] = self._handle_workspace_create_document
@@ -2358,167 +2359,6 @@ class GatewayServer:
             return GatewayProtocol.create_response(request.id, False, error=str(e))
     # ============ Config-management handlers ============
     
-    async def _handle_config_get(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle configuration fetch for current user."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-            
-            user_id = self._resolve_request_user_id(connection, request)
-            config_data = self.config_service.get_merged_config(user_id)
-            
-            return GatewayProtocol.create_response(request.id, True, config_data)
-        except Exception as e:
-            logger.error(f"Error getting config: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
-    
-    async def _handle_config_reload(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle reload of default configuration."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-
-            # Reload default config from disk.
-            result = await self.config_service.reload_default_config()
-
-            if result["success"]:
-                return GatewayProtocol.create_response(
-                    request.id,
-                    True,
-                    {
-                        "status": "reloaded",
-                        "message": result["message"],
-                        "config": result.get("config", {}),
-                    },
-                )
-            return GatewayProtocol.create_response(
-                request.id, False, error=result["message"]
-            )
-        except Exception as e:
-            logger.error(f"Error reloading config: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
-    
-    async def _handle_config_update(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle user configuration update."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-            
-            user_id = self._resolve_request_user_id(connection, request)
-            normalized = normalize_config_update_params(request.params or {})
-            config_updates = normalized["config"]
-            if not config_updates:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="config updates are required"
-                )
-
-            result = await self.config_service.update_user_config(
-                user_id,
-                config_updates,
-                validate=bool(normalized["validate"]),
-            )
-            if not result.get("success"):
-                return GatewayProtocol.create_response(
-                    request.id,
-                    False,
-                    error=result.get("message") or "config update failed",
-                )
-
-            hot_apply_payload: Dict[str, Any] = {"requested": bool(normalized["hot_apply"]), "success": False}
-            if normalized["hot_apply"]:
-                reload_result = await self.config_service.reload_default_config()
-                hot_apply_payload["success"] = bool(reload_result.get("success"))
-                hot_apply_payload["message"] = reload_result.get("message")
-                if reload_result.get("reloaded_at"):
-                    hot_apply_payload["reloaded_at"] = reload_result.get("reloaded_at")
-            result["hot_apply"] = hot_apply_payload
-            
-            return GatewayProtocol.create_response(
-                request.id,
-                True,
-                payload=result,
-            )
-        except Exception as e:
-            logger.error(f"Error updating config: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
-
-    async def _handle_config_reset(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle user configuration reset."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-            
-            user_id = self._resolve_request_user_id(connection, request)
-            
-            reset_to_default = request.params.get("reset_to_default", True)
-            
-            result = await self.config_service.reset_user_config(user_id, reset_to_default)
-            
-            return GatewayProtocol.create_response(
-                request.id,
-                result["success"],
-                payload=result if result["success"] else None,
-                error=result.get("message") if not result["success"] else None
-            )
-        except Exception as e:
-            logger.error(f"Error resetting config: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
-    
-    async def _handle_config_switch_model(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle switching of underlying LLM model for current user."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-            
-            user_id = self._resolve_request_user_id(connection, request)
-            
-            model = request.params.get("model")
-            if not model:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="model is required"
-                )
-            
-            api_key = request.params.get("api_key")
-            base_url = request.params.get("base_url")
-            
-            result = await self.config_service.switch_model(user_id, model, api_key, base_url)
-            
-            return GatewayProtocol.create_response(
-                request.id,
-                result["success"],
-                payload=result if result["success"] else None,
-                error=result.get("message") if not result["success"] else None
-            )
-        except Exception as e:
-            logger.error(f"Error switching model: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
-    
-    async def _handle_config_diagnose(self, connection: Connection, request: RequestMessage) -> ResponseMessage:
-        """Handle configuration diagnostics for current user."""
-        try:
-            if not self.config_service:
-                return GatewayProtocol.create_response(
-                    request.id, False, error="Config service not initialized"
-                )
-            
-            user_id = self._resolve_request_user_id(connection, request)
-
-            result = self.config_service.diagnose_config(user_id)
-            
-            return GatewayProtocol.create_response(request.id, True, result)
-        except Exception as e:
-            logger.error(f"Error diagnosing config: {e}")
-            return GatewayProtocol.create_response(request.id, False, error=str(e))
     
     # ============ Helpers ============
     

@@ -33,6 +33,7 @@ class ActionContext:
     run_context: Optional[Any] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     prepare_messages: Optional[Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]]] = None
+    checkpoint_sink: Optional[Callable[[Dict[str, Any]], Any]] = None
 
 
 @dataclass

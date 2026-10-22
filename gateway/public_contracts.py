@@ -38,6 +38,29 @@ class Error(PublicContract):
     details: Dict[str, Any] = Field(default_factory=dict)
 
 
+class GuestChatMessage(PublicContract):
+    model_config = {"extra": "forbid"}
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=64000)
+
+
+class GuestChatRequest(PublicContract):
+    model_config = {"extra": "forbid"}
+    messages: List[GuestChatMessage] = Field(min_length=1, max_length=24)
+
+
+class GuestChatResponse(PublicContract):
+    response: str
+    usage: Dict[str, int] = Field(default_factory=dict)
+
+
+class GuestChatStatus(PublicContract):
+    enabled: bool
+    available: bool
+    max_messages: int
+    max_input_chars: int
+
+
 class Attachment(PublicContract):
     file_id: Optional[str] = None
     filename: Optional[str] = None
@@ -387,6 +410,10 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
     model.__name__: model
     for model in (
         Error,
+        GuestChatMessage,
+        GuestChatRequest,
+        GuestChatResponse,
+        GuestChatStatus,
         Attachment,
         UserFile,
         FileUploadResponse,

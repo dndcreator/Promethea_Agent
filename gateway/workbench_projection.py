@@ -262,7 +262,7 @@ class WorkbenchProjection:
                 (task for task in tasks if any(str(run.get("run_id") or "") == str(run_id) for run in task.get("runs", []))),
                 None,
             )
-        session_matches = [task for task in tasks if session_id and str(session_id) in (task.get("session_ids") or [])]
+        session_matches = [task for task in tasks if session_id and str(session_id) in (task.get("session_ids") or []) and task.get("source") not in {"subagent", "agent_inbox"}]
         if session_id:
             candidates = session_matches
         else:
@@ -300,6 +300,8 @@ class WorkbenchProjection:
             payload.get("workflow_run_id"),
             payload.get("action_loop_id"),
             payload.get("action_run_id"),
+            payload.get("parent_action_loop_id"),
+            *(payload.get("ancestor_action_loop_ids") or []),
         )
         return {str(value) for value in values if value not in (None, "")}
 

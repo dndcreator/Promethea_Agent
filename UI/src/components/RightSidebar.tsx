@@ -19,6 +19,7 @@ import {
 } from 'lucide-react'
 import {
   getActiveReasoning,
+  getTask,
   cancelTask,
   getReasoningTree,
   pauseTask,
@@ -47,6 +48,7 @@ interface RightSidebarProps {
   onClose?: () => void
   onOpenArtifact?: (reference: WorkbenchReference, workspaceId: string) => void
   onOpenWorkflows?: () => void
+  onObserveTask?: (task: Task) => void
   content?: ReactNode
 }
 
@@ -78,7 +80,7 @@ const EMPTY_WORKBENCH: WorkbenchView = {
   activeRuntimeRuns: [],
 }
 
-export default function RightSidebar({ sessionId, treeId, chatRunning = false, onOpenCanvas, onOpenMemoryReview, onOpenMemory, taskId, runId, view = 'activity', onViewChange, onClose, onOpenArtifact, onOpenWorkflows, content }: RightSidebarProps) {
+export default function RightSidebar({ sessionId, treeId, chatRunning = false, onOpenCanvas, onOpenMemoryReview, onOpenMemory, taskId, runId, view = 'activity', onViewChange, onClose, onOpenArtifact, onOpenWorkflows, onObserveTask, content }: RightSidebarProps) {
   const { lang, t } = useLanguage()
   const { snapshot, error: streamError, retry: retryStream } = useWorkbench()
   const [tree, setTree] = useState<any>(null)
@@ -217,6 +219,17 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false, o
   }
 
   const handleReference = async (reference: WorkbenchReference) => {
+    if (reference.kind === 'task') {
+      const epoch = scopeEpoch.current
+      setReferenceError('')
+      try {
+        const task = await getTask(reference.target)
+        if (epoch === scopeEpoch.current) onObserveTask?.(task)
+      } catch {
+        if (epoch === scopeEpoch.current) setReferenceError(t('任务打开失败，请重试。', 'Could not open task. Please retry.'))
+      }
+      return
+    }
     if (reference.kind === 'url') {
       try {
         const url = new URL(reference.target)
@@ -261,7 +274,7 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false, o
     <aside className="runtime-workbench relative flex h-full w-full shrink-0 flex-col overflow-hidden">
       {streamError && <div role="alert" className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-800"><span>{t('工作台连接中断', 'Workbench disconnected')}</span><button type="button" onClick={retryStream} className="ml-auto underline">{t('重试', 'Retry')}</button></div>}
       {referenceError && <p role="alert" className="px-4 py-2 text-xs text-red-600">{referenceError}</p>}
-      <div className="z-10 flex shrink-0 items-center justify-between border-b border-black/5 bg-bg-card/70 px-4 py-3">
+      <div className="workbench-heading z-10 flex shrink-0 items-center justify-between border-b border-black/5 px-4">
         <h2 className="flex items-baseline gap-2 font-display text-[17px] font-semibold text-text-strong">
           {t('任务工作台', 'Workbench')}
         </h2>

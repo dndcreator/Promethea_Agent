@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from .routes.chat import router as chat_router
+from .routes.guest import router as guest_router
 from .routes.status import router as status_router
 from .routes.sessions import router as sessions_router
 from .routes.projects import router as projects_router
@@ -33,6 +34,7 @@ from .routes.canvas import router as canvas_router
 router = APIRouter()
 
 router.include_router(chat_router)
+router.include_router(guest_router)
 router.include_router(status_router)
 router.include_router(sessions_router)
 router.include_router(projects_router)

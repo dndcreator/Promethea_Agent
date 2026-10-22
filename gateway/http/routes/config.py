@@ -327,6 +327,9 @@ async def get_config(
         field_paths=source_paths,
     )
     full_config = _sanitize_config_for_client(effective_bundle.get("effective") or {})
+    multi_agent = full_config.get("multi_agent")
+    if isinstance(multi_agent, dict):
+        multi_agent["enabled"] = config_module.config.multi_agent.enabled and multi_agent.get("enabled") is True
     config_data = _build_basic_config_view(full_config) if view == "basic" else full_config
     warnings = config_service.get_deprecation_warnings(resolved_user_id)
     if raw:

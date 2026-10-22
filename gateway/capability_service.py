@@ -4,8 +4,6 @@ from dataclasses import dataclass, field
 from contextlib import nullcontext
 from copy import deepcopy
 from datetime import datetime, timezone
-import hashlib
-import json
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Protocol
 from uuid import uuid4
@@ -23,6 +21,7 @@ from .runtime_hooks import RuntimeHookManager, get_runtime_hook_manager
 from .temporal import resolve_context_timezone_name
 from .tools import SideEffectLevel, ToolPolicy, ToolPolicyDecision, ToolRegistry
 from .tools.presentation import project_tool_call, project_tool_result
+from .tools.projection import project_capability_snapshot, resolve_capability_candidates
 
 
 @dataclass
@@ -598,80 +597,21 @@ class CapabilityService:
     ) -> Dict[str, Any]:
         """Build a versioned projection of registry state for one model-visible turn."""
         catalog = await self.get_tool_catalog(run_context=run_context, user_config=user_config)
-        preferred = {str(item).strip() for item in (preferred_tools or []) if str(item).strip()}
-        compact_index: List[Dict[str, Any]] = []
-        candidates: List[tuple[int, str, Dict[str, Any]]] = []
-        for row in catalog:
-            service_name = str(row.get("service_name") or "").strip()
-            tool_name = str(row.get("tool_name") or "").strip()
-            if not tool_name:
-                continue
-            full_name = (
-                tool_name
-                if not service_name or tool_name == service_name or tool_name.startswith(f"{service_name}.")
-                else f"{service_name}.{tool_name}"
-            )
-            compact_index.append(
-                {
-                    "name": full_name,
-                    "description": str(row.get("description") or "").strip(),
-                    "callable_now": bool(row.get("callable_now", False)),
-                    "callable_reason": str(row.get("callable_reason") or ""),
-                    "requires_confirmation": bool(row.get("requires_confirmation", False)),
-                    "side_effect_level": str(row.get("side_effect_level") or ""),
-                    "side_effect_selector": dict(row.get("side_effect_selector") or {}),
-                    "schema_status": str(row.get("schema_status") or "missing"),
-                    "capability_type": str(row.get("capability_type") or "general"),
-                    "required_capability": str(row.get("required_capability") or "") or None,
-                    "capability_details": dict(row.get("capability_details") or {}),
-                }
-            )
-            schema = row.get("input_schema") if isinstance(row.get("input_schema"), dict) else {}
-            if not schema:
-                continue
-            priority = 0 if full_name in preferred else 1
-            candidates.append(
-                (
-                    priority,
-                    full_name,
-                    {
-                        "name": full_name,
-                        "description": str(row.get("description") or "").strip(),
-                        "input_schema": schema,
-                        "output_schema": dict(row.get("output_schema") or {}),
-                        "side_effect_level": str(row.get("side_effect_level") or ""),
-                        "side_effect_selector": dict(row.get("side_effect_selector") or {}),
-                        "required_capability": str(row.get("required_capability") or "") or None,
-                    },
-                )
-            )
-
-        selected_specs: List[Dict[str, Any]] = []
-        remaining = max(0, int(schema_budget_chars))
-        for _, _, spec in sorted(candidates, key=lambda item: (item[0], item[1])):
-            size = len(json.dumps(spec, ensure_ascii=False, separators=(",", ":")))
-            if size > remaining and selected_specs:
-                continue
-            if size > remaining:
-                break
-            selected_specs.append(spec)
-            remaining -= size
-
-        stable = json.dumps(catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        registry_revision = hashlib.sha256(stable.encode("utf-8")).hexdigest()
+        projection = project_capability_snapshot(
+            catalog, preferred_tools=preferred_tools, schema_budget_chars=schema_budget_chars,
+        )
         previous = getattr(run_context, "tool_availability", None)
-        if isinstance(previous, dict) and previous.get("registry_revision") == registry_revision and previous.get("selected_specs") == selected_specs and previous.get("schema_budget_chars") == int(schema_budget_chars):
+        if (
+            isinstance(previous, dict)
+            and previous.get("registry_revision") == projection["registry_revision"]
+            and previous.get("selected_specs") == projection["selected_specs"]
+            and previous.get("schema_budget_chars") == int(schema_budget_chars)
+        ):
             return dict(previous)
         snapshot = {
             "snapshot_id": f"caps_{uuid4().hex}",
-            "registry_revision": registry_revision,
             "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "total_count": len(compact_index),
-            "callable_count": sum(1 for item in compact_index if item["callable_now"]),
-            "compact_index": compact_index,
-            "selected_specs": selected_specs,
-            "schema_budget_chars": int(schema_budget_chars),
-            "missing_schema_count": sum(1 for item in compact_index if item["schema_status"] == "missing"),
+            **projection,
         }
         if run_context is not None:
             try:
@@ -705,88 +645,18 @@ class CapabilityService:
         if not required:
             return {"error": "required_capabilities is empty", "candidates": []}
         max_effect = str(request.get("max_side_effect") or "read_only").strip().lower()
-        effect_rank = {
-            SideEffectLevel.READ_ONLY.value: 0,
-            SideEffectLevel.WORKSPACE_WRITE.value: 1,
-            SideEffectLevel.EXTERNAL_WRITE.value: 2,
-            SideEffectLevel.PRIVILEGED_HOST_ACTION.value: 3,
-        }
-        if max_effect not in effect_rank:
+        if max_effect not in {level.value for level in SideEffectLevel}:
             return {"error": f"invalid max_side_effect: {max_effect}", "candidates": []}
 
-        preferred = {str(item).strip() for item in (preferred_tools or []) if str(item).strip()}
         catalog = await self.get_tool_catalog(run_context=run_context, user_config=user_config)
-        candidates: List[tuple[int, int, str, Dict[str, Any]]] = []
-        unavailable: List[Dict[str, Any]] = []
-        for row in catalog:
-            declared = str(row.get("required_capability") or "").strip()
-            if not declared or not any(self._capability_identifiers_overlap(declared, item) for item in required):
-                continue
-            if not bool(row.get("callable_now")):
-                unavailable.append({key: row.get(key) for key in (
-                    "service_name", "tool_name", "required_capability", "callable_reason", "dependency_ready", "config_ready",
-                )})
-                continue
-            effect = str(row.get("side_effect_level") or SideEffectLevel.PRIVILEGED_HOST_ACTION.value)
-            selector = row.get("side_effect_selector") if isinstance(row.get("side_effect_selector"), dict) else {}
-            groups = selector.get("groups") if isinstance(selector.get("groups"), dict) else {}
-            effect_options = {effect, *(str(item) for item in groups if str(item) in effect_rank)}
-            eligible_effects = [item for item in effect_options if effect_rank.get(item, 3) <= effect_rank[max_effect]]
-            if not eligible_effects:
-                continue
-            service_name = str(row.get("service_name") or "").strip()
-            tool_name = str(row.get("tool_name") or "").strip()
-            full_name = (
-                tool_name
-                if not service_name or tool_name == service_name or tool_name.startswith(f"{service_name}.")
-                else f"{service_name}.{tool_name}"
-            )
-            candidate = {
-                "name": full_name,
-                "description": str(row.get("description") or "").strip(),
-                "required_capability": declared,
-                "side_effect_level": effect,
-                "side_effect_options": sorted(effect_options, key=lambda item: effect_rank.get(item, 3)),
-                "requires_confirmation": bool(row.get("requires_confirmation")),
-                "confirmation_depends_on_arguments": bool(groups),
-                "input_schema": dict(row.get("input_schema") or {}),
-                "output_schema": dict(row.get("output_schema") or {}),
-            }
-            candidates.append(
-                (
-                    0 if full_name in preferred else 1,
-                    min(effect_rank.get(item, 3) for item in eligible_effects),
-                    full_name,
-                    candidate,
-                )
-            )
-
-        resolved = [item[3] for item in sorted(candidates, key=lambda item: (item[0], item[1], item[2]))[:max(1, limit)]]
-        return {
-            "objective": str(request.get("objective") or "").strip(),
-            "required_capabilities": sorted(required),
-            "preferred_modalities": [
-                str(item).strip()
-                for item in (request.get("preferred_modalities") or [])
-                if str(item).strip()
-            ],
-            "max_side_effect": max_effect,
-            "candidate_count": len(resolved),
-            "candidates": resolved,
-            "unavailable_candidates": unavailable[:max(1, limit)],
-            "registry_revision": self._registry_revision(catalog),
-        }
-
-    @staticmethod
-    def _capability_identifiers_overlap(declared: str, requested: str) -> bool:
-        left = str(declared or "").strip().lower()
-        right = str(requested or "").strip().lower()
-        return bool(left and right and (left == right or left.startswith(f"{right}.") or right.startswith(f"{left}.")))
-
-    @staticmethod
-    def _registry_revision(catalog: List[Dict[str, Any]]) -> str:
-        stable = json.dumps(catalog, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
-        return hashlib.sha256(stable.encode("utf-8")).hexdigest()
+        return resolve_capability_candidates(
+            catalog,
+            request=request,
+            required=required,
+            max_effect=max_effect,
+            preferred_tools=preferred_tools,
+            limit=limit,
+        )
 
     def inspect_capabilities(
         self,
@@ -1141,6 +1011,13 @@ class CapabilityService:
         return summary, metadata
 
     def _workspace_scope(self, params: Dict[str, Any], context_fields: Dict[str, Any]):
+        from .delegation import current_delegation
+
+        delegation = current_delegation()
+        if delegation is not None and (delegation.depth or delegation.background_notification) and delegation.workspace_id:
+            if params.get("workspace_id") and str(params["workspace_id"]) != delegation.workspace_id:
+                raise ToolPolicyViolationError("tool workspace exceeds the delegated workspace scope")
+            context_fields = {**context_fields, "workspace_id": delegation.workspace_id}
         service = getattr(self, "workspace_service", None)
         user_id = str(context_fields.get("user_id") or "").strip()
         if service is None or not user_id:
@@ -1179,6 +1056,15 @@ class CapabilityService:
         tool_name, params = self.tool_registry.normalize_call(tool_name=tool_name, params=params)
         execution_params = deepcopy(params)
         context_fields = self._build_context_fields(ctx=ctx, run_context=run_context)
+        from .delegation import current_delegation
+
+        delegation = current_delegation()
+        if delegation is not None and delegation.depth:
+            context_fields.update(
+                parent_action_loop_id=delegation.parent_action_loop_id,
+                ancestor_action_loop_ids=list(delegation.ancestor_action_loop_ids),
+                delegation_depth=delegation.depth,
+            )
         context_fields["timezone"] = resolve_context_timezone_name(
             user_config,
             str(context_fields.get("timezone") or ""),

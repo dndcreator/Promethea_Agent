@@ -1,0 +1,7 @@
+{
+  "name": "subagent",
+  "label": "Subagent delegation",
+  "version": "1.0.0",
+  "serviceType": "tool",
+  "entryPoint": { "module": "agentkit.tools.subagent", "factory": "create_tools" }
+}

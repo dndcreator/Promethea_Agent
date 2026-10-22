@@ -40,7 +40,7 @@ _TASK_TRANSITIONS = {
     TASK_OPEN: {TASK_RUNNING, TASK_PAUSED, TASK_COMPLETED, TASK_CANCELLED},
     TASK_RUNNING: {TASK_WAITING_USER, TASK_PAUSED, TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED},
     TASK_WAITING_USER: {TASK_RUNNING, TASK_PAUSED, TASK_FAILED, TASK_CANCELLED},
-    TASK_PAUSED: {TASK_RUNNING, TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED},
+    TASK_PAUSED: {TASK_RUNNING, TASK_WAITING_USER, TASK_COMPLETED, TASK_FAILED, TASK_CANCELLED},
     TASK_COMPLETED: {TASK_RUNNING},
     TASK_FAILED: {TASK_RUNNING, TASK_CANCELLED},
     TASK_CANCELLED: set(),
@@ -73,13 +73,31 @@ class TaskService:
         self._events: Dict[str, List[Dict[str, Any]]] = {}
         self._load()
 
-    def create_task(self, *, user_id: str, title: str, objective: str = "", session_id: Optional[str] = None, source: str = "user") -> Dict[str, Any]:
+    def create_task(self, *, user_id: str, title: str, objective: str = "", session_id: Optional[str] = None, source: str = "user", metadata: Optional[Dict[str, Any]] = None, initial_run: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         task_id = f"task_{uuid4().hex}"
         now = _now()
         task = {"task_id": task_id, "user_id": str(user_id), "title": str(title).strip() or "Untitled task", "objective": str(objective).strip(), "session_ids": [str(session_id)] if session_id else [], "status": TASK_OPEN, "revision": 1, "activation_epoch": 0, "executions": {}, "source": source, "runs": [], "created_at": now, "updated_at": now, "completed_at": None}
+        if metadata:
+            task["metadata"] = self._copy(metadata)
+        if initial_run is not None:
+            if not initial_run.get("run_id") or not initial_run.get("run_type"):
+                raise ValueError("initial run requires an id and execution type")
+            task["runs"] = [{
+                "run_id": str(initial_run["run_id"]), "run_type": str(initial_run["run_type"]),
+                "status": "pending", "session_id": str(session_id or ""),
+                "trace_id": str(initial_run.get("trace_id") or ""),
+                "metadata": self._copy(initial_run.get("metadata") or {}), "attempts": [],
+                "started_at": now, "updated_at": now, "ended_at": None,
+            }]
+            task["status"] = TASK_RUNNING
         self._tasks[task_id] = task
         event = self._record(task_id, "task.created", {"source": source})
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self._tasks.pop(task_id, None)
+            self._events.pop(task_id, None)
+            raise
         self._publish(EventType.TASK_CREATED, event)
         return self._copy(task)
 
@@ -100,14 +118,19 @@ class TaskService:
             rows = [task for task in rows if task.get("status") == status]
         return sorted(rows, key=lambda task: str(task.get("updated_at") or ""), reverse=True)[:max(1, limit)]
 
-    def start_run(self, *, task_id: str, user_id: str, run_id: str, run_type: str, session_id: Optional[str] = None, trace_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def start_run(self, *, task_id: str, user_id: str, run_id: str, run_type: str, session_id: Optional[str] = None, trace_id: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, status: str = "running") -> Dict[str, Any]:
+        if status not in {"pending", "running"}:
+            raise ValueError("new runs must be pending or running")
         task = self._require(task_id, user_id)
+        previous_task = self._copy(task)
+        previous_events = self._copy(self._events.get(task_id, []))
         if self._normalize_task_status(task.get("status")) == TASK_CANCELLED:
             raise ValueError("cancelled task cannot start a new run")
         for run in task["runs"]:
             if run.get("run_id") == run_id:
                 return self._copy(run)
-        run = {"run_id": str(run_id), "run_type": str(run_type), "status": "running", "session_id": str(session_id or ""), "trace_id": str(trace_id or ""), "metadata": dict(metadata or {}), "attempts": [], "started_at": _now(), "updated_at": _now(), "ended_at": None}
+        run = {"run_id": str(run_id), "run_type": str(run_type), "status": "running", "session_id": str(session_id or ""), "trace_id": str(trace_id or ""), "metadata": self._copy(metadata or {}), "attempts": [], "started_at": _now(), "updated_at": _now(), "ended_at": None}
+        run["status"] = status
         task["runs"].append(run)
         self._attach_session(task, session_id)
         previous_status = self._normalize_task_status(task.get("status"))
@@ -123,14 +146,83 @@ class TaskService:
                 "task.state.changed",
                 {"from_status": previous_status, "to_status": TASK_RUNNING, "reason": "run_started"},
             )
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self._tasks[task_id] = previous_task
+            self._events[task_id] = previous_events
+            raise
         self._publish(EventType.TASK_RUN_STARTED, event)
         if state_event:
             self._publish(EventType.TASK_STATE_CHANGED, state_event)
         return self._copy(run)
 
-    def update_run(self, *, task_id: str, user_id: str, run_id: str, status: str, detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def execution_tasks(self, *, run_type: str) -> List[Dict[str, Any]]:
+        """Trusted host scan; public queries remain explicitly owner-scoped."""
+        return [self._copy(task) for task in self._tasks.values() if any(run.get("run_type") == run_type for run in task.get("runs", []))]
+
+    def checkpoint_run(self, *, task_id: str, user_id: str, run_id: str, token: Dict[str, Any], checkpoint: Dict[str, Any]) -> None:
         task = self._require(task_id, user_id)
+        self._assert_execution_token(task, token)
+        if str(token.get("run_id")) != str(run_id):
+            raise TaskExecutionConflict("checkpoint does not belong to this execution")
+        run = self._require_run(task, run_id)
+        previous = self._copy(run["metadata"])
+        run["metadata"]["checkpoint"] = self._copy(checkpoint)
+        try:
+            self._persist()
+        except Exception:
+            run["metadata"] = previous
+            raise
+
+    def append_agent_message(self, *, task_id: str, user_id: str, run_id: str, message: Dict[str, Any], token: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Persist a Runtime-addressed outbox entry alongside its originating run."""
+        task = self._require(task_id, user_id)
+        if token is not None:
+            self._assert_execution_token(task, token)
+            if token.get("run_id") != run_id:
+                raise TaskExecutionConflict("message does not belong to this execution")
+        run = self._require_run(task, run_id)
+        rows = run["metadata"].get("agent_outbox", [])
+        existing = next((row for row in rows if row["message_id"] == message["message_id"]), None)
+        if existing is not None:
+            return self._copy(existing)
+        previous = self._copy(run["metadata"])
+        entry = self._copy(message)
+        run["metadata"]["agent_outbox"] = [*rows, entry]
+        try:
+            self._persist()
+        except Exception:
+            run["metadata"] = previous
+            raise
+        return self._copy(entry)
+
+    def acknowledge_agent_messages(self, *, user_id: str, message_ids: List[str]) -> None:
+        wanted = set(message_ids)
+        changed = []
+        for task in self._tasks.values():
+            if task["user_id"] != user_id:
+                continue
+            for run in task["runs"]:
+                for row in run["metadata"].get("agent_outbox", []):
+                    if row["message_id"] in wanted and not row.get("received"):
+                        changed.append(row)
+        if not changed:
+            return
+        for row in changed:
+            row["received"] = True
+        try:
+            self._persist()
+        except Exception:
+            for row in changed:
+                row["received"] = False
+            raise
+
+    def update_run(self, *, task_id: str, user_id: str, run_id: str, status: str, detail: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        detail = self._copy(detail or {})
+        task = self._require(task_id, user_id)
+        previous_task = self._copy(task)
+        previous_events = self._copy(self._events.get(task_id, []))
         run = next((item for item in task["runs"] if item.get("run_id") == str(run_id)), None)
         if run is None:
             raise KeyError(f"task run not found: {run_id}")
@@ -142,6 +234,8 @@ class TaskService:
             run["metadata"].update(detail)
         previous_status = self._normalize_task_status(task.get("status"))
         next_status = self._derive_task_status(task["runs"], fallback=previous_status)
+        if next_status == TASK_COMPLETED and (task.get("metadata") or {}).get("continuable") is True:
+            next_status = TASK_WAITING_USER
         if next_status == TASK_COMPLETED and any(gap.state != "resolved" for gap in GoalGapState.model_validate(task.get("goal_gaps") or {}).gaps):
             next_status = TASK_WAITING_USER
         task["status"] = next_status
@@ -159,7 +253,12 @@ class TaskService:
                 "task.state.changed",
                 {"from_status": previous_status, "to_status": next_status, "reason": "run_state_changed"},
             )
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self._tasks[task_id] = previous_task
+            self._events[task_id] = previous_events
+            raise
         self._publish(EventType.TASK_RUN_UPDATED, event)
         if state_event:
             self._publish(EventType.TASK_STATE_CHANGED, state_event)
@@ -300,6 +399,8 @@ class TaskService:
     ) -> Dict[str, Any]:
         """Claim one fenced execution generation and open a durable attempt."""
         task = self._require(task_id, user_id)
+        previous_task = self._copy(task)
+        previous_events = self._copy(self._events.get(task_id, []))
         run = self._require_run(task, run_id)
         executions = task.setdefault("executions", {})
         current = executions.get(str(run_id)) if isinstance(executions, dict) else None
@@ -342,7 +443,12 @@ class TaskService:
         event = self._record(task_id, "task.execution.claimed", {
             "run_id": run_id, "attempt_id": attempt_id, "owner_id": owner_id, "epoch": epoch,
         })
-        self._persist()
+        try:
+            self._persist()
+        except Exception:
+            self._tasks[task_id] = previous_task
+            self._events[task_id] = previous_events
+            raise
         self._publish(EventType.TASK_EXECUTION_CLAIMED, event)
         return self._copy(execution)
 

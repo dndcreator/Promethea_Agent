@@ -406,6 +406,16 @@ class GatewayIntegration:
             capability_service=self.gateway_server.capability_service,
             self_model_service=self.gateway_server.self_model_service,
         )
+        from gateway.background_agents import BackgroundAgents
+
+        background_agents = BackgroundAgents(
+            conversation=self.gateway_server.conversation_service,
+            task_runtime=self.gateway_server.task_runtime,
+            task_service=self.gateway_server.task_service,
+        )
+        self.gateway_server.conversation_service.background_agents = background_agents
+        self.gateway_server.task_runtime.register_driver("subagent", background_agents)
+        self.gateway_server.task_runtime.register_driver("agent_inbox", background_agents)
         self.gateway_server.ensure_capability_service().ensure_discovered_tools()
 
         event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)
@@ -443,12 +453,6 @@ class GatewayIntegration:
                 await memory_service.start_background_services()
 
             task_runtime = self.gateway_server.task_runtime
-            if task_runtime is not None:
-                recovered = await task_runtime.recover_incomplete()
-                if recovered:
-                    logger.info("Recovered {} detached task run(s)", recovered)
-                task_runtime.start_supervisor()
-
             computer_cfg = self.config.get("computer", {})
             enabled = computer_cfg.get(
                 "enabled_controllers",
@@ -471,6 +475,11 @@ class GatewayIntegration:
             self.message_router.register_global_handler(self._handle_incoming_message)
 
             await self.gateway_server.start()
+            if task_runtime is not None:
+                recovered = await task_runtime.recover_incomplete()
+                if recovered:
+                    logger.info("Recovered {} detached task run(s)", recovered)
+                task_runtime.start_supervisor()
             logger.info("Gateway system initialized successfully")
             return True
         except Exception as e:

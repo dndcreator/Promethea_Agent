@@ -375,6 +375,7 @@ async def chat(
                         user_id=user_id,
                         reasoning_tree_id=tree_id,
                         reasoning_steps=list(run_chat_loop_result.get("reasoning_steps") or []),
+                        agent_message_ids=run_chat_loop_result.get("agent_message_ids"),
                     )
                     if not committed:
                         yield _sse({"type": "error", "content": "failed to commit turn"})

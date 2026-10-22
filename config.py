@@ -499,9 +499,34 @@ class ActionConfig(BaseSettings):
     gaps: GoalGapConfig = Field(default_factory=GoalGapConfig)
 
 
+class MultiAgentConfig(BaseSettings):
+    enabled: bool = True
+    max_children: int = Field(default=6, ge=1, le=32)
+    max_parallel: int = Field(default=3, ge=1, le=8)
+    max_pending: int = Field(default=24, ge=1, le=256)
+    max_depth: int = Field(default=1, ge=1, le=3)
+    child_steps: int = Field(default=5, ge=1, le=20)
+    child_max_tokens: int = Field(default=2048, ge=256, le=8192)
+    timeout_s: float = Field(default=120, ge=1, le=600)
+    result_chars: int = Field(default=12000, ge=500, le=40000)
+
+
+class GuestChatConfig(BaseSettings):
+    enabled: bool = True
+    allow_remote: bool = False
+    requests_per_minute: int = Field(default=6, ge=1, le=120)
+    max_concurrent: int = Field(default=2, ge=1, le=16)
+    timeout_s: float = Field(default=60, ge=1, le=180)
+    max_messages: int = Field(default=21, ge=1, le=24)
+    max_input_chars: int = Field(default=16000, ge=100, le=64000)
+    max_output_tokens: int = Field(default=1024, ge=1, le=4096)
+
+
 class PrometheaConfig(BaseSettings):
     config_version: str = Field(default="1")
     system: SystemConfig = Field(default_factory=SystemConfig)
+    guest_chat: GuestChatConfig = Field(default_factory=GuestChatConfig)
+    multi_agent: MultiAgentConfig = Field(default_factory=MultiAgentConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     action: ActionConfig = Field(default_factory=ActionConfig)
     prompts: SystemPrompts = Field(default_factory=SystemPrompts)

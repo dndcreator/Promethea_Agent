@@ -1,33 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
-import { BarChart3, BrainCircuit, ChevronDown, ChevronRight, CircleDot, Clock3, MessageCircleQuestion, Mic, Paperclip, Plus, Search, Send, Smile, Square, X } from 'lucide-react'
+import { BarChart3, Clock3, MessageCircleQuestion, Mic, Paperclip, Plus, Search, Send, Smile, Square, UsersRound } from 'lucide-react'
 import ConfirmModal from './modals/ConfirmModal'
-import MessageContent from './MessageContent'
-import { sourceSelection } from '../utils/message-links'
-import { getActiveReasoning, getMetrics, getReasoningTree, getSession, getWelcome, sendFollowup, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
+import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
 import { useWorkbench } from '../store/WorkbenchContext'
-import type { ChatAttachment, WorkbenchActivity } from '../services/api'
+import type { ChatAttachment, GuestChatStatus, StreamHandler } from '../services/api'
+import { guestTranscript } from '../utils/guest-chat'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
 
-interface MessageData {
-  id: string
-  role: 'user' | 'agent' | 'assistant' | 'tool' | 'status'
-  content: string
-  name?: string
-  time?: string
-  reasoningTreeId?: string
-  conversationTurnId?: string
-  reasoningSteps?: ReasoningStep[]
-  runStatus?: string
-  error?: Record<string, unknown>
-}
+import Message from './chat/ChatMessage'
+import FollowupModal from './chat/FollowupModal'
+import { normalizeReasoningSteps } from './chat/TurnProcess'
+import type { FollowupData, MessageData, TextSelection } from './chat/types'
 
-type ReasoningStep = {
-  step_id: string
-  source: string
-  content: string
-}
 
 interface MainContentProps {
   sessionId: string | null
@@ -51,27 +37,6 @@ type MemoryNotice = {
   requiresReview: boolean
 }
 
-type FollowupData = {
-  id: string
-  message_id: string
-  selected_text: string
-  start_offset: number
-  end_offset: number
-  query_type: string
-  custom_query?: string | null
-  query: string
-  response: string
-  created_at: number
-}
-
-type TextSelection = {
-  messageId: string
-  selectedText: string
-  startOffset: number
-  endOffset: number
-  left: number
-  top: number
-}
 
 type WelcomeState = {
   greeting: string
@@ -156,6 +121,9 @@ export default function MainContent({
   const [input, setInput] = useState('')
   const [sessionTitle, setSessionTitle] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [multiAgent, setMultiAgent] = useState(false)
+  const [multiAgentAvailable, setMultiAgentAvailable] = useState(false)
+  const [guestStatus, setGuestStatus] = useState<GuestChatStatus | null>(null)
   const [isRecording, setIsRecording] = useState(false)
   const [confirmRequest, setConfirmRequest] = useState<any>(null)
   const [memoryNotice, setMemoryNotice] = useState<MemoryNotice | null>(null)
@@ -168,6 +136,10 @@ export default function MainContent({
   const [textSelection, setTextSelection] = useState<TextSelection | null>(null)
   const [followupDraft, setFollowupDraft] = useState<TextSelection | null>(null)
   const { snapshot: workbenchSnapshot } = useWorkbench()
+  const completedAgentTurns = (workbenchSnapshot?.tasks || []).flatMap((task) => task.runs || [])
+    .filter((run) => run.run_type === 'agent_inbox' && run.status === 'completed' && run.session_id === sessionId)
+    .map((run) => run.run_id).sort().join(':')
+  const syncedAgentTurnsRef = useRef('')
   const pendingReviewId = memoryReviewId || workbenchSnapshot?.memory_proposals?.find((proposal) => proposal.session_id === sessionId)?.proposal_id || null
   const processActivities = workbenchSnapshot?.timeline || []
   const [meta, setMeta] = useState<{ tokens: number | null; latency: number | null }>({ tokens: null, latency: null })
@@ -188,6 +160,16 @@ export default function MainContent({
   const welcomeRequestRef = useRef(0)
   const selectionActionRef = useRef<HTMLButtonElement>(null)
   const observedMemoryReviewRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!user) return
+    const controller = new AbortController()
+    void getConfig(controller.signal).then(async (response) => {
+      if (!response.ok) return
+      const payload = await response.json()
+      if (!controller.signal.aborted) setMultiAgentAvailable(payload.config?.multi_agent?.enabled === true)
+    }).catch(() => {})
+    return () => controller.abort()
+  }, [user?.user_id])
   useEffect(() => () => {
     activeStreamRef.current?.controller.abort()
     activeStreamRef.current = null
@@ -199,14 +181,25 @@ export default function MainContent({
       `你好，我是 ${user?.agent_name || 'Promethea'}。`,
       `Hi, I am ${user?.agent_name || 'Promethea'}.`,
     ),
-    context_hint: t('可以直接告诉我你想推进的任务。', 'Tell me what you want to work on.'),
-    suggested_actions: [
+    context_hint: user ? t('可以直接告诉我你想推进的任务。', 'Tell me what you want to work on.') : t('今天想聊些什么？', 'What is on your mind today?'),
+    suggested_actions: user ? [
       t('开始一个新任务', 'Start a new task'),
       t('查看当前工作台状态', 'Review workspace status'),
       t('整理下一步计划', 'Plan next steps'),
-    ],
+    ] : [t('帮我整理一个想法', 'Help me organize an idea'), t('解释一个有趣的概念', 'Explain an interesting concept'), t('一起写一小段文字', 'Write something together')],
   }), [t, user?.agent_name])
   const quickEmojis = ['\u{1F642}', '\u{1F44D}', '\u{1F64F}', '\u{1F4A1}', '\u{2705}', '\u{1F525}']
+
+  useEffect(() => {
+    if (user) return
+    const controller = new AbortController()
+    void getGuestChatStatus(controller.signal).then((status) => {
+      if (!controller.signal.aborted) setGuestStatus(status)
+    }).catch(() => {
+      if (!controller.signal.aborted) setGuestStatus({ enabled: false, available: false, max_messages: 1, max_input_chars: 0 })
+    })
+    return () => controller.abort()
+  }, [user?.user_id])
 
   useEffect(() => {
     const previousReviewId = observedMemoryReviewRef.current
@@ -334,8 +327,9 @@ export default function MainContent({
     if (isStreaming) {
       return
     }
-    if (active?.sessionId === sessionId && ['failed', 'interrupted', 'waiting_confirmation'].includes(active.outcome)) return
+    if (active?.sessionId === sessionId && ['failed', 'interrupted', 'waiting_confirmation'].includes(active.outcome) && completedAgentTurns === syncedAgentTurnsRef.current) return
     if (!sessionId) {
+      if (!user) return
       setMessages([])
       setSessionTitle('')
       setTreeId(null)
@@ -349,6 +343,7 @@ export default function MainContent({
         if (!res.ok) return
         const data = await res.json()
         if (cancelled) return
+        syncedAgentTurnsRef.current = completedAgentTurns
         setTreeId(data.tree_id || null)
         const sessionInfo = data.session_info || data
         setSessionTitle(String(sessionInfo.title || '').trim())
@@ -374,7 +369,7 @@ export default function MainContent({
     }
     fetchSessionHistory()
     return () => { cancelled = true }
-  }, [sessionId, user, setTreeId, isStreaming])
+  }, [sessionId, user, setTreeId, isStreaming, completedAgentTurns])
 
   const insertIntoInput = (text: string) => {
     const el = inputRef.current
@@ -394,6 +389,10 @@ export default function MainContent({
   }
 
   const handleNewChat = () => {
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    activeStreamRef.current = null
+    setIsStreaming(false)
     setMeta({ tokens: null, latency: null })
     setSessionId(null)
     setTreeId(null)
@@ -476,7 +475,7 @@ export default function MainContent({
 
   const handleSend = async (text: string = input) => {
     if (!text.trim() || isStreaming) return
-    if (!user) {
+    if (!user && !guestStatus?.available) {
       onRequireAuth()
       return
     }
@@ -485,7 +484,7 @@ export default function MainContent({
       id: `${Date.now()}-user`,
       role: 'user',
       content: text,
-      name: user.username || 'You',
+      name: user?.username || t('访客', 'Guest'),
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     }
     const agentMessageId = `${Date.now()}-agent`
@@ -501,7 +500,7 @@ export default function MainContent({
         id: agentMessageId,
         role: 'agent',
         content: '',
-        name: user.agent_name || 'Promethea',
+        name: user?.agent_name || 'Promethea',
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       },
     ])
@@ -519,11 +518,7 @@ export default function MainContent({
 
     const startTime = Date.now()
 
-    await streamChat(
-      userMessage.content,
-      sessionId,
-      attachments,
-      (event, data) => {
+    const onEvent: StreamHandler = (event, data) => {
         if (activeStreamRef.current !== request || viewSessionRef.current !== request.sessionId) return
         const payload = asStreamPayload(data)
         if (event === 'text') {
@@ -607,7 +602,7 @@ export default function MainContent({
           if (notice) setMemoryNotice(notice)
           const doneTokens = tokenCountFromPayload(payload)
           setMeta((prev) => ({ ...prev, tokens: doneTokens ?? prev.tokens, latency: (Date.now() - startTime) / 1000 }))
-          void refreshTokenMetric()
+          if (user) void refreshTokenMetric()
           if (payload.session_id && payload.status !== 'needs_confirmation') {
             void getSession(String(payload.session_id))
               .then(async (res) => {
@@ -655,8 +650,8 @@ export default function MainContent({
           const message = typeof data === 'string' ? data : payload.content || 'Unknown error'
           setMessages((prev) => prev.map((item) => item.id === agentMessageId ? { ...item, role: 'status', content: '', runStatus: 'failed', error: { ...payload.error_detail, message } } : item))
         }
-      },
-      (error) => {
+      }
+    const onError = (error: Error) => {
         if (activeStreamRef.current !== request || viewSessionRef.current !== request.sessionId) return
         request.outcome = 'failed'
         abortControllerRef.current = null
@@ -666,9 +661,9 @@ export default function MainContent({
           ...item, role: 'status', content: '', runStatus: 'failed',
           error: { code: 'code' in error ? error.code : 'RUN_FAILED', message: error.message },
         } : item))
-      },
-      controller.signal,
-    )
+      }
+    if (user) await streamChat(userMessage.content, sessionId, attachments, onEvent, onError, controller.signal, multiAgent)
+    else if (guestStatus) await sendGuestChat(guestTranscript(messages, text, guestStatus), onEvent, onError, controller.signal)
   }
 
   const startRecording = async () => {
@@ -734,7 +729,7 @@ export default function MainContent({
       <header className="chat-heading flex items-center justify-between border-b border-black/5 px-4 py-3 sm:px-6">
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 truncate font-display text-[15px] font-semibold text-text-strong">
-            {sessionId ? (sessionTitle || t('对话', 'Conversation')) : t('新的对话', 'New conversation')}
+            {sessionTitle || (sessionId ? t('对话', 'Conversation') : user ? t('新的对话', 'New conversation') : t('临时对话', 'Temporary chat'))}
           </h1>
         </div>
         <div className="ml-2 flex shrink-0 items-center gap-1.5 sm:gap-4">
@@ -818,7 +813,7 @@ export default function MainContent({
               content={msg.content}
               messageId={msg.id}
               followups={followups.filter((item) => item.message_id === msg.id)}
-              onSelectText={(selection) => setTextSelection(selection)}
+              onSelectText={(selection) => { if (user) setTextSelection(selection) }}
               reasoningTreeId={msg.reasoningTreeId}
               reasoningSteps={msg.reasoningSteps}
               runStatus={msg.runStatus}
@@ -847,7 +842,8 @@ export default function MainContent({
       </div>
 
       <div className="chat-composer relative z-20 bg-white px-4 pb-4 pt-2 sm:px-6">
-        <div className={`overflow-hidden rounded-lg border bg-bg-card shadow-sm transition-shadow focus-within:ring-2 ${isRecording ? 'border-red-300 ring-2 ring-red-100' : 'border-border-soft focus-within:ring-brand-100'}`}>
+        {!user && <div className="guest-chat-status" role="status"><span className={`health-dot ${guestStatus?.available ? 'healthy' : 'unknown'}`} />{guestStatus?.available ? t('临时对话', 'Temporary chat') : guestStatus ? t('游客对话暂不可用', 'Guest chat unavailable') : t('正在连接', 'Connecting')}</div>}
+        <div className={`composer-surface overflow-hidden ${isRecording ? 'border-red-300 ring-2 ring-red-100' : ''}`}>
           {attachments.length > 0 && (
             <div className="flex flex-wrap gap-2 border-b border-black/5 bg-brand-50/45 px-4 py-2">
               {attachments.map((file) => (
@@ -891,8 +887,15 @@ export default function MainContent({
               />
             )}
           </div>
-          <div className="flex items-center justify-between border-t border-black/5 bg-bg-page/45 px-3 py-2">
+          <div className="composer-toolbar flex items-center justify-between px-3 py-2">
             <div className="relative flex items-center gap-1 text-text-muted">
+              {user && multiAgentAvailable && (
+                <label className="flex h-8 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-text-muted hover:bg-black/5">
+                  <UsersRound size={15} />
+                  <span>{t('多 Agent', 'Multi-agent')}</span>
+                  <input type="checkbox" role="switch" aria-label={t('多 Agent', 'Multi-agent')} checked={multiAgent} disabled={isStreaming} onChange={(event) => setMultiAgent(event.target.checked)} className="h-3.5 w-3.5 accent-zinc-700" />
+                </label>
+              )}
               <IconButton icon={<Paperclip size={16} />} onClick={user ? onOpenFiles : onRequireAuth} title={t('上传或搜索文件', 'Upload or search files')} />
               <IconButton icon={<span className="text-sm font-bold">@</span>} onClick={() => insertIntoInput('@')} title={t('插入提及符号', 'Insert mention')} />
               <IconButton icon={<Smile size={16} />} onClick={() => setShowEmojiPicker((value) => !value)} title={t('插入表情', 'Insert emoji')} />
@@ -920,9 +923,9 @@ export default function MainContent({
             <button
               type="button"
               onClick={() => (isStreaming ? handleStopStreaming() : handleSend(input))}
-              disabled={(!isStreaming && !input.trim()) || isRecording}
+              disabled={(!isStreaming && (!input.trim() || (!user && !guestStatus?.available))) || isRecording}
               title={isStreaming ? t('停止当前任务', 'Stop current task') : t('发送', 'Send')}
-              className={`flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors disabled:opacity-50 ${
+              className={`composer-submit ${isStreaming ? 'is-stopping' : ''} flex h-8 w-8 cursor-pointer items-center justify-center rounded-md transition-colors disabled:opacity-50 ${
                 isStreaming ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-brand-100 text-brand-700 hover:bg-brand-200'
               }`}
             >
@@ -1018,113 +1021,6 @@ function HeaderButton({ children, ...props }: ButtonHTMLAttributes<HTMLButtonEle
   )
 }
 
-type MessageProps = {
-  role: MessageData['role']
-  avatar: string
-  name: string
-  time?: string
-  content: string
-  messageId: string
-  followups: FollowupData[]
-  onSelectText: (selection: TextSelection) => void
-  reasoningTreeId?: string
-  reasoningSteps?: ReasoningStep[]
-  processActivities?: WorkbenchActivity[]
-  onOpenWorkbench: () => void
-  processRunning?: boolean
-  runStatus?: string
-  error?: Record<string, unknown>
-  onRetry?: () => void
-}
-
-function Message({ role, avatar, name, time, content, messageId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry }: MessageProps) {
-  const { t } = useLanguage()
-  const isAgent = role === 'agent' || role === 'assistant'
-  const isTool = role === 'tool' || role === 'status'
-
-  if (isTool) {
-    if (runStatus) {
-      const code = String(error?.code || '')
-      const label = code === 'MODEL_OUTPUT_LIMIT'
-        ? t('模型输出额度已用尽，本次未完成。', 'The model reached its output limit before completing the request.')
-        : code === 'MODEL_EMPTY_RESPONSE'
-          ? t('模型没有返回可执行动作或回答。', 'The model returned no action or answer.')
-          : t('本次请求未完成。', 'This request did not complete.')
-      return (
-        <div className="max-w-[86%] border-l-2 border-amber-300 py-1 pl-3 text-[13px] text-text-muted">
-          <div className="flex items-center gap-3"><span>{label}</span>{onRetry && <button type="button" onClick={onRetry} className="shrink-0 text-brand-700 underline">{t('重试', 'Retry')}</button>}</div>
-          {(reasoningTreeId || reasoningSteps.length > 0) && <TurnProcess treeId={reasoningTreeId} reasoningSteps={reasoningSteps} activities={processActivities} running={false} onOpenWorkbench={onOpenWorkbench} />}
-          {error && <details className="mt-1 text-xs"><summary className="cursor-pointer">{t('错误详情', 'Error details')}</summary><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words py-2">{[code, String(error.message || '')].filter(Boolean).join('\n')}</pre></details>}
-        </div>
-      )
-    }
-    return (
-      <div className="flex w-full justify-center py-1">
-        <div className="rounded-xl border border-brand-100 bg-bg-page/70 px-3 py-1.5 font-mono text-[11px] text-text-muted">
-          {content}
-        </div>
-      </div>
-    )
-  }
-
-  let displayContent = content
-  let thinkingContent = ''
-  if (typeof content === 'string' && content.includes('<thinking>')) {
-    const parts = content.split('<thinking>')
-    const rest = parts[1]
-    if (rest && rest.includes('</thinking>')) {
-      const restParts = rest.split('</thinking>')
-      thinkingContent = restParts[0]
-      displayContent = parts[0] + restParts[1]
-    }
-  }
-
-  return (
-    <div className={`flex max-w-[86%] gap-3.5 ${isAgent ? '' : 'self-start'}`}>
-      <div className={`flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-xl text-[13px] font-bold shadow-sm ${isAgent ? 'bg-bg-card text-brand-700 ring-1 ring-white/80' : 'bg-brand-600 text-white'}`}>
-        {isAgent && avatar === 'agent' ? 'P' : avatar}
-      </div>
-      <div className="mt-0.5 flex w-full flex-col gap-1 overflow-hidden">
-        <div className="flex items-baseline gap-2">
-          <span className="text-[13px] font-semibold text-text-strong">{name}</span>
-          {time && <span className="text-[11px] text-text-muted">{time}</span>}
-        </div>
-        {isAgent && (reasoningTreeId || reasoningSteps.length > 0 || processActivities.length > 0 || processRunning) && (
-          <TurnProcess
-            treeId={reasoningTreeId}
-            reasoningSteps={reasoningSteps}
-            activities={processActivities}
-            running={processRunning}
-            onOpenWorkbench={onOpenWorkbench}
-          />
-        )}
-        {thinkingContent && <ProcessText title={t('模型思考', 'Model reasoning')} content={thinkingContent} />}
-        <div
-          className="relative min-w-0 whitespace-pre-wrap text-[14px] leading-7 text-text-normal [overflow-wrap:anywhere]"
-          onMouseUp={(event) => {
-            if (displayContent !== content) return
-            const selection = window.getSelection()
-            const range = selection?.rangeCount ? selection.getRangeAt(0) : null
-            const root = event.currentTarget
-            if (!range || selection?.isCollapsed) return
-            const source = sourceSelection(root, content, range)
-            if (!source) return
-            const rect = range.getBoundingClientRect()
-            if (!rect.width && !rect.height) return
-            onSelectText({
-              messageId,
-              ...source,
-              left: Math.max(12, Math.min(window.innerWidth - 130, rect.left)),
-              top: Math.min(window.innerHeight - 44, rect.bottom + 8),
-            })
-          }}
-        >
-          <MessageContent content={displayContent} followups={followups} />
-        </div>
-      </div>
-    </div>
-  )
-}
 
 type IconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   icon: ReactNode
@@ -1138,297 +1034,7 @@ function IconButton({ icon, ...props }: IconButtonProps) {
   )
 }
 
-type ReasoningNodeView = {
-  id: string
-  title: string
-  summary: string
-  status: string
-}
 
-function TurnProcess({
-  treeId,
-  reasoningSteps,
-  activities,
-  running,
-  onOpenWorkbench,
-}: {
-  treeId?: string
-  reasoningSteps: ReasoningStep[]
-  activities: WorkbenchActivity[]
-  running: boolean
-  onOpenWorkbench: () => void
-}) {
-  const { lang, t } = useLanguage()
-  const [tree, setTree] = useState<any>(null)
-  const [open, setOpen] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    let interval: number | undefined
-    const refresh = async () => {
-      if (!treeId) {
-        if (!cancelled) setTree(null)
-        return
-      }
-      try {
-        const response = await getReasoningTree(treeId)
-        if (response.ok && !cancelled) setTree(await response.json())
-      } catch {
-        // The final answer remains usable when process projection is unavailable.
-      }
-    }
-    void refresh()
-    if (running && treeId) interval = window.setInterval(refresh, 1500)
-    return () => {
-      cancelled = true
-      if (interval !== undefined) window.clearInterval(interval)
-    }
-  }, [treeId, running])
-
-  const nodes: ReasoningNodeView[] = Array.isArray(tree?.nodes)
-    ? tree.nodes
-        .filter((node: any) => {
-          const kind = String(node?.kind || '').toLowerCase()
-          const status = String(node?.status || '').toLowerCase()
-          return kind !== 'root' && status !== 'pruned'
-        })
-        .sort((left: any, right: any) => Number(left.updated_at || 0) - Number(right.updated_at || 0))
-        .map((node: any, index: number) => ({
-          id: String(node?.node_id || index),
-          title: reasoningNodeTitle(node, t),
-          summary: readableProcessSummary(node?.summary || node?.observation),
-          status: String(node?.status || '').toLowerCase(),
-        }))
-    : []
-  const latest = nodes[nodes.length - 1]
-  const live = running
-  const visibleActivities = activities.filter((activity) => !(treeId && activity.kind === 'reasoning'))
-  const activityCount = visibleActivities.reduce((total, activity) => total + Number(activity.occurrence_count || 1), 0)
-  const counts = [
-    reasoningSteps.length > 0 ? t(`${reasoningSteps.length} 段思考`, `${reasoningSteps.length} thoughts`) : '',
-    nodes.length > 0 ? t(`${nodes.length} 个推理步骤`, `${nodes.length} reasoning steps`) : '',
-    activityCount > 0 ? t(`${activityCount} 次操作`, `${activityCount} actions`) : '',
-  ].filter(Boolean)
-  const label = live
-    ? t('正在思考', 'Thinking')
-    : counts.length > 0
-      ? counts.join(' · ')
-      : t('已思考', 'Thought for a while')
-  const latestLabel = visibleActivities.length > 0
-    ? localizedProcessActivity(visibleActivities[visibleActivities.length - 1], lang)
-    : latest?.title || compactProcessText(reasoningSteps[reasoningSteps.length - 1]?.content || '', 90)
-
-  return (
-    <div className="mb-2 mt-1 overflow-hidden border-l-2 border-brand-200 pl-3">
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        aria-expanded={open}
-        className="flex w-full items-center gap-2 py-1 text-left text-[12px] text-text-muted transition-colors hover:text-text-strong"
-      >
-        <BrainCircuit size={13} className={live ? 'text-brand-600' : ''} />
-        <span className="font-medium">{label}</span>
-        {!open && latestLabel && <span className="min-w-0 flex-1 truncate">{latestLabel}</span>}
-        <span className="ml-auto shrink-0">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
-      </button>
-      {open && (
-        <div className="max-h-80 overflow-y-auto pb-2 pt-1 pr-2">
-          {reasoningSteps.length === 0 && nodes.length === 0 && visibleActivities.length === 0 ? (
-            <div className="flex items-center gap-2 py-1 text-[12px] text-text-muted">
-              <CircleDot size={11} className={live ? 'animate-pulse text-brand-600' : ''} />
-              <span>{label}</span>
-            </div>
-          ) : (
-            <>
-              {reasoningSteps.map((step, index) => (
-                <div key={`${step.step_id}:${index}`} className="relative py-1.5 pl-5 text-[12px] leading-5">
-                  <CircleDot size={10} className={`absolute left-0 top-3 ${live && index === reasoningSteps.length - 1 ? 'animate-pulse text-brand-600' : 'text-text-muted'}`} />
-                  <ProcessText title={`${t('模型思考', 'Model reasoning')} ${index + 1}`} content={step.content} />
-                </div>
-              ))}
-              {nodes.map((node, index) => {
-              const active = live && (
-                ['running', 'active', 'pending', 'waiting_tool', 'waiting_human'].includes(node.status)
-                || index === nodes.length - 1
-              )
-              return (
-                <div key={node.id} className="relative py-1.5 pl-5 text-[12px] leading-5">
-                  <CircleDot size={10} className={`absolute left-0 top-3 ${active ? 'animate-pulse text-brand-600' : 'text-text-muted'}`} />
-                  <ProcessText title={node.title} content={node.summary} />
-                </div>
-              )
-              })}
-              {visibleActivities.map((activity) => {
-                const title = localizedProcessActivity(activity, lang)
-                const count = Number(activity.occurrence_count || 1)
-                return (
-                  <button
-                    key={activity.activity_id}
-                    type="button"
-                    onClick={onOpenWorkbench}
-                    className="flex w-full items-center gap-2 py-1.5 pl-5 text-left text-[12px] leading-5 text-text-normal hover:text-brand-700"
-                  >
-                    <CircleDot size={10} className="shrink-0 text-text-muted" />
-                    <span className="min-w-0 flex-1 truncate">{title}</span>
-                    {count > 1 && <span className="shrink-0 font-mono text-[10px] text-text-muted">x{count}</span>}
-                    <ChevronRight size={12} className="shrink-0 text-text-muted" />
-                  </button>
-                )
-              })}
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function ProcessText({ title, content }: { title: string; content: string }) {
-  return (
-    <details className="min-w-0 py-1 text-[12px] leading-5">
-      <summary className="cursor-pointer text-text-normal">
-        <span className="font-medium">{title}</span>
-        {content && <span className="mt-1 line-clamp-2 break-words text-text-muted">{content.slice(0, 200)}</span>}
-      </summary>
-      {content && <div className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap break-words border-l border-black/10 pl-2 text-text-muted">{content}</div>}
-    </details>
-  )
-}
-
-function readableProcessSummary(value: unknown): string {
-  if (typeof value !== 'string') return ''
-  try {
-    const parsed = JSON.parse(value)
-    return typeof parsed === 'string' ? parsed : String(parsed?.summary || parsed?.message || parsed?.text || '')
-  } catch { return value }
-}
-
-function normalizeReasoningSteps(value: unknown): ReasoningStep[] {
-  if (!Array.isArray(value)) return []
-  return value
-    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-    .map((item, index) => ({
-      step_id: String(item.step_id || `reasoning-${index}`),
-      source: String(item.source || 'provider'),
-      content: String(item.content || ''),
-    }))
-    .filter((item) => item.content.trim().length > 0)
-}
-
-function localizedProcessActivity(activity: WorkbenchActivity, lang: 'zh' | 'en'): string {
-  return String(activity.subject_i18n?.[lang] || activity.subject || activity.summary_i18n?.[lang] || activity.summary || '')
-}
-
-function compactProcessText(value: string, maxLength: number): string {
-  const text = value.replace(/\s+/g, ' ').trim()
-  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}...` : text
-}
-
-function reasoningNodeTitle(node: any, t: (zh: string, en: string) => string): string {
-  const kind = String(node?.kind || '').toLowerCase()
-  const metadata = node?.metadata && typeof node.metadata === 'object' ? node.metadata : {}
-  if (kind === 'memory') {
-    const query = compactProcessText(String(metadata.query || ''), 90)
-    return query ? `${t('召回记忆', 'Recall memory')} · ${query}` : compactProcessText(String(node.title || t('召回记忆', 'Recall memory')), 120)
-  }
-  if (kind === 'tool') {
-    const identity = [metadata.service_name, metadata.tool_name].filter(Boolean).join('.')
-    return identity ? `${t('调用工具', 'Use tool')} · ${identity}` : compactProcessText(String(node.title || t('调用工具', 'Use tool')), 120)
-  }
-  if (kind === 'think') return t('分析当前步骤', 'Analyze current step')
-  return compactProcessText(String(node?.title || t('分析', 'Reasoning')), 120)
-}
-
-function FollowupModal({
-  selection,
-  sessionId,
-  onClose,
-  onCreated,
-}: {
-  selection: TextSelection
-  sessionId: string
-  onClose: () => void
-  onCreated: (followup: FollowupData) => void
-}) {
-  const { t } = useLanguage()
-  const [queryType, setQueryType] = useState<'why' | 'risk' | 'alternative' | 'custom'>('why')
-  const [customQuery, setCustomQuery] = useState('')
-  const [isSubmitting, setIsSubmitting] = useState(false)
-  const [error, setError] = useState('')
-
-  useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
-    }
-    document.addEventListener('keydown', closeOnEscape)
-    return () => document.removeEventListener('keydown', closeOnEscape)
-  }, [onClose])
-
-  const submit = async () => {
-    if (queryType === 'custom' && !customQuery.trim()) return
-    setIsSubmitting(true)
-    setError('')
-    try {
-      const response = await sendFollowup({
-        selected_text: selection.selectedText,
-        query_type: queryType,
-        custom_query: queryType === 'custom' ? customQuery.trim() : undefined,
-        session_id: sessionId,
-        message_id: selection.messageId,
-        start_offset: selection.startOffset,
-        end_offset: selection.endOffset,
-      })
-      const data = await response.json()
-      if (!response.ok || !data.followup) throw new Error(data?.detail?.message || data?.detail || t('追问失败，请重试。', 'Follow-up failed. Please try again.'))
-      onCreated(data.followup)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : t('追问失败，请重试。', 'Follow-up failed. Please try again.'))
-    } finally {
-      setIsSubmitting(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-5 backdrop-blur-sm" onMouseDown={onClose}>
-      <div className="relative w-full max-w-lg rounded-xl border border-white/70 bg-bg-card p-5 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
-        <button type="button" onClick={onClose} className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-lg text-text-muted hover:bg-black/5 hover:text-text-strong" aria-label={t('关闭', 'Close')}>
-          <X size={16} />
-        </button>
-        <div className="flex items-center gap-2 pr-10 text-text-strong">
-          <MessageCircleQuestion size={18} className="text-brand-600" />
-          <h2 className="text-[16px] font-semibold">{t('追问这段内容', 'Follow up on this text')}</h2>
-        </div>
-        <blockquote className="mt-4 max-h-28 overflow-y-auto border-l-2 border-brand-300 bg-brand-50/55 px-3 py-2 text-[13px] leading-6 text-text-normal">
-          {selection.selectedText}
-        </blockquote>
-        <div className="mt-4 grid grid-cols-3 gap-2">
-          {([
-            ['why', t('为什么', 'Why')],
-            ['risk', t('风险', 'Risks')],
-            ['alternative', t('替代方案', 'Alternatives')],
-          ] as const).map(([value, label]) => (
-            <button key={value} type="button" onClick={() => setQueryType(value)} className={`rounded-lg border px-3 py-2 text-[12px] font-medium ${queryType === value ? 'border-brand-300 bg-brand-100 text-brand-800' : 'border-black/10 text-text-normal hover:bg-black/5'}`}>
-              {label}
-            </button>
-          ))}
-        </div>
-        <button type="button" onClick={() => setQueryType('custom')} className={`mt-2 text-[12px] ${queryType === 'custom' ? 'font-semibold text-brand-700' : 'text-text-muted hover:text-text-strong'}`}>
-          {t('自定义问题', 'Custom question')}
-        </button>
-        {queryType === 'custom' && (
-          <textarea value={customQuery} onChange={(event) => setCustomQuery(event.target.value)} autoFocus rows={3} className="mt-2 w-full resize-none rounded-lg border border-black/10 bg-bg-page/45 p-3 text-[13px] text-text-strong outline-none focus:border-brand-300" placeholder={t('输入你的问题', 'Write your question')} />
-        )}
-        {error && <p className="mt-3 text-[12px] text-red-600">{error}</p>}
-        <div className="mt-5 flex justify-end gap-2">
-          <button type="button" onClick={onClose} disabled={isSubmitting} className="rounded-lg px-3 py-2 text-[12px] font-medium text-text-muted hover:bg-black/5">{t('取消', 'Cancel')}</button>
-          <button type="button" onClick={() => void submit()} disabled={isSubmitting || (queryType === 'custom' && !customQuery.trim())} className="rounded-lg bg-brand-600 px-3 py-2 text-[12px] font-semibold text-white hover:bg-brand-700 disabled:opacity-50">
-            {isSubmitting ? t('生成中...', 'Generating...') : t('开始追问', 'Ask')}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
 
 function formatWelcomeClock(value: Date, lang: string) {
   return value.toLocaleString(lang === 'en' ? 'en-US' : 'zh-CN', {

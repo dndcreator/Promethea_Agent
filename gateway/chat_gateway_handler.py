@@ -260,6 +260,7 @@ async def handle_chat(self, connection, request):
             user_id=user_id,
             reasoning_tree_id=tree_id,
             reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or []),
+            agent_message_ids=tool_call_outcome.get("agent_message_ids"),
         )
         if not committed:
             return GatewayProtocol.create_response(
@@ -537,6 +538,7 @@ async def handle_chat_confirm(self, connection, request):
                 user_id=user_id,
                 reasoning_tree_id=pending.get("reasoning_tree_id"),
                 reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or pending.get("reasoning_steps") or []),
+                agent_message_ids=tool_call_outcome.get("agent_message_ids"),
             )
             if not committed:
                 return GatewayProtocol.create_response(

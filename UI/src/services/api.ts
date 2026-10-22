@@ -10,10 +10,13 @@ import {
   type Project,
   type Session,
   type WorkbenchSnapshot,
+  type GuestChatMessage,
+  type GuestChatStatus,
 } from '@promethea/sdk'
 
 export type {
   Event as RuntimeEvent,
+  GuestChatStatus,
   ErrorDetail as RuntimeError,
   RunRequest,
   RunResponse,
@@ -414,6 +417,10 @@ export function listTasks(signal?: AbortSignal): Promise<Task[]> {
   return sdkCall((client) => client.tasks.list({ limit: 100 }, signal))
 }
 
+export function getTask(taskId: string, signal?: AbortSignal): Promise<Task> {
+  return sdkCall((client) => client.tasks.get(taskId, signal))
+}
+
 export function resumeTask(taskId: string, expectedRevision?: number): Promise<Task> {
   return sdkCall((client) => client.tasks.resume(taskId, { expected_revision: expectedRevision }))
 }
@@ -569,7 +576,7 @@ export function sendVoicePtt(formData: FormData): Promise<Response> {
   return authFetch('/api/voice/ptt', { method: 'POST', body: formData })
 }
 
-type StreamHandler = (event: string, data: unknown) => void
+export type StreamHandler = (event: string, data: unknown) => void
 
 export type ChatAttachment = Attachment & { file_id: string }
 
@@ -580,6 +587,7 @@ export async function streamChat(
   onEvent: StreamHandler,
   onError: (error: Error) => void,
   signal?: AbortSignal,
+  multiAgent = false,
 ): Promise<void> {
   const token = getAuthToken()
   try {
@@ -591,6 +599,7 @@ export async function streamChat(
       metadata: {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ui_language: document.documentElement.lang || navigator.language,
+        multi_agent: multiAgent,
       },
     }
     const client = createRuntimeClient(token)
@@ -605,6 +614,24 @@ export async function streamChat(
     if (error instanceof PrometheaError && error.status === 401) {
       expireAuthToken(token)
     }
+    onError(error instanceof Error ? error : new Error(String(error)))
+  }
+}
+
+export function getGuestChatStatus(signal?: AbortSignal): Promise<GuestChatStatus> {
+  return createRuntimeClient('').runs.guestStatus(signal)
+}
+
+export async function sendGuestChat(
+  messages: GuestChatMessage[], onEvent: StreamHandler, onError: (error: Error) => void, signal?: AbortSignal,
+): Promise<void> {
+  try {
+    const result = await createRuntimeClient('').runs.guest({ messages }, signal)
+    if (signal?.aborted) return
+    onEvent('text', { content: result.response })
+    onEvent('done', { status: 'success', usage: result.usage })
+  } catch (error) {
+    if (signal?.aborted) return
     onError(error instanceof Error ? error : new Error(String(error)))
   }
 }

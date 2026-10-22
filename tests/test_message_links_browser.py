@@ -131,7 +131,11 @@ async def test_real_chat_followup_bubble_save_and_reload(tmp_path):
         if path == "user/profile":
             data = {"user_id": "test-user", "username": "Test", "agent_name": "Promethea"}
         elif path == "sessions/test-session":
-            data = {"messages": [{"id": "message-1", "role": "assistant", "content": source}], "session_info": {"followups": saved}}
+            data = {"messages": [{"id": "message-1", "role": "assistant", "content": source,
+                    "reasoning_tree_id": "test-tree", "reasoning_steps": [{"step_id": "model-1", "source": "provider", "content": "Check the selected source before answering."}]}],
+                    "session_info": {"followups": saved}}
+        elif path == "reasoning/tree/test-tree":
+            data = {"nodes": [{"node_id": "node-1", "kind": "think", "status": "succeeded", "title": "Inspect source", "summary": "The source has been checked."}]}
         elif path == "followup":
             payload = route.request.post_data_json
             assert source[payload["start_offset"]:payload["end_offset"]] == payload["selected_text"] == "Select this sentence."
@@ -154,6 +158,17 @@ async def test_real_chat_followup_bubble_save_and_reload(tmp_path):
             await page.goto(base + "/tests/message-content.html?chat")
             await expect(page.get_by_role("link", name="paper", exact=True)).to_be_visible()
             await expect(page.get_by_text("检测到记忆冲突，等待确认。", exact=True)).to_be_visible()
+            process = page.get_by_role("button").filter(has_text="1 段思考").first
+            await expect(process).to_contain_text("1 个推理步骤")
+            await expect(process).to_have_attribute("aria-expanded", "false")
+            await expect(page.get_by_text("模型思考 1", exact=True)).to_have_count(0)
+            await process.click()
+            await expect(page.get_by_text("模型思考 1", exact=True)).to_be_visible()
+            await expect(page.get_by_text("分析当前步骤", exact=True)).to_be_visible()
+            await page.get_by_text("模型思考 1", exact=True).click()
+            await expect(page.locator("details[open]")).to_have_count(1)
+            await process.click()
+            await expect(process).to_have_attribute("aria-expanded", "false")
             await page.evaluate("""() => {
               for (const span of document.querySelectorAll('main [data-source-start]')) {
                 const walker = document.createTreeWalker(span, NodeFilter.SHOW_TEXT);

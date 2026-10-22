@@ -2,19 +2,25 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
-import json
-import os
 from pathlib import Path
-import tempfile
-import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from .events import EventEmitter
+from .workflow_definition import (
+    dependencies_satisfied,
+    normalize_definition,
+    scheduler_mode_for_type,
+    select_next_ready_step_id,
+    validate_definition,
+)
+from .workflow_state_store import json_safe, load_workflow_state, save_workflow_state, snapshot_dict
 from .protocol import EventType
 from .capability_service import ToolInvocationContext
 from .task_service import TaskExecutionConflict
 from .workflow_models import (
+    WorkflowError,
+    WorkflowDependencyError,
     Checkpoint,
     RUN_STATUS_COMPLETED,
     RUN_STATUS_CANCELLED,
@@ -35,17 +41,6 @@ from .workflow_models import (
     WorkflowRun,
     WorkflowStep,
 )
-
-
-class WorkflowError(Exception):
-    pass
-
-
-class WorkflowDependencyError(WorkflowError):
-    def __init__(self, dependency: str, detail: str) -> None:
-        self.dependency = str(dependency or "unknown")
-        self.detail = str(detail or "dependency unavailable")
-        super().__init__(f"{self.dependency} unavailable: {self.detail}")
 
 
 class WorkflowEngine:
@@ -76,8 +71,8 @@ class WorkflowEngine:
     def define_workflow(self, definition: WorkflowDefinition) -> WorkflowDefinition:
         if not definition.steps:
             raise WorkflowError("workflow must contain at least one step")
-        self._normalize_definition(definition)
-        self._validate_definition(definition)
+        normalize_definition(definition)
+        validate_definition(definition)
         now = datetime.now(timezone.utc)
         definition.updated_at = now
         if not definition.created_at:
@@ -85,20 +80,6 @@ class WorkflowEngine:
         self._definitions[definition.workflow_id] = definition
         self._persist_state()
         return definition
-
-    def _normalize_definition(self, definition: WorkflowDefinition) -> None:
-        wft = str(definition.workflow_type or "linear").strip().lower()
-        definition.workflow_type = wft or "linear"
-        if wft != "linear":
-            return
-        for idx, step in enumerate(definition.steps):
-            if idx == 0:
-                step.depends_on = []
-                continue
-            expected_prev = definition.steps[idx - 1].step_id
-            raw_dep = [str(dep).strip() for dep in (step.depends_on or []) if str(dep).strip()]
-            if not raw_dep:
-                step.depends_on = [expected_prev]
 
     def get_workflow(self, workflow_id: str) -> Optional[WorkflowDefinition]:
         return self._definitions.get(str(workflow_id or ""))
@@ -179,11 +160,11 @@ class WorkflowEngine:
 
         run_id = f"wf_run_{uuid4().hex}"
         steps = [WorkflowStep(**step.model_dump()) for step in definition.steps]
-        initial_step_id = self._select_next_ready_step_id(steps, workflow_type=definition.workflow_type)
+        initial_step_id = select_next_ready_step_id(steps, workflow_type=definition.workflow_type)
         run_meta = dict(run_metadata or {})
         workflow_type = str(definition.workflow_type or "linear").strip().lower() or "linear"
         run_meta.setdefault("workflow_type", workflow_type)
-        run_meta.setdefault("scheduler_mode", self._scheduler_mode_for_type(workflow_type))
+        run_meta.setdefault("scheduler_mode", scheduler_mode_for_type(workflow_type))
         run = WorkflowRun(
             workflow_run_id=run_id,
             workflow_id=definition.workflow_id,
@@ -332,7 +313,7 @@ class WorkflowEngine:
                         "active_attempt_id": current_step.active_attempt_id,
                         "idempotency_key": current_step.idempotency_key,
                     } if current_step else None,
-                    "retry": self._json_safe(run.run_metadata.get("retry")),
+                    "retry": json_safe(run.run_metadata.get("retry")),
                     "started_at": run.started_at.isoformat() + "Z",
                     "updated_at": run.updated_at.isoformat() + "Z",
                 }
@@ -344,17 +325,17 @@ class WorkflowEngine:
         """Return durable workflow records owned by one user."""
         user_ids = self._user_id_aliases(user_id)
         definitions = {
-            workflow_id: self._json_safe(definition.model_dump(mode="python"))
+            workflow_id: json_safe(definition.model_dump(mode="python"))
             for workflow_id, definition in self._definitions.items()
             if str(definition.owner_user_id or "") in user_ids
         }
         runs = {
-            run_id: self._json_safe(run.model_dump(mode="python"))
+            run_id: json_safe(run.model_dump(mode="python"))
             for run_id, run in self._runs.items()
             if str(run.user_id or "") in user_ids
         }
         checkpoints = {
-            run_id: [self._json_safe(item.model_dump(mode="python")) for item in self._checkpoints.get(run_id, [])]
+            run_id: [json_safe(item.model_dump(mode="python")) for item in self._checkpoints.get(run_id, [])]
             for run_id in runs
         }
         return {"version": 1, "definitions": definitions, "runs": runs, "checkpoints": checkpoints}
@@ -698,9 +679,9 @@ class WorkflowEngine:
             checkpoint_id=f"ckpt_{uuid4().hex}",
             workflow_run_id=run.workflow_run_id,
             step_id=step_id,
-            run_context_snapshot=self._safe_dict(run_context),
-            reasoning_state_snapshot=self._safe_dict(getattr(run_context, "reasoning_state", None)),
-            memory_summary_snapshot=self._safe_dict(getattr(run_context, "memory_bundle", None)),
+            run_context_snapshot=snapshot_dict(run_context),
+            reasoning_state_snapshot=snapshot_dict(getattr(run_context, "reasoning_state", None)),
+            memory_summary_snapshot=snapshot_dict(getattr(run_context, "memory_bundle", None)),
             workspace_artifact_refs=list(artifact_refs or []),
         )
         self._checkpoints.setdefault(run.workflow_run_id, []).append(checkpoint)
@@ -1120,7 +1101,7 @@ class WorkflowEngine:
         }
 
     def _execute_reasoning_step(self, run: WorkflowRun, step: WorkflowStep, *, run_context: Optional[Any]) -> Dict[str, Any]:
-        reasoning_snapshot = self._safe_dict(getattr(run_context, "reasoning_state", None))
+        reasoning_snapshot = snapshot_dict(getattr(run_context, "reasoning_state", None))
         if not reasoning_snapshot and self.reasoning_service:
             reasoning_snapshot = {"source": "reasoning_service", "mode": "workflow"}
         return {
@@ -1245,7 +1226,7 @@ class WorkflowEngine:
     def _move_to_next_step(self, run: WorkflowRun, completed_step_id: str) -> None:
         _ = completed_step_id
         workflow_type = str(run.run_metadata.get("workflow_type") or "linear").strip().lower() or "linear"
-        run.current_step_id = self._select_next_ready_step_id(run.steps, workflow_type=workflow_type)
+        run.current_step_id = select_next_ready_step_id(run.steps, workflow_type=workflow_type)
         run.status = RUN_STATUS_RUNNING if run.current_step_id else RUN_STATUS_COMPLETED
         run.updated_at = datetime.now(timezone.utc)
         if run.current_step_id is None:
@@ -1259,21 +1240,21 @@ class WorkflowEngine:
                 if (
                     step.step_id == run.current_step_id
                     and step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING}
-                    and self._dependencies_satisfied(step, run.steps)
+                    and dependencies_satisfied(step, run.steps)
                 ):
                     return step
         for step in run.steps:
             if step.status in {STEP_STATUS_WAITING_HUMAN, STEP_STATUS_FAILED}:
                 return step
         for step in run.steps:
-            if step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING} and self._dependencies_satisfied(step, run.steps):
+            if step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING} and dependencies_satisfied(step, run.steps):
                 return step
         return None
 
     def _ready_steps(self, run: WorkflowRun, *, workflow_type: str) -> List[WorkflowStep]:
         ready: List[WorkflowStep] = []
         for step in run.steps:
-            if step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING} and self._dependencies_satisfied(step, run.steps):
+            if step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING} and dependencies_satisfied(step, run.steps):
                 ready.append(step)
         if not ready:
             return []
@@ -1282,7 +1263,7 @@ class WorkflowEngine:
         return ready
 
     def _refresh_run_cursor(self, run: WorkflowRun, *, workflow_type: str) -> None:
-        run.current_step_id = self._select_next_ready_step_id(run.steps, workflow_type=workflow_type)
+        run.current_step_id = select_next_ready_step_id(run.steps, workflow_type=workflow_type)
         run.status = RUN_STATUS_RUNNING if run.current_step_id else RUN_STATUS_COMPLETED
         run.updated_at = datetime.now(timezone.utc)
         if run.current_step_id is None:
@@ -1408,97 +1389,11 @@ class WorkflowEngine:
                 return False
         return bool(value)
 
-    def _validate_definition(self, definition: WorkflowDefinition) -> None:
-        allowed_types = {"linear", "dag", "graph", "parallel"}
-        wft = str(definition.workflow_type or "linear").strip().lower()
-        if wft not in allowed_types:
-            raise WorkflowError(f"unsupported workflow_type: {definition.workflow_type}")
-        step_ids: Set[str] = set()
-        for step in definition.steps:
-            sid = str(step.step_id or "").strip()
-            if not sid:
-                raise WorkflowError("step_id is required")
-            if sid in step_ids:
-                raise WorkflowError(f"duplicate step_id: {sid}")
-            step_ids.add(sid)
-        for step in definition.steps:
-            for dep in step.depends_on:
-                d = str(dep or "").strip()
-                if not d:
-                    continue
-                if d == step.step_id:
-                    raise WorkflowError(f"step cannot depend on itself: {step.step_id}")
-                if d not in step_ids:
-                    raise WorkflowError(f"unknown dependency '{d}' for step '{step.step_id}'")
-        if wft == "linear":
-            for idx, step in enumerate(definition.steps):
-                expected_dep = [] if idx == 0 else [definition.steps[idx - 1].step_id]
-                actual_dep = [str(dep).strip() for dep in step.depends_on if str(dep).strip()]
-                if actual_dep != expected_dep:
-                    raise WorkflowError(
-                        f"linear workflow requires explicit sequential dependencies; "
-                        f"step '{step.step_id}' expected depends_on={expected_dep}, got {actual_dep}"
-                    )
-        else:
-            self._ensure_acyclic_definition(definition)
 
-    def _ensure_acyclic_definition(self, definition: WorkflowDefinition) -> None:
-        deps: Dict[str, List[str]] = {}
-        for step in definition.steps:
-            deps[step.step_id] = [str(dep).strip() for dep in step.depends_on if str(dep).strip()]
-        visiting: Set[str] = set()
-        visited: Set[str] = set()
-
-        def _dfs(step_id: str) -> None:
-            if step_id in visited:
-                return
-            if step_id in visiting:
-                raise WorkflowError(f"workflow contains dependency cycle at step '{step_id}'")
-            visiting.add(step_id)
-            for dep in deps.get(step_id, []):
-                _dfs(dep)
-            visiting.remove(step_id)
-            visited.add(step_id)
-
-        for sid in deps.keys():
-            _dfs(sid)
-
-    @staticmethod
-    def _scheduler_mode_for_type(workflow_type: str) -> str:
-        wft = str(workflow_type or "linear").strip().lower()
-        if wft == "linear":
-            return "sequential"
-        if wft == "parallel":
-            return "dependency_batch"
-        if wft in {"dag", "graph"}:
-            return "dependency_graph"
-        return "unknown"
-
-    @staticmethod
-    def _dependencies_satisfied(step: WorkflowStep, all_steps: List[WorkflowStep]) -> bool:
-        if not step.depends_on:
-            return True
-        status_by_id = {s.step_id: s.status for s in all_steps}
-        for dep in step.depends_on:
-            if status_by_id.get(dep) not in {STEP_STATUS_SUCCEEDED, STEP_STATUS_SKIPPED}:
-                return False
-        return True
-
-    def _select_next_ready_step_id(self, steps: List[WorkflowStep], *, workflow_type: str = "linear") -> Optional[str]:
-        ready: List[WorkflowStep] = []
-        for step in steps:
-            if step.status in {STEP_STATUS_PENDING, STEP_STATUS_RUNNING} and self._dependencies_satisfied(step, steps):
-                ready.append(step)
-        if not ready:
-            return None
-        if workflow_type == "linear":
-            return ready[0].step_id
-        ready_sorted = sorted(ready, key=lambda s: s.step_id)
-        return ready_sorted[0].step_id
 
     def _has_blocked_pending_steps(self, run: WorkflowRun) -> bool:
         for step in run.steps:
-            if step.status == STEP_STATUS_PENDING and not self._dependencies_satisfied(step, run.steps):
+            if step.status == STEP_STATUS_PENDING and not dependencies_satisfied(step, run.steps):
                 return True
         return False
 
@@ -1528,45 +1423,7 @@ class WorkflowEngine:
             raise error_box["error"]
         return result_box.get("value")
 
-    @staticmethod
-    def _safe_dict(value: Any) -> Dict[str, Any]:
-        if value is None:
-            return {}
-        if isinstance(value, dict):
-            safe_value = WorkflowEngine._json_safe(deepcopy(value))
-            return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
-        if hasattr(value, "model_dump"):
-            try:
-                dumped = value.model_dump()
-                safe_value = WorkflowEngine._json_safe(dumped)
-                return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
-            except Exception:
-                return {}
-        if hasattr(value, "__dict__"):
-            safe_value = WorkflowEngine._json_safe(vars(value))
-            return safe_value if isinstance(safe_value, dict) else {"value": safe_value}
-        return {"value": WorkflowEngine._json_safe(value)}
 
-    @staticmethod
-    def _json_safe(value: Any) -> Any:
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, datetime):
-            return value.isoformat().replace("+00:00", "Z")
-        if isinstance(value, Path):
-            return str(value)
-        if isinstance(value, dict):
-            return {str(k): WorkflowEngine._json_safe(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [WorkflowEngine._json_safe(item) for item in value]
-        if hasattr(value, "model_dump"):
-            try:
-                return WorkflowEngine._json_safe(value.model_dump(mode="python"))
-            except Exception:
-                return str(value)
-        if hasattr(value, "__dict__"):
-            return WorkflowEngine._json_safe(vars(value))
-        return str(value)
 
     def _emit(self, event_type: EventType, payload: Dict[str, Any]) -> None:
         if not self.event_emitter:
@@ -1592,85 +1449,17 @@ class WorkflowEngine:
         except Exception:
             pass
 
+
     def _load_state(self) -> None:
-        path = self.storage_path
-        if not path.exists():
-            return
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                payload = json.load(f)
-        except Exception as exc:
-            raise RuntimeError(f"failed to load durable workflow state: {path}") from exc
-        if not isinstance(payload, dict):
-            raise RuntimeError(f"durable workflow state must be an object: {path}")
-        definitions = payload.get("definitions") if isinstance(payload.get("definitions"), dict) else {}
-        runs = payload.get("runs") if isinstance(payload.get("runs"), dict) else {}
-        checkpoints = payload.get("checkpoints") if isinstance(payload.get("checkpoints"), dict) else {}
-        loaded_definitions: Dict[str, WorkflowDefinition] = {}
-        for workflow_id, raw in definitions.items():
-            try:
-                loaded_definitions[str(workflow_id)] = WorkflowDefinition(**raw)
-            except Exception as exc:
-                raise RuntimeError(f"invalid workflow definition {workflow_id!r} in {path}") from exc
-        loaded_runs: Dict[str, WorkflowRun] = {}
-        for run_id, raw in runs.items():
-            try:
-                loaded_runs[str(run_id)] = WorkflowRun(**raw)
-            except Exception as exc:
-                raise RuntimeError(f"invalid workflow run {run_id!r} in {path}") from exc
-        loaded_checkpoints: Dict[str, List[Checkpoint]] = {}
-        for run_id, rows in checkpoints.items():
-            if not isinstance(rows, list):
-                raise RuntimeError(f"invalid workflow checkpoint list {run_id!r} in {path}")
-            parsed: List[Checkpoint] = []
-            for raw in rows:
-                try:
-                    parsed.append(Checkpoint(**raw))
-                except Exception as exc:
-                    raise RuntimeError(f"invalid workflow checkpoint for {run_id!r} in {path}") from exc
-            loaded_checkpoints[str(run_id)] = parsed
-        self._definitions.update(loaded_definitions)
-        self._runs.update(loaded_runs)
-        self._checkpoints.update(loaded_checkpoints)
+        definitions, runs, checkpoints = load_workflow_state(self.storage_path)
+        self._definitions.update(definitions)
+        self._runs.update(runs)
+        self._checkpoints.update(checkpoints)
 
     def _persist_state(self) -> None:
-        path = self.storage_path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
-            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "definitions": {k: self._json_safe(v.model_dump(mode="python")) for k, v in self._definitions.items()},
-            "runs": {k: self._json_safe(v.model_dump(mode="python")) for k, v in self._runs.items()},
-            "checkpoints": {
-                k: [self._json_safe(item.model_dump(mode="python")) for item in rows]
-                for k, rows in self._checkpoints.items()
-            },
-        }
-        fd, tmp_file = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
-        tmp_path = Path(tmp_file)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            self._replace_state_file(tmp_path, path)
-        except Exception:
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except Exception:
-                pass
-            raise
-
-    @staticmethod
-    def _replace_state_file(tmp_path: Path, path: Path) -> None:
-        last_error: Optional[PermissionError] = None
-        for _ in range(5):
-            try:
-                os.replace(tmp_path, path)
-                return
-            except PermissionError as exc:
-                last_error = exc
-                time.sleep(0.05)
-        if last_error is not None:
-            raise last_error
+        save_workflow_state(
+            self.storage_path,
+            definitions=self._definitions,
+            runs=self._runs,
+            checkpoints=self._checkpoints,
+        )

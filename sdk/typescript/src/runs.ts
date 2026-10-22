@@ -1,4 +1,4 @@
-import type { Event, RunRequest, RunResponse } from './generated/public-contracts.js'
+import type { Event, RunRequest, RunResponse, GuestChatRequest, GuestChatResponse, GuestChatStatus } from './generated/public-contracts.js'
 import { errorFromPayload } from './errors.js'
 import { HttpTransport } from './transport/http.js'
 import { parseSse, type SseMessage } from './transport/sse.js'
@@ -37,6 +37,16 @@ function runtimeEvent(message: SseMessage, payload: unknown): Event {
 
 export class RunsClient {
   constructor(private readonly transport: HttpTransport) {}
+
+  async guestStatus(signal?: AbortSignal): Promise<GuestChatStatus> {
+    return await this.transport.json<GuestChatStatus>('/api/guest', { signal })
+  }
+
+  async guest(request: GuestChatRequest, signal?: AbortSignal): Promise<GuestChatResponse> {
+    return await this.transport.json<GuestChatResponse>('/api/guest/chat', {
+      method: 'POST', body: JSON.stringify(request), signal,
+    })
+  }
 
   async run(request: RunRequest, signal?: AbortSignal): Promise<RunResponse> {
     return await this.transport.json<RunResponse>('/api/chat', {

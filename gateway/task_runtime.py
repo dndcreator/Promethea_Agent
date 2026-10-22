@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import Context
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -31,6 +32,71 @@ class TaskRuntime:
         self._pending: Dict[str, tuple[str, Dict[str, Any]]] = {}
         self._supervisor: Optional[asyncio.Task] = None
         self._shutting_down = False
+        self._drivers: Dict[str, Any] = {}
+
+    def register_driver(self, run_type: str, driver: Any) -> None:
+        if run_type in self._drivers:
+            raise ValueError(f"execution driver already registered: {run_type}")
+        self._drivers[run_type] = driver
+
+    def schedule_run(self, *, task_id: str, user_id: str, run_id: str) -> None:
+        if self._shutting_down:
+            raise RuntimeError("Task runtime is shutting down")
+        task = self._require_task(task_id, user_id)
+        if task["status"] in {"paused", "cancelled"}:
+            return
+        run = next((row for row in task["runs"] if row["run_id"] == run_id), None)
+        if not run or run["run_type"] not in self._drivers:
+            raise ValueError("run has no registered execution driver")
+        pending = [row for row in task["runs"] if row["run_type"] == run["run_type"] and row["status"] in {"pending", "running"}]
+        if not pending or pending[0]["run_id"] != run_id or run_id in self.active_run_ids():
+            return
+        if any(token.get("task_id") == task_id for rid, token in self._tokens.items() if rid in self.active_run_ids()):
+            return
+        driver = self._drivers[run["run_type"]]
+        if not driver.available(task):
+            return
+        token = self.task_service.claim_execution(task_id=task_id, user_id=user_id, run_id=run_id, owner_id=self.runtime_id, lease_seconds=self.lease_seconds)
+        self._tokens[run_id] = token
+        job = asyncio.create_task(self._drive_registered(task, run, token, driver), name=f"task-runtime:{run_id}", context=Context())
+        self._jobs[run_id] = job
+        job.add_done_callback(lambda completed, rid=run_id: self._on_done(rid, completed))
+
+    async def _drive_registered(self, task: Dict[str, Any], run: Dict[str, Any], token: Dict[str, Any], driver: Any) -> None:
+        outcome, reason = "interrupted", "runtime_stopped"
+        task_id, user_id, run_id = task["task_id"], task["user_id"], run["run_id"]
+        try:
+            self.task_service.assert_action_execution(task_id=task_id, user_id=user_id, expected_objective=task["objective"], task_run_id=run_id, execution_token=token)
+            self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="running")
+            result = await self._run_with_heartbeat(driver.run(task, run, token), task_id=task_id, user_id=user_id, token=token)
+            self.task_service.assert_action_execution(task_id=task_id, user_id=user_id, expected_objective=task["objective"], task_run_id=run_id, execution_token=token)
+            outcome = str(result["status"])
+            self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status=outcome, detail=result.get("detail"))
+            reason = "run_boundary"
+        except asyncio.CancelledError:
+            raise
+        except TaskExecutionConflict as exc:
+            reason = str(exc)
+            current = self._require_task(task_id, user_id)
+            try:
+                self.task_service.assert_execution(task_id=task_id, user_id=user_id, token=token)
+                owns_lease = True
+            except TaskExecutionConflict:
+                owns_lease = False
+            if owns_lease and current["status"] not in {"paused", "cancelled"}:
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="paused", detail={"error": reason})
+        except Exception as exc:
+            logger.exception("Detached {} run {} failed", run["run_type"], run_id)
+            outcome, reason = "failed", str(exc)
+            current = self._require_task(task_id, user_id)
+            if current["status"] not in {"paused", "cancelled"}:
+                self.task_service.assert_execution(task_id=task_id, user_id=user_id, token=token)
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="failed", detail={"error": str(exc)})
+        finally:
+            try:
+                self.task_service.settle_execution(task_id=task_id, user_id=user_id, token=token, status=outcome, reason=reason)
+            except (KeyError, TaskExecutionConflict):
+                pass
 
     def start_workflow(
         self,
@@ -89,6 +155,21 @@ class TaskRuntime:
 
     async def _recover_available(self) -> int:
         recovered = 0
+        for driver in {id(item): item for item in self._drivers.values()}.values():
+            recover = getattr(driver, "recover", None)
+            if recover is not None:
+                recover()
+        for run_type in self._drivers:
+            for task in self.task_service.execution_tasks(run_type=run_type):
+                if task["status"] in {"paused", "cancelled"}:
+                    continue
+                for run in task["runs"]:
+                    if run["run_type"] == run_type and run["status"] in {"pending", "running"} and run["run_id"] not in self.active_run_ids():
+                        try:
+                            self.schedule_run(task_id=task["task_id"], user_id=task["user_id"], run_id=run["run_id"])
+                            recovered += int(run["run_id"] in self.active_run_ids())
+                        except TaskExecutionConflict:
+                            continue
         for row in self.workflow_engine.list_runs(limit=10000):
             status = str(row.get("status") or "")
             if status not in {RUN_STATUS_RUNNING, RUN_STATUS_RETRY_WAIT}:
@@ -136,6 +217,11 @@ class TaskRuntime:
         self.task_service.assert_revision(task_id=task_id, user_id=user_id, expected_revision=expected_revision)
         for run in task.get("runs", []):
             if str(run.get("status") or "") in {"pending", "running", "retry_wait"}:
+                if run.get("run_type") in self._drivers:
+                    job = self._jobs.get(run["run_id"])
+                    self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run["run_id"], status="paused")
+                    if job and not job.done():
+                        job.cancel()
                 workflow_run = self.workflow_engine.get_run(str(run.get("run_id") or ""))
                 if workflow_run is not None:
                     self.workflow_engine.pause_workflow(workflow_run.workflow_run_id)
@@ -156,6 +242,10 @@ class TaskRuntime:
         waiting = False
         for item in task.get("runs", []):
             run_id = str(item.get("run_id") or "")
+            if item.get("run_type") in self._drivers and item["status"] == "paused":
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="pending")
+                scheduled += 1
+                continue
             run = self.workflow_engine.get_run(run_id)
             if run is None:
                 continue
@@ -176,7 +266,12 @@ class TaskRuntime:
                 reason="approval_required",
             )
         if not scheduled:
+            if task["status"] == TASK_PAUSED and (task.get("metadata") or {}).get("continuable") is True and all(item["status"] in {"completed", "failed", "cancelled"} for item in task["runs"]):
+                return self.task_service.transition_task(task_id=task_id, user_id=user_id, status=TASK_WAITING_USER, reason="resume_ready_worker")
             raise ValueError("task has no paused run to resume")
+        for item in self._require_task(task_id, user_id)["runs"]:
+            if item.get("run_type") in self._drivers and item["status"] == "pending":
+                self.schedule_run(task_id=task_id, user_id=user_id, run_id=item["run_id"])
         return self._require_task(task_id, user_id)
 
     def cancel_task(self, *, task_id: str, user_id: str, reason: str = "user_cancelled", expected_revision: Optional[int] = None) -> Dict[str, Any]:
@@ -184,6 +279,8 @@ class TaskRuntime:
         self.task_service.assert_revision(task_id=task_id, user_id=user_id, expected_revision=expected_revision)
         for item in task.get("runs", []):
             run_id = str(item.get("run_id") or "")
+            if item.get("run_type") in self._drivers and item["status"] not in {"completed", "failed", "cancelled"}:
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="cancelled", detail={"cancel_reason": reason})
             job = self._jobs.get(run_id)
             if job and not job.done():
                 job.cancel()

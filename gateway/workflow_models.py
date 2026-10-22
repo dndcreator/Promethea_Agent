@@ -6,6 +6,17 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+class WorkflowError(Exception):
+    pass
+
+
+class WorkflowDependencyError(WorkflowError):
+    def __init__(self, dependency: str, detail: str) -> None:
+        self.dependency = str(dependency or "unknown")
+        self.detail = str(detail or "dependency unavailable")
+        super().__init__(f"{self.dependency} unavailable: {self.detail}")
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 

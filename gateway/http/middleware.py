@@ -76,6 +76,8 @@ def register_http_middlewares(app: FastAPI) -> None:
     public_paths = {
         "/api/auth/login",
         "/api/auth/register",
+        "/api/guest",
+        "/api/guest/chat",
         "/api/bootstrap",
         "/api/status",
         "/api/metrics",

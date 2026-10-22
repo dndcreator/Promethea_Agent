@@ -8,6 +8,10 @@ export { CanvasClient } from './canvas.js'
 export { connectCanvasFrame } from './canvas-bridge.js'
 export type {
   Attachment,
+  GuestChatMessage,
+  GuestChatRequest,
+  GuestChatResponse,
+  GuestChatStatus,
   UserFile,
   FileUploadResponse,
   Error as ErrorDetail,
