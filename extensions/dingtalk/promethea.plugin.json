@@ -20,6 +20,6 @@
   },
   "capabilities": {
     "surfaces": ["dingtalk"],
-    "supports_hot_reload": true
+    "supports_hot_reload": false
   }
 }

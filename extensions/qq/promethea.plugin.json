@@ -1,0 +1,7 @@
+{
+  "id": "qq", "kind": "channel", "name": "QQ Official Bot",
+  "description": "Signed official QQ Webhook and text replies",
+  "version": "0.1.0",
+  "configSchema": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "channel_config": {"type": "object"}}, "additionalProperties": true},
+  "capabilities": {"surfaces": ["qq"], "supports_hot_reload": false}
+}

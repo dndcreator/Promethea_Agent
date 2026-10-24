@@ -1,4 +1,4 @@
-import type { CanvasEnvironment, CanvasEnvironmentList, CanvasState, CanvasStateWrite } from './generated/public-contracts.js'
+import type { CanvasEnvironment, CanvasEnvironmentList, CanvasState, CanvasStateWrite, CanvasInteraction, CanvasSemanticSnapshot } from './generated/public-contracts.js'
 import { HttpTransport } from './transport/http.js'
 
 export class CanvasClient {
@@ -24,6 +24,14 @@ export class CanvasClient {
 
   setState(environment: CanvasEnvironment, state: CanvasStateWrite): Promise<CanvasState> {
     return this.transport.json(`${this.path(environment)}/state`, { method: 'PUT', body: JSON.stringify(state) })
+  }
+
+  semantics(environment: CanvasEnvironment): Promise<CanvasSemanticSnapshot> {
+    return this.transport.json(`${this.path(environment)}/semantics`)
+  }
+
+  interact(environment: CanvasEnvironment, command: CanvasInteraction): Promise<CanvasState> {
+    return this.transport.json(`${this.path(environment)}/interact`, { method: 'POST', body: JSON.stringify(command) })
   }
 
   retain(environment: CanvasEnvironment): Promise<CanvasEnvironment> {

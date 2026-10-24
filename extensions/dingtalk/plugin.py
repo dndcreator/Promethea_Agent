@@ -1,9 +1,9 @@
 ﻿from channels.dingtalk_channel import DingTalkChannel
-from channels.base import ChannelConfig
+from channels.settings import load_settings
 
 
 def register(api):
-    channel_cfg = api.config.get("channel_config") or {}
-    channel = DingTalkChannel(ChannelConfig(**channel_cfg))
+    settings = load_settings({"dingtalk": api.config.get("channel_config") or {}})
+    channel = DingTalkChannel(settings.dingtalk)
     api.register_channel("dingtalk", channel)
 

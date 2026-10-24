@@ -94,6 +94,9 @@ The first release supports:
 - Task lookup/list, detached Run start, and revision-aware pause, resume, and cancel commands
 - Workbench snapshot queries and cursor-resumable SSE subscriptions
 - opt-in Ambient state/configuration, annotation feedback, and exact sensitive-action confirmation
+- Semantic UI expression reads, revision-aware choice/dismissal feedback and sequenced, expiring host-view/object reports through `client.semanticUI`; no tool dispatch or approval semantics
+- `client.channels` reads account-scoped status, creates verified pairing codes, revokes bindings and inspects/retries persisted replies; it never holds bot credentials or Agent policy. See [channel setup](../../docs/channels/README.md).
+- `client.canvas.semantics/interact` use generated component snapshot/command types and current definition/state revisions; only declared local app-state operations. `connectCanvasFrame` supports bounded visible-state watching and teardown, never arbitrary Runtime execution.
 - Canvas discovery, app-state reads/optimistic writes, retain/delete, diagnostics,
   and a restricted opaque-frame bridge; no arbitrary tool execution from apps
 - bearer-token injection

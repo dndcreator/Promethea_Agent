@@ -1,298 +1,96 @@
-﻿"""Feishu channel adapter."""
-import hmac
+"""Feishu application bot: encrypted event subscriptions and OpenAPI replies."""
+import asyncio
+import base64
 import hashlib
-import time
-from typing import Dict, Any, Optional
-from datetime import datetime
-import uuid
-import aiohttp
+import hmac
 import json
+import time
+from urllib.parse import quote
 
-from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
+from .base import ChannelType
+from .webhook_channel import ProviderRejected, WebhookChannel
+from .webhook_security import decrypt_cbc, fresh_timestamp
 
 
-class FeishuChannel(BaseChannel):
-    """Feishu adapter supporting bot webhook and OpenAPI sends."""
-    
-    def __init__(self, config: ChannelConfig):
-        super().__init__("feishu", ChannelType.FEISHU, config)
-        
-        self.app_id = config.app_key
-        self.app_secret = config.app_secret
-        self.webhook_url = config.webhook_url
-        self.webhook_secret = config.extra.get("webhook_secret")
-        
-        self.api_base = config.api_endpoint or "https://open.feishu.cn/open-apis"
-        
-        self.tenant_access_token = None
-        self.token_expires_at = 0
-        
-        self.session: Optional[aiohttp.ClientSession] = None
-    
-    async def connect(self) -> bool:
-        """Create the HTTP session and optionally fetch tenant access token."""
-        try:
-            self.session = aiohttp.ClientSession()
-            
-            if self.app_id and self.app_secret:
-                await self._refresh_access_token()
-            
-            self.is_connected = True
-            self.logger.info("Feishu channel connected")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to connect Feishu: {e}")
-            return False
-    
-    async def disconnect(self) -> bool:
-        """Close the HTTP session and mark Feishu disconnected."""
-        if self.session:
-            await self.session.close()
-            self.session = None
-        
-        self.is_connected = False
-        self.logger.info("Feishu channel disconnected")
-        return True
-    
-    async def _refresh_access_token(self):
-        """Refresh Feishu tenant access token when API mode is used."""
-        url = f"{self.api_base}/auth/v3/tenant_access_token/internal"
-        payload = {
-            "app_id": self.app_id,
-            "app_secret": self.app_secret
-        }
-        
-        async with self.session.post(url, json=payload) as response:
-            data = await response.json()
-            if data.get("code") == 0:
-                self.tenant_access_token = data.get("tenant_access_token")
-                self.token_expires_at = time.time() + data.get("expire", 7200) - 300
-                self.logger.info("Feishu access token refreshed")
-            else:
-                raise Exception(f"Failed to get access token: {data}")
-    
-    async def _ensure_token(self):
-        """Refresh the tenant token when missing or near expiry."""
-        if not self.tenant_access_token or time.time() >= self.token_expires_at:
-            await self._refresh_access_token()
-    
-    def _generate_signature(self, timestamp: str, secret: str) -> str:
-        """Generate Feishu webhook signature material."""
-        string_to_sign = f"{timestamp}\n{secret}"
-        hmac_code = hmac.new(
-            string_to_sign.encode("utf-8"),
-            digestmod=hashlib.sha256
-        ).digest()
-        sign = hmac_code.hex()
-        return sign
-    
-    async def send_message(
-        self,
-        receiver_id: str,  # open_id, user_id, union_id, email, chat_id
-        content: str,
-        message_type: MessageType = MessageType.TEXT,
-        **kwargs
-    ) -> Dict[str, Any]:
-        try:
-            if self.webhook_url and kwargs.get("use_webhook", True):
-                return await self._send_webhook_message(content, message_type, **kwargs)
-            
-            else:
-                await self._ensure_token()
-                return await self._send_api_message(receiver_id, content, message_type, **kwargs)
-                
-        except Exception as e:
-            self.logger.error(f"Error sending Feishu message: {e}")
-            return {"success": False, "error": str(e)}
-    
-    async def _send_webhook_message(
-        self,
-        content: str,
-        message_type: MessageType,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Channel adapter operation."""
-        if not self.webhook_url:
-            return {"success": False, "error": "Webhook URL not configured"}
-        
-        if message_type == MessageType.TEXT:
-            payload = {
-                "msg_type": "text",
-                "content": {
-                    "text": content
-                }
-            }
-        elif message_type == MessageType.MARKDOWN:
-            payload = {
-                "msg_type": "post",
-                "content": {
-                    "post": {
-                        "zh_cn": {
-                            "content": [[{"tag": "text", "text": content}]]
-                        }
-                    }
-                }
-            }
-        else:
-            payload = {
-                "msg_type": "text",
-                "content": {"text": content}
-            }
-        
-        if self.webhook_secret:
-            timestamp = str(int(time.time()))
-            sign = self._generate_signature(timestamp, self.webhook_secret)
-            payload["timestamp"] = timestamp
-            payload["sign"] = sign
-        
-        async with self.session.post(self.webhook_url, json=payload) as response:
-            result = await response.json()
-            
-            return {
-                "success": result.get("StatusCode") == 0 or result.get("code") == 0,
-                "message_id": str(uuid.uuid4()),
-                "result": result
-            }
-    
-    async def _send_api_message(
-        self,
-        receiver_id: str,
-        content: str,
-        message_type: MessageType,
-        **kwargs
-    ) -> Dict[str, Any]:
-        url = f"{self.api_base}/im/v1/messages"
-        headers = {
-            "Authorization": f"Bearer {self.tenant_access_token}",
-            "Content-Type": "application/json; charset=utf-8"
-        }
-        
-        receive_id_type = kwargs.get("receive_id_type", "chat_id")  # open_id, user_id, union_id, email, chat_id
-        
-        if message_type == MessageType.TEXT:
-            msg_type = "text"
-            msg_content = {"text": content}
-        elif message_type == MessageType.MARKDOWN:
-            msg_type = "post"
-            msg_content = {
-                "zh_cn": {
-                    "title": kwargs.get("title", "Message"),
-                    "content": [[{"tag": "text", "text": content}]]
-                }
-            }
-        else:
-            msg_type = "text"
-            msg_content = {"text": content}
-        
-        payload = {
-            "receive_id": receiver_id,
-            "msg_type": msg_type,
-            "content": json.dumps(msg_content)
-        }
-        
-        params = {"receive_id_type": receive_id_type}
-        
-        async with self.session.post(url, headers=headers, params=params, json=payload) as response:
-            result = await response.json()
-            
-            return {
-                "success": result.get("code") == 0,
-                "message_id": result.get("data", {}).get("message_id"),
-                "result": result
-            }
-    
-    async def send_card(
-        self,
-        receiver_id: str,
-        card_data: Dict[str, Any],
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Channel adapter operation."""
-        try:
-            if self.webhook_url and kwargs.get("use_webhook", True):
-                payload = {
-                    "msg_type": "interactive",
-                    "card": card_data
-                }
-                
-                if self.webhook_secret:
-                    timestamp = str(int(time.time()))
-                    sign = self._generate_signature(timestamp, self.webhook_secret)
-                    payload["timestamp"] = timestamp
-                    payload["sign"] = sign
-                
-                async with self.session.post(self.webhook_url, json=payload) as response:
-                    result = await response.json()
-                    
-                    return {
-                        "success": result.get("StatusCode") == 0 or result.get("code") == 0,
-                        "message_id": str(uuid.uuid4()),
-                        "result": result
-                    }
-            
-            else:
-                await self._ensure_token()
-                
-                url = f"{self.api_base}/im/v1/messages"
-                headers = {
-                    "Authorization": f"Bearer {self.tenant_access_token}",
-                    "Content-Type": "application/json; charset=utf-8"
-                }
-                
-                payload = {
-                    "receive_id": receiver_id,
-                    "msg_type": "interactive",
-                    "content": json.dumps(card_data)
-                }
-                
-                receive_id_type = kwargs.get("receive_id_type", "chat_id")
-                params = {"receive_id_type": receive_id_type}
-                
-                async with self.session.post(url, headers=headers, params=params, json=payload) as response:
-                    result = await response.json()
-                    
-                    return {
-                        "success": result.get("code") == 0,
-                        "message_id": result.get("data", {}).get("message_id"),
-                        "result": result
-                    }
-                    
-        except Exception as e:
-            self.logger.error(f"Error sending Feishu card: {e}")
-            return {"success": False, "error": str(e)}
-    
-    async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        try:
-            await self._ensure_token()
-            
-            url = f"{self.api_base}/contact/v3/users/{user_id}"
-            headers = {
-                "Authorization": f"Bearer {self.tenant_access_token}"
-            }
-            
-            async with self.session.get(url, headers=headers) as response:
-                result = await response.json()
-                
-                if result.get("code") == 0:
-                    return result.get("data", {}).get("user")
-                else:
-                    self.logger.error(f"Failed to get user info: {result}")
-                    return None
-                    
-        except Exception as e:
-            self.logger.error(f"Error getting Feishu user info: {e}")
-            return None
-    
-    async def validate_config(self) -> bool:
-        if not self.config.enabled:
-            return True
-        
-        has_webhook = bool(self.webhook_url)
-        has_app = bool(self.app_id and self.app_secret)
-        
-        if not (has_webhook or has_app):
-            self.logger.error("Feishu config missing: need webhook_url or (app_id+app_secret)")
-            return False
-        
-        return True
+class FeishuChannel(WebhookChannel):
+    api_base = "https://open.feishu.cn/open-apis"
+
+    def __init__(self, settings):
+        super().__init__("feishu", ChannelType.FEISHU, settings)
+        self.account_id = settings.app_id
+        self._token, self._expires = "", 0
+        self._token_lock = asyncio.Lock()
+
+    def accept_webhook(self, headers, body):
+        outer = json.loads(body)
+        if not isinstance(outer, dict) or not isinstance(outer.get("encrypt"), str):
+            raise PermissionError("Encrypted Feishu callbacks are required")
+        encrypted = base64.b64decode(outer["encrypt"], validate=True)
+        key = hashlib.sha256(self.settings.encrypt_key.get_secret_value().encode()).digest()
+        data = json.loads(decrypt_cbc(encrypted[16:], key, encrypted[:16]))
+        header = data.get("header") or {}
+        token = data.get("token") if data.get("type") == "url_verification" else header.get("token")
+        if not isinstance(token, str) or not hmac.compare_digest(token, self.settings.verification_token.get_secret_value()):
+            raise PermissionError("Wrong Feishu verification token")
+        # URL verification lacks signature headers; encrypted challenge and token
+        # authenticate it, and it can never dispatch a user message.
+        if data.get("type") == "url_verification":
+            challenge = data.get("challenge")
+            if not isinstance(challenge, str) or not 1 <= len(challenge) <= 1024:
+                raise ValueError("Invalid Feishu challenge")
+            return {"challenge": challenge}, None
+        timestamp = headers.get("x-lark-request-timestamp", "")
+        nonce = headers.get("x-lark-request-nonce", "")
+        fresh_timestamp(timestamp)
+        expected = hashlib.sha256((timestamp + nonce + self.settings.encrypt_key.get_secret_value()).encode() + body).hexdigest()
+        if not nonce or not hmac.compare_digest(expected, headers.get("x-lark-signature", "")):
+            raise PermissionError("Invalid Feishu signature")
+        if header.get("app_id") != self.account_id:
+            raise PermissionError("Wrong Feishu application")
+        if header.get("event_type") != "im.message.receive_v1":
+            return {}, None
+        event = data.get("event") or {}
+        sender, message = event.get("sender") or {}, event.get("message") or {}
+        if sender.get("sender_type") != "user" or message.get("message_type") != "text":
+            return {}, None
+        fresh_timestamp(message.get("create_time"), scale=1000, max_age=86400)
+        kind = message.get("chat_type")
+        if kind not in {"p2p", "group"}:
+            return {}, None
+        text = json.loads(message.get("content") or "{}").get("text", "")
+        for mention in message.get("mentions") or []:
+            key = mention.get("key")
+            if isinstance(key, str) and key:
+                text = text.replace(key, "@" + str(mention.get("name") or "user"))
+        if not text.strip():
+            return {}, None
+        return {}, {"message_id": message["message_id"], "sender_id": sender["sender_id"]["open_id"],
+                    "receiver_id": message["chat_id"], "scope": "private" if kind == "p2p" else "group",
+                    "content": text.strip(), "reply_to": message["message_id"]}
+
+    async def access_token(self):
+        async with self._token_lock:
+            if time.time() >= self._expires:
+                result = await self.json_request("POST", self.api_base + "/auth/v3/tenant_access_token/internal", json={"app_id": self.account_id, "app_secret": self.settings.app_secret.get_secret_value()})
+                if result.get("code") != 0:
+                    raise ProviderRejected(result.get("code", "INVALID_TOKEN_RESPONSE"))
+                token, expire = result.get("tenant_access_token"), result.get("expire")
+                if not isinstance(token, str) or not token or not isinstance(expire, int) or expire <= 60:
+                    raise RuntimeError("Feishu did not confirm an access token")
+                self._token, self._expires = token, time.time() + expire - 60
+            return self._token
+
+    async def send_text(self, receiver_id, content, *, reply_to, sequence=1, **kwargs):
+        token = await self.access_token()
+        # Reply to the original message, preserving chat/thread. UUID remains
+        # stable across an explicit retry of the same persisted segment.
+        identity = hashlib.sha256(f"{self.account_id}:{reply_to}:{sequence}".encode()).hexdigest()[:50]
+        result = await self.json_request("POST", self.api_base + f"/im/v1/messages/{quote(reply_to, safe='')}/reply", headers={"Authorization": f"Bearer {token}"}, json={"msg_type": "text", "content": json.dumps({"text": content}, ensure_ascii=False), "uuid": identity})
+        if "code" not in result:
+            raise RuntimeError("Feishu did not confirm delivery")
+        if result["code"] != 0:
+            raise ProviderRejected(result["code"])
+        message_id = (result.get("data") or {}).get("message_id")
+        if not message_id:
+            raise RuntimeError("Feishu did not confirm delivery")
+        return {"success": True, "message_id": str(message_id)}

@@ -7,6 +7,9 @@ export function connectCanvasFrame(frame: HTMLIFrameElement, client: CanvasClien
   let active = true
   let inFlight = 0
   let reports = 0
+  let watcher: ReturnType<typeof setInterval> | undefined
+  let latestRevision = -1
+  let polling = false
   channel.port1.onmessage = async ({ data }: MessageEvent) => {
     if (!active || typeof data?.id !== 'string' || data.id.length > 80 || inFlight >= 32) return
     inFlight += 1
@@ -14,6 +17,20 @@ export function connectCanvasFrame(frame: HTMLIFrameElement, client: CanvasClien
       if (JSON.stringify(data).length > 256000) throw new Error('Canvas request is too large')
       let result: unknown
       if (data.method === 'state.get') result = await client.getState(environment)
+      else if (data.method === 'state.watch') {
+        result = await client.getState(environment)
+        latestRevision = result && typeof result === 'object' && 'revision' in result ? Number(result.revision) : -1
+        if (!watcher) watcher = setInterval(() => {
+          if (!active || polling || document.visibilityState === 'hidden') return
+          polling = true
+          void client.getState(environment).then((state) => {
+            if (active && Number(state.revision || 0) > latestRevision) {
+              latestRevision = Number(state.revision || 0)
+              channel.port1.postMessage({ event: 'state.changed', state })
+            }
+          }).catch(() => {}).finally(() => { polling = false })
+        }, 1500)
+      }
       else if (data.method === 'state.set') {
         const params = data.params as CanvasStateWrite
         if (!Number.isInteger(params.expected_revision) || !params.value || typeof params.value !== 'object' || Array.isArray(params.value)) throw new Error('Invalid canvas state')
@@ -30,5 +47,5 @@ export function connectCanvasFrame(frame: HTMLIFrameElement, client: CanvasClien
   }
   channel.port1.start()
   frame.contentWindow?.postMessage({ type: 'promethea:connect', version: 1 }, '*', [channel.port2])
-  return () => { active = false; channel.port1.close() }
+  return () => { active = false; if (watcher) clearInterval(watcher); channel.port1.close() }
 }

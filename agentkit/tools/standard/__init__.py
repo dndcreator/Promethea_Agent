@@ -124,6 +124,8 @@ def create_tools(runtime: dict[str, Any]) -> list[Any]:
             tools.append(ReasoningRunTool(gateway_server=gateway_server))
         if getattr(gateway_server, "self_model_service", None) is not None:
             tools.append(CognitionRecallTool(self_model_service=gateway_server.self_model_service))
+            from .situation_tools import create_situation_tools
+            tools.extend(create_situation_tools(gateway_server.self_model_service))
         if getattr(gateway_server, "org_context_service", None) is not None:
             tools.append(OrganizationRecallTool(org_context_service=gateway_server.org_context_service))
         if getattr(gateway_server, "workflow_engine", None) is not None:

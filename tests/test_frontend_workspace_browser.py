@@ -85,6 +85,8 @@ async def prepare(page):
             data = {"ready": True, "active_backend": "neo4j"}
         elif path == "config/secrets":
             data = {"secrets": {"api": {"model": "deepseek-chat"}}}
+        elif path == "channels":
+            data = []
         elif path == "memory/write-proposals":
             data = {"proposals": [{"proposal_id": "review", "content": "用户倾向于简洁的界面。", "memory_type": "semantic", "conflict_candidates": ["用户喜欢详细的说明。"]}]}
         elif "write-proposals/review/decision" in path:

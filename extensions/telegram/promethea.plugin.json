@@ -1,0 +1,7 @@
+{
+  "id": "telegram", "kind": "channel", "name": "Telegram Bot",
+  "description": "Authenticated Telegram private-text Webhook and replies",
+  "version": "0.1.0",
+  "configSchema": {"type": "object", "properties": {"enabled": {"type": "boolean"}, "channel_config": {"type": "object"}}, "additionalProperties": true},
+  "capabilities": {"surfaces": ["telegram"], "supports_hot_reload": false}
+}

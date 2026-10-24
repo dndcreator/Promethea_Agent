@@ -16,6 +16,17 @@ class ComponentContract(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
 
+class CanvasResourceRef(ComponentContract):
+    kind: str = Field(pattern=r"^[a-z][a-z0-9_.-]{0,63}$")
+    id: str = Field(min_length=1, max_length=200)
+    workspace_id: str | None = Field(default=None, max_length=200)
+
+
+class CanvasComponent(ComponentContract):
+    description: str = Field(default="", max_length=800)
+    object_ref: CanvasResourceRef | None = None
+
+
 class CanvasMutation(ComponentContract):
     op: Literal["set", "increment", "toggle", "reset", "calculate"]
     field: Key | None = None
@@ -41,7 +52,7 @@ class CanvasMutation(ComponentContract):
         return self
 
 
-class CanvasText(ComponentContract):
+class CanvasText(CanvasComponent):
     type: Literal["text"]
     id: Key
     text: str | None = Field(default=None, max_length=4000)
@@ -55,7 +66,7 @@ class CanvasText(ComponentContract):
         return self
 
 
-class CanvasInput(ComponentContract):
+class CanvasInput(CanvasComponent):
     type: Literal["input"]
     id: Key
     label: str = Field(min_length=1, max_length=200)
@@ -63,7 +74,7 @@ class CanvasInput(ComponentContract):
     input_type: Literal["text", "number"] = "text"
 
 
-class CanvasCheckbox(ComponentContract):
+class CanvasCheckbox(CanvasComponent):
     type: Literal["checkbox"]
     id: Key
     label: str = Field(min_length=1, max_length=200)
@@ -75,7 +86,7 @@ class CanvasOption(ComponentContract):
     value: str = Field(max_length=500)
 
 
-class CanvasSelect(ComponentContract):
+class CanvasSelect(CanvasComponent):
     type: Literal["select"]
     id: Key
     label: str = Field(min_length=1, max_length=200)
@@ -83,7 +94,7 @@ class CanvasSelect(ComponentContract):
     options: list[CanvasOption] = Field(min_length=1, max_length=64)
 
 
-class CanvasButton(ComponentContract):
+class CanvasButton(CanvasComponent):
     type: Literal["button"]
     id: Key
     label: str = Field(min_length=1, max_length=200)
@@ -91,7 +102,7 @@ class CanvasButton(ComponentContract):
     variant: Literal["primary", "secondary"] = "primary"
 
 
-class CanvasTable(ComponentContract):
+class CanvasTable(CanvasComponent):
     type: Literal["table"]
     id: Key
     columns: list[Annotated[str, Field(max_length=200)]] = Field(min_length=1, max_length=16)
@@ -104,7 +115,7 @@ class CanvasTable(ComponentContract):
         return self
 
 
-class CanvasStack(ComponentContract):
+class CanvasStack(CanvasComponent):
     type: Literal["stack"]
     id: Key
     direction: Literal["row", "column"] = "column"

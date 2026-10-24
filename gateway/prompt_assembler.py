@@ -466,6 +466,13 @@ class PromptAssembler:
         )
 
         self_model_context = getattr(run_context, "self_model_context", None) if run_context is not None else None
+        observation_prompt = str((self_model_context or {}).get("observation_prompt") or "")
+        if observation_prompt:
+            blocks.append(PromptBlock(
+                block_id="environment_observations", block_type=PromptBlockType.RUNTIME_CONTEXT,
+                source="environment_runtime", content=observation_prompt, priority=95,
+                can_compact=False, metadata={"revision": (self_model_context.get("environment") or {}).get("revision"), "runtime_stability": "dynamic"},
+            ))
         self_model_prompt = (
             str(self_model_context.get("prompt_text") or "").strip()
             if isinstance(self_model_context, dict)
@@ -708,9 +715,10 @@ class PromptAssembler:
         return "\n\n".join(rendered).strip()
 
     def render_messages(self, blocks: List[PromptBlock]) -> List[Dict[str, Any]]:
-        static = self.render_prompt([block for block in blocks if block.block_id != "tools"])
+        static = self.render_prompt([block for block in blocks if block.block_id not in {"tools", "environment_observations"}])
         tools = self.render_prompt([block for block in blocks if block.block_id == "tools"])
-        return [{"role": "system", "content": content} for content in (static, tools) if content]
+        observations = self.render_prompt([block for block in blocks if block.block_id == "environment_observations"])
+        return [{"role": "system", "content": content} for content in (static, tools) if content] + ([{"role": "user", "content": observations}] if observations else [])
 
     @staticmethod
     def refresh_tool_message(messages: List[Dict[str, Any]], *, tools: List[Dict[str, Any]], snapshot: Dict[str, Any], run_context: Optional[Any]) -> List[Dict[str, Any]]:
@@ -761,7 +769,7 @@ class PromptAssembler:
         budget_policy = self._resolve_budget_policy(run_context=run_context, user_config=user_config)
         compacted = self.compact_blocks(blocks, budget, budget_policy=budget_policy)
         kept_blocks = compacted["blocks"]
-        prompt = self.render_prompt(kept_blocks)
+        prompt = self.render_prompt([block for block in kept_blocks if block.block_id != "environment_observations"])
 
         debug = {
             "budget": budget,

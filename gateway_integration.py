@@ -135,6 +135,16 @@ class GatewayIntegration:
             http["rate_limit"] = rate
         if http:
             result["http"] = http
+        from channels.settings import BotSettings, load_settings
+        from pydantic import SecretStr
+        profiles = load_settings(result.get("channels"))
+        channel_config = dict(result.get("channels") or {})
+        for name in type(profiles).model_fields:
+            profile = getattr(profiles, name)
+            if isinstance(profile, BotSettings):
+                secrets = {key for key, value in profile if isinstance(value, SecretStr)}
+                channel_config[name] = profile.model_dump(exclude=secrets)
+        result["channels"] = channel_config
         return result
 
     async def reload_config(self) -> Dict[str, Any]:
@@ -147,8 +157,7 @@ class GatewayIntegration:
                 EventType.CONFIG_RELOADED,
                 {
                     "scope": "gateway_runtime",
-                    "old_config": old_config,
-                    "new_config": self.config,
+                    "changed": old_config != self.config,
                 },
             )
         return {"success": True, "config": self.config}
@@ -157,6 +166,8 @@ class GatewayIntegration:
         plugins_config = {"plugins": {}}
         channels_cfg = self.config.get("channels", {}) or {}
         for channel_id, ch_cfg in channels_cfg.items():
+            if not isinstance(ch_cfg, dict):
+                continue
             plugins_config["plugins"][channel_id] = {
                 "enabled": bool(ch_cfg.get("enabled", False)),
                 "config": {"channel_config": ch_cfg},
@@ -358,6 +369,17 @@ class GatewayIntegration:
             message_manager=message_manager,
             workflow_engine=self.gateway_server.workflow_engine,
         )
+        from gateway.http.routes.files import user_file_store
+
+        def read_file_context(user_id, resource):
+            row = user_file_store.get_file(user_id=user_id, file_id=resource.id)
+            if row is None:
+                raise KeyError("file not found")
+            return {"status": "available", "title": str(row.get("filename") or "")[:160],
+                    "version": str(row.get("uploaded_at") or ""),
+                    **{key: row.get(key) for key in ("bytes", "content_type", "modality", "text_extraction_status")}}
+
+        self.gateway_server.self_model_service.environment_sources.register("file", read_file_context)
         self.gateway_server.self_evolve_module = SelfEvolveModule(
             config_service=self.gateway_server.config_service,
             self_model_service=self.gateway_server.self_model_service,
@@ -428,10 +450,10 @@ class GatewayIntegration:
         )
         self.gateway_server.task_runtime.register_driver("ambient", self.gateway_server.ambient_service)
         self.gateway_server.conversation_service.ambient_service = self.gateway_server.ambient_service
-        self.gateway_server.self_model_service.ambient_service = self.gateway_server.ambient_service
         self.gateway_server.capability_service.autonomy_validator = self.gateway_server.ambient_service.validate_scheduled_scope
         self.gateway_server.self_model_service.workflow_engine = self.gateway_server.workflow_engine
         self.gateway_server.workbench_projection.ambient_service = self.gateway_server.ambient_service
+        self.gateway_server.workbench_projection.self_model_service = self.gateway_server.self_model_service
         self.gateway_server.ensure_capability_service().ensure_discovered_tools()
 
         event_emitter.on(EventType.CONVERSATION_COMPLETE, self._on_conversation_complete)
@@ -490,6 +512,15 @@ class GatewayIntegration:
             self.message_router.setup_channel_listeners()
             self.message_router.register_global_handler(self._handle_incoming_message)
 
+            from channels.delivery_runtime import ChannelDeliveryRuntime
+            from channels.settings import load_settings
+            from gateway.http.user_manager import user_manager
+            self.gateway_server.channel_delivery = ChannelDeliveryRuntime(
+                server=self.gateway_server, identities=user_manager.identity_store,
+                settings=load_settings(self.config.get("channels")),
+                path=Path(__file__).resolve().parent / ".runtime" / "channels" / "delivery.sqlite3",
+            )
+            self.gateway_server.channel_delivery.start()
             await self.gateway_server.start()
             if task_runtime is not None:
                 recovered = await task_runtime.recover_incomplete()
@@ -536,6 +567,9 @@ class GatewayIntegration:
             sender = payload.get("user_id")
             if not response or not channel:
                 return
+            from channels.webhook_channel import WebhookChannel
+            if isinstance(self.gateway_server.channels.get(channel), WebhookChannel):
+                return  # The durable outbox owns these replies and provider recipients.
             await self.message_router.send_message(
                 channel_name=channel,
                 receiver_id=sender,
@@ -552,15 +586,12 @@ class GatewayIntegration:
             payload = {
                 "channel": message.channel.value,
                 "sender": message.sender_name or message.sender_id,
-                "content": message.content,
                 "message_type": message.message_type.value,
                 "timestamp": message.timestamp.isoformat(),
             }
             await self.gateway_server.event_emitter.emit(EventType.CHANNEL_MESSAGE, payload)
-            await self.gateway_server.connection_manager.broadcast(
-                EventType.CHANNEL_MESSAGE,
-                payload,
-            )
+            # Legacy provider events are not an authenticated Agent ingress. Never
+            # broadcast potentially private content to every connected account.
             if not self.gateway_server.conversation_service:
                 logger.warning(
                     "ConversationService not initialized, message will not be processed"
@@ -572,6 +603,9 @@ class GatewayIntegration:
         """Shutdown gateway system."""
         try:
             logger.info("Shutting down gateway system...")
+            delivery = getattr(self.gateway_server, "channel_delivery", None)
+            if delivery is not None:
+                await delivery.stop()
             if self.gateway_server and self.gateway_server.task_runtime:
                 await self.gateway_server.task_runtime.shutdown()
             if self.gateway_server and self.gateway_server.memory_service:

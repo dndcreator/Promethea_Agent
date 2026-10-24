@@ -1149,6 +1149,7 @@ class ActionService:
             "provider_error_code": response.get("code"),
             "finish_reason": response.get("finish_reason"),
             "usage": response.get("usage"),
+            "cost_estimate": response.get("cost_estimate"),
             "max_tokens": response.get("max_tokens"),
             "reasoning_chars": response.get("reasoning_chars"),
         }

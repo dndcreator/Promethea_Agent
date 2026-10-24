@@ -3,12 +3,14 @@ import { ArrowLeft, Download, FileText, RefreshCw } from 'lucide-react'
 import { getWorkbenchArtifact } from '../services/api'
 import type { WorkbenchReference } from '../services/api'
 import { useLanguage } from '../store/LanguageContext'
+import { useEnvironmentObservation } from '../hooks/useEnvironmentObservation'
 
 export default function ArtifactPreview({ reference, workspaceId, onClose }: { reference: WorkbenchReference; workspaceId: string; onClose: () => void }) {
   const { t } = useLanguage()
   const [preview, setPreview] = useState<{ url: string; type: string; text?: string } | null>(null)
   const [error, setError] = useState('')
   const [revision, setRevision] = useState(0)
+  useEnvironmentObservation('artifact', [{ kind: 'artifact', id: reference.target, workspace_id: workspaceId }])
   useEffect(() => {
     const controller = new AbortController()
     let url = ''

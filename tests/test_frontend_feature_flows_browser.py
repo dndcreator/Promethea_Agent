@@ -82,13 +82,15 @@ async def test_settings_load_retry_plugins_and_workspace_restore_clear_stale_cha
             _, _, errors = await prepare(page)
             counts = {"config": 0, "plugin": 0, "restore": 0}
             enabled = False
+            settings_open = False
 
             async def api(route):
                 nonlocal enabled
                 path = urlparse(route.request.url).path
                 if path == "/api/config":
-                    counts["config"] += 1
-                    await route.fulfill(status=503 if counts["config"] == 1 else 200, json={"config": {"agent_name": "Promethea"}})
+                    if settings_open:
+                        counts["config"] += 1
+                    await route.fulfill(status=503 if settings_open and counts["config"] == 1 else 200, json={"config": {"agent_name": "Promethea"}})
                 elif path == "/api/plugins/catalog":
                     await route.fulfill(json={"plugins": [{"id": "demo", "name": "示例插件", "enabled": enabled}]})
                 elif path == "/api/extensions/catalog":
@@ -108,6 +110,7 @@ async def test_settings_load_retry_plugins_and_workspace_restore_clear_stale_cha
             await page.goto(BASE)
             await page.get_by_role("button", name="整理认知架构文章", exact=True).click()
             await expect(page.locator(".chat-heading h1")).to_have_text("整理认知架构文章")
+            settings_open = True
             await page.get_by_role("navigation").get_by_role("button", name="设置", exact=True).click()
             await expect(page.get_by_role("alert")).to_contain_text("设置加载失败")
             await expect(page.get_by_role("button", name="保存更改", exact=True)).to_have_count(0)

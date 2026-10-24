@@ -1,4 +1,4 @@
-"""Unified, read-only self-model projection for the Promethea runtime."""
+"""Personal working cognition and bounded projections of Runtime-owned facts."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from loguru import logger
 
 from .cognitive_reducer import CognitiveRecallPolicy, CognitiveReducer
 from .protocol import EventType
+from .self_model_state import SelfModelStateStore
+from .semantic_ui import SemanticUI
 
 
 SELF_MODEL_DOCS = [
@@ -54,11 +56,67 @@ class SelfModelService:
         self.llm_client = llm_client
         self.message_manager = message_manager
         self.workflow_engine = workflow_engine
-        self.ambient_service = None
         self.agent_messages = None
         root = Path(workspace_root) if workspace_root else Path.cwd()
         self.workspace_root = root.resolve()
         self.self_model_path = self.workspace_root / "memory" / "self_model.json"
+        self.state = SelfModelStateStore(self.workspace_root / ".runtime" / "self-model" / "state.json")
+        from config import config
+        from .environment_sources import EnvironmentSources
+        from .environment_context import EnvironmentViews
+        self.environment_sources = EnvironmentSources(message_manager=message_manager, task_service=task_service, capability_service=capability_service)
+        self.environment = EnvironmentViews(resolver=self.environment_sources.inspect, ttl_seconds=config.self_model.environment_ttl_s)
+        self.semantic_ui = SemanticUI(store=self.state, message_manager=message_manager, event_emitter=event_emitter, environment=self.environment)
+        if event_emitter is not None:
+            for event in (EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.MEMORY_SAVED, EventType.MEMORY_UPDATE,
+                          EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED,
+                          EventType.ACTION_OBSERVATION_COMMITTED, EventType.ENVIRONMENT_STATE_CHANGED,
+                          EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED):
+                event_emitter.on(event, self.observe)
+
+    def observe(self, event):
+        user = event.payload.get("user_id")
+        if not user or (event.seq and event.seq <= self.state.get(user).last_event_seq):
+            return
+        def change(current):
+            current.last_event_seq = max(current.last_event_seq, event.seq or 0)
+            current.changes = [*current.changes, {
+                "event_id": event.event_id, "seq": event.seq, "event_type": event.event.value,
+                **{key: event.payload[key] for key in ("task_id", "session_id", "expression_id") if event.payload.get(key)},
+            }][-24:]
+        self.state.update(user, change)
+
+    async def update_situation(self, user, command):
+        def apply(current):
+            current.attention = command.attention
+            current.questions = command.questions
+            current.interpretation = command.interpretation
+            current.cognition_revision += 1
+        current = self.state.update(user, apply, expected_revision=command.expected_revision)
+        if self.event_emitter is not None:
+            await self.event_emitter.emit(EventType.SELF_MODEL_UPDATED, {"user_id": user, "revision": current.revision})
+        return {"ok": True, "revision": current.cognition_revision, "classification": "working_interpretation_not_memory_fact"}
+
+    def working_context(self, user):
+        current = self.state.get(user)
+        if user not in self.state.users:
+            return {"revision": 0, "attention": [], "questions": [], "interpretation": "", "surface": self.environment.current_surface(user)}
+        result = current.model_dump(exclude={"expressions", "cognition_revision"})
+        result["state_revision"], result["revision"] = current.revision, current.cognition_revision
+        result["surface"] = self.environment.current_surface(user)
+        log = getattr(self.event_emitter, "event_log", None)
+        if log is not None:
+            for change in result["changes"][-4:]:
+                seq = change.get("seq") or 0
+                rows = log.query(user_id=user, after_seq=seq - 1, limit=1, oldest_first=True) if seq else []
+                if rows and rows[0]["seq"] == seq:
+                    change["observation_excerpt"] = json.dumps(rows[0]["payload"], ensure_ascii=False, default=str)[:1200]
+        return result
+
+    async def build_observation_context(self, user):
+        from config import config
+        environment = await self.environment.snapshot(user)
+        return {"environment": environment, "observation_prompt": self.environment.prompt(environment, config.self_model.observation_chars)}
 
     def _resolve_workspace_path(self, path_str: str) -> Path:
         path = (self.workspace_root / path_str).resolve()
@@ -127,7 +185,7 @@ class SelfModelService:
             },
             "initiative": {
                 "modules": ["AmbientService", "AgentMessages"],
-                "role": "maintain personal-space attention and coordinate proactive participation through Runtime messaging",
+                "role": "schedule proactive participation and coordinate delivery; cognition belongs to SelfModelService",
             },
             "self_evolve": {
                 "modules": ["SelfEvolveService"],
@@ -618,6 +676,13 @@ class SelfModelService:
             )
             cognition = result.get("cognition") if result.get("ok") else {}
         items = list((cognition or {}).get("items") or [])
+        if normalized_query:
+            global_bundle = await asyncio.to_thread(self.build_cognition_bundle, user_id=user_id, limit=120)
+            global_items = list((global_bundle.get("cognition") or {}).get("items") or [])
+            seen = {item.get("cognition_id") for item in items}
+            items.extend(item for item in global_items if item.get("cognition_id") not in seen)
+        else:
+            global_items = items
         current = [item for item in items if item.get("state") == "current"]
         evolving = [item for item in items if item.get("state") == "evolving"]
         uncertain = [item for item in items if item.get("state") == "uncertain"]
@@ -643,6 +708,9 @@ class SelfModelService:
                 }
 
         runtime = self.runtime_projection(user_id)
+        environment = await self.environment.snapshot(user_id)
+        from config import config as runtime_config
+        observation_prompt = self.environment.prompt(environment, runtime_config.self_model.observation_chars)
         lines = [
             "Self model context:",
             "- Current cognition may guide continuity; uncertain cognition is not established fact.",
@@ -681,13 +749,26 @@ class SelfModelService:
                     projection_lines.append(line)
                     remaining -= len(line) + 1
             prompt_text += "\n".join(projection_lines)
-        revision_source = json.dumps({"items": items, "runtime": runtime}, sort_keys=True, ensure_ascii=False, default=str)
+        revision_source = json.dumps({"items": items, "runtime": runtime, "environment": environment}, sort_keys=True, ensure_ascii=False, default=str)
         return {
             "version": "self_model.context.v1",
             "revision": hashlib.sha256(revision_source.encode("utf-8")).hexdigest()[:16],
             "user_id": str(user_id),
             "active": active, "task": task_summary,
             "current": current[:10], "evolving": evolving[:10], "uncertain": uncertain[:10],
+            "global_context": {
+                "identity_source": "PromptAssembler core identity, customization and Soul",
+                "cognition": [item for item in global_items if item.get("state") == "current"][:10],
+                "commitments": [item for item in global_items if item.get("state") == "evolving"][:10],
+                "authority": "governed Memory and live Runtime projections, not model declarations",
+            },
+            "situational_context": {
+                "working": self.working_context(user_id), "active": active,
+                "environmental_state": environment,
+                "uncertain": uncertain[:10], "runtime": runtime,
+            },
+            "environment": environment,
+            "observation_prompt": observation_prompt,
             "runtime": runtime,
             "prompt_text": prompt_text,
         }
@@ -708,9 +789,12 @@ class SelfModelService:
             sessions = self.message_manager.list_sessions(user_id=user_id, limit=6)
             result["conversations"] = [{"session_id": row["session_id"], "title": str(row.get("title") or "")[:160], "last_message": str(row.get("last_message") or "")[:300], "last_activity": row.get("last_activity")} for row in sessions]
             result["coverage"]["conversations"] = {"included": len(sessions)}
-        if self.ambient_service is not None:
-            result["attention"] = self.ambient_service.context_projection(user_id, None)
-            result["coverage"]["attention"] = {"available": True}
+        result["attention"] = self.working_context(user_id)
+        # Live visibility has one independently refreshed model-visible block.
+        result["attention"].pop("surface", None)
+        result["coverage"]["attention"] = {"available": True}
+        result["expressions"] = self.semantic_ui.context_projection(user_id)
+        result["coverage"]["expressions"] = {"available": True}
         if self.agent_messages is not None:
             result["communication"] = self.agent_messages.communication_context(user_id)
             result["coverage"]["communication"] = {"available": True}

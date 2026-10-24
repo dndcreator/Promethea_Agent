@@ -1,5 +1,93 @@
 # Intelligent Canvas
 
+## Semantic Expressions Are Separate
+
+Intelligent Canvas builds applications and task-specific work surfaces. Semantic
+UI expresses the Agent's participation in the existing host: a note, gesture,
+choice or ongoing text panel. The distinction is purpose, not whether a user or
+Agent initiated it. Neither path edits Promethea's main UI source at runtime.
+
+`semantic_ui.inspect/present` use the ordinary capability registry. Validated
+expression data is rendered by host React components, with personal, conversation
+or exact-message scope. Stable IDs and expected revisions update/hide an existing
+expression; no code generation or application deployment is required. This first
+grammar is text and choices, not arbitrary charts, layout generation or remote
+business actions. Rich custom applications remain in Canvas.
+
+Host presentation uses the existing Workbench SSE subscription and generated SDK
+contracts. `/api/semantic-ui` reads expressions; `/context` records an advisory
+host view; `/{expression_id}/feedback` records a declared choice or dismissal.
+An iframe does not gain access to this channel: the Canvas MessageChannel remains
+limited to application state and diagnostics. There is no arbitrary tool name,
+executable script or approval grant in the expression protocol.
+
+SelfModel retains expression intent and feedback alongside working cognition;
+business facts remain in their original services. Feedback emits
+`semantic_ui.interacted`, and an enabled Ambient service may coalesce it into a
+normal activation. Deterministic saves and rendering make no model calls. Choices
+are user feedback, not proof that a task succeeded or permission to execute a
+sensitive action. An Agent must still use CapabilityService and exact approval.
+
+State survives restart and personal-space transfer; advisory visible-surface
+context resets to unknown. Source message anchors are validated against the
+authenticated owner's transcript. The browser reports which view it exposes,
+not what the user has actually read. Dismissed/answered expressions are available
+to the model so it can avoid repetition. Capacity is bounded and updates use
+optimistic concurrency; stale writes fail instead of replacing newer feedback.
+
+## Environment Understanding And Component Operations
+
+SelfModel consumes a current environment projection, not a second business-state
+store. The host reports surface IDs, monotonically increasing sequence numbers,
+visibility/focus and resource references. Authenticated source adapters validate
+ownership and read the current Session, Task, uploaded File, workspace Artifact
+or Canvas authority. Unknown source kinds stay unsupported. Reports are advisory:
+focus is not proof of reading, intent, agreement or successful business action.
+Hidden/expired surfaces disappear from model context; restart/import begins with
+unknown visibility. Meaningful descriptor changes emit the existing UI event;
+heartbeats only renew leases. State-change events accelerate awareness, while a
+fresh source snapshot prevents missed events from becoming permanent false state.
+
+The protected `environment_observations` block has its own bounded JSON budget,
+separate from normal cognition text, and is refreshed at each Action model step.
+It enters as user-level data, never system instructions. Existing model-call
+manifests retain the actual request and refreshed block hash. Source failures
+produce unavailable observations without aborting the Agent loop; cancellation
+still propagates. This path does not invoke an extractor or another model.
+SelfModel interpretations/questions remain distinct from these source snapshots;
+neither can override source-service facts or permissions.
+
+Generated component documents can include descriptions and `object_ref` relations.
+`environment.inspect` and `GET /api/canvas/{workspace}/{environment}/semantics`
+expose parent relationships, binding values, operation names, input schemas and
+both definition/state revisions. The packaged source is classified as `compiled`
+only when it exactly matches the current renderer; a custom embedded declaration
+is `declared`, not verified visual correspondence. Legacy/custom apps without a
+document remain `undeclared`; process apps currently have no packaged declaration.
+Object relations inside a document are app declarations, not proof that the
+referenced business object exists. Resolve that object through its source.
+
+`environment.interact` and the authenticated Canvas `/interact` endpoint execute
+only the existing scalar component DSL: set a declared field or activate a
+declared button. Runtime validates definition hash, state revision, types, enums,
+finite arithmetic and workspace/delegation scope, then commits through the
+existing app-state store. A failed commit publishes no change. The existing
+environment event records changed field names and committed revisions, not model
+claims. App data cannot dispatch tools, approve actions, alter Tasks or write
+external business state; those operations retain their original services and
+confirmation policies. These are ordinary registered capabilities, not a new
+plugin protocol or execution engine.
+
+The restricted iframe bridge supports `subscribe(listener)` in addition to
+`getState/setState`. Its host watcher reads app state at most once concurrently,
+every 1.5 seconds while visible, and stops on disconnect. Newer committed state
+updates mounted components without reloading the app; local concurrent edits are
+still fenced by revisions rather than silently overwritten or replayed. No model
+is used to synchronize the UI. Existing retained artifacts keep their bundled
+renderer; they need recomposition to acquire new renderer behavior.
+
+## Application Canvas
+
 Promethea separates the conversation interface from generated applications.
 Canvas is a shell above the existing UI, not an alternative Agent Core. An
 application may be conversation-scoped or retained in a user's library, with
@@ -52,6 +140,29 @@ They use existing sandboxed authoring, build/check commands, diagnostics, and
 repair. A custom edit to a compiled document becomes custom application code
 and must pass verification again; it does not retain a special trusted status.
 Neither path modifies Promethea's main UI or Agent Core.
+
+Composition returns the automatically embedded semantic document's definition
+revision and component count, explicitly marked not yet browser-verified.
+Self Evolve's existing browser validation now inspects the actual opaque iframe
+before and after declared test steps: IDs, containment, visibility, input types,
+labels, options and displayed binding values must agree with the declaration and
+the verifier's app-state bridge. Mismatches fail the ordinary validation gate and
+therefore block deployment/publication. Results retain the semantic status and
+verification outcome for the Agent's next Observation; no model translates the
+DOM into purported facts.
+
+The same verifier also applies valid scalar changes through the existing Runtime
+component DSL and sends host state-change notifications across the actual frame
+bridge. Each declared settable control must display the new stored value, then
+the original state is restored. A page that renders correctly but omits state
+subscription therefore cannot pass semantic verification. These are isolated
+verification-page mutations, never changes to a user's retained application.
+
+Custom apps without a declaration remain usable under ordinary browser tests but
+report `undeclared` and no semantic verification. A matching custom declaration
+is still `declared`, never promoted to the trusted compiler path. These bounded
+checks prove only the observed test states, not arbitrary future JavaScript
+behavior or the existence of referenced external business objects.
 
 ## Interaction And Persistence
 

@@ -48,15 +48,16 @@ async def test_one_identity_spans_sessions_and_observes_the_whole_owned_space(tm
 
 def test_old_session_states_converge_once_without_dual_writes(tmp_path):
     path = tmp_path / "ambient.json"
-    from gateway.ambient_state import Situation
-    first = Situation(user_id="alice", session_id="a", attention=["A"], revision=1)
-    second = Situation(user_id="alice", session_id="b", attention=["B"], revision=2)
-    path.write_text(json.dumps({"version": 1, "situations": {"a": first.model_dump(), "b": second.model_dump()}, "usage": {}}), encoding="utf-8")
-    restored = AmbientStore(path)
+    first = {"user_id": "alice", "session_id": "a", "attention": ["A"], "revision": 1}
+    second = {"user_id": "alice", "session_id": "b", "attention": ["B"], "revision": 2}
+    path.write_text(json.dumps({"version": 1, "situations": {"a": first, "b": second}, "usage": {}}), encoding="utf-8")
+    model = SelfModelService(workspace_root=str(tmp_path))
+    restored = AmbientStore(path, cognition_store=model.state)
     assert len(restored.scenes) == 1
-    assert restored.get("alice", "a").attention == ["B", "A"]
+    assert model.state.get("alice").attention == ["B", "A"]
     assert restored.get("alice", "b").session_id == "b"
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 2
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 3
+    assert "attention" not in json.loads(path.read_text(encoding="utf-8"))["situations"]["alice"]
 
 
 @pytest.mark.asyncio
@@ -83,7 +84,7 @@ async def test_root_turns_share_identity_while_children_can_progress_in_parallel
 
 @pytest.mark.asyncio
 async def test_deleted_transcript_does_not_destroy_personal_attention(tmp_path):
-    core = Core(call("ambient.reflect", attention=["Project"], questions=[], interpretation="Continue checking results"))
+    core = Core(call("cognition.update_situation", expected_revision=0, attention=["Project"], questions=[], interpretation="Continue checking results"))
     tasks, runtime, _, manager, ambient = setup(tmp_path, core)
     try:
         ambient.configure("alice", "chat", AmbientSettings(enabled=True))

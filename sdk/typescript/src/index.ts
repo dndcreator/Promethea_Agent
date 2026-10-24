@@ -6,12 +6,29 @@ export { type WorkbenchQuery, type WorkbenchWatchOptions } from './workbench.js'
 export { CognitionClient } from './cognition.js'
 export { CanvasClient } from './canvas.js'
 export { AmbientClient } from './ambient.js'
+export { SemanticUIClient } from './semantic-ui.js'
+export { ChannelsClient } from './channels.js'
 export { connectCanvasFrame } from './canvas-bridge.js'
 export type {
+  ChannelAccount,
+  ChannelDelivery,
+  ChannelPairing,
+  ChannelPairingRequest,
   AmbientSettings,
   AmbientState,
   AmbientFeedback,
   AmbientConfirmation,
+  SemanticChoice,
+  SemanticUIWrite,
+  SemanticExpression,
+  SemanticUIFeedback,
+  SemanticSurface,
+  SemanticUIState,
+  SituationUpdate,
+  CanvasResourceRef,
+  EnvironmentInspect,
+  EnvironmentInteraction,
+  CanvasInteraction,
   Attachment,
   GuestChatMessage,
   GuestChatRequest,
@@ -51,6 +68,8 @@ export type {
   CanvasState,
   CanvasStateWrite,
   CanvasDocument,
+  CanvasSemanticSnapshot,
+  CanvasComponentView,
   CanvasMutation,
   CanvasText,
   CanvasInput,

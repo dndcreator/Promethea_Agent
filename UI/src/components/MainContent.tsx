@@ -3,6 +3,7 @@ import type { ButtonHTMLAttributes, ReactNode } from 'react'
 import { BarChart3, Clock3, MessageCircleQuestion, Mic, Paperclip, Plus, Search, Send, Smile, Square, UsersRound } from 'lucide-react'
 import ConfirmModal from './modals/ConfirmModal'
 import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
+import SemanticExpressions from './SemanticExpressions'
 import { useWorkbench } from '../store/WorkbenchContext'
 import type { ChatAttachment, GuestChatStatus, StreamHandler } from '../services/api'
 import { guestTranscript } from '../utils/guest-chat'
@@ -781,6 +782,7 @@ export default function MainContent({
 
       <div ref={messagesScrollRef} onScroll={handleMessagesScroll} className="chat-messages relative flex-1 overflow-y-auto p-4 sm:p-6">
         <div className="chat-message-column flex flex-col gap-6">
+          <SemanticExpressions sessionId={sessionId} />
           {messages.length === 0 && sessionId && <p className="py-6 text-sm text-text-muted">{t('此会话没有已保存的消息。', 'No messages were saved in this session.')}</p>}
           {messages.length === 0 && !sessionId && (
             <div className="chat-welcome text-left text-text-muted">

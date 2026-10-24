@@ -41,6 +41,8 @@ class RunContext(BaseModel):
     cost_budget: Optional[float] = None
     workspace_handle: Dict[str, Any] = Field(default_factory=dict)
     runtime_blocks: list[Dict[str, Any]] = Field(default_factory=list)
+    runtime_context: str = ""
+    prompt_policy: Dict[str, Any] = Field(default_factory=dict)
     action_state: Dict[str, Any] = Field(default_factory=dict)
     goal_gaps: Dict[str, Any] = Field(default_factory=dict)
     event_buffer: list[Dict[str, Any]] = Field(default_factory=list)

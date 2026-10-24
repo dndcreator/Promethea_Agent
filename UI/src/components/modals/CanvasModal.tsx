@@ -5,6 +5,7 @@ import { connectCanvasFrame } from '@promethea/sdk'
 import { getCanvasClient, type CanvasEnvironment } from '../../services/api'
 import FeatureSurface from '../FeatureSurface'
 import { useLanguage } from '../../store/LanguageContext'
+import { useEnvironmentObservation } from '../../hooks/useEnvironmentObservation'
 
 const identity = (item: Pick<CanvasEnvironment, 'workspace_id' | 'environment_id'>) => `${item.workspace_id}/${item.environment_id}`
 
@@ -55,6 +56,7 @@ export default function CanvasModal({ workspaceId, initialEnvironmentId, onClose
   useEffect(() => () => { disconnect.current?.() }, [])
 
   const selected = useMemo(() => environments.find((item) => identity(item) === selectedId), [environments, selectedId])
+  useEnvironmentObservation('canvas', selected ? [{ kind: 'canvas', id: selected.environment_id, workspace_id: selected.workspace_id }] : [])
   const refresh = () => { setReload((value) => value + 1); void load() }
   const retain = async () => {
     if (!selected || busy) return

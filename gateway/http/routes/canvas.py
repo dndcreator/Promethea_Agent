@@ -16,7 +16,7 @@ from jose import JWTError
 
 from computer.execution_context import ComputerWorkspace, bind_workspace
 from computer.canvas_document import artifact_files, render_canvas_html, decode_canvas_library, canvas_csp, is_redirected_path
-from gateway.public_contracts import CanvasEnvironmentList, CanvasState, CanvasStateWrite, CanvasEnvironment
+from gateway.public_contracts import CanvasEnvironmentList, CanvasState, CanvasStateWrite, CanvasEnvironment, CanvasInteraction, CanvasSemanticSnapshot
 from pydantic import BaseModel, Field
 
 from ..dispatcher import get_gateway_server
@@ -159,6 +159,16 @@ async def set_canvas_state(workspace_id: str, environment_id: str, body: CanvasS
 
 class CanvasDiagnostic(BaseModel):
     message: str = Field(max_length=2000)
+
+
+@router.get("/{workspace_id}/{environment_id}/semantics", response_model=CanvasSemanticSnapshot)
+async def get_canvas_semantics(workspace_id: str, environment_id: str, user_id: str = Depends(get_current_user_id)):
+    return await _canvas_action(user_id, workspace_id, environment_id, "semantics")
+
+
+@router.post("/{workspace_id}/{environment_id}/interact", response_model=CanvasState)
+async def interact_canvas(workspace_id: str, environment_id: str, body: CanvasInteraction, user_id: str = Depends(get_current_user_id)):
+    return await _canvas_action(user_id, workspace_id, environment_id, "interact", body.model_dump())
 
 
 @router.post("/{workspace_id}/{environment_id}/diagnostics")

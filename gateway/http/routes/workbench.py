@@ -104,7 +104,7 @@ async def stream_workbench(
             )
             timeline = snapshot.get("timeline") or []
             next_cursor = max(cursor, int(snapshot.get("cursor") or 0))
-            version = json.dumps(snapshot.get("ambient"), sort_keys=True)
+            version = json.dumps([snapshot.get("ambient"), snapshot.get("semantic_ui")], sort_keys=True)
             if first or next_cursor > cursor or version != ambient_version:
                 ambient_version = version
                 cursor = next_cursor

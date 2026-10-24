@@ -203,7 +203,10 @@ class SelfEvolveService:
         if Path(task["canvas"]["entrypoint"]).suffix.lower() != ".html":
             raise ValueError("component documents require an HTML entrypoint")
         html = render_component_document(document)
-        return await self.evolve_write_file(task_id, task["canvas"]["entrypoint"], html, expected_sha256=expected_sha256)
+        result = await self.evolve_write_file(task_id, task["canvas"]["entrypoint"], html, expected_sha256=expected_sha256)
+        from computer.canvas_semantics import snapshot
+        semantics = snapshot(html, {"value": {}, "revision": 0})
+        return {**result, "semantics": {"status": semantics["status"], "component_count": len(semantics["components"]), "definition_revision": semantics["definition_revision"], "browser_verified": False}}
 
     async def evolve_create_task(
         self,

@@ -182,6 +182,9 @@ class WorkbenchProjection:
             timeline[-1] if timeline else None,
         )
         ambient = None
+        semantic_ui = None
+        if getattr(self, "self_model_service", None) is not None:
+            semantic_ui = self.self_model_service.semantic_ui.view(user_id)
         if getattr(self, "ambient_service", None) is not None:
             try:
                 ambient = self.ambient_service.view(user_id, resolved_session_id or None)
@@ -213,6 +216,7 @@ class WorkbenchProjection:
             ] if self.task_runtime else [],
             "cursor": cursor,
             "ambient": ambient,
+            "semantic_ui": semantic_ui,
         }
 
     def _query_events(self, *, user_id: str, **filters: Any) -> List[Dict[str, Any]]:

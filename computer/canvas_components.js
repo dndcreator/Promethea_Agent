@@ -10,6 +10,7 @@
   let busy = false;
   let loaded = false;
   let blocked = false;
+  let observed;
   const mutations = [];
   const style = document.createElement('style');
   style.textContent = `
@@ -45,6 +46,16 @@
     for (const update of bindings) update(state.value);
     for (const control of controls) control.disabled = !loaded || blocked;
   }
+  function acceptObserved(saved) {
+    if (!observed || saved.revision > observed.revision) observed = saved;
+    if (!loaded || busy || blocked || observed.revision <= state.revision) return;
+    try {
+      const next = {revision: observed.revision, value: {...doc.initial_state, ...observed.value}};
+      validate(next.value);
+      state = next;
+      refresh();
+    } catch (error) { status.textContent = String(error.message || error); }
+  }
   async function commit(update, field = null) {
     if (!loaded || blocked) return;
     const last = mutations[mutations.length - 1];
@@ -74,6 +85,7 @@
       }
     } finally {
       busy = false;
+      if (observed) acceptObserved(observed);
       refresh();
     }
   }
@@ -166,6 +178,7 @@
     } finally {
       loaded = true;
       refresh();
+      if (!blocked) window.promethea.subscribe?.(acceptObserved);
     }
   })();
 })();

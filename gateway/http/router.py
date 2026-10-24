@@ -31,6 +31,8 @@ from .routes.avatar import router as avatar_router
 from .routes.workbench import router as workbench_router
 from .routes.canvas import router as canvas_router
 from .routes.ambient import router as ambient_router
+from .routes.semantic_ui import router as semantic_ui_router
+from .routes.channels import router as channels_router
 
 router = APIRouter()
 
@@ -63,6 +65,8 @@ router.include_router(avatar_router)
 router.include_router(workbench_router)
 router.include_router(canvas_router)
 router.include_router(ambient_router)
+router.include_router(semantic_ui_router)
+router.include_router(channels_router)
 
 
 

@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Type
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
-from computer.canvas_components import CanvasDocument
+from pydantic import BaseModel, Field, model_validator
+from computer.canvas_components import CanvasDocument, CanvasResourceRef, Scalar
 from gateway.goal_gaps import GoalGapView, GapDelta
 
 
@@ -26,6 +26,36 @@ class PublicContract(BaseModel):
     """Common configuration for additive public contracts."""
 
     model_config = {"extra": "ignore"}
+
+
+class ChannelPairingRequest(PublicContract):
+    channel: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
+
+
+class ChannelPairing(PublicContract):
+    channel: str
+    command: str
+    expires_at: float
+
+
+class ChannelAccount(PublicContract):
+    channel: str
+    account_id: str
+    running: bool
+    bound: bool
+    external_account_id: Optional[str] = None
+
+
+class ChannelDelivery(PublicContract):
+    delivery_id: str
+    channel: str
+    session_id: str
+    state: str
+    execution_status: Optional[str] = None
+    next_part: int
+    error_code: Optional[str] = None
+    created: float
+    updated: float
 
 
 class Error(PublicContract):
@@ -430,6 +460,116 @@ class AmbientState(PublicContract):
     pending: Optional[AmbientApproval] = None
 
 
+class SituationUpdate(PublicContract):
+    model_config = {"extra": "forbid"}
+    expected_revision: int = Field(ge=0)
+    attention: List[str] = Field(default_factory=list, max_length=6)
+    questions: List[str] = Field(default_factory=list, max_length=8)
+    interpretation: str = Field(default="", max_length=4000)
+
+
+class SemanticChoice(PublicContract):
+    model_config = {"extra": "forbid"}
+    id: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+    label: str = Field(min_length=1, max_length=120)
+
+
+class SemanticUIWrite(PublicContract):
+    model_config = {"extra": "forbid"}
+    expression_id: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+    expected_revision: int = Field(ge=0)
+    kind: Literal["note", "gesture", "choice", "panel"]
+    content: str = Field(min_length=1, max_length=2000)
+    title: str = Field(default="", max_length=120)
+    tone: Literal["neutral", "warm", "playful", "concerned"] = "neutral"
+    session_id: Optional[str] = Field(default=None, max_length=200)
+    message_id: Optional[str] = Field(default=None, max_length=200)
+    choices: List[SemanticChoice] = Field(default_factory=list, max_length=6)
+    hidden: bool = False
+
+    @model_validator(mode="after")
+    def validate_expression(self):
+        if (self.kind == "choice") != bool(self.choices):
+            raise ValueError("only choice expressions require choices")
+        if len({item.id for item in self.choices}) != len(self.choices):
+            raise ValueError("choice identifiers must be unique")
+        if self.message_id and not self.session_id:
+            raise ValueError("a message anchor requires its conversation")
+        return self
+
+
+class SemanticExpression(SemanticUIWrite):
+    revision: int = Field(ge=1)
+    state: Literal["open", "responded", "dismissed"] = "open"
+    response: Optional[str] = None
+    updated_at: str
+
+
+class SemanticUIFeedback(PublicContract):
+    model_config = {"extra": "forbid"}
+    expected_revision: int = Field(ge=1)
+    action: Literal["respond", "dismiss"]
+    choice_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class SemanticSurface(PublicContract):
+    model_config = {"extra": "forbid"}
+    view: str = Field(default="unknown", max_length=80)
+    surface_id: str = Field(default="main", pattern=r"^[a-zA-Z0-9_-]{1,80}$")
+    sequence: Optional[int] = Field(default=None, ge=0)
+    visible: bool = True
+    focused: bool = True
+    objects: List[CanvasResourceRef] = Field(default_factory=list, max_length=8)
+    session_id: Optional[str] = Field(default=None, max_length=200)
+    message_id: Optional[str] = Field(default=None, max_length=200)
+
+
+class EnvironmentInspect(PublicContract):
+    model_config = {"extra": "forbid"}
+    resource: CanvasResourceRef
+
+
+class CanvasInteraction(PublicContract):
+    model_config = {"extra": "forbid"}
+    component_id: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+    operation: Literal["set", "activate"]
+    expected_revision: int = Field(ge=0)
+    definition_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    value: Optional[Scalar] = None
+
+
+class EnvironmentInteraction(EnvironmentInspect):
+    interaction: CanvasInteraction
+
+
+class CanvasComponentView(PublicContract):
+    component_id: str
+    parent_id: Optional[str] = None
+    kind: str
+    label: str
+    description: str = ""
+    object_ref: Optional[CanvasResourceRef] = None
+    binding: Optional[str] = None
+    value: Optional[Scalar] = None
+    operations: List[Literal["set", "activate"]] = Field(default_factory=list)
+    input_schema: Optional[Dict[str, Any]] = None
+    options: Optional[List[Dict[str, str]]] = None
+
+
+class CanvasSemanticSnapshot(PublicContract):
+    status: Literal["compiled", "declared", "undeclared"]
+    definition_revision: str
+    title: Optional[str] = None
+    revision: Optional[int] = None
+    state_origin: Optional[str] = None
+    components: List[CanvasComponentView] = Field(default_factory=list)
+
+
+class SemanticUIState(PublicContract):
+    revision: int = 0
+    expressions: List[SemanticExpression] = Field(default_factory=list)
+
+
 class WorkbenchSnapshot(PublicContract):
     version: str = "workbench.v1"
     scope: WorkbenchScope
@@ -447,11 +587,16 @@ class WorkbenchSnapshot(PublicContract):
     active_runtime_runs: List[str] = Field(default_factory=list)
     cursor: int = 0
     ambient: Optional[AmbientState] = None
+    semantic_ui: Optional[SemanticUIState] = None
 
 
 PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
     model.__name__: model
     for model in (
+        ChannelPairingRequest,
+        ChannelPairing,
+        ChannelAccount,
+        ChannelDelivery,
         Error,
         GuestChatMessage,
         GuestChatRequest,
@@ -501,6 +646,19 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         AmbientFeedback,
         AmbientConfirmation,
         AmbientState,
+        SituationUpdate,
+        SemanticChoice,
+        SemanticUIWrite,
+        SemanticExpression,
+        SemanticUIFeedback,
+        SemanticSurface,
+        CanvasResourceRef,
+        EnvironmentInspect,
+        CanvasInteraction,
+        EnvironmentInteraction,
+        CanvasComponentView,
+        CanvasSemanticSnapshot,
+        SemanticUIState,
         WorkbenchSnapshot,
     )
 }

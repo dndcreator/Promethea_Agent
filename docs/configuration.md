@@ -1,5 +1,54 @@
 # Configuration Reference
 
+## Model Cost Estimates
+
+The old fixed example tariff is removed. Runtime metrics use the actual returned
+usage and a quote selected by **exact base URL and requested model**. Prices never
+control Agent choices or permissions. Missing/invalid pricing, missing required
+cache-token breakdown, or missing usage stays unknown; zero is reserved for an
+explicit zero rate. Multimodal requests are not priced with a text-only tariff.
+
+Operator settings follow root `.env` and explicit environment overrides:
+
+```dotenv
+PRICING__AUTO_REFRESH=true
+PRICING__CACHE_TTL_S=3600
+PRICING__REQUEST_TIMEOUT_S=2
+PRICING__RATES=[]
+```
+
+The automatic source currently implemented is the official
+[OpenRouter model catalog](https://openrouter.ai/api/v1/models), and only for
+requests sent to `https://openrouter.ai/api/v1`. This is a catalog-based estimate,
+not a routed-provider invoice. Do not reuse its price for a direct DeepSeek,
+OpenAI-compatible proxy, or a different endpoint with the same model name.
+Scheduled overrides and non-token charges are deliberately left unpriced rather
+than silently ignored. Other direct providers currently need configured rates.
+
+The first matching call refreshes the in-memory cache, at most once per TTL;
+simultaneous requests share a bounded refresh. Only the public catalog is fetched,
+without model credentials, redirects, proxy inheritance or LLM calls. A failed
+refresh is throttled and expired quotes become unknown. Cold refresh may add up
+to the configured timeout; unsupported providers make no pricing network request.
+
+`PRICING__RATES` is a JSON list. Each record specifies `base_url`, `model`,
+`input_per_million`, `output_per_million`, and optionally
+`cache_read_per_million`. Amounts are non-negative **USD per million tokens**,
+supplied from the operator's actual tariff; there are no default rate examples.
+Base URLs cannot contain credentials, queries or fragments. Duplicate
+endpoint/model pairs are rejected. Configured rates take precedence over catalog
+estimates. Restart after changing deployment pricing. Local-model pricing is
+unknown unless the operator explicitly configures a tariff; do not assume the
+machine's running cost is zero.
+
+Each priced model response retains its quote source, retrieval time and revision.
+Action model-call manifests record that cost snapshot in the existing Runtime
+Event Log. Cache refreshes cannot reprice past calls. The Metrics panel remains
+process-lifetime aggregate telemetry, not a persistent account billing ledger:
+its total is unknown if any recorded call is unpriced; the API separately exposes
+`known_estimated_usd`, `priced_calls` and `unpriced_calls` for coverage. Rebooting
+resets those aggregates. The provider's actual bill remains authoritative.
+
 ## Ambient Collaboration
 
 `AmbientService` is a first-level, in-process service. Its deployment switch is
@@ -49,6 +98,30 @@ reads/configures the personal scope, while session-qualified routes select an ow
 communication channel without creating a second cognitive identity. Public types
 are generated from `gateway/public_contracts.py`. See
 [Runtime ownership](architecture/task-runtime.md#ambient-service) for the boundaries.
+
+## SelfModel And Semantic UI
+
+SelfModel's working cognition and Semantic UI expression state live under
+`.runtime/self-model/`, separate from Memory backend selection and Ambient
+permission. Legacy Ambient attention is migrated once on startup. Personal-space
+bundles include this state, but importing never enables autonomous work and never
+restores a claim about the user's currently visible view. Account deletion removes
+the corresponding state. These files are local Runtime data and are ignored by Git.
+
+Semantic UI has no arbitrary-tool bridge. Authenticated clients can read expressions
+and send declared feedback through `client.semanticUI`; the host reports bounded
+view IDs and owned object references, not guessed intentions. Environment leases
+are memory-only, expire after `SELF_MODEL__ENVIRONMENT_TTL_S` (default 60 seconds,
+20-300), and reset on restart/import. A 20-second client heartbeat renews freshness
+without producing an event or model request when the descriptor is unchanged.
+Hidden/closed surfaces are excluded immediately when the report arrives.
+`SELF_MODEL__OBSERVATION_CHARS` (default 3200, 1200-12000) reserves a separate,
+non-compactable model-visible JSON projection; large details are explicitly omitted
+and remain available through `environment.inspect`. Source reads are bounded and
+unavailable sources stay unavailable, never inferred as facts. There is no new
+perception LLM or background watcher. Proactive execution remains Ambient opt-in.
+Keep the existing Canvas bridge restricted when embedding custom applications. See
+[Semantic expressions](architecture/intelligent-canvas.md#semantic-expressions-are-separate).
 
 ## Optional Multi-Agent Delegation
 
@@ -739,14 +812,22 @@ Enabled by default in the public preview. It only starts a full reasoning tree w
 
 ## Channels (current state)
 
-Channel runtime support is not symmetric.
+QQ, Telegram, Feishu, DingTalk and WeCom have real text ingress/reply plugins,
+verified account pairing, an owner-scoped persistent transport inbox/outbox and
+the original Gateway/Conversation/Action execution chain. Disabled by default.
+QQ/Feishu/DingTalk groups require a dedicated account/member binding; Telegram
+and WeCom expose private text only. Media ingestion is not supported. Enterprise
+channels use application/enterprise-bot APIs, not send-only custom group webhooks.
 
-- Telegram adapter exists, but full first-party bot runtime wiring is not yet a config-only turnkey flow.
-- Do not assume `TELEGRAM__...` variables are active unless you implement corresponding runtime handlers.
+Deployment-owned `channels/settings.py` uses root `.env` with nested `CHANNELS__...`
+keys and environment > dotenv > non-secret gateway JSON > defaults precedence.
+It is outside per-user/model config. Secrets are never returned by status/pairing.
+`QUEUE_LIMIT` defaults to 200, `TURN_TIMEOUT_S` to 240 and `RETENTION_DAYS` to 30
+(all under `CHANNELS__`). Use one process for one durable queue; restart after
+credential/deployment changes. Old planning-only `TELEGRAM__...` names are not used.
 
-See:
-
-- `docs/channels/telegram.md`
+See [channel operations](channels/README.md), [QQ](channels/qq.md) and
+[Telegram](channels/telegram.md) for setup, pairing, limits and recovery.
 
 ---
 

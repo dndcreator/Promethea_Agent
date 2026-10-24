@@ -29,6 +29,20 @@ This avoids hardcoding stale assumptions.
 
 ## Core HTTP Domains
 
+### Messaging Platforms
+
+- `POST /api/channels/{channel}/webhook`: QQ raw-body Ed25519 / Telegram Secret Token authentication, not a user JWT. Durable acceptance precedes acknowledgement; unbound/unsupported events do not invoke the model.
+- `GET /api/channels`: current user's platform availability and bindings.
+- `POST /api/channels/pairings`: `{channel: registered_provider_id}` -> generated `ChannelPairing`, valid for 10 minutes. The provider must expose the authenticated Webhook contract; send its command in a verified bot private chat.
+- `DELETE /api/channels/{channel}/binding`: revoke current-user bindings even when the provider is disabled.
+- `GET /api/channels/deliveries`: current user's `ChannelDelivery[]`, without payloads or credentials.
+- `POST /api/channels/deliveries/{delivery_id}/retry`: retry a provider-rejected persisted reply only; foreign records return 404, ambiguous/non-retryable outcomes 409.
+
+Controls require the current Promethea user. Public types originate in
+`gateway/public_contracts.py`; the SDK exposes `client.channels`. The legacy
+`/api/user/channels/bind` cannot claim QQ/Telegram identities by raw ID.
+See [operational boundaries](channels/README.md).
+
 ### Chat and Conversation
 
 - `POST /api/chat`

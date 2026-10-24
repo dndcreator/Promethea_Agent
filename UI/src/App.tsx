@@ -23,6 +23,7 @@ import type { ChatAttachment, Task, WorkbenchReference } from './services/api'
 import { useAuth } from './store/AuthContext'
 import { useLanguage } from './store/LanguageContext'
 import { WorkbenchProvider } from './store/WorkbenchContext'
+import { useEnvironmentObservation } from './hooks/useEnvironmentObservation'
 
 export default function App() {
   const { user } = useAuth()
@@ -35,6 +36,7 @@ function Workspace() {
   const [view, setView] = useState<WorkspaceView>('chat')
   const [authOpen, setAuthOpen] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
+  useEnvironmentObservation(view === 'chat' && !sessionId ? 'home' : view, view === 'chat' && sessionId ? [{ kind: 'session', id: sessionId }] : [], !loading)
   const [chatKey, setChatKey] = useState(0)
   const [revision, setRevision] = useState(0)
   const [treeId, setTreeId] = useState<string | null>(null)

@@ -102,7 +102,7 @@ async def test_cognition_hint_is_checkpointed_used_and_consumed(tmp_path: Path):
 
     result = await service.run_once(user_id="u1", force=True)
 
-    assert result["ran"][0]["status"] == "completed"
+    assert result["ran"][0]["status"] == "completed", result
     assert observed["selected_hints"] == observed["reflected_hints"]
     assert observed["reflected_hints"][0]["basis_memory_ids"] == ["m1", "m2"]
     assert service.get_status(user_id="u1")["users"]["u1"]["cognition_hints"] == []

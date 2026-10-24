@@ -127,6 +127,8 @@ async def test_authoring_settings_use_existing_configuration_and_reject_http_fai
             return
         elif path == "user/profile":
             data = {"user_id": "test-user", "username": "Test"}
+        elif path == "channels":
+            data = []
         else:
             data = {}
         await route.fulfill(json=data)

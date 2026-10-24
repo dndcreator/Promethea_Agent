@@ -16,5 +16,6 @@ def test_metrics_collector_exposes_llm_token_fields_and_ui_aliases():
     assert stats["llm"]["avg_time_ms"] == 250
     assert stats["llm"]["average_latency_ms"] == 250
     assert stats["llm"]["average_first_token_ms"] == 80
-    assert stats["llm"]["estimated_cost"] > 0
+    assert stats["llm"]["estimated_cost"] is None
+    assert stats["cost"]["unpriced_calls"] == 1
     assert stats["cost"]["estimated_usd"] == stats["llm"]["estimated_cost"]

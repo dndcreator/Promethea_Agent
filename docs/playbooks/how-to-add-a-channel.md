@@ -1,179 +1,100 @@
-# Playbook: How to Add a Channel
+# Add A Channel
 
-This guide explains how to add a new input channel (e.g. Slack, Discord, WeChat, SMS) to Promethea without modifying the core pipeline.
+Use [QQ](../channels/qq.md), [Telegram](../channels/telegram.md) and
+[enterprise platforms](../channels/enterprise.md) to deploy existing
+plugins. This guide is for implementing another provider without changing Agent
+Core. The old illustrative `NormalizedMessage` interface does not exist; use the
+real contracts below.
 
----
+## 1. Provider Transport
 
-## Concepts
+Implement `channels.base.BaseChannel`, or subclass
+`channels.webhook_channel.WebhookChannel` for a signed HTTP bot. Existing working
+references are `channels/qq_channel.py` and `channels/telegram_channel.py`.
 
-A **channel** is any source of user messages. The channel adapter framework (`channels/`) normalizes every channel's input/output to the same `GatewayRequest` / `GatewayResponse` contract.
-
-The core pipeline never sees raw Slack messages or Telegram payloads — it only sees normalized `GatewayRequest` objects.
-
----
-
-## Step 1 — Create the adapter file
-
-```bash
-touch channels/adapters/slack_adapter.py
-```
-
-### Minimal implementation
+For the shared webhook transport, implement:
 
 ```python
-from __future__ import annotations
+def accept_webhook(self, headers, body: bytes):
+    # Verify the provider against the original bytes before accepting an event.
+    # Return (provider_ack, None) for verified, unsupported events.
+    ...
 
-from typing import Any, Dict, Optional
-
-from channels.base import ChannelAdapter, ChannelMetadata, NormalizedMessage
-
-
-class SlackAdapter(ChannelAdapter):
-    channel_id = "slack"
-    display_name = "Slack"
-
-    def normalize_identity(self, raw: Dict[str, Any]) -> Dict[str, str]:
-        """Extract user_id and session_id from the Slack event payload."""
-        return {
-            "user_id": raw["event"]["user"],
-            "session_id": f"slack_{raw['event']['channel']}",
-        }
-
-    def ingest_message(self, raw: Dict[str, Any]) -> NormalizedMessage:
-        identity = self.normalize_identity(raw)
-        return NormalizedMessage(
-            content=raw["event"]["text"],
-            user_id=identity["user_id"],
-            session_id=identity["session_id"],
-            channel_id=self.channel_id,
-            raw=raw,
-        )
-
-    def permission_check(self, identity: Dict[str, str], raw: Dict[str, Any]) -> bool:
-        # Return False to block the message (e.g. banned users)
-        return True
-
-    def emit_response(self, session_id: str, text: str, metadata: Optional[Dict] = None) -> None:
-        # Post to Slack using slack_sdk or requests
-        ...
-
-    def emit_stream_chunk(self, session_id: str, chunk: str) -> None:
-        # Most IM channels do not support streaming — just buffer and send when done
-        ...
+async def send_text(self, receiver_id, content, *, reply_to, sequence=1, **kwargs):
+    # Return success only after the provider confirms a message ID.
+    ...
 ```
 
----
+For query-authenticated/XML providers, override
+`accept_request(self, headers, body, query)` instead; `verify_webhook(self, query)`
+handles an optional GET verification handshake. Acknowledgements may be a JSON
+object or plaintext string; HTTP serialization remains at the existing route.
+These hooks only verify/normalize transport data, never dispatch Agent work.
+See `channels/wecom_channel.py`. Follow each provider's actual signature coverage;
+do not describe a timestamp-only signature as raw-body authentication.
 
-## Step 2 — Register the adapter
+A supported inbound event returns these bounded fields, not a raw provider body:
 
-Open `channels/adapters/__init__.py` (or `channels/adapter_registry.py`) and register:
+```json
+{
+  "message_id": "provider-stable-id",
+  "sender_id": "external-user-id",
+  "receiver_id": "provider-chat-id",
+  "scope": "private",
+  "content": "message text",
+  "reply_to": "original-provider-message-id"
+}
+```
+
+Set a non-secret, stable `account_id` that namespaces provider identities. Add
+typed operator settings in `channels/settings.py`, following root `.env` and
+nested `CHANNELS__...` conventions. Keep credentials out of plugin JSON, status,
+exceptions, public types and per-user model configuration. Use the provider's
+actual freshness/replay rules and structured error codes. Never retry an unknown
+outbound effect merely because an HTTP response was lost.
+
+## 2. Existing Plugin Discovery
+
+Create `extensions/<provider>/promethea.plugin.json` with `kind: "channel"` and a
+`plugin.py`. Use `extensions/qq` as the executable template:
 
 ```python
-from channels.adapters.slack_adapter import SlackAdapter
-
-def get_default_adapters():
-    return [
-        WebAdapter(),
-        HttpApiAdapter(),
-        TelegramAdapter(),
-        SlackAdapter(),   # ← add this
-    ]
+def register(api):
+    channel = MyProviderChannel(operator_settings)
+    api.register_channel("my_provider", channel)
 ```
 
----
+Bundled providers can extend the typed deployment profiles. Community plugins
+can own root-environment settings and use their normal `gateway_config.json`
+channel entry for admission, without modifying Core. Do not create another
+auto-loader, Agent loop or tool registry. Startup/shutdown must release HTTP
+sessions and any provider tasks.
+Declare hot-reload support truthfully; current bot credentials require restart.
 
-## Step 3 — Add the inbound route
+## 3. Protocol Projection And Verified Identity
 
-Create or modify the HTTP route that receives Slack events:
+`WebhookChannel.protocol_adapter()` reuses the current HTTP request projection
+with provider metadata; the delivery Runtime registers it on first use.
+Override it only for additional actual protocol needs, returning a
+`channels.adapter_framework.ChannelAdapter`. Metadata describes wired features,
+not every feature the provider offers. It is not webhook authentication.
 
-```python
-# gateway/http/routes/slack.py
+Use existing IdentityStore proof pairing. The typed API accepts a running
+registered provider, not a fixed QQ/Telegram list; raw namespaced ID claims are
+blocked. Bind under `provider:account_id`.
+Reuse the durable delivery ingress and existing Gateway chat/confirmation entry
+points, never accept a local user ID, session ID, approval flag or tool name from
+an untrusted callback. Group support needs explicit isolated ownership and member
+admission, not implicit access to a private user's memory.
 
-from fastapi import APIRouter, Request
-from channels.adapter_registry import get_adapter
+## 4. Tests And Documentation
 
-router = APIRouter(prefix="/channels/slack")
+- Verify raw-body tampering, missing/expired signatures, malformed and oversized input, bot loops and unsupported events.
+- Verify expiring proof pairing, cross-account isolation, group ownership and revocation before execution/sending.
+- Verify duplicate events, bounded admission, shutdown/restart, known rejection versus unknown delivery, and no model rerun on reply retry.
+- Drive a real Gateway/ConversationService/ActionService chain with a deterministic model fixture, including sensitive-tool confirmation.
+- Add the provider's real setup, callback registration, supported surfaces, credentials, limitations and acceptance checklist under `docs/channels/`.
 
-@router.post("/events")
-async def slack_events(request: Request):
-    raw = await request.json()
-    adapter = get_adapter("slack")
-    message = adapter.ingest_message(raw)
-    if not adapter.permission_check(message.identity, raw):
-        return {"ok": False, "reason": "forbidden"}
-
-    # Forward to gateway
-    from gateway.server import handle_channel_message
-    response = await handle_channel_message(message)
-    adapter.emit_response(message.session_id, response.text)
-    return {"ok": True}
-```
-
-Register the router in `gateway/http/router.py`:
-
-```python
-from gateway.http.routes.slack import router as slack_router
-app.include_router(slack_router)
-```
-
----
-
-## Step 4 — Handle the outbound response
-
-Promethea calls `adapter.emit_response(session_id, text)` after each turn.  
-Implement this to send the reply back to Slack:
-
-```python
-from slack_sdk import WebClient
-
-client = WebClient(token=os.environ["SLACK_BOT_TOKEN"])
-
-def emit_response(self, session_id: str, text: str, metadata=None):
-    channel_id = session_id.replace("slack_", "")
-    client.chat_postMessage(channel=channel_id, text=text)
-```
-
----
-
-## Step 5 — Add tests
-
-```python
-# tests/test_slack_adapter.py
-
-from channels.adapters.slack_adapter import SlackAdapter
-
-def test_ingest_message():
-    adapter = SlackAdapter()
-    raw = {"event": {"user": "U123", "channel": "C456", "text": "Hello"}}
-    msg = adapter.ingest_message(raw)
-    assert msg.user_id == "U123"
-    assert msg.session_id == "slack_C456"
-    assert msg.content == "Hello"
-    assert msg.channel_id == "slack"
-```
-
----
-
-## Checklist
-
-- [ ] Adapter file created in `channels/adapters/`
-- [ ] `channel_id` is unique and lowercase
-- [ ] `normalize_identity` returns `user_id` and `session_id`
-- [ ] `ingest_message` produces a `NormalizedMessage`
-- [ ] `emit_response` delivers the reply
-- [ ] Adapter registered in `adapter_registry.py`
-- [ ] HTTP route created and registered
-- [ ] Tests added for normalize_identity and ingest_message
-- [ ] PR description answers the six PR checklist questions
-
----
-
-## What you do NOT need to change
-
-- `gateway/conversation_pipeline.py`
-- `gateway/memory_service.py`
-- `gateway/capability_service.py`
-- `gateway/protocol.py`
-- Any memory backend
-
-The channel adapter is a normalization boundary. The core runtime is channel-agnostic.
+Provider payload parsing and admission are Runtime work, not a new LLM classifier.
+Model language understanding, Agent decisions, Memory and tool safety remain in
+their current services.

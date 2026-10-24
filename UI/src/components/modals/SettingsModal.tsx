@@ -7,6 +7,7 @@ import EnterpriseBrainPanel from './settings/EnterpriseBrainPanel'
 import PersonalWorkspacePanel from './settings/PersonalWorkspacePanel'
 import PluginCapabilitiesPanel from './settings/PluginCapabilitiesPanel'
 import PersonalAccountsPanel from './settings/PersonalAccountsPanel'
+import ChannelAccountsPanel from './settings/ChannelAccountsPanel'
 import SoulReadOnlyPanel from './settings/SoulReadOnlyPanel'
 import AvatarSettingsPanel from '../avatar/AvatarSettingsPanel'
 import FeatureSurface from '../FeatureSurface'
@@ -316,6 +317,8 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
               <PersonalAccountsPanel status={secrets?.personal_accounts} draft={secretDraft} busy={saving || secretsError} onChange={(key, value) => setSecretDraft((current) => ({ ...current, [key]: value }))} onDisconnect={(keys) => void handleDisconnect(keys)} />
               <button type="button" disabled={saving || secretsError} onClick={handleSaveSecrets} className="self-end px-4 py-2 text-sm font-medium text-white bg-slate-800 hover:bg-slate-900 rounded-lg transition-colors">{t('保存敏感配置', 'Save Sensitive Settings')}</button>
             </section>
+
+            <ChannelAccountsPanel />
 
             <section className="flex flex-col gap-4 mt-4 pt-4 border-t border-black/5">
               <h3 className="font-semibold text-text-strong">{t('个性化', 'Personalization')}</h3>

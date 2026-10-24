@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import secrets
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
@@ -43,8 +46,19 @@ class IdentityStore:
                     UNIQUE (channel, account_id),
                     FOREIGN KEY (user_id) REFERENCES identities(user_id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS channel_pairings (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    expires REAL NOT NULL,
+                    account_id TEXT,
+                    UNIQUE(user_id, channel),
+                    FOREIGN KEY (user_id) REFERENCES identities(user_id) ON DELETE CASCADE
+                );
                 """
             )
+            if "account_id" not in {row[1] for row in connection.execute("PRAGMA table_info(channel_pairings)")}:
+                connection.execute("ALTER TABLE channel_pairings ADD COLUMN account_id TEXT")
 
     @staticmethod
     def _raw_user_id(value: Any) -> str:
@@ -183,6 +197,35 @@ class IdentityStore:
                 (self._raw_user_id(user_id),),
             ).fetchall()
         return {str(row["channel"]): str(row["account_id"]) for row in rows}
+
+    def issue_channel_pairing(self, user_id: str, channel: str) -> dict:
+        token = secrets.token_urlsafe(24)
+        expires = time.time() + 600
+        with self._connect() as connection:
+            connection.execute("DELETE FROM channel_pairings WHERE expires < ?", (time.time(),))
+            connection.execute("INSERT INTO channel_pairings(token_hash,user_id,channel,expires) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, channel) DO UPDATE SET token_hash=excluded.token_hash, expires=excluded.expires, account_id=NULL", (hashlib.sha256(token.encode()).hexdigest(), self._raw_user_id(user_id), channel, expires))
+        return {"command": f"/bind {token}", "expires_at": expires}
+
+    def consume_channel_pairing(self, token: str, channel: str, account_id: str) -> Optional[str]:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT user_id, account_id FROM channel_pairings WHERE token_hash=? AND channel=? AND expires>?", (hashlib.sha256(token.encode()).hexdigest(), channel, time.time())).fetchone()
+            if row is None:
+                return None
+            if row["account_id"] is not None:
+                bound = connection.execute("SELECT 1 FROM channel_bindings WHERE user_id=? AND channel=? AND account_id=?", (row["user_id"], channel, account_id)).fetchone()
+                return str(row["user_id"]) if row["account_id"] == account_id and bound else None
+            try:
+                connection.execute("INSERT INTO channel_bindings VALUES (?, ?, ?) ON CONFLICT(user_id, channel) DO UPDATE SET account_id=excluded.account_id", (row["user_id"], channel, account_id))
+            except sqlite3.IntegrityError:
+                return None
+            connection.execute("UPDATE channel_pairings SET account_id=? WHERE token_hash=?", (account_id, hashlib.sha256(token.encode()).hexdigest()))
+            return str(row["user_id"])
+
+    def unbind_channel(self, user_id: str, channel: str) -> bool:
+        with self._connect() as connection:
+            connection.execute("DELETE FROM channel_pairings WHERE user_id=? AND channel=?", (self._raw_user_id(user_id), channel))
+            return connection.execute("DELETE FROM channel_bindings WHERE user_id=? AND channel=?", (self._raw_user_id(user_id), channel)).rowcount > 0
 
     def get_by_channel(self, channel: str, account_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as connection:

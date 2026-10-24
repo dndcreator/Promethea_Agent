@@ -90,6 +90,7 @@ def _build_workspace_payload(*, gateway_server: Any, user_id: str) -> Dict[str, 
         "workflows": workflow_engine.export_user_state(user_id=user_id) if workflow_engine else {},
         "tasks": task_service.export_user_state(user_id=user_id) if task_service else {},
         "ambient": gateway_server.ambient_service.store.export_user_state(user_id) if getattr(gateway_server, "ambient_service", None) else {},
+        "self_model": gateway_server.self_model_service.state.export_user_state(user_id) if getattr(gateway_server, "self_model_service", None) else {},
         "reasoning_history": reasoning_service.tree_history.export_user_history(user_id=user_id) if reasoning_service else [],
         "moirai_learning": learning.export_user_state(user_id) if learning else {},
         "canvas_apps": export_canvas_library(Path(library.root_path)) if library else [],
@@ -102,9 +103,17 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
     try:
         project_rows = ProjectStore.validate_records(scoped["projects"]) if "projects" in scoped else None
         if "ambient" in scoped:
-            from gateway.ambient_state import Situation
+            from gateway.ambient_state import AmbientControl
             for row in scoped["ambient"].get("situations", []):
-                Situation.model_validate(row)
+                AmbientControl.model_validate({key: value for key, value in row.items() if key not in {"attention", "questions", "reflection", "feedback"}})
+                if scoped["ambient"].get("version", 2) < 3:
+                    from gateway.self_model_state import WorkingSituation
+                    WorkingSituation(attention=row.get("attention", []), questions=row.get("questions", []), interpretation=row.get("reflection", ""), feedback=row.get("feedback", []))
+        if scoped.get("self_model"):
+            from gateway.self_model_state import WorkingSituation
+            if scoped["self_model"].get("version") != 1:
+                raise ValueError("unsupported self-model transfer version")
+            WorkingSituation.model_validate(scoped["self_model"]["situation"])
     except ValueError as exc:
         raise HTTPException(422, detail=str(exc)) from exc
     message_manager = getattr(gateway_server, "message_manager", None)
@@ -114,6 +123,11 @@ async def _restore_workspace_payload(*, gateway_server: Any, config_service: Any
     task_service = getattr(gateway_server, "task_service", None)
     reasoning_service = getattr(gateway_server, "reasoning_service", None)
     result: Dict[str, Any] = {"status": "success", "user_id": user_id, "mode": "merge" if merge else "replace", "applied": {}}
+    self_model = getattr(gateway_server, "self_model_service", None)
+    if self_model is not None and scoped.get("self_model"):
+        self_model.state.import_user_state(user_id, scoped["self_model"], merge=merge)
+        self_model.environment.purge(user_id)
+        result["applied"]["self_model"] = {"success": True}
     ambient = getattr(gateway_server, "ambient_service", None)
     if ambient and "ambient" in scoped:
         for scene in list(ambient.store.scenes.values()):

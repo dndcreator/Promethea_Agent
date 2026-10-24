@@ -4,6 +4,7 @@ import { listUserFiles, readApiResponse, uploadUserFile } from '../../services/a
 import type { ChatAttachment } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
 import FeatureSurface from '../FeatureSurface'
+import { useEnvironmentObservation } from '../../hooks/useEnvironmentObservation'
 
 type FileRecord = {
   file_id: string
@@ -62,6 +63,7 @@ export default function FilesModal({ sessionId, onClose, onAttach, embedded = fa
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const selected = files.find((file) => file.file_id === selectedId)
+  useEnvironmentObservation('files', selected ? [{ kind: 'file', id: selected.file_id }] : [])
 
   const load = async (nextQuery = query) => {
     const epoch = ++requestEpoch.current

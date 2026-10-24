@@ -27,6 +27,8 @@ export default function MetricsModal({ onClose, embedded = false }: { onClose: (
   const totalCalls = llm.total_calls ?? llm.calls
   const averageLatency = llm.average_latency_ms ?? llm.avg_time_ms
   const estimatedCost = llm.estimated_cost ?? cost.estimated_usd
+  const pricingCoverage = typeof cost.priced_calls === 'number' && typeof cost.unpriced_calls === 'number'
+    ? ` · ${t('已计价', 'Priced')}: ${cost.priced_calls}/${cost.priced_calls + cost.unpriced_calls}` : ''
   const totalRecalls = memory.total_recalls ?? memory.recalls
   const averageRecall = memory.average_recall_time_ms ?? memory.avg_time_ms
   const messagesTotal = metrics.chat?.messages_total ?? sessions.messages
@@ -42,7 +44,7 @@ export default function MetricsModal({ onClose, embedded = false }: { onClose: (
         </div>
         {loading ? <div className="empty-state">{t('正在加载', 'Loading')}</div> : error ? <div role="alert" className="page-error"><span>{error}</span><button type="button" aria-label={t('重试', 'Retry')} onClick={() => setRevision((value) => value + 1)}><RefreshCw size={15} /></button></div> : <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
           <MetricCard label={t('Token 用量', 'Token Usage')} value={numeric(llm.total_tokens)} sub={`${t('输入', 'In')}: ${numeric(llm.prompt_tokens)} / ${t('输出', 'Out')}: ${numeric(llm.completion_tokens)}`} />
-          <MetricCard label={t('估算成本', 'Estimated Cost')} value={typeof estimatedCost === 'number' ? `$${numeric(estimatedCost, 4)}` : '-'} sub={`${t('模型调用', 'Model calls')}: ${numeric(totalCalls)} · ${t('平均延迟', 'Average')}: ${numeric(averageLatency)} ms`} />
+          <MetricCard label={t('估算成本', 'Estimated Cost')} value={typeof estimatedCost === 'number' ? `$${numeric(estimatedCost, 6)}` : t('未知', 'Unknown')} sub={`${t('模型调用', 'Model calls')}: ${numeric(totalCalls)}${pricingCoverage} · ${t('平均延迟', 'Average')}: ${numeric(averageLatency)} ms`} />
           <MetricCard label={t('记忆召回', 'Memory Recalls')} value={numeric(totalRecalls)} sub={`${t('平均耗时', 'Average')}: ${numeric(averageRecall)} ms · ${t('召回条数', 'Items')}: ${numeric(memory.items_recalled)}`} />
           <MetricCard label={t('会话 / 消息', 'Sessions / Messages')} value={`${numeric(personal.sessions_current)} / ${numeric(messagesTotal)}`} sub={`${t('运行时间', 'Uptime')}: ${numeric(uptimeSeconds)} s`} />
         </div>}

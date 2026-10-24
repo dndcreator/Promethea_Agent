@@ -165,6 +165,8 @@ async def bind_channel(
     request: ChannelBindRequest,
     user_id: str = Depends(get_current_user_id),
 ):
+    if ":" in request.channel or request.channel.lower() in {"qq", "telegram"}:
+        raise HTTPException(422, detail="Use verified channel pairing instead of claiming an account id")
     success = user_manager.bind_channel_account(user_id, request.channel, request.account_id)
     if not success:
         raise HTTPException(status_code=500, detail="Bind failed")
@@ -205,6 +207,13 @@ async def delete_user_account(
                     ambient.configure(user_id, None, scene.settings.model_copy(update={"enabled": False}))
                     ambient.runtime.cancel_task(task_id=scene.task_id, user_id=user_id, reason="user_deleted")
             ambient.store.purge_user_state(user_id)
+        self_model = getattr(gateway, "self_model_service", None)
+        if self_model is not None:
+            self_model.state.purge_user_state(user_id)
+            self_model.environment.purge(user_id)
+        channel_delivery = getattr(gateway, "channel_delivery", None)
+        if channel_delivery is not None:
+            channel_delivery.store.purge(user_id)
         learning = getattr(getattr(getattr(gateway, "reasoning_service", None), "template_memory", None), "learning", None)
         if learning is not None:
             await learning.interrupt(user_id)

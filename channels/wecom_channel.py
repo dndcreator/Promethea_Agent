@@ -1,264 +1,86 @@
-﻿"""WeCom channel adapter."""
+"""WeCom self-built application: encrypted callbacks and application messages."""
+import asyncio
+import base64
+import hashlib
+import hmac
+import struct
 import time
-from typing import Dict, Any, Optional
-from datetime import datetime
-import uuid
-import aiohttp
-import json
 
-from .base import BaseChannel, ChannelType, MessageType, Message, ChannelConfig
+from .base import ChannelType
+from .webhook_channel import ProviderRejected, WebhookChannel
+from .webhook_security import decrypt_cbc, fresh_timestamp, xml_fields
 
 
-class WeComChannel(BaseChannel):
-    """WeCom adapter supporting group robot and application API sends."""
-    
-    def __init__(self, config: ChannelConfig):
-        super().__init__("wecom", ChannelType.WECOM, config)
-        
-        self.corpid = config.extra.get("corpid")
-        self.corpsecret = config.app_secret
-        self.agentid = config.extra.get("agentid")
-        self.webhook_url = config.webhook_url
-        
-        self.api_base = config.api_endpoint or "https://qyapi.weixin.qq.com/cgi-bin"
-        
-        self.access_token = None
-        self.token_expires_at = 0
-        
-        self.session: Optional[aiohttp.ClientSession] = None
-    
-    async def connect(self) -> bool:
-        """Create the HTTP session and optionally fetch an access token."""
-        try:
-            self.session = aiohttp.ClientSession()
-            
-            if self.corpid and self.corpsecret:
-                await self._refresh_access_token()
-            
-            self.is_connected = True
-            self.logger.info("WeCom channel connected")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to connect WeCom: {e}")
-            return False
-    
-    async def disconnect(self) -> bool:
-        """Close the HTTP session and mark WeCom disconnected."""
-        if self.session:
-            await self.session.close()
-            self.session = None
-        
-        self.is_connected = False
-        self.logger.info("WeCom channel disconnected")
-        return True
-    
-    async def _refresh_access_token(self):
-        """Refresh WeCom API access token when API mode is used."""
-        url = f"{self.api_base}/gettoken"
-        params = {
-            "corpid": self.corpid,
-            "corpsecret": self.corpsecret
-        }
-        
-        async with self.session.get(url, params=params) as response:
-            data = await response.json()
-            if data.get("errcode") == 0:
-                self.access_token = data.get("access_token")
-                self.token_expires_at = time.time() + data.get("expires_in", 7200) - 300
-                self.logger.info("WeCom access token refreshed")
-            else:
-                raise Exception(f"Failed to get access token: {data}")
-    
-    async def _ensure_token(self):
-        """Refresh the API token when missing or near expiry."""
-        if not self.access_token or time.time() >= self.token_expires_at:
-            await self._refresh_access_token()
-    
-    async def send_message(
-        self,
-        receiver_id: str,  # userid, partyid, tagid
-        content: str,
-        message_type: MessageType = MessageType.TEXT,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Channel adapter operation."""
-        try:
-            if self.webhook_url and kwargs.get("use_webhook", True):
-                return await self._send_webhook_message(content, message_type, **kwargs)
-            
-            else:
-                await self._ensure_token()
-                return await self._send_api_message(receiver_id, content, message_type, **kwargs)
-                
-        except Exception as e:
-            self.logger.error(f"Error sending WeCom message: {e}")
-            return {"success": False, "error": str(e)}
-    
-    async def _send_webhook_message(
-        self,
-        content: str,
-        message_type: MessageType,
-        **kwargs
-    ) -> Dict[str, Any]:
-        if not self.webhook_url:
-            return {"success": False, "error": "Webhook URL not configured"}
-        
-        if message_type == MessageType.TEXT:
-            payload = {
-                "msgtype": "text",
-                "text": {
-                    "content": content
-                }
-            }
-            
-            mentioned_list = kwargs.get("mentioned_list", [])
-            mentioned_mobile_list = kwargs.get("mentioned_mobile_list", [])
-            if mentioned_list or mentioned_mobile_list:
-                payload["text"]["mentioned_list"] = mentioned_list
-                payload["text"]["mentioned_mobile_list"] = mentioned_mobile_list
-        
-        elif message_type == MessageType.MARKDOWN:
-            payload = {
-                "msgtype": "markdown",
-                "markdown": {
-                    "content": content
-                }
-            }
-        else:
-            payload = {
-                "msgtype": "text",
-                "text": {"content": content}
-            }
-        
-        async with self.session.post(self.webhook_url, json=payload) as response:
-            result = await response.json()
-            
-            return {
-                "success": result.get("errcode") == 0,
-                "message_id": str(uuid.uuid4()),
-                "result": result
-            }
-    
-    async def _send_api_message(
-        self,
-        receiver_id: str,
-        content: str,
-        message_type: MessageType,
-        **kwargs
-    ) -> Dict[str, Any]:
-        """Channel adapter operation."""
-        url = f"{self.api_base}/message/send"
-        params = {"access_token": self.access_token}
-        
-        if message_type == MessageType.TEXT:
-            msg_data = {
-                "content": content
-            }
-            msgtype = "text"
-        elif message_type == MessageType.MARKDOWN:
-            msg_data = {
-                "content": content
-            }
-            msgtype = "markdown"
-        else:
-            msg_data = {
-                "content": content
-            }
-            msgtype = "text"
-        
-        
-        payload = {
-            "touser": touser,
-            "toparty": toparty,
-            "totag": totag,
-            "msgtype": msgtype,
-            "agentid": self.agentid,
-            msgtype: msg_data
-        }
-        
-        async with self.session.post(url, params=params, json=payload) as response:
-            result = await response.json()
-            
-            return {
-                "success": result.get("errcode") == 0,
-                "message_id": result.get("msgid"),
-                "result": result
-            }
-    
-    async def send_card(
-        self,
-        receiver_id: str,
-        card_data: Dict[str, Any],
-        **kwargs
-    ) -> Dict[str, Any]:
-        try:
-            await self._ensure_token()
-            
-            url = f"{self.api_base}/message/send"
-            params = {"access_token": self.access_token}
-            
-            payload = {
-                "touser": kwargs.get("touser", receiver_id),
-                "toparty": kwargs.get("toparty", ""),
-                "totag": kwargs.get("totag", ""),
-                "msgtype": "textcard",
-                "agentid": self.agentid,
-                "textcard": {
-                    "title": card_data.get("title", "Message"),
-                    "description": card_data.get("description", ""),
-                    "url": card_data.get("url", ""),
-                    "btntxt": card_data.get("btntxt", "Details")
-                }
-            }
-            
-            async with self.session.post(url, params=params, json=payload) as response:
-                result = await response.json()
-                
-                return {
-                    "success": result.get("errcode") == 0,
-                    "message_id": result.get("msgid"),
-                    "result": result
-                }
-                
-        except Exception as e:
-            self.logger.error(f"Error sending WeCom card: {e}")
-            return {"success": False, "error": str(e)}
-    
-    async def get_user_info(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Channel adapter operation."""
-        try:
-            await self._ensure_token()
-            
-            url = f"{self.api_base}/user/get"
-            params = {
-                "access_token": self.access_token,
-                "userid": user_id
-            }
-            
-            async with self.session.get(url, params=params) as response:
-                result = await response.json()
-                
-                if result.get("errcode") == 0:
-                    return result
-                else:
-                    self.logger.error(f"Failed to get user info: {result}")
-                    return None
-                    
-        except Exception as e:
-            self.logger.error(f"Error getting WeCom user info: {e}")
-            return None
-    
-    async def validate_config(self) -> bool:
-        """Channel adapter operation."""
-        if not self.config.enabled:
-            return True
-        
-        has_webhook = bool(self.webhook_url)
-        has_app = bool(self.corpid and self.corpsecret and self.agentid)
-        
-        if not (has_webhook or has_app):
-            self.logger.error("WeCom config missing: need webhook_url or (corpid+corpsecret+agentid)")
-            return False
-        
-        return True
+class WeComChannel(WebhookChannel):
+    api_base = "https://qyapi.weixin.qq.com/cgi-bin"
+
+    def __init__(self, settings):
+        super().__init__("wecom", ChannelType.WECOM, settings)
+        self.account_id = f"{settings.corp_id}:{settings.agent_id}"
+        self._token, self._expires = "", 0
+        self._token_lock = asyncio.Lock()
+
+    def _decrypt(self, encrypted, query):
+        timestamp, nonce = query.get("timestamp", ""), query.get("nonce", "")
+        fresh_timestamp(timestamp)
+        if not nonce or len(nonce) > 256:
+            raise PermissionError("Invalid WeCom nonce")
+        expected = hashlib.sha1("".join(sorted((self.settings.callback_token.get_secret_value(), timestamp, nonce, encrypted))).encode()).hexdigest()
+        if not hmac.compare_digest(expected, query.get("msg_signature", "")):
+            raise PermissionError("Invalid WeCom signature")
+        key = base64.b64decode(self.settings.encoding_aes_key.get_secret_value() + "=", validate=True)
+        plain = decrypt_cbc(base64.b64decode(encrypted, validate=True), key, key[:16], padding_bits=256)
+        if len(plain) < 20:
+            raise PermissionError("Invalid WeCom envelope")
+        size = struct.unpack("!I", plain[16:20])[0]
+        if size > len(plain) - 20 or plain[20 + size:] != self.settings.corp_id.encode():
+            raise PermissionError("Wrong WeCom enterprise")
+        return plain[20:20 + size]
+
+    def verify_webhook(self, query):
+        encrypted = query.get("echostr", "")
+        if not isinstance(encrypted, str) or not 1 <= len(encrypted) <= 4096:
+            raise ValueError("Invalid WeCom challenge")
+        return self._decrypt(encrypted, query).decode("utf-8")
+
+    def accept_request(self, headers, body, query):
+        outer = xml_fields(body)
+        data = xml_fields(self._decrypt(outer["Encrypt"], query))
+        if data.get("ToUserName") != self.settings.corp_id or data.get("AgentID") != str(self.settings.agent_id):
+            raise PermissionError("Wrong WeCom application")
+        if data.get("MsgType") != "text":
+            return "success", None
+        fresh_timestamp(data.get("CreateTime"), max_age=86400)
+        text = data.get("Content", "").strip()
+        if not text:
+            return "success", None
+        sender = data["FromUserName"]
+        return "success", {"message_id": data["MsgId"], "sender_id": sender, "receiver_id": sender,
+                           "scope": "private", "content": text, "reply_to": data["MsgId"]}
+
+    async def access_token(self):
+        async with self._token_lock:
+            if time.time() >= self._expires:
+                result = await self.json_request("GET", self.api_base + "/gettoken", params={"corpid": self.settings.corp_id, "corpsecret": self.settings.app_secret.get_secret_value()})
+                if result.get("errcode", 0) != 0:
+                    raise ProviderRejected(result["errcode"])
+                token, expire = result.get("access_token"), result.get("expires_in")
+                if not isinstance(token, str) or not token or not isinstance(expire, int) or expire <= 60:
+                    raise RuntimeError("WeCom did not confirm an access token")
+                self._token, self._expires = token, time.time() + expire - 60
+            return self._token
+
+    async def send_text(self, receiver_id, content, *, scope="private", **kwargs):
+        if scope != "private" or receiver_id == "@all" or "|" in receiver_id:
+            raise ProviderRejected("INVALID_PRIVATE_RECIPIENT")
+        token = await self.access_token()
+        result = await self.json_request("POST", self.api_base + "/message/send", params={"access_token": token}, json={"touser": receiver_id, "agentid": self.settings.agent_id, "msgtype": "text", "text": {"content": content}})
+        if "errcode" not in result:
+            raise RuntimeError("WeCom did not confirm delivery")
+        if result["errcode"] != 0:
+            raise ProviderRejected(result["errcode"])
+        if result.get("invaliduser") or result.get("unlicenseduser"):
+            raise ProviderRejected("RECIPIENT_REJECTED")
+        if not result.get("msgid"):
+            raise RuntimeError("WeCom did not confirm delivery")
+        return {"success": True, "message_id": str(result["msgid"])}

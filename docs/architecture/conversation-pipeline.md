@@ -110,12 +110,20 @@ midstream interruption is recorded as a distinct model I/O failure.
 - `CapabilityService`, `ToolRegistry`, and `ToolPolicy` own capability truth, authorization, and execution.
 - `MemoryService`, `ReasoningService`, and Workflow services retain their existing business logic.
 - `SelfModelService` reads their public state projections and adds one bounded context to `RunContext`; it does not own or mutate their state.
+- Its Global context combines governed cognition and identity provenance; its Situational context combines persistent working understanding, source revisions, current execution, recent event references and advisory UI context. Working understanding is personal-space scoped and is not a sliding transcript truncation or a second truth store.
 - The fixed control-loop budget limits recursion; it does not interpret user language.
 - `RunContext` identity fields are propagated into stage and tool events.
 
 Passive Self Model context uses deterministic high-precision Memory search and
 does not call the LLM extractor. Complex decomposition and reduction are only
 available through explicit active cognition recall.
+
+SelfModel owns revisioned attention, unresolved questions and interpretation in
+`.runtime/self-model/state.json`; its observation and UI revisions do not invalidate
+an otherwise current cognitive edit. `cognition.context` reads this projection;
+`cognition.update_situation` uses the cognitive revision. No background extractor
+or extra model loop is introduced. Ambient schedules the existing execution chain
+and consumes semantic interaction events; it does not maintain another mind.
 
 ## Reference Boundaries
 

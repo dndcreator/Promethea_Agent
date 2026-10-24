@@ -14,6 +14,8 @@ test('canvas state and lifecycle requests use owner-scoped existing HTTP transpo
   const state = await client.canvas.setState(environment, { expected_revision: 0, value: { count: 1 } })
   await client.canvas.retain(environment)
   await client.canvas.remove(environment)
+  await client.canvas.semantics(environment)
+  await client.canvas.interact(environment, { component_id: 'count', operation: 'set', value: 3, expected_revision: 1, definition_revision: '0'.repeat(64) })
   assert.equal(state.value.count, 1)
   assert.equal(calls[0].url, 'http://localhost:8000/api/canvas/session%201/env1/state')
   assert.equal(calls[1].init.method, 'PUT')
@@ -21,6 +23,48 @@ test('canvas state and lifecycle requests use owner-scoped existing HTTP transpo
   assert.equal(new Headers(calls[1].init.headers).get('Authorization'), 'Bearer private')
   assert.equal(calls[2].init.method, 'POST')
   assert.equal(calls[3].init.method, 'DELETE')
+  assert.equal(calls[4].url, 'http://localhost:8000/api/canvas/session%201/env1/semantics')
+  assert.equal(calls[5].url, 'http://localhost:8000/api/canvas/session%201/env1/interact')
+  assert.deepEqual(JSON.parse(calls[5].init.body), { component_id: 'count', operation: 'set', value: 3, expected_revision: 1, definition_revision: '0'.repeat(64) })
+})
+
+test('canvas state watch delivers newer Runtime state and stops on disconnect', async () => {
+  let peer, tick
+  let revision = 0
+  let calls = 0
+  const originalDocument = globalThis.document
+  const originalInterval = globalThis.setInterval
+  const originalClear = globalThis.clearInterval
+  globalThis.document = { visibilityState: 'visible' }
+  globalThis.setInterval = (callback) => { tick = callback; return 123 }
+  let cleared = false
+  globalThis.clearInterval = (id) => { assert.equal(id, 123); cleared = true }
+  const client = { getState: async () => { calls++; return { revision, value: { count: revision } } } }
+  const disconnect = connectCanvasFrame({ contentWindow: { postMessage: (_data, _origin, ports) => { peer = ports[0] } } }, client, environment)
+  const receive = () => new Promise((resolve) => { peer.onmessage = ({data}) => resolve(data) })
+  try {
+    let response = receive()
+    peer.postMessage({ id: 'watch', method: 'state.watch' })
+    assert.equal((await response).result.revision, 0)
+    revision = 2
+    response = receive()
+    tick()
+    assert.deepEqual(await response, { event: 'state.changed', state: { revision: 2, value: { count: 2 } } })
+    globalThis.document.visibilityState = 'hidden'
+    const before = calls
+    tick()
+    assert.equal(calls, before)
+    disconnect()
+    assert.equal(cleared, true)
+    tick()
+    assert.equal(calls, before)
+  } finally {
+    disconnect()
+    peer.close()
+    globalThis.document = originalDocument
+    globalThis.setInterval = originalInterval
+    globalThis.clearInterval = originalClear
+  }
 })
 
 test('opaque canvas bridge exposes app state, not arbitrary Runtime execution', async () => {

@@ -79,6 +79,8 @@ class EnvironmentController(ComputerController):
             "remove": self._remove,
             "state_get": self._state_get,
             "state_set": self._state_set,
+            "semantics": self._semantics,
+            "interact": self._interact,
             "report_error": self._report_error,
         }
         handler = handlers.get(str(action or "").strip().lower())
@@ -103,6 +105,8 @@ class EnvironmentController(ComputerController):
             {"name": "register", "params": ["name", "kind?", "root", "entrypoint", "port?"]},
             {"name": "list", "params": []},
             {"name": "get", "params": ["environment_id"]},
+            {"name": "semantics", "params": ["environment_id"]},
+            {"name": "interact", "params": ["environment_id", "component_id", "operation", "expected_revision", "definition_revision", "value?"]},
             {"name": "launch", "params": ["environment_id", "command?", "expected_revision?"]},
             {"name": "stop", "params": ["environment_id"]},
             {"name": "remove", "params": ["environment_id"]},
@@ -266,7 +270,41 @@ class EnvironmentController(ComputerController):
             else:
                 row["app_state"] = previous
             raise
+        changed = sorted(key for key in set(current["value"]) | set(value) if current["value"].get(key) != value.get(key) or (key in current["value"]) != (key in value))
+        if changed:
+            self._lifecycle_events.append({"action": "app_state_changed", "environment_id": row["environment_id"], "state_revision": state["revision"], "previous_revision": current["revision"], "changed_fields": changed[:64], "changed_fields_omitted": max(0, len(changed) - 64)})
         return json.loads(json.dumps(state))
+
+    def _semantic_source(self, environment_id):
+        from .canvas_document import is_redirected_path
+        row = self._require(environment_id)
+        if row["kind"] != "static":
+            raise ValueError("process applications have no packaged semantic document")
+        root = self.workspace_root / row["root"]
+        if is_redirected_path(root):
+            raise ValueError("app root must not redirect through a link")
+        root = root.resolve()
+        root.relative_to(self.workspace_root)
+        entry = root / row["entrypoint"]
+        entry.resolve().relative_to(root)
+        if is_redirected_path(entry) or not entry.is_file() or entry.stat().st_size > 1_000_000:
+            raise ValueError("invalid app semantic source")
+        return entry.read_text(encoding="utf-8")
+
+    async def _semantics(self, params):
+        from .canvas_semantics import snapshot
+        identity = str(params.get("environment_id") or "")
+        return snapshot(self._semantic_source(identity), await self._state_get(params))
+
+    async def _interact(self, params):
+        from .canvas_semantics import interact
+        state = await self._state_get(params)
+        if params.get("expected_revision") != state["revision"]:
+            raise ValueError("canvas state revision conflict; inspect before acting")
+        value = interact(self._semantic_source(str(params.get("environment_id") or "")), state,
+                         component_id=params.get("component_id"), operation=params.get("operation"),
+                         value=params.get("value"), definition_revision=params.get("definition_revision"))
+        return await self._state_set({**params, "value": value})
 
     async def _report_error(self, params: Dict[str, Any]) -> Dict[str, Any]:
         row = self._require(str(params.get("environment_id") or ""))

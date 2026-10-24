@@ -307,6 +307,8 @@ class SelfModelRecallConfig(BaseSettings):
 
 class SelfModelConfig(BaseSettings):
     recall: SelfModelRecallConfig = Field(default_factory=SelfModelRecallConfig)
+    environment_ttl_s: int = Field(default=60, ge=20, le=300)
+    observation_chars: int = Field(default=3200, ge=1200, le=12000)
 
 
 class OrgBrainConfig(BaseSettings):

@@ -8,6 +8,20 @@ from .surface_discovery import collect_http_surface_from_routes
 def _core_contracts() -> List[Dict[str, Any]]:
     return [
         {
+            "id": "channels.webhook", "path": "/api/channels/{channel}/webhook", "method": "POST",
+            "domain": "channels", "stability": "stable", "auth_required": True,
+            "auth_scheme": "provider_signature_or_secret_header_not_user_jwt",
+            "request": {"body": "provider-specific raw payload"},
+            "response": {"acknowledgement": "provider-specific; durable receipt before acknowledgement"},
+        },
+        {
+            "id": "channels.webhook.verify", "path": "/api/channels/{channel}/webhook", "method": "GET",
+            "domain": "channels", "stability": "stable", "auth_required": True,
+            "auth_scheme": "provider_signed_encrypted_challenge_not_user_jwt",
+            "request": {"query": "provider-specific URL verification"},
+            "response": {"body": "verified plaintext challenge; no Agent dispatch"},
+        },
+        {
             "id": "chat.turn",
             "path": "/api/chat",
             "method": "POST",
@@ -227,6 +241,8 @@ def _core_contracts() -> List[Dict[str, Any]]:
 
 
 def _infer_domain(path: str) -> str:
+    if path.startswith("/api/channels"):
+        return "channels"
     if path.startswith("/api/chat") or path.startswith("/api/followup") or path.startswith("/api/sessions"):
         return "conversation"
     if path.startswith("/api/config"):

@@ -82,6 +82,11 @@ Before exposing service:
 
 ## 7. Operational Notes
 
+Messaging bots use the existing HTTP server, not the Gateway WebSocket port.
+See [Messaging Platforms](channels/README.md) for signed callbacks, verified
+pairing, single-process locking, retention and uncertain-send recovery. Do not
+expose all administrative APIs merely to receive a bot callback.
+
 - Corrupt session snapshots are now quarantined by session storage loader.
 - Kernel scheduler (local recurring task loop) controls:
   - `POST /api/automation/scheduler/run-once`

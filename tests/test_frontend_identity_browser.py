@@ -59,6 +59,8 @@ async def test_sensitive_configuration_http_failure_keeps_draft_and_shows_failur
             async def api(route):
                 if route.request.method == "POST" and "/api/config/secrets" in route.request.url:
                     await route.fulfill(status=500, json={"error": "save failed"})
+                elif "/api/channels" in route.request.url:
+                    await route.fulfill(json=[])
                 else:
                     await route.fulfill(json={"config": {}, "secrets": {}})
 

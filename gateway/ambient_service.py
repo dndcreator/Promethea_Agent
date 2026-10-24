@@ -26,17 +26,20 @@ ACTIVE = {"pending", "running", "paused", "waiting_human", "waiting_user"}
 
 
 class AmbientService:
-    """Own working situation and initiative, never task/tool/memory truth."""
+    """Own proactive admission and delivery, never cognition or domain truth."""
 
     def __init__(self, *, conversation, task_runtime, task_service, storage_path=None):
         self.conversation, self.runtime, self.tasks = conversation, task_runtime, task_service
-        self.store = AmbientStore(storage_path or Path(__file__).resolve().parents[1] / ".runtime" / "ambient" / "state.json")
+        self.self_model = conversation.self_model_service
+        if self.self_model is None:
+            raise ValueError("Ambient requires the existing SelfModelService")
+        self.store = AmbientStore(storage_path or Path(__file__).resolve().parents[1] / ".runtime" / "ambient" / "state.json", cognition_store=self.self_model.state)
         emitter = conversation.event_emitter
         self.event_log = getattr(emitter, "event_log", None)
         if self.event_log:
             self.event_log.ensure_consumer("ambient.v1", start_at_tail=True)
         if emitter:
-            for event in (EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED):
+            for event in (EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED, EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED):
                 emitter.on(event, self._observe)
 
     def _config(self, user):
@@ -129,12 +132,13 @@ class AmbientService:
         elif status == "waiting_user":
             status = "idle"
         usage = self.store.usage.get(user, {})
+        cognition = self.self_model.state.get(user)
         if status == "idle" and usage.get("day") == datetime.now(timezone.utc).date().isoformat() and usage.get("cycles", 0) >= config.ambient.daily_cycles:
             status = "budget_exhausted"
         return AmbientState(
             session_id=scene.session_id or None, user_id=user, available=config.ambient.enabled, settings=scene.settings,
             revision=scene.revision, status=status, task_id=scene.task_id,
-            attention=scene.attention, questions=scene.questions, reflection=scene.reflection,
+            attention=cognition.attention, questions=cognition.questions, reflection=cognition.interpretation,
             next_check_at=scene.next_check_at or None,
             pending={"run_id": run[0]["run_id"], "tool_call_id": pending["tool_call_id"], "tool_name": pending["tool_name"], "args": pending.get("args") or {}} if pending and status == "waiting_confirmation" else None,
         ).model_dump()
@@ -179,7 +183,7 @@ class AmbientService:
             cursor = self.event_log.get_consumer_cursor("ambient.v1")
             for row in self.event_log.query(after_seq=cursor, limit=200, oldest_first=True):
                 kind = EventType(row["event_type"]) if row["event_type"] in EventType._value2member_map_ else None
-                if kind in {EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED}:
+                if kind in {EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED, EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED}:
                     self._observe(SimpleNamespace(payload=row.get("payload", {}), event=kind, event_id=row["event_id"], seq=row["seq"]))
                 self.event_log.commit_consumer_cursor("ambient.v1", row["seq"])
         now = time.time()
@@ -254,13 +258,6 @@ class AmbientService:
         self.tasks.assert_action_execution(task_id=context.task_id, user_id=context.user_id, expected_objective=task["objective"], task_run_id=context.task_run_id, execution_token=context.execution_token)
         return frame, scene
 
-    def reflect(self, attention, questions, interpretation):
-        frame, scene = self.assert_execution()
-        scene.attention, scene.questions, scene.reflection = attention, questions, interpretation
-        scene.revision += 1
-        self.store.put(scene)
-        return {"ok": True, "revision": scene.revision, "classification": "working_interpretation_not_memory_fact"}
-
     def annotate(self, *, message_id, selected_text, start_offset, end_offset, title, content, session_id=None):
         frame, scene = self.assert_execution()
         manager = self.conversation.message_manager
@@ -320,29 +317,12 @@ class AmbientService:
         if note is None:
             raise KeyError("agent annotation not found")
         scene = self.store.get(user)
-        scene.feedback = [*scene.feedback, {**feedback.model_dump(), "query": note["query"], "response": note["response"]}][-30:]
+        self.self_model.state.update(user, lambda row: setattr(row, "feedback", [*row.feedback, {**feedback.model_dump(), "query": note["query"], "response": note["response"]}][-30:]))
         scene.revision += 1
         scene.dirty = True
         scene.next_check_at = min(scene.next_check_at, time.time() + config.ambient.cooldown_s)
         self.store.put(scene)
         return self.view(user, session)
-
-    def context_projection(self, user, session):
-        """Bounded, low-trust cognition; no inference or shadow Runtime facts."""
-        scene = self.store.get(user)
-        if user not in self.store.scenes:
-            return {}
-        manager = self.conversation.message_manager
-        if not manager or not manager.get_session(scene.session_id, user_id=user):
-            return {}
-        evidence = []
-        seq = int(scene.last_trigger.get("seq") or 0)
-        if seq and self.event_log:
-            rows = self.event_log.query(user_id=user, after_seq=seq - 1, limit=1, oldest_first=True)
-            if rows and rows[0]["seq"] == seq:
-                row = rows[0]
-                evidence = [{"event_id": row["event_id"], "event_type": row["event_type"], "payload": json.dumps(row["payload"], ensure_ascii=False)[:4000]}]
-        return {"revision": scene.revision, "enabled": self._enabled(scene), "direction": scene.settings.direction, "attention": scene.attention, "questions": scene.questions, "interpretation": scene.reflection, "trigger_evidence": evidence}
 
     def _context(self, task, run, token, scene):
         context = RunContext(request_id=run["run_id"], trace_id=run["run_id"], task_id=task["task_id"], task_run_id=run["run_id"], execution_token=token, conversation_turn_id=run["run_id"], session_state=SessionState(session_id=scene.session_id, user_id=scene.user_id, trace_id=run["run_id"]), input_payload={"metadata": {"origin": RUN_TYPE, "multi_agent": True, "ui_language": scene.settings.ui_language, "timezone": scene.settings.timezone}})
@@ -369,7 +349,7 @@ class AmbientService:
             with bind_ambient(AmbientExecution(self, context, scene.generation)), bind_delegation(scope), approval_scope("ambient.activation", {}, confirmed=False):
                 try:
                     async with asyncio.timeout(config.ambient.timeout_s):
-                        result = await self.conversation.run_ambient_turn(run_context=context, situation=scene.model_dump(exclude={"admission"}), checkpoint_sink=save, checkpoint=run["metadata"].get("checkpoint"))
+                        result = await self.conversation.run_ambient_turn(run_context=context, situation={"initiative": scene.model_dump(exclude={"admission"}), "cognition": self.self_model.working_context(scene.user_id)}, checkpoint_sink=save, checkpoint=run["metadata"].get("checkpoint"))
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

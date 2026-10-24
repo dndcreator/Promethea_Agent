@@ -14,7 +14,7 @@ from gateway.multimodal_service import ModelEndpoint, multimodal_service
 from gateway.user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
 
 
-def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None) -> None:
+def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None, *, cost_estimate=None) -> None:
     """Best-effort runtime metrics hook; never let observability break chat."""
     try:
         from gateway.http.metrics import get_metrics_collector
@@ -24,9 +24,30 @@ def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None)
             duration=duration,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
+            cost_estimate=cost_estimate,
         )
     except Exception as exc:
         logger.debug("failed to record LLM metrics: {}", exc)
+
+
+def _usage_cache_fields(raw):
+    result = {}
+    cached = getattr(raw, "prompt_cache_hit_tokens", None)
+    if cached is not None:
+        result["prompt_cache_hit_tokens"] = cached
+    details = getattr(raw, "prompt_tokens_details", None)
+    if details is not None:
+        cached = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+        if cached is not None:
+            result["prompt_tokens_details"] = {"cached_tokens": cached}
+    return result
+
+
+async def _model_quote(endpoint, modalities):
+    if modalities:
+        return None
+    from gateway.model_pricing import quote_model
+    return await quote_model(endpoint.base_url, endpoint.model)
 
 
 def _record_llm_first_token_metrics(duration: float) -> None:
@@ -190,6 +211,7 @@ class PrometheaConversation:
             attempts += 1
             try:
                 client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
+                price_quote = await _model_quote(endpoint, modalities)
                 started = time.perf_counter()
                 resp = await client.chat.completions.create(
                     model=endpoint.model,
@@ -215,7 +237,11 @@ class PrometheaConversation:
                     if hasattr(resp, "usage") and resp.usage
                     else 0,
                 }
-                _record_llm_metrics(time.perf_counter() - started, usage)
+                usage.update(_usage_cache_fields(getattr(resp, "usage", None)))
+                from gateway.model_pricing import estimate
+                reported = getattr(resp, "usage", None)
+                cost_estimate = estimate(price_quote, {**usage, "prompt_tokens": getattr(reported, "prompt_tokens", None), "completion_tokens": getattr(reported, "completion_tokens", None)})
+                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate)
 
                 code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content.strip() else None
                 result = {
@@ -230,6 +256,7 @@ class PrometheaConversation:
                     "model_route": endpoint.source,
                     "model_attempts": attempts,
                     "usage": usage,
+                    "cost_estimate": cost_estimate,
                 }
 
                 try:
@@ -322,6 +349,7 @@ class PrometheaConversation:
             emitted_stream_content = False
             try:
                 client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
+                price_quote = await _model_quote(endpoint, modalities)
                 started = time.perf_counter()
                 try:
                     stream = await client.chat.completions.create(
@@ -356,16 +384,19 @@ class PrometheaConversation:
                 provider_request_id = None
                 content_chars = 0
                 reasoning_chars = 0
+                usage_reported = False
                 async for chunk in stream:
                     provider_request_id = getattr(chunk, "id", None) or provider_request_id
                     if chunk.choices:
                         finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
                     chunk_usage = getattr(chunk, "usage", None)
                     if chunk_usage:
+                        usage_reported = type(getattr(chunk_usage, "prompt_tokens", None)) is int and type(getattr(chunk_usage, "completion_tokens", None)) is int
                         usage = {
                             "prompt_tokens": getattr(chunk_usage, "prompt_tokens", 0) or 0,
                             "completion_tokens": getattr(chunk_usage, "completion_tokens", 0) or 0,
                         }
+                        usage.update(_usage_cache_fields(chunk_usage))
                     delta = chunk.choices[0].delta if chunk.choices else None
                     reasoning_delta = getattr(delta, "reasoning_content", None) if delta is not None else None
                     reasoning_chars += len(str(reasoning_delta or ""))
@@ -381,13 +412,16 @@ class PrometheaConversation:
                             _record_llm_first_token_metrics(time.perf_counter() - started)
                             first_token_recorded = True
                         yield delta.content
-                _record_llm_metrics(time.perf_counter() - started, usage)
+                from gateway.model_pricing import estimate
+                cost_estimate = estimate(price_quote, usage) if usage_reported else None
+                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate)
                 code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content_chars else None
                 result = {
                     "status": "error" if code else "success", "code": code,
                     "finish_reason": finish_reason, "request_id": provider_request_id,
                     "model_used": endpoint.model, "usage": usage, "max_tokens": max_tokens,
                     "content_chars": content_chars, "reasoning_chars": reasoning_chars,
+                    "cost_estimate": cost_estimate,
                 }
                 if result_sink is not None:
                     await result_sink(result)

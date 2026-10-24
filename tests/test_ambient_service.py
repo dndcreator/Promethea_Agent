@@ -18,6 +18,9 @@ from gateway.task_service import TaskExecutionConflict
 from gateway.events import EventEmitter
 from gateway.protocol import EventType
 from gateway.runtime_event_log import RuntimeEventLog
+from gateway.self_model_service import SelfModelService
+from gateway.self_model_state import SelfModelStateStore
+from agentkit.tools.standard.situation_tools import create_situation_tools
 from agentkit.tools.subagent import DelegateTool
 
 
@@ -34,10 +37,11 @@ class Core:
 
 def setup(tmp_path, core):
     tasks, runtime, conversation, _, manager = inbox_host(tmp_path, core)
+    conversation.self_model_service = SelfModelService(task_service=tasks, message_manager=manager, event_emitter=conversation.event_emitter, workspace_root=str(tmp_path))
     ambient = AmbientService(conversation=conversation, task_runtime=runtime, task_service=tasks, storage_path=tmp_path / "ambient.json")
     conversation.ambient_service = ambient
     runtime.register_driver("ambient", ambient)
-    for tool in create_tools({}):
+    for tool in [*create_tools({}), *create_situation_tools(conversation.self_model_service)]:
         conversation.capability_service.register_tool(tool)
     return tasks, runtime, conversation, manager, ambient
 
@@ -48,7 +52,7 @@ def call(name, **args):
 
 @pytest.mark.asyncio
 async def test_opt_in_working_cognition_continuity_and_silence(tmp_path):
-    core = Core(call("ambient.reflect", attention=["Release readiness"], questions=["Did tests finish?"], interpretation="Unverified; inspect results next."))
+    core = Core(call("cognition.update_situation", expected_revision=0, attention=["Release readiness"], questions=["Did tests finish?"], interpretation="Unverified; inspect results next."))
     tasks, runtime, conversation, manager, ambient = setup(tmp_path, core)
     try:
         await drain(runtime)
@@ -59,7 +63,8 @@ async def test_opt_in_working_cognition_continuity_and_silence(tmp_path):
         assert manager.get_messages("chat", user_id="alice") == []
         assert len(tasks.execution_tasks(run_type="ambient")) == 1
         restored = AmbientStore(tmp_path / "ambient.json")
-        assert restored.get("alice", "chat").questions == ["Did tests finish?"]
+        assert SelfModelStateStore(conversation.self_model_service.state.path).get("alice").questions == ["Did tests finish?"]
+        assert "questions" not in restored.get("alice", "chat").model_dump()
         scene = ambient.store.get("alice", "chat")
         scene.next_check_at = time.time() - 1
         ambient.store.put(scene)
@@ -69,7 +74,7 @@ async def test_opt_in_working_cognition_continuity_and_silence(tmp_path):
         assert len(tasks.execution_tasks(run_type="ambient")[0]["runs"]) == 2
         assert conversation.action_service.task_service is tasks
         prepared = await conversation.prepare_chat_turn(session_id="chat", user_id="alice", user_message="Continue", channel="web", run_context=ambient._context(tasks.execution_tasks(run_type="ambient")[0], tasks.execution_tasks(run_type="ambient")[0]["runs"][-1], {}, ambient.store.get("alice", "chat")))
-        assert any("Retained shared attention" in str(row["content"]) and "Did tests finish?" in str(row["content"]) for row in prepared["messages"])
+        assert any("Did tests finish?" in str(row["content"]) for row in prepared["messages"])
     finally:
         await runtime.shutdown()
 
@@ -104,15 +109,15 @@ def test_portability_never_grants_autonomy_and_persistence_rolls_back(tmp_path, 
     transferred.import_user_state("bob", store.export_user_state("alice"))
     assert not transferred.get("bob", "chat").settings.enabled
     monkeypatch.setattr(store, "save", lambda: (_ for _ in ()).throw(OSError("disk full")))
-    scene.attention = ["not persisted"]
+    scene.settings.direction = "not persisted"
     with pytest.raises(OSError):
         store.put(scene)
-    assert store.get("alice", "chat").attention == []
+    assert store.get("alice", "chat").settings.direction == ""
 
 
 def test_projection_does_not_require_new_conversations_to_exist(tmp_path):
     _, _, _, _, ambient = setup(tmp_path, Core())
-    assert ambient.context_projection("alice", "not-created-yet") == {}
+    assert ambient.self_model.working_context("alice")["revision"] == 0
 
 
 @pytest.mark.asyncio
@@ -171,7 +176,7 @@ async def test_sensitive_action_waits_for_exact_consent_and_continues_same_run(t
 
 @pytest.mark.asyncio
 async def test_restarts_restore_same_completed_checkpoint_without_reexecuting(tmp_path):
-    core = Core(call("ambient.reflect", attention=["Release"], questions=[], interpretation="Next investigation"))
+    core = Core(call("cognition.update_situation", expected_revision=0, attention=["Release"], questions=[], interpretation="Next investigation"))
     tasks, runtime, _, _, ambient = setup(tmp_path, core)
     ambient.configure("alice", "chat", AmbientSettings(enabled=True))
     await drain(runtime)
@@ -196,6 +201,8 @@ async def test_durable_events_are_owner_scoped_deduped_and_reconstruct_evidence(
     tasks, runtime, conversation, _, _ = setup(tmp_path, Core())
     log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
     conversation.event_emitter = EventEmitter(log)
+    conversation.self_model_service.event_emitter = conversation.event_emitter
+    conversation.event_emitter.on(EventType.GOAL_GAPS_UPDATED, conversation.self_model_service.observe)
     ambient = AmbientService(conversation=conversation, task_runtime=runtime, task_service=tasks, storage_path=tmp_path / "events-state.json")
     ambient.configure("alice", "chat", AmbientSettings(enabled=True))
     before = ambient.view("alice", "chat")["revision"]
@@ -205,9 +212,9 @@ async def test_durable_events_are_owner_scoped_deduped_and_reconstruct_evidence(
     revision = ambient.view("alice", "chat")["revision"]
     ambient.recover()
     assert ambient.view("alice", "chat")["revision"] == revision
-    projected = ambient.context_projection("alice", "chat")
-    assert "a test failed" in str(projected["trigger_evidence"])
-    assert "secret" not in str(projected["trigger_evidence"])
+    projected = ambient.self_model.working_context("alice")
+    assert "a test failed" in str(projected["changes"])
+    assert "secret" not in str(projected["changes"])
     assert log.get_consumer_cursor("ambient.v1") == log.next_seq - 1
     await runtime.shutdown()
 

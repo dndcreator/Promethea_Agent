@@ -4,6 +4,7 @@ import { cancelTask, listSessions, listTasks, pauseTask, resumeTask } from '../s
 import type { Session, Task } from '../services/api'
 import { useLanguage } from '../store/LanguageContext'
 import { taskStatusLabel } from '../utils/task-presentation'
+import { useEnvironmentObservation } from '../hooks/useEnvironmentObservation'
 
 type Props = { onObserve: (task: Task, runId?: string) => void; onOpenSession: (id: string) => void }
 const TASK_STATUSES = ['open', 'running', 'paused', 'waiting_user', 'completed', 'failed', 'cancelled']
@@ -21,6 +22,7 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
   const [busy, setBusy] = useState(false)
   const [revision, setRevision] = useState(0)
   const selected = tasks.find((task) => task.task_id === selectedId)
+  useEnvironmentObservation('tasks', selected ? [{ kind: 'task', id: selected.task_id }] : [])
   const label = (value: string) => taskStatusLabel(value, value, t)
 
   useEffect(() => {

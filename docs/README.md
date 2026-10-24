@@ -12,6 +12,7 @@ Promethea's public docs are intentionally small. Start with the release-facing f
 
 ## Build And Operate
 - [Deployment](./deployment.md)
+- [Messaging Platforms](./channels/README.md)
 - [Testing Strategy](./testing-strategy.md)
 - [Local Model Quickstart](./quickstart-local-model.md)
 

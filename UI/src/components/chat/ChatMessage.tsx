@@ -1,6 +1,7 @@
 import MessageContent from '../MessageContent'
 import { useState } from 'react'
 import AgentNotes from './AgentNotes'
+import SemanticExpressions from '../SemanticExpressions'
 import { sourceSelection } from '../../utils/message-links'
 import { useLanguage } from '../../store/LanguageContext'
 import type { WorkbenchActivity } from '../../services/api'
@@ -114,6 +115,7 @@ export default function ChatMessage({ role, avatar, name, time, content, message
           <MessageContent content={displayContent} followups={followups} onAnnotationClick={sessionId ? (id) => { setSelectedNote(id); setNoteFocus((value) => value + 1) } : undefined} />
         </div>
         {sessionId && <AgentNotes sessionId={sessionId} notes={followups} selectedId={selectedNote} focusVersion={noteFocus} />}
+        {sessionId && <SemanticExpressions sessionId={sessionId} messageId={messageId} />}
       </div>
     </div>
   )

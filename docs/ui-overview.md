@@ -98,7 +98,8 @@ curl "http://127.0.0.1:8000/api/health/memory"
 
 - No full parity with all low-level API and internal debug endpoints by design.
 - Voice input is not a supported preview feature. The current route is experimental and provider-dependent.
-- Telegram bot runtime setup is not managed through this UI.
+- Messaging platform settings support verified QQ/Telegram pairing and revocation;
+  bot credentials and public HTTPS callbacks remain operator-owned deployment setup.
 - Some operational tasks (bulk export/migration scripts) are playbook/API driven.
 - Procedural memory internals (ExecutionMindGraph / basal_ganglia templates) are currently backend-visible but not fully first-class in UI editing.
 

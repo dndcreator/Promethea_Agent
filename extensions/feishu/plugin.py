@@ -1,9 +1,9 @@
 ﻿from channels.feishu_channel import FeishuChannel
-from channels.base import ChannelConfig
+from channels.settings import load_settings
 
 
 def register(api):
-    channel_cfg = api.config.get("channel_config") or {}
-    channel = FeishuChannel(ChannelConfig(**channel_cfg))
+    settings = load_settings({"feishu": api.config.get("channel_config") or {}})
+    channel = FeishuChannel(settings.feishu)
     api.register_channel("feishu", channel)
 

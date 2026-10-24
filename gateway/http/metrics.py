@@ -28,13 +28,21 @@ class MetricsCollector:
             'start_time': datetime.now(timezone.utc)
         }
         self.http_by_path: Dict[str, Dict[str, float]] = {}
+        self.priced_calls = 0
+        self.known_cost = 0.0
     
-    def record_llm_call(self, duration: float, prompt_tokens: int = 0, completion_tokens: int = 0):
+    def record_llm_call(self, duration: float, prompt_tokens: int = 0, completion_tokens: int = 0, *, cost_estimate=None):
         """Record one LLM call."""
         self.stats['llm_calls'] += 1
         self.stats['llm_total_time'] += duration
         self.stats['prompt_tokens'] += prompt_tokens
         self.stats['completion_tokens'] += completion_tokens
+        if cost_estimate is not None:
+            import math
+            amount = cost_estimate.get("estimated_usd")
+            if type(amount) in (int, float) and math.isfinite(amount) and amount >= 0 and math.isfinite(self.known_cost + amount):
+                self.priced_calls += 1
+                self.known_cost += amount
     
     def record_memory_recall(self, duration: float, items_count: int = 0):
         """Record one memory recall."""
@@ -58,11 +66,8 @@ class MetricsCollector:
         """Return aggregated metrics snapshot."""
         total_tokens = self.stats['prompt_tokens'] + self.stats['completion_tokens']
         
-        # Cost estimate uses placeholder pricing.
-        estimated_cost = (
-            self.stats['prompt_tokens'] / 1000 * 0.03 +
-            self.stats['completion_tokens'] / 1000 * 0.06
-        )
+        complete = bool(self.stats['llm_calls']) and self.priced_calls == self.stats['llm_calls']
+        estimated_cost = round(self.known_cost, 8) if complete else None
         
         uptime = (datetime.now(timezone.utc) - self.stats['start_time']).total_seconds()
         
@@ -79,7 +84,7 @@ class MetricsCollector:
                 'total_tokens': total_tokens,
                 'prompt_tokens': self.stats['prompt_tokens'],
                 'completion_tokens': self.stats['completion_tokens'],
-                'estimated_cost': round(estimated_cost, 4),
+                'estimated_cost': estimated_cost,
             },
             'memory': {
                 'recalls': self.stats['memory_recalls'],
@@ -108,7 +113,11 @@ class MetricsCollector:
                 ),
             },
             'cost': {
-                'estimated_usd': round(estimated_cost, 4)
+                'estimated_usd': estimated_cost,
+                'known_estimated_usd': round(self.known_cost, 8),
+                'priced_calls': self.priced_calls,
+                'unpriced_calls': self.stats['llm_calls'] - self.priced_calls,
+                'status': 'estimated' if complete else 'unknown',
             },
             'uptime_seconds': round(uptime)
         }

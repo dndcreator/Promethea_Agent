@@ -13,10 +13,10 @@ class TelegramChannelAdapter(ChannelAdapter):
         channel_id="telegram",
         channel_type="im",
         supports_streaming=False,
-        supports_attachments=True,
+        supports_attachments=False,
         supports_rich_artifacts=False,
-        supports_reactions=True,
-        supports_voice=True,
+        supports_reactions=False,
+        supports_voice=False,
         session_model="per_chat",
     )
 

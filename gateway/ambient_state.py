@@ -1,4 +1,4 @@
-"""Scoped working cognition and admission state; domain facts stay service-owned."""
+"""Proactive admission state; cognition and domain facts remain service-owned."""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .public_contracts import AmbientSettings
 
 
-class Situation(BaseModel):
+class AmbientControl(BaseModel):
     model_config = ConfigDict(extra="forbid")
     user_id: str
     session_id: str = ""  # execution/delivery channel, never the cognition owner
@@ -26,31 +26,39 @@ class Situation(BaseModel):
     dirty: bool = True
     next_check_at: float = 0
     admission: dict | None = None
-    attention: list[str] = Field(default_factory=list, max_length=6)
-    questions: list[str] = Field(default_factory=list, max_length=8)
-    reflection: str = Field(default="", max_length=4000)
-    feedback: list[dict] = Field(default_factory=list, max_length=30)
     last_trigger: dict = Field(default_factory=dict)
 
 
 class AmbientStore:
-    def __init__(self, path):
+    def __init__(self, path, *, cognition_store=None):
         self.path = Path(path)
+        self.cognition_store = cognition_store
         if self.path.exists():
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            if raw.get("version") not in {1, 2}:
+            if raw.get("version") not in {1, 2, 3}:
                 raise ValueError("unsupported ambient state version")
             self.scenes = {}
+            legacy = {}
             for value in sorted(raw["situations"].values(), key=lambda row: int(row.get("revision") or 0)):
-                scene = Situation.model_validate(value)
-                previous = self.scenes.get(scene.user_id)
-                if previous:
-                    scene.attention = list(dict.fromkeys([*scene.attention, *previous.attention]))[:6]
-                    scene.questions = list(dict.fromkeys([*scene.questions, *previous.questions]))[:8]
-                    scene.feedback = [*previous.feedback, *scene.feedback][-30:]
+                value = dict(value)
+                if raw["version"] < 3:
+                    user = value["user_id"]
+                    previous = legacy.get(user, {})
+                    legacy[user] = {
+                        "attention": list(dict.fromkeys([*value.pop("attention", []), *previous.get("attention", [])]))[:6],
+                        "questions": list(dict.fromkeys([*value.pop("questions", []), *previous.get("questions", [])]))[:8],
+                        "interpretation": value.pop("reflection", ""),
+                        "feedback": [*previous.get("feedback", []), *value.pop("feedback", [])][-30:],
+                    }
+                scene = AmbientControl.model_validate(value)
                 self.scenes[scene.user_id] = scene
             self.usage = raw.get("usage", {})
-            if raw.get("version") == 1:
+            if raw["version"] < 3:
+                if cognition_store is None:
+                    raise ValueError("legacy Ambient cognition requires SelfModel migration")
+                for user, working in legacy.items():
+                    if user not in cognition_store.users:
+                        cognition_store.import_user_state(user, {"version": 1, "situation": working})
                 self.save()
         else:
             self.scenes, self.usage = {}, {}
@@ -61,7 +69,7 @@ class AmbientStore:
 
     def get(self, user, session=None):
         scene = self.scenes.get(self.key(user))
-        return scene.model_copy(deep=True) if scene else Situation(user_id=user, session_id=session or "")
+        return scene.model_copy(deep=True) if scene else AmbientControl(user_id=user, session_id=session or "")
 
     def put(self, scene):
         key = self.key(scene.user_id, scene.session_id)
@@ -81,7 +89,7 @@ class AmbientStore:
         fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".ambient-", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump({"version": 2, "situations": {key: scene.model_dump() for key, scene in self.scenes.items()}, "usage": self.usage}, stream, ensure_ascii=False)
+                json.dump({"version": 3, "situations": {key: scene.model_dump() for key, scene in self.scenes.items()}, "usage": self.usage}, stream, ensure_ascii=False)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(name, self.path)
@@ -90,10 +98,25 @@ class AmbientStore:
             raise
 
     def export_user_state(self, user_id):
-        return {"version": 2, "situations": [scene.model_dump() for scene in self.scenes.values() if scene.user_id == user_id]}
+        return {"version": 3, "situations": [scene.model_dump() for scene in self.scenes.values() if scene.user_id == user_id]}
 
     def import_user_state(self, user_id, payload, *, merge=True):
-        rows = [Situation.model_validate(row) for row in payload.get("situations", [])]
+        rows = []
+        legacy = []
+        for value in payload.get("situations", []):
+            value = dict(value)
+            if payload.get("version", 2) < 3:
+                from .self_model_state import WorkingSituation
+                working = WorkingSituation(
+                    attention=value.pop("attention", []), questions=value.pop("questions", []),
+                    interpretation=value.pop("reflection", ""), feedback=value.pop("feedback", []),
+                )
+                if self.cognition_store is None:
+                    raise ValueError("legacy Ambient transfer requires SelfModel")
+                legacy.append(working)
+            rows.append(AmbientControl.model_validate(value))
+        for working in legacy:
+            self.cognition_store.import_user_state(user_id, {"version": 1, "situation": working.model_dump()}, merge=merge)
         previous = deepcopy(self.scenes)
         if not merge:
             self.scenes = {key: row for key, row in self.scenes.items() if row.user_id != user_id}

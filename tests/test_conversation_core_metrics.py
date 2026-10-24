@@ -83,7 +83,7 @@ async def test_call_llm_records_usage_metrics(monkeypatch):
     client = SimpleNamespace(chat=SimpleNamespace(completions=create))
     conv = _conversation_with_client(client)
     recorded = []
-    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage: recorded.append(usage))
+    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage, **kwargs: recorded.append(usage))
 
     out = await conv.call_llm([{"role": "user", "content": "hi"}])
 
@@ -150,7 +150,7 @@ async def test_call_llm_stream_requests_and_records_stream_usage(monkeypatch):
     conv = _conversation_with_client(client)
     recorded = []
     first_tokens = []
-    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage: recorded.append(usage))
+    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage, **kwargs: recorded.append(usage))
     monkeypatch.setattr(
         conversation_core,
         "_record_llm_first_token_metrics",

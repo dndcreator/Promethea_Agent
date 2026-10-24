@@ -68,6 +68,32 @@ Pre-release stage:
 - Local environment tests should avoid hard network requirements unless explicitly marked integration.
 - DeepSeek-only configurations do not provide STT/audio transcription, so voice-input tests are not part of the supported preview smoke path unless an audio transcription provider is explicitly configured.
 
+### Browser Test Target
+
+The browser suite includes source fixtures at `UI/tests/message-content.html` as
+well as the actual application shell. Run the complete suite against a Vite
+**development server**; the production build deliberately excludes these test
+pages. Pointing fixture tests at `vite preview` loads the SPA fallback instead
+and produces misleading failures. Always set the URL explicitly:
+
+```powershell
+# Terminal 1, from UI/; choose another port if occupied.
+npm run dev -- --host 127.0.0.1 --port 5186 --strictPort
+
+# Terminal 2, from the project root, using the project virtual environment.
+$env:CANVAS_TEST_BROWSER_CHANNEL = 'msedge'
+$env:PROMETHEA_UI_TEST_URL = 'http://127.0.0.1:5186'
+python -m pytest -q
+```
+
+`msedge` selects an installed Edge browser. A configured browser must be installed;
+this acceptance run should not download dependencies or enable
+`PROMETHEA_LIVE_TEST` against real accounts/desktops. Separately run the UI
+production build and inspect production-shell flows. Browser API fixtures must
+follow current public response shapes, including an empty array for a deployment
+with no enabled messaging channels. Inject failures at the intended operation,
+not by assuming that the first global config request belongs to Settings.
+
 ## 7. Test Artifact Policy
 
 - Test artifacts are expected to be created under `.tmp/pytest-runtime/`.
@@ -95,7 +121,7 @@ python -m pytest tests/test_files_routes.py tests/test_chat_routes_args_resilien
 
 ## 9. Next Expansion Targets
 
-- Channel adapter end-to-end fixtures for major official channels.
+- Operator-owned live acceptance for bot/application channels, beyond the existing local protocol and delivery fixtures.
 - More negative-path tests for memory/reasoning degradation reason codes.
 - Release-grade scenario replay packs for regression prevention.
 
@@ -122,6 +148,11 @@ on Windows, `SELF_EVOLVE__BROWSER_CHANNEL=msedge` selects an installed Edge.
 | Create a small form/calculator in Canvas; type without blurring, refresh after saves, retain and reopen | Inputs persist, calculations work, rapid edits do not corrupt revisions, and retained apps survive reopening. Test a newly generated app: old retained artifacts intentionally keep their bundled renderer. |
 | Start a multi-step Workflow; pause/resume and restart the Gateway | Run identity, completed steps and artifacts remain traceable; no claim of exactly-once remote effects across a hard crash. |
 | Explicitly bind a run to an owned Task and inspect Gap state | Public Task data retains requirements; checked assertions and inferred resolutions stay distinct. Ordinary unbound chat gaps are transient. |
+| Use guest chat, then sign in and switch accounts | Guest conversation stays transient and cannot access tools, personal memory or files; accounts cannot read each other's state. |
+| Inspect Metrics with known, missing and explicit zero model rates | Unknown/partial costs must not appear as a zero or complete total; cached tokens use the matching tariff and refreshing prices does not reprice old calls. Use the deployment settings in `docs/configuration.md`, not sample prices. |
+| Enable Ambient with a bounded focus, interact, then disable it | Observe real autonomous runs and scoped expressions; dismissed choices do not imply tool approval, and disabled authority cannot start further actions. Runtime must stay running. |
+| Open a generated component app, inspect/change its state, then close it | Semantic snapshots match actual stored values and revisions; stale interactions fail; closed/expired views become unknown, not inferred user intent. Custom undeclared apps are not claimed to be semantically understood. |
+| Bind a configured messaging platform, send text, reject a sensitive operation, then unlink | Replies enter the correct owned conversation; rejection executes nothing; duplicate callbacks do not rerun the model; queued work loses authority after unlink. Complete the platform-specific checks in `docs/channels/README.md`. |
 
 For API acceptance, create a Task with `POST /api/tasks`, then send its `task_id`
 with `POST /api/chat` or `client.runs.run/stream`. Query `GET /api/tasks/{task_id}`

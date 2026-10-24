@@ -135,6 +135,10 @@ class EventType(str, Enum):
     # Full interaction event (user input + assistant output)
     INTERACTION_COMPLETED = "interaction.completed"
     AGENT_COMMUNICATION_OFFERED = "agent.communication.offered"
+    SELF_MODEL_UPDATED = "self_model.updated"
+    SEMANTIC_UI_UPDATED = "semantic_ui.updated"
+    SEMANTIC_UI_INTERACTED = "semantic_ui.interacted"
+    UI_CONTEXT_CHANGED = "ui.context.changed"
     # Durable task-domain lifecycle events
     TASK_CREATED = "task.created"
     TASK_STATE_CHANGED = "task.state.changed"

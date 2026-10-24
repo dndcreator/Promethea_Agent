@@ -3,11 +3,16 @@
   let port;
   let sequence = 0;
   const pending = new Map();
+  const listeners = new Set();
   const ready = new Promise((resolve) => {
     window.addEventListener('message', (event) => {
       if (port || event.source !== parent || event.data?.type !== 'promethea:connect' || !event.ports[0]) return;
       port = event.ports[0];
       port.onmessage = ({ data }) => {
+        if (data?.event === 'state.changed') {
+          for (const listener of listeners) listener(data.state);
+          return;
+        }
         const request = pending.get(data?.id);
         if (!request) return;
         pending.delete(data.id);
@@ -32,6 +37,11 @@
   Object.defineProperty(window, 'promethea', { value: Object.freeze({
     getState: () => call('state.get'),
     setState: (value, expectedRevision) => call('state.set', { value, expected_revision: expectedRevision }),
+    subscribe: (listener) => {
+      listeners.add(listener);
+      void call('state.watch').then(state => { if (listeners.has(listener)) listener(state); }).catch(() => {});
+      return () => listeners.delete(listener);
+    },
   }) });
   window.addEventListener('error', (event) => {
     void call('diagnostic.report', { message: String(event.message).slice(0, 2000) }).catch(() => {});

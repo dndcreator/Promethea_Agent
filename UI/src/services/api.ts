@@ -15,6 +15,9 @@ import {
   type AmbientSettings,
   type AmbientFeedback,
   type AmbientConfirmation,
+  type SemanticSurface,
+  type SemanticUIFeedback,
+  type ChannelPairingRequest,
 } from '@promethea/sdk'
 
 export type {
@@ -36,12 +39,20 @@ export type {
   CognitionBundle,
   CanvasEnvironment,
   CanvasEnvironmentList,
+  SemanticExpression,
+  ChannelAccount,
+  ChannelPairing,
 } from '@promethea/sdk'
 
 export const getAmbient = (sessionId: string | null, signal?: AbortSignal) => sdkCall((client) => client.ambient.get(sessionId, signal))
 export const setAmbient = (sessionId: string | null, settings: AmbientSettings) => sdkCall((client) => client.ambient.configure(sessionId, settings))
 export const sendAmbientFeedback = (sessionId: string, feedback: AmbientFeedback) => sdkCall((client) => client.ambient.feedback(sessionId, feedback))
 export const confirmAmbient = (sessionId: string | null, command: AmbientConfirmation) => sdkCall((client) => client.ambient.confirm(sessionId, command))
+export const sendSemanticFeedback = (expressionId: string, command: SemanticUIFeedback) => sdkCall((client) => client.semanticUI.feedback(expressionId, command))
+export const observeSemanticSurface = (surface: SemanticSurface, signal?: AbortSignal) => sdkCall((client) => client.semanticUI.observeSurface(surface, signal))
+export const listChannelAccounts = (signal?: AbortSignal) => sdkCall((client) => client.channels.list(signal))
+export const pairChannelAccount = (command: ChannelPairingRequest, signal?: AbortSignal) => sdkCall((client) => client.channels.pair(command, signal))
+export const unbindChannelAccount = (channel: string, signal?: AbortSignal) => sdkCall((client) => client.channels.unbind(channel, signal))
 
 const DEFAULT_API_BASE = ''
 

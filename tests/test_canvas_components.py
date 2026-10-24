@@ -94,7 +94,9 @@ async def test_composition_reuses_owned_staging_checkpoints_and_validation(tmp_p
         task_id = task["task_id"]
         schema = await service.evolve_get_canvas_schema()
         assert schema["schema"] == CanvasDocument.model_json_schema()
-        await service.evolve_compose_canvas(task_id, document())
+        composed = await service.evolve_compose_canvas(task_id, document())
+        assert composed["semantics"]["status"] == "compiled"
+        assert composed["semantics"]["browser_verified"] is False
         source = (service._task_root(task_id) / "index.html").read_text(encoding="utf-8")
         with pytest.raises(ValueError, match="changed since inspection"):
             await service.evolve_compose_canvas(task_id, document(), expected_sha256="stale")
@@ -135,6 +137,25 @@ async def test_component_browser_interaction_uses_existing_verifier(tmp_path, mo
         {"action": "expect_count", "selector": "tbody tr", "value": "2"},
     ]}, tmp_path.parent / "components.png", browser_channel=os.environ["CANVAS_TEST_BROWSER_CHANNEL"] if selection == "configured" else "")
     assert result["ok"], result
+    assert result["semantics"]["browser_verified"] is True
+    assert result["semantics"]["status"] == "compiled"
+    assert result["semantics"]["state_update_checks"] > 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.environ.get("CANVAS_TEST_BROWSER_CHANNEL"), reason="opt-in real browser")
+@pytest.mark.parametrize("failure", ["label", "state_updates"])
+async def test_custom_declaration_cannot_claim_a_different_visible_component_label(tmp_path, failure):
+    source = render_component_document(document())
+    if failure == "label":
+        source += '<script>document.getElementById("price").parentElement.querySelector("span").textContent="Wrong price label";</script>'
+    else:
+        source = source.replace("window.promethea.subscribe?.(acceptObserved)", "void 0")
+    (tmp_path / "index.html").write_text(source, encoding="utf-8")
+    result = await verify_canvas(tmp_path, {"tests": [{"action": "expect_text", "selector": "#title", "value": "Trip budget"}]}, tmp_path / "mismatch.png", browser_channel=os.environ["CANVAS_TEST_BROWSER_CHANNEL"])
+    assert not result["ok"]
+    assert result["semantics"]["status"] == "declared" and not result["semantics"]["browser_verified"]
+    assert any(("price: label does not match" if failure == "label" else "differs") in error for error in result["errors"])
 
 
 @pytest.mark.asyncio
@@ -166,6 +187,7 @@ async def test_component_browser_persistence_conflict_and_safe_text(tmp_path):
               const frame = document.querySelector('iframe');
               const connect = () => {
                 const channel = new MessageChannel();
+                window.hostPort = channel.port1;
                 channel.port1.onmessage = ({data}) => {
                   setTimeout(() => {
                     if (data.method === 'state.set') {
@@ -217,6 +239,11 @@ async def test_component_browser_persistence_conflict_and_safe_text(tmp_path):
             await page.set_viewport_size({"width": 390, "height": 844})
             await page.screenshot(path=str(output / 'mobile.png'), full_page=True)
             assert await frame.locator('body').evaluate('() => document.documentElement.scrollWidth <= innerWidth')
+            await page.evaluate('''() => {
+              window.saved = {revision:window.saved.revision+1, value:{...window.saved.value, quantity:4}};
+              window.hostPort.postMessage({event:'state.changed', state:window.saved});
+            }''')
+            await expect(frame.locator('#quantity')).to_have_value('4')
             await frame.locator('#reset').click()
             await expect(frame.locator('#total')).to_have_text('0')
             await expect(frame.locator('#quantity')).to_have_value('2')

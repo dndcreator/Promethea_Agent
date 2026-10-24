@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -505,10 +506,28 @@ class HippocampusReplayService:
 
     def _save_state(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_name(f".{self._path.name}.{os.getpid()}.tmp")
         payload = {"version": 1, "updated_at": time.time(), "users": self._states}
-        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temporary, self._path)
+        fd, name = tempfile.mkstemp(prefix=f".{self._path.name}.", suffix=".tmp", dir=self._path.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, indent=2))
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Windows readers/scanners can briefly deny replace despite a closed
+            # writer. Retry only that atomic commit, never replay memory effects.
+            delays = (0, .01, .03, .07)
+            for attempt, delay in enumerate(delays):
+                if delay:
+                    time.sleep(delay)
+                try:
+                    os.replace(temporary, self._path)
+                    return
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == len(delays) - 1:
+                        raise
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 async def _resolve(value: Awaitable[Any] | Any) -> Any:

@@ -15,8 +15,8 @@ class ChannelType(str, Enum):
     DINGTALK = "dingtalk"
     FEISHU = "feishu"
     WECOM = "wecom"
-    WECHAT = "wechat"        # WeChat (for testing)
-    QQ = "qq"                # QQ (for testing)
+    QQ = "qq"
+    TELEGRAM = "telegram"
     API = "api"              # REST API
     WEBHOOK = "webhook"      # Webhook
 

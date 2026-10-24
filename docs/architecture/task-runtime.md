@@ -3,8 +3,9 @@
 ## Ambient Service
 
 `AmbientService` is a first-level peer of Conversation, Memory and Task. It owns
-continuous shared attention, open questions, revisable interpretations, user
-feedback and durable activation admission. It does not own tool facts, Task
+durable proactive admission, budgets, recovery and delivery. SelfModel owns shared
+attention, open questions, revisable interpretations and interaction feedback.
+Ambient does not own cognition, tool facts, Task
 transitions, memory governance, model execution or another scheduler.
 
 ```text
@@ -16,17 +17,19 @@ Runtime events / periodic wakeup
   -> CapabilityService policy and exact approval
 ```
 
-One durable situation per personal space spans conversations and bounded activations. Each activation may
+One durable SelfModel situation per personal space spans conversations and bounded activations. Each activation may
 inspect, recall, reason, act, update its working understanding, annotate a visible
 message span, communicate, or remain silent. There is no required task template,
 automatic chat response or suggestion-only restriction. Session ids identify
 owned execution/communication channels. They do not own identity or attention.
-Version-one per-session state converges to the personal state on load; redundant
-actors are cancelled rather than maintained as a second writable state path.
+Legacy Ambient cognition migrates once into SelfModel state on load; the new
+Ambient control file contains no cognition fields. Redundant actors are cancelled
+rather than maintained as a second writable state path.
 
-`ambient.reflect`, `ambient.annotate` and `ambient.say` are ordinary
-manifest-discovered tools. Reflection updates working cognition, never Memory
-facts. Annotations reuse exact-span follow-up persistence and acceptance/dismissal
+`cognition.context`, `cognition.update_situation`, `semantic_ui.inspect/present`,
+`ambient.annotate` and `ambient.say` are ordinary manifest-discovered tools.
+Working updates belong to SelfModel, never Memory facts. Semantic expressions
+are not applications or tool authorizations. Annotations reuse exact-span follow-up persistence and acceptance/dismissal
 feedback; chat notices use idempotent assistant-only Runtime turns. Foreground
 conversation context also receives a bounded, explicitly revisable projection.
 Model-generated relevance rules cannot grant permissions or assert tool outcomes.

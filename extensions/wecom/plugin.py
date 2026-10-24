@@ -1,9 +1,9 @@
 ﻿from channels.wecom_channel import WeComChannel
-from channels.base import ChannelConfig
+from channels.settings import load_settings
 
 
 def register(api):
-    channel_cfg = api.config.get("channel_config") or {}
-    channel = WeComChannel(ChannelConfig(**channel_cfg))
+    settings = load_settings({"wecom": api.config.get("channel_config") or {}})
+    channel = WeComChannel(settings.wecom)
     api.register_channel("wecom", channel)
 

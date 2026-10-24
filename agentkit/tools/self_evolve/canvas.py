@@ -25,6 +25,90 @@ class CanvasSpec(BaseModel):
     tests: list[BrowserStep] = Field(min_length=1, max_length=32)
 
 
+async def _verify_semantics(page, document):
+    """Compare a declaration to live DOM and bridge state, never infer meaning."""
+    from computer.canvas_semantics import nodes
+    components = [node.model_dump() | {"parent_id": parent} for node, parent in nodes(document)]
+    await page.frame_locator('iframe').locator('body').wait_for(timeout=3000)
+    frame = next(frame for frame in page.frames if urlsplit(frame.url).netloc == "canvas.invalid")
+    # A component may commit asynchronously after the final browser step.
+    await frame.wait_for_function("""components => {
+      return components.every(node => {
+        const element = document.getElementById(node.id);
+        return element && (!(element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLButtonElement) || !element.disabled);
+      });
+    }""", arg=components, timeout=3000)
+    compare = """({components, values}) => {
+      const errors = [];
+      for (const node of components) {
+        const matches = document.querySelectorAll('#' + CSS.escape(node.id));
+        const element = matches[0];
+        if (matches.length !== 1) { errors.push(node.id + ': missing or duplicate DOM id'); continue; }
+        if (node.parent_id && !element.parentElement?.closest('#' + CSS.escape(node.parent_id))) errors.push(node.id + ': declared parent does not contain component');
+        if (!element.getClientRects().length) errors.push(node.id + ': declared component is not rendered');
+        if (node.type === 'button' && (element.tagName !== 'BUTTON' || element.textContent.trim() !== node.label)) errors.push(node.id + ': button does not match declaration');
+        if (node.type === 'input' || node.type === 'checkbox') {
+          if (element.tagName !== 'INPUT' || element.type !== (node.type === 'checkbox' ? 'checkbox' : node.input_type) || element.readOnly) errors.push(node.id + ': input type does not match declaration');
+        }
+        if (node.type === 'select') {
+          if (element.tagName !== 'SELECT' || JSON.stringify(Array.from(element.options || [], option => option.value)) !== JSON.stringify(node.options.map(option => option.value))) errors.push(node.id + ': options do not match declaration');
+        }
+        if (['input','checkbox','select'].includes(node.type)) {
+          if (!Array.from(element.labels || []).some(label => {
+            const copy = label.cloneNode(true);
+            for (const control of copy.querySelectorAll('input,select,textarea,button')) control.remove();
+            return copy.textContent.trim() === node.label;
+          })) errors.push(node.id + ': label does not match declaration');
+          if (node.type === 'checkbox' ? element.checked !== values[node.bind] : element.value !== String(values[node.bind])) errors.push(node.id + ': visible value differs from Runtime app state');
+        }
+        if (node.type === 'text' && element.textContent !== String(node.bind ? values[node.bind] : node.text)) errors.push(node.id + ': text differs from declaration or Runtime app state');
+      }
+      return errors;
+    }"""
+    for attempt in range(10):
+        state = await page.evaluate("window.canvasVerificationSnapshot()")
+        values = {**document.initial_state, **state["value"]}
+        failures = await frame.evaluate(compare, {"components": components, "values": values})
+        if not failures or any("differs" not in failure for failure in failures):
+            break
+        await asyncio.sleep(0.05)
+    return failures
+
+
+async def _verify_state_updates(page, document, source):
+    from computer.canvas_semantics import nodes, interact
+    from computer.canvas_components import CanvasInput, CanvasCheckbox, CanvasSelect
+    import hashlib
+    state = await page.evaluate("window.canvasVerificationSnapshot()")
+    original = {**document.initial_state, **state["value"]}
+    revision = hashlib.sha256(source.encode()).hexdigest()
+    tested = 0
+    try:
+        for node, _ in nodes(document):
+            if not isinstance(node, (CanvasInput, CanvasCheckbox, CanvasSelect)):
+                continue
+            current = original[node.bind]
+            if isinstance(node, CanvasSelect):
+                value = next((option.value for option in node.options if option.value != current), current)
+            elif isinstance(current, bool):
+                value = not current
+            elif type(current) in (int, float):
+                value = 1 if current == 0 else 0
+            else:
+                value = "verification" if not current else ""
+            if value == current:
+                continue
+            values = interact(source, {"value": original}, component_id=node.id, operation="set", value=value, definition_revision=revision)
+            await page.evaluate("value => window.canvasVerificationSetState(value)", values)
+            failures = await _verify_semantics(page, document)
+            if failures:
+                return failures, tested
+            tested += 1
+    finally:
+        await page.evaluate("value => window.canvasVerificationSetState(value)", original)
+    return await _verify_semantics(page, document), tested
+
+
 async def verify_canvas(root: Path, spec: dict[str, Any], screenshot: Path, *, browser_channel: str = "") -> dict[str, Any]:
     """Run declared interactions without host credentials, internet, or file URLs."""
     from playwright.async_api import async_playwright
@@ -37,6 +121,11 @@ async def verify_canvas(root: Path, spec: dict[str, Any], screenshot: Path, *, b
         raise ValueError("canvas entrypoint must be a packaged HTML file")
     errors: list[str] = []
     steps = []
+    from computer.canvas_semantics import read_document, snapshot
+    source = entry.read_text(encoding="utf-8")
+    document = read_document(source)
+    semantics = snapshot(source, {"value": {}, "revision": 0})
+    semantic_report = {"status": semantics["status"], "component_count": len(semantics["components"]), "definition_revision": semantics["definition_revision"], "browser_verified": False}
     async with async_playwright() as playwright:
         browser = await launch_browser(playwright, headless=True, chromium_sandbox=True, channel=browser_channel)
         try:
@@ -65,8 +154,15 @@ async def verify_canvas(root: Path, spec: dict[str, Any], screenshot: Path, *, b
             await page.evaluate("""() => {
               const frame = document.querySelector('iframe');
               let state = {revision: 0, value: {}};
+              const ports = new Set();
+              window.canvasVerificationSnapshot = () => structuredClone(state);
+              window.canvasVerificationSetState = (value) => {
+                state = {revision: state.revision + 1, value};
+                for (const port of ports) port.postMessage({event:'state.changed', state});
+              };
               const connect = () => {
                 const channel = new MessageChannel();
+                ports.add(channel.port1);
                 channel.port1.onmessage = ({data}) => {
                   if (data.method === 'state.set') {
                     if (data.params.expected_revision !== state.revision) {
@@ -81,6 +177,11 @@ async def verify_canvas(root: Path, spec: dict[str, Any], screenshot: Path, *, b
               frame.addEventListener('load', connect);
               connect();
             }""")
+            if document is not None:
+                try:
+                    errors.extend(await _verify_semantics(page, document))
+                except Exception as exc:
+                    errors.append("Semantic contract verification failed: " + str(exc)[:2000])
             for step in definition.tests:
                 locator = page.frame_locator('iframe').locator(step.selector)
                 try:
@@ -103,8 +204,18 @@ async def verify_canvas(root: Path, spec: dict[str, Any], screenshot: Path, *, b
                     steps.append({**step.model_dump(), "ok": False, "error": str(exc)[:2000]})
                     errors.append(str(exc)[:2000])
                     break
+            if document is not None and not errors:
+                try:
+                    errors.extend(await _verify_semantics(page, document))
+                    if not errors:
+                        failures, tested = await _verify_state_updates(page, document, source)
+                        errors.extend(failures)
+                        semantic_report["state_update_checks"] = tested
+                    semantic_report["browser_verified"] = not errors
+                except Exception as exc:
+                    errors.append("Semantic state verification failed: " + str(exc)[:2000])
             screenshot.parent.mkdir(parents=True, exist_ok=True)
             await page.screenshot(path=str(screenshot), full_page=True)
         finally:
             await browser.close()
-    return {"ok": not errors, "errors": errors[:16], "steps": steps, "screenshot": str(screenshot)}
+    return {"ok": not errors, "errors": errors[:16], "steps": steps, "screenshot": str(screenshot), "semantics": semantic_report}

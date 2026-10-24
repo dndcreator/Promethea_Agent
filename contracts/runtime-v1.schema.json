@@ -308,6 +308,12 @@
           "title": "Actions",
           "type": "array"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "id": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
@@ -318,6 +324,17 @@
           "minLength": 1,
           "title": "Label",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "type": {
           "const": "button",
@@ -351,6 +368,12 @@
           "title": "Bind",
           "type": "string"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "id": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
@@ -361,6 +384,17 @@
           "minLength": 1,
           "title": "Label",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "type": {
           "const": "checkbox",
@@ -375,6 +409,132 @@
         "bind"
       ],
       "title": "CanvasCheckbox",
+      "type": "object"
+    },
+    "CanvasComponentView": {
+      "properties": {
+        "binding": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Binding"
+        },
+        "component_id": {
+          "title": "Component Id",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
+        "input_schema": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Input Schema"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "operations": {
+          "items": {
+            "enum": [
+              "set",
+              "activate"
+            ],
+            "type": "string"
+          },
+          "title": "Operations",
+          "type": "array"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Options"
+        },
+        "parent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Id"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "component_id",
+        "kind",
+        "label"
+      ],
+      "title": "CanvasComponentView",
       "type": "object"
     },
     "CanvasDocument": {
@@ -677,6 +837,12 @@
           "title": "Bind",
           "type": "string"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "id": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
@@ -697,6 +863,17 @@
           "title": "Label",
           "type": "string"
         },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "type": {
           "const": "input",
           "title": "Type",
@@ -710,6 +887,63 @@
         "bind"
       ],
       "title": "CanvasInput",
+      "type": "object"
+    },
+    "CanvasInteraction": {
+      "additionalProperties": false,
+      "properties": {
+        "component_id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Component Id",
+          "type": "string"
+        },
+        "definition_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Definition Revision",
+          "type": "string"
+        },
+        "expected_revision": {
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "operation": {
+          "enum": [
+            "set",
+            "activate"
+          ],
+          "title": "Operation",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Value"
+        }
+      },
+      "required": [
+        "component_id",
+        "operation",
+        "expected_revision",
+        "definition_revision"
+      ],
+      "title": "CanvasInteraction",
       "type": "object"
     },
     "CanvasMutation": {
@@ -816,12 +1050,53 @@
       "title": "CanvasOption",
       "type": "object"
     },
+    "CanvasResourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+          "title": "Kind",
+          "type": "string"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Workspace Id"
+        }
+      },
+      "required": [
+        "kind",
+        "id"
+      ],
+      "title": "CanvasResourceRef",
+      "type": "object"
+    },
     "CanvasSelect": {
       "additionalProperties": false,
       "properties": {
         "bind": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Bind",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
           "type": "string"
         },
         "id": {
@@ -834,6 +1109,17 @@
           "minLength": 1,
           "title": "Label",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "options": {
           "items": {
@@ -858,6 +1144,72 @@
         "options"
       ],
       "title": "CanvasSelect",
+      "type": "object"
+    },
+    "CanvasSemanticSnapshot": {
+      "properties": {
+        "components": {
+          "items": {
+            "$ref": "#/$defs/CanvasComponentView"
+          },
+          "title": "Components",
+          "type": "array"
+        },
+        "definition_revision": {
+          "title": "Definition Revision",
+          "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Revision"
+        },
+        "state_origin": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "State Origin"
+        },
+        "status": {
+          "enum": [
+            "compiled",
+            "declared",
+            "undeclared"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        }
+      },
+      "required": [
+        "status",
+        "definition_revision"
+      ],
+      "title": "CanvasSemanticSnapshot",
       "type": "object"
     },
     "CanvasStack": {
@@ -906,6 +1258,12 @@
           "title": "Children",
           "type": "array"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "direction": {
           "default": "column",
           "enum": [
@@ -919,6 +1277,17 @@
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "type": {
           "const": "stack",
@@ -983,10 +1352,27 @@
           "title": "Columns",
           "type": "array"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "id": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "rows": {
           "items": {
@@ -1042,6 +1428,12 @@
           "default": null,
           "title": "Bind"
         },
+        "description": {
+          "default": "",
+          "maxLength": 800,
+          "title": "Description",
+          "type": "string"
+        },
         "emphasis": {
           "default": "body",
           "enum": [
@@ -1056,6 +1448,17 @@
           "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
           "title": "Id",
           "type": "string"
+        },
+        "object_ref": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "text": {
           "anyOf": [
@@ -1081,6 +1484,150 @@
         "id"
       ],
       "title": "CanvasText",
+      "type": "object"
+    },
+    "ChannelAccount": {
+      "properties": {
+        "account_id": {
+          "title": "Account Id",
+          "type": "string"
+        },
+        "bound": {
+          "title": "Bound",
+          "type": "boolean"
+        },
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "external_account_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "External Account Id"
+        },
+        "running": {
+          "title": "Running",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "channel",
+        "account_id",
+        "running",
+        "bound"
+      ],
+      "title": "ChannelAccount",
+      "type": "object"
+    },
+    "ChannelDelivery": {
+      "properties": {
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "created": {
+          "title": "Created",
+          "type": "number"
+        },
+        "delivery_id": {
+          "title": "Delivery Id",
+          "type": "string"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "execution_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Execution Status"
+        },
+        "next_part": {
+          "title": "Next Part",
+          "type": "integer"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "updated": {
+          "title": "Updated",
+          "type": "number"
+        }
+      },
+      "required": [
+        "delivery_id",
+        "channel",
+        "session_id",
+        "state",
+        "next_part",
+        "created",
+        "updated"
+      ],
+      "title": "ChannelDelivery",
+      "type": "object"
+    },
+    "ChannelPairing": {
+      "properties": {
+        "channel": {
+          "title": "Channel",
+          "type": "string"
+        },
+        "command": {
+          "title": "Command",
+          "type": "string"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "number"
+        }
+      },
+      "required": [
+        "channel",
+        "command",
+        "expires_at"
+      ],
+      "title": "ChannelPairing",
+      "type": "object"
+    },
+    "ChannelPairingRequest": {
+      "properties": {
+        "channel": {
+          "pattern": "^[a-z][a-z0-9_-]{0,79}$",
+          "title": "Channel",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel"
+      ],
+      "title": "ChannelPairingRequest",
       "type": "object"
     },
     "CognitionBundle": {
@@ -1254,6 +1801,36 @@
         "cognition"
       ],
       "title": "CognitionResponse",
+      "type": "object"
+    },
+    "EnvironmentInspect": {
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "$ref": "#/$defs/CanvasResourceRef"
+        }
+      },
+      "required": [
+        "resource"
+      ],
+      "title": "EnvironmentInspect",
+      "type": "object"
+    },
+    "EnvironmentInteraction": {
+      "additionalProperties": false,
+      "properties": {
+        "interaction": {
+          "$ref": "#/$defs/CanvasInteraction"
+        },
+        "resource": {
+          "$ref": "#/$defs/CanvasResourceRef"
+        }
+      },
+      "required": [
+        "resource",
+        "interaction"
+      ],
+      "title": "EnvironmentInteraction",
       "type": "object"
     },
     "Error": {
@@ -2191,6 +2768,382 @@
       "title": "RunResponse",
       "type": "object"
     },
+    "SemanticChoice": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "SemanticChoice",
+      "type": "object"
+    },
+    "SemanticExpression": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "$ref": "#/$defs/SemanticChoice"
+          },
+          "maxItems": 6,
+          "title": "Choices",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "expected_revision": {
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "expression_id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$",
+          "title": "Expression Id",
+          "type": "string"
+        },
+        "hidden": {
+          "default": false,
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "note",
+            "gesture",
+            "choice",
+            "panel"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "response": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Response"
+        },
+        "revision": {
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "state": {
+          "default": "open",
+          "enum": [
+            "open",
+            "responded",
+            "dismissed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "title": {
+          "default": "",
+          "maxLength": 120,
+          "title": "Title",
+          "type": "string"
+        },
+        "tone": {
+          "default": "neutral",
+          "enum": [
+            "neutral",
+            "warm",
+            "playful",
+            "concerned"
+          ],
+          "title": "Tone",
+          "type": "string"
+        },
+        "updated_at": {
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expression_id",
+        "expected_revision",
+        "kind",
+        "content",
+        "revision",
+        "updated_at"
+      ],
+      "title": "SemanticExpression",
+      "type": "object"
+    },
+    "SemanticSurface": {
+      "additionalProperties": false,
+      "properties": {
+        "focused": {
+          "default": true,
+          "title": "Focused",
+          "type": "boolean"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "objects": {
+          "items": {
+            "$ref": "#/$defs/CanvasResourceRef"
+          },
+          "maxItems": 8,
+          "title": "Objects",
+          "type": "array"
+        },
+        "sequence": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "surface_id": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+          "title": "Surface Id",
+          "type": "string"
+        },
+        "view": {
+          "default": "unknown",
+          "maxLength": 80,
+          "title": "View",
+          "type": "string"
+        },
+        "visible": {
+          "default": true,
+          "title": "Visible",
+          "type": "boolean"
+        }
+      },
+      "title": "SemanticSurface",
+      "type": "object"
+    },
+    "SemanticUIFeedback": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "enum": [
+            "respond",
+            "dismiss"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "choice_id": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Choice Id"
+        },
+        "expected_revision": {
+          "minimum": 1,
+          "title": "Expected Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "action"
+      ],
+      "title": "SemanticUIFeedback",
+      "type": "object"
+    },
+    "SemanticUIState": {
+      "properties": {
+        "expressions": {
+          "items": {
+            "$ref": "#/$defs/SemanticExpression"
+          },
+          "title": "Expressions",
+          "type": "array"
+        },
+        "revision": {
+          "default": 0,
+          "title": "Revision",
+          "type": "integer"
+        }
+      },
+      "title": "SemanticUIState",
+      "type": "object"
+    },
+    "SemanticUIWrite": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "$ref": "#/$defs/SemanticChoice"
+          },
+          "maxItems": 6,
+          "title": "Choices",
+          "type": "array"
+        },
+        "content": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "expected_revision": {
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "expression_id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,63}$",
+          "title": "Expression Id",
+          "type": "string"
+        },
+        "hidden": {
+          "default": false,
+          "title": "Hidden",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "note",
+            "gesture",
+            "choice",
+            "panel"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "message_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Message Id"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Id"
+        },
+        "title": {
+          "default": "",
+          "maxLength": 120,
+          "title": "Title",
+          "type": "string"
+        },
+        "tone": {
+          "default": "neutral",
+          "enum": [
+            "neutral",
+            "warm",
+            "playful",
+            "concerned"
+          ],
+          "title": "Tone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expression_id",
+        "expected_revision",
+        "kind",
+        "content"
+      ],
+      "title": "SemanticUIWrite",
+      "type": "object"
+    },
     "Session": {
       "properties": {
         "created_at": {
@@ -2259,6 +3212,43 @@
         }
       },
       "title": "SessionProjectWrite",
+      "type": "object"
+    },
+    "SituationUpdate": {
+      "additionalProperties": false,
+      "properties": {
+        "attention": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 6,
+          "title": "Attention",
+          "type": "array"
+        },
+        "expected_revision": {
+          "minimum": 0,
+          "title": "Expected Revision",
+          "type": "integer"
+        },
+        "interpretation": {
+          "default": "",
+          "maxLength": 4000,
+          "title": "Interpretation",
+          "type": "string"
+        },
+        "questions": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Questions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "expected_revision"
+      ],
+      "title": "SituationUpdate",
       "type": "object"
     },
     "Task": {
@@ -3082,6 +4072,17 @@
         },
         "scope": {
           "$ref": "#/$defs/WorkbenchScope"
+        },
+        "semantic_ui": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SemanticUIState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "task": {
           "anyOf": [
