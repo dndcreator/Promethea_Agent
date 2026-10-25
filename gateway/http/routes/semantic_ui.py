@@ -38,5 +38,5 @@ async def observe_surface(body: SemanticSurface, user_id: str = Depends(get_curr
 async def expression_feedback(expression_id: str, body: SemanticUIFeedback, user_id: str = Depends(get_current_user_id)):
     try:
         return await component().feedback(user_id, expression_id, body)
-    except (KeyError, ValueError, TaskExecutionConflict) as exc:
+    except (KeyError, ValueError, TaskExecutionConflict, PermissionError, TimeoutError, OSError) as exc:
         translate(exc)

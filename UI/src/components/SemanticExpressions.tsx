@@ -19,7 +19,7 @@ export default function SemanticExpressions({ sessionId, messageId }: { sessionI
   const expressions = (snapshot?.semantic_ui?.expressions || []).map((item) => {
     const updated = updates[`${identity}:${item.expression_id}`]
     return updated && updated.revision >= item.revision ? updated : item
-  }).filter((item) => !item.hidden && item.state !== 'dismissed'
+  }).filter((item) => !item.canvas_anchor && !item.hidden && item.state !== 'dismissed'
     && (messageId ? item.message_id === messageId && item.session_id === sessionId : !item.message_id && (!item.session_id || item.session_id === sessionId)))
 
   if (!user || !expressions.length) return null

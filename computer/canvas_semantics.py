@@ -88,7 +88,9 @@ def snapshot(source: str, state: dict):
                            "binding": bind, "value": value.get(bind) if bind else None,
                            "operations": operations,
                            "input_schema": schema,
-                           "options": [option.model_dump() for option in node.options] if isinstance(node, CanvasSelect) else None})
+                           "options": [option.model_dump() for option in node.options] if isinstance(node, CanvasSelect) else None,
+                           "display": {"text": node.text} if node.type == "text" and not bind else {"columns": node.columns, "rows": node.rows} if node.type == "table" else None,
+                           "effects": [action.model_dump(exclude_none=True) for action in node.actions] if isinstance(node, CanvasButton) else []})
     return {"status": "compiled" if source == render_component_document(document.model_dump()) else "declared",
             "title": document.title, "definition_revision": hashlib.sha256(source.encode()).hexdigest(),
             "revision": int(state.get("revision") or 0), "state_origin": "runtime_stored_app_data_not_external_business_facts",

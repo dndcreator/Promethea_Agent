@@ -63,7 +63,7 @@ export default function FilesModal({ sessionId, onClose, onAttach, embedded = fa
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const selected = files.find((file) => file.file_id === selectedId)
-  useEnvironmentObservation('files', selected ? [{ kind: 'file', id: selected.file_id }] : [])
+  const observe = useEnvironmentObservation('files', selected ? [{ kind: 'file', id: selected.file_id }] : [])
 
   const load = async (nextQuery = query) => {
     const epoch = ++requestEpoch.current
@@ -109,7 +109,7 @@ export default function FilesModal({ sessionId, onClose, onAttach, embedded = fa
     }
   }
 
-  return <FeatureSurface embedded={embedded} onClose={onClose} label={t('文件', 'Files')}>
+  return <FeatureSurface surfaceRef={observe} embedded={embedded} onClose={onClose} label={t('文件', 'Files')}>
     <header className="page-heading">
       <div><FileText size={19} /><h1>{t('文件', 'Files')}</h1><span>{files.length}</span></div>
       <button type="button" className="icon-button" onClick={onClose} aria-label={t('关闭', 'Close')} title={t('关闭', 'Close')}><X size={17} /></button>

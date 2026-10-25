@@ -240,18 +240,27 @@ class UserFileStore:
             return None
         for item in self._load_index(user_id).get("items", []):
             if isinstance(item, dict) and str(item.get("file_id") or "") == target:
-                return dict(item)
+                result = dict(item)
+                text_path = self._text_dir(user_id) / f"{target}.txt"
+                if text_path.resolve().is_relative_to(self._text_dir(user_id).resolve()) and text_path.is_file() and not text_path.is_symlink():
+                    stat = text_path.stat()
+                    result["content_revision"] = f"{stat.st_mtime_ns}:{stat.st_size}"
+                return result
         return None
 
-    def read_extracted_text(self, *, user_id: str, file_id: str, max_chars: int = 12000) -> str:
+    def read_extracted_text(self, *, user_id: str, file_id: str, max_chars: int = 12000, offset: int = 0) -> str:
         target = str(file_id or "").strip()
-        if not target:
+        if not target or self.get_file(user_id=user_id, file_id=target) is None:
             return ""
         text_path = self._text_dir(user_id) / f"{target}.txt"
         if not text_path.exists():
             return ""
         try:
-            return text_path.read_text(encoding="utf-8")[: max(1, int(max_chars))]
+            if not text_path.resolve().is_relative_to(self._text_dir(user_id).resolve()) or text_path.is_symlink():
+                return ""
+            with text_path.open(encoding="utf-8") as handle:
+                start = min(1_000_000, max(0, int(offset)))
+                return handle.read(start + max(1, int(max_chars)))[start:]
         except Exception:
             return ""
 

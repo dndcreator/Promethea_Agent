@@ -317,6 +317,10 @@ export function getCanvasClient() {
   return createRuntimeClient().canvas
 }
 
+export function getSemanticUIClient() {
+  return createRuntimeClient().semanticUI
+}
+
 export function updateMemoryEntry(memoryId: string, content: string): Promise<Response> {
   return authFetch(`/api/memory/entries/${encodeURIComponent(memoryId)}`, {
     method: 'PATCH',

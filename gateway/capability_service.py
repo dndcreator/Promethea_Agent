@@ -1015,15 +1015,17 @@ class CapabilityService:
             logger.warning(f"Tool result projection failed [{tool.tool_id}]: {exc}")
         return summary, metadata
 
-    def _workspace_scope(self, params: Dict[str, Any], context_fields: Dict[str, Any]):
+    def _workspace_scope(self, params: Dict[str, Any], context_fields: Dict[str, Any], *, observation: bool = False):
         from .delegation import current_delegation
         from .ambient_state import current_ambient
 
         delegation = current_delegation()
         if delegation is not None and (delegation.depth or delegation.background_notification or current_ambient() is not None) and delegation.workspace_id:
-            if params.get("workspace_id") and str(params["workspace_id"]) != delegation.workspace_id:
+            requested = str(params.get("workspace_id") or delegation.workspace_id)
+            projected = observation and delegation.depth == 0 and requested in delegation.observation_workspaces
+            if requested != delegation.workspace_id and not projected:
                 raise ToolPolicyViolationError("tool workspace exceeds the delegated workspace scope")
-            context_fields = {**context_fields, "workspace_id": delegation.workspace_id}
+            context_fields = {**context_fields, "workspace_id": requested if projected else delegation.workspace_id}
         service = getattr(self, "workspace_service", None)
         user_id = str(context_fields.get("user_id") or "").strip()
         if service is None or not user_id:

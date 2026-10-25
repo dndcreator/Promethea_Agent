@@ -340,7 +340,7 @@ class AmbientService:
         context = self._context(task, run, token, scene)
         checkpoint = run["metadata"].get("checkpoint") or {}
         context.agent_message_ids = checkpoint.get("agent_message_ids", [])
-        scope = DelegationScope(_Budget(count=int(checkpoint.get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id)
+        scope = DelegationScope(_Budget(count=int(checkpoint.get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id, observation_workspaces=self.self_model.environment.visible_workspaces(scene.user_id))
         def save(value):
             self.tasks.checkpoint_run(task_id=task["task_id"], user_id=scene.user_id, run_id=run["run_id"], token=token, checkpoint={**value, "agent_message_ids": context.agent_message_ids, "delegation_spent": scope.budget.count})
         async with self.conversation.agent_execution(scene.user_id, scene.session_id):
@@ -382,7 +382,7 @@ class AmbientService:
                 raise TaskExecutionConflict("ambient context changed")
             context = self._context(task, run, token, scene)
             context.agent_message_ids = pending.get("agent_message_ids", [])
-            scope = DelegationScope(_Budget(count=int((run["metadata"].get("checkpoint") or {}).get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id)
+            scope = DelegationScope(_Budget(count=int((run["metadata"].get("checkpoint") or {}).get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id, observation_workspaces=self.self_model.environment.visible_workspaces(user))
             user_config = deepcopy(self._config(user))
             user_config.setdefault("api", {})["max_tokens"] = min(int(user_config.get("api", {}).get("max_tokens") or config.ambient.max_tokens), config.ambient.max_tokens)
             user_config.setdefault("action", {}).setdefault("gaps", {})["enabled"] = False

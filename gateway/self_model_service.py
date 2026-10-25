@@ -66,7 +66,7 @@ class SelfModelService:
         from .environment_context import EnvironmentViews
         self.environment_sources = EnvironmentSources(message_manager=message_manager, task_service=task_service, capability_service=capability_service)
         self.environment = EnvironmentViews(resolver=self.environment_sources.inspect, ttl_seconds=config.self_model.environment_ttl_s)
-        self.semantic_ui = SemanticUI(store=self.state, message_manager=message_manager, event_emitter=event_emitter, environment=self.environment)
+        self.semantic_ui = SemanticUI(store=self.state, message_manager=message_manager, event_emitter=event_emitter, environment=self.environment, sources=self.environment_sources)
         if event_emitter is not None:
             for event in (EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.MEMORY_SAVED, EventType.MEMORY_UPDATE,
                           EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED,

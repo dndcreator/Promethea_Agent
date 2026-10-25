@@ -140,7 +140,8 @@ def render_canvas_html(source: str, *, root: Path | None = None, entrypoint: Pat
         assets.feed(source)
         source = "".join(assets.parts)
     script = Path(__file__).with_name("canvas_bridge.js").read_text(encoding="utf-8")
-    bootstrap = f"<script>{script}</script>"
+    expressions = Path(__file__).with_name("canvas_expressions.js").read_text(encoding="utf-8")
+    bootstrap = f"<script>{expressions}\n{script}</script>"
     # Place the bridge before application scripts without altering application code.
     class Position(HTMLParser):
         insertion = 0

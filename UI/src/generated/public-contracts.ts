@@ -582,6 +582,12 @@ export interface SemanticChoice {
   label: string
 }
 
+export interface CanvasExpressionAnchor {
+  resource: CanvasResourceRef
+  component_id: string
+  definition_revision: string
+}
+
 export interface SemanticUIWrite {
   expression_id: string
   expected_revision: number
@@ -591,6 +597,7 @@ export interface SemanticUIWrite {
   tone?: "neutral" | "warm" | "playful" | "concerned"
   session_id?: string | null
   message_id?: string | null
+  canvas_anchor?: CanvasExpressionAnchor | null
   choices?: Array<SemanticChoice>
   hidden?: boolean
 }
@@ -604,6 +611,7 @@ export interface SemanticExpression {
   tone?: "neutral" | "warm" | "playful" | "concerned"
   session_id?: string | null
   message_id?: string | null
+  canvas_anchor?: CanvasExpressionAnchor | null
   choices?: Array<SemanticChoice>
   hidden?: boolean
   revision: number
@@ -627,10 +635,15 @@ export interface SemanticSurface {
   objects?: Array<CanvasResourceRef>
   session_id?: string | null
   message_id?: string | null
+  active_component_id?: string | null
+  definition_revision?: string | null
 }
 
 export interface EnvironmentInspect {
   resource: CanvasResourceRef
+  offset?: number
+  limit?: number
+  component_id?: string | null
 }
 
 export interface CanvasInteraction {
@@ -658,6 +671,8 @@ export interface CanvasComponentView {
   operations?: Array<"set" | "activate">
   input_schema?: Record<string, unknown> | null
   options?: Array<Record<string, string>> | null
+  display?: Record<string, unknown> | null
+  effects?: Array<Record<string, unknown>>
 }
 
 export interface CanvasSemanticSnapshot {

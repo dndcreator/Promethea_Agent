@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookmarkPlus, MonitorPlay, RefreshCw, Trash2, X } from 'lucide-react'
 import { connectCanvasFrame } from '@promethea/sdk'
 
-import { getCanvasClient, type CanvasEnvironment } from '../../services/api'
+import { getCanvasClient, getSemanticUIClient, type CanvasEnvironment } from '../../services/api'
 import FeatureSurface from '../FeatureSurface'
 import { useLanguage } from '../../store/LanguageContext'
 import { useEnvironmentObservation } from '../../hooks/useEnvironmentObservation'
@@ -19,6 +19,8 @@ export default function CanvasModal({ workspaceId, initialEnvironmentId, onClose
   const { t } = useLanguage()
   const resolvedWorkspace = workspaceId || 'default'
   const [client] = useState(getCanvasClient)
+  const [semanticUI] = useState(getSemanticUIClient)
+  const [attention, setAttention] = useState<{ component_id: string; definition_revision: string } | null>(null)
   const [environments, setEnvironments] = useState<CanvasEnvironment[]>([])
   const [selectedId, setSelectedId] = useState('')
   const [loading, setLoading] = useState(true)
@@ -56,7 +58,8 @@ export default function CanvasModal({ workspaceId, initialEnvironmentId, onClose
   useEffect(() => () => { disconnect.current?.() }, [])
 
   const selected = useMemo(() => environments.find((item) => identity(item) === selectedId), [environments, selectedId])
-  useEnvironmentObservation('canvas', selected ? [{ kind: 'canvas', id: selected.environment_id, workspace_id: selected.workspace_id }] : [])
+  const observe = useEnvironmentObservation('canvas', selected ? [{ kind: 'canvas', id: selected.environment_id, workspace_id: selected.workspace_id }] : [], true, attention)
+  useEffect(() => { setAttention(null); disconnect.current?.(); disconnect.current = null }, [selectedId])
   const refresh = () => { setReload((value) => value + 1); void load() }
   const retain = async () => {
     if (!selected || busy) return
@@ -77,7 +80,7 @@ export default function CanvasModal({ workspaceId, initialEnvironmentId, onClose
   }
 
   return (
-    <FeatureSurface embedded={embedded} onClose={onClose} label={t('画布', 'Canvas')}>
+    <FeatureSurface surfaceRef={observe} embedded={embedded} onClose={onClose} label={t('画布', 'Canvas')}>
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <aside className={`${compact ? 'hidden' : 'hidden md:flex'} w-56 shrink-0 flex-col border-r border-border-soft bg-bg-page p-3`}>
           <h2 className="mb-3 px-2 text-sm font-semibold text-text-strong">{t('画布', 'Canvas')}</h2>
@@ -109,7 +112,7 @@ export default function CanvasModal({ workspaceId, initialEnvironmentId, onClose
           <div className="min-h-0 flex-1">
             {selected ? <iframe key={`${identity(selected)}:${selected.content_revision || selected.updated_at || ''}:${reload}`}
               src={selected.preview_url} title={selected.name} sandbox="allow-scripts allow-forms allow-modals"
-              onLoad={(event) => { disconnect.current?.(); disconnect.current = connectCanvasFrame(event.currentTarget, client, selected) }}
+              onLoad={(event) => { disconnect.current?.(); setAttention(null); disconnect.current = connectCanvasFrame(event.currentTarget, client, selected, { semanticUI, onAttention: setAttention, labels: { dismiss: t('收起', 'Dismiss'), retry: t('暂时未能保存，请重试。', 'Could not save. Please retry.') } }) }}
               className="h-full w-full border-0" />
               : <div className="flex h-full items-center justify-center text-sm text-text-muted">{loading ? t('正在加载', 'Loading') : t('暂无画布', 'No canvas')}</div>}
           </div>

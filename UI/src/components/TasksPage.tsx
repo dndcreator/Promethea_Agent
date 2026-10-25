@@ -22,7 +22,7 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
   const [busy, setBusy] = useState(false)
   const [revision, setRevision] = useState(0)
   const selected = tasks.find((task) => task.task_id === selectedId)
-  useEnvironmentObservation('tasks', selected ? [{ kind: 'task', id: selected.task_id }] : [])
+  const observe = useEnvironmentObservation('tasks', selected ? [{ kind: 'task', id: selected.task_id }] : [])
   const label = (value: string) => taskStatusLabel(value, value, t)
 
   useEffect(() => {
@@ -74,7 +74,7 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   }) : ''
 
-  return <section className="tasks-page" aria-label={t('任务', 'Tasks')}>
+  return <section ref={observe} className="tasks-page" aria-label={t('任务', 'Tasks')}>
     <header className="page-heading">
       <div><ListTodo size={19} /><h1>{t('任务', 'Tasks')}</h1><span>{tasks.length}</span></div>
       <button type="button" className="icon-button" title={t('刷新', 'Refresh')} aria-label={t('刷新', 'Refresh')}

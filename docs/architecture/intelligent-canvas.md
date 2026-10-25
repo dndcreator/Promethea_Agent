@@ -8,8 +8,8 @@ choice or ongoing text panel. The distinction is purpose, not whether a user or
 Agent initiated it. Neither path edits Promethea's main UI source at runtime.
 
 `semantic_ui.inspect/present` use the ordinary capability registry. Validated
-expression data is rendered by host React components, with personal, conversation
-or exact-message scope. Stable IDs and expected revisions update/hide an existing
+expression data is rendered by host React components, with personal, conversation,
+exact-message or Canvas-component scope. Stable IDs and expected revisions update/hide an existing
 expression; no code generation or application deployment is required. This first
 grammar is text and choices, not arbitrary charts, layout generation or remote
 business actions. Rich custom applications remain in Canvas.
@@ -17,8 +17,19 @@ business actions. Rich custom applications remain in Canvas.
 Host presentation uses the existing Workbench SSE subscription and generated SDK
 contracts. `/api/semantic-ui` reads expressions; `/context` records an advisory
 host view; `/{expression_id}/feedback` records a declared choice or dismissal.
-An iframe does not gain access to this channel: the Canvas MessageChannel remains
-limited to application state and diagnostics. There is no arbitrary tool name,
+Canvas expressions use `canvas_anchor`: an owned workspace/app reference, component
+ID and exact source-definition hash, mutually exclusive with conversation anchors.
+The existing opaque-frame bridge forwards only expressions matching that app and
+current definition. A trusted text renderer mounts them beside the actual component;
+the same ID updates in place, answered choices become disabled, and dismissals remove
+the expression. Canvas-targeted expressions are excluded from chat rendering.
+The frame can submit feedback only for its forwarded expressions. Runtime rechecks
+ownership, the expression revision and current component definition before accepting
+a new answer; it still permits dismissal of a stale expression. Save failures keep
+the interaction retryable. The frame receives no host token or other apps' expressions.
+Presentation/definition checks poll at most once concurrently every 1.5 seconds while
+the document is visible and stop on disconnect; unavailable sources withdraw old cards.
+There is no arbitrary tool name,
 executable script or approval grant in the expression protocol.
 
 SelfModel retains expression intent and feedback alongside working cognition;
@@ -48,6 +59,28 @@ unknown visibility. Meaningful descriptor changes emit the existing UI event;
 heartbeats only renew leases. State-change events accelerate awareness, while a
 fresh source snapshot prevents missed events from becoming permanent false state.
 
+Host focus follows the deepest registered work region on pointer/keyboard focus,
+not a copy of `document.hasFocus()` on every panel. The frame reports a component
+only when that iframe is active; the host and Runtime validate its ID and definition.
+Reports debounce within the frame, contain no keystrokes, and remain advisory.
+Projection drops component attention when the source definition has changed.
+
+Uploaded files reuse UserFileStore's extracted text (including supported PDF/DOCX
+extraction); workspace artifacts expose supported UTF-8 text, JSON, Markdown and XML.
+`environment.inspect` accepts character `offset`/`limit` (maximum 12,000 per read,
+offset up to 1,000,000). Content includes its offset, truncation/next offset and source
+revision. Automatic context contains only a bounded excerpt; the model can explicitly
+read subsequent windows. Binary artifacts, missing extraction and unknown source kinds
+stay unavailable/unsupported, not guessed from filenames. This does not add universal
+OCR, binary document parsing or visual understanding of every file format.
+
+For each proactive activation, Ambient projects fresh, owner-validated visible Canvas
+and Artifact workspace references into its existing delegation scope as observation-only
+access. This lets SelfModel inspect the active app and validate a presentation anchor
+even if the delivery conversation uses another workspace. It grants no ordinary tool,
+command or app-state write scope, is not inherited as child workspace access, and is
+recomputed for continuation/new activation rather than persisted as permission.
+
 The protected `environment_observations` block has its own bounded JSON budget,
 separate from normal cognition text, and is refreshed at each Action model step.
 It enters as user-level data, never system instructions. Existing model-call
@@ -60,7 +93,12 @@ neither can override source-service facts or permissions.
 Generated component documents can include descriptions and `object_ref` relations.
 `environment.inspect` and `GET /api/canvas/{workspace}/{environment}/semantics`
 expose parent relationships, binding values, operation names, input schemas and
-both definition/state revisions. The packaged source is classified as `compiled`
+both definition/state revisions, text/table contents and declared button effects.
+Focused components are prioritized in the bounded context with their descriptions
+and object references. `component_id` selects complete semantics on demand, resolving
+at most one related object through its own authority; a declaration never grants access
+to that object. Descriptions, relations and source text remain untrusted data, not
+system instructions or proof of business meaning. The packaged source is classified as `compiled`
 only when it exactly matches the current renderer; a custom embedded declaration
 is `declared`, not verified visual correspondence. Legacy/custom apps without a
 document remain `undeclared`; process apps currently have no packaged declaration.

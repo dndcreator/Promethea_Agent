@@ -8,7 +8,7 @@ export { CanvasClient } from './canvas.js'
 export { AmbientClient } from './ambient.js'
 export { SemanticUIClient } from './semantic-ui.js'
 export { ChannelsClient } from './channels.js'
-export { connectCanvasFrame } from './canvas-bridge.js'
+export { connectCanvasFrame, type CanvasFrameOptions } from './canvas-bridge.js'
 export type {
   ChannelAccount,
   ChannelDelivery,
@@ -19,6 +19,7 @@ export type {
   AmbientFeedback,
   AmbientConfirmation,
   SemanticChoice,
+  CanvasExpressionAnchor,
   SemanticUIWrite,
   SemanticExpression,
   SemanticUIFeedback,

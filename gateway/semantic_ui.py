@@ -9,9 +9,22 @@ from .task_service import TaskExecutionConflict
 
 
 class SemanticUI:
-    def __init__(self, *, store, message_manager=None, event_emitter=None, environment=None):
+    def __init__(self, *, store, message_manager=None, event_emitter=None, environment=None, sources=None):
         self.store, self.messages, self.events = store, message_manager, event_emitter
         self.environment = environment
+        self.sources = sources
+
+    async def _canvas_target(self, user, anchor):
+        if anchor is None:
+            return
+        if self.sources is None:
+            raise RuntimeError("Canvas sources are unavailable")
+        current = await self.sources.inspect(user, anchor.resource)
+        semantics = current.get("semantics", {})
+        if semantics.get("definition_revision") != anchor.definition_revision:
+            raise TaskExecutionConflict("Canvas definition changed; inspect before presenting or responding")
+        if not any(row["component_id"] == anchor.component_id for row in semantics.get("components", [])):
+            raise KeyError("Canvas component not found")
 
     def _target(self, user, session_id, message_id=None):
         if message_id and not session_id:
@@ -33,7 +46,7 @@ class SemanticUI:
         return {
             "revision": current.revision,
             "recent_responses": [{"expression_id": item.expression_id, "response": item.response, "state": item.state} for item in rows if item.state != "open"][-6:],
-            "open_expressions": [{"expression_id": item.expression_id, "revision": item.revision, "kind": item.kind, "content": item.content[:240], "session_id": item.session_id, "message_id": item.message_id} for item in rows if item.state == "open" and not item.hidden][-8:],
+            "open_expressions": [{"expression_id": item.expression_id, "revision": item.revision, "kind": item.kind, "content": item.content[:240], "session_id": item.session_id, "message_id": item.message_id, "canvas_anchor": item.canvas_anchor.model_dump() if item.canvas_anchor else None} for item in rows if item.state == "open" and not item.hidden][-8:],
             "retained_count": len(rows),
         }
 
@@ -43,6 +56,7 @@ class SemanticUI:
 
     async def present(self, user, command):
         self._target(user, command.session_id, command.message_id)
+        await self._canvas_target(user, command.canvas_anchor)
         result = None
         before = self.store.get(user).revision
         def apply(current):
@@ -69,6 +83,9 @@ class SemanticUI:
         return result.model_dump()
 
     async def feedback(self, user, expression_id, command):
+        existing = self.store.get(user).expressions.get(expression_id)
+        if existing is not None and existing.state == "open" and command.action == "respond":
+            await self._canvas_target(user, existing.canvas_anchor)
         result = None
         before = self.store.get(user).revision
         def apply(current):
@@ -90,11 +107,11 @@ class SemanticUI:
             item.state, item.response = state, response
             item.revision += 1
             item.updated_at = datetime.now(timezone.utc).isoformat()
-            current.feedback = [*current.feedback, {"expression_id": expression_id, "content": item.content, "response": response, "state": state}][-30:]
+            current.feedback = [*current.feedback, {"expression_id": expression_id, "content": item.content, "response": response, "state": state, "canvas_anchor": item.canvas_anchor.model_dump() if item.canvas_anchor else None}][-30:]
             result = item
         current = self.store.update(user, apply)
         if current.revision != before:
-            await self._emit(EventType.SEMANTIC_UI_INTERACTED, user, expression_id=expression_id, revision=current.revision, session_id=result.session_id, state=result.state, response=result.response)
+            await self._emit(EventType.SEMANTIC_UI_INTERACTED, user, expression_id=expression_id, revision=current.revision, session_id=result.session_id, state=result.state, response=result.response, canvas_anchor=result.canvas_anchor.model_dump() if result.canvas_anchor else None)
         return result.model_dump()
 
     async def observe_surface(self, user, surface):

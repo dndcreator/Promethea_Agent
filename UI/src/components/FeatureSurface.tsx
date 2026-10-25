@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefCallback } from 'react'
 
 export type FeatureSurfaceProps = { embedded?: boolean; onClose: () => void }
 
-export default function FeatureSurface({ embedded = false, onClose, label, children, size = 'wide' }: FeatureSurfaceProps & { label: string; children: ReactNode; size?: 'compact' | 'wide' }) {
-  const ref = useRef<HTMLElement>(null)
+export default function FeatureSurface({ embedded = false, onClose, label, children, size = 'wide', surfaceRef }: FeatureSurfaceProps & { label: string; children: ReactNode; size?: 'compact' | 'wide'; surfaceRef?: RefCallback<HTMLElement> }) {
+  const ref = useRef<HTMLElement | null>(null)
   const closeRef = useRef(onClose)
   useEffect(() => { closeRef.current = onClose }, [onClose])
   useEffect(() => {
@@ -31,6 +31,6 @@ export default function FeatureSurface({ embedded = false, onClose, label, child
   }, [embedded])
 
   return <div className={embedded ? 'feature-page' : 'feature-overlay'} onClick={embedded ? undefined : (event) => { if (event.target === event.currentTarget) onClose() }}>
-    <section ref={ref} tabIndex={-1} role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : true} aria-label={label} className={`feature-surface ${embedded ? 'is-page' : ''} surface-${size}`}>{children}</section>
+    <section ref={(node) => { ref.current = node; surfaceRef?.(node) }} tabIndex={-1} role={embedded ? 'region' : 'dialog'} aria-modal={embedded ? undefined : true} aria-label={label} className={`feature-surface ${embedded ? 'is-page' : ''} surface-${size}`}>{children}</section>
   </div>
 }

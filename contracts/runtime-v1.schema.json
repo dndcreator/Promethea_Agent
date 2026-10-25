@@ -434,6 +434,27 @@
           "title": "Description",
           "type": "string"
         },
+        "display": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "effects": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Effects",
+          "type": "array"
+        },
         "input_schema": {
           "anyOf": [
             {
@@ -827,6 +848,31 @@
         "workspace_id"
       ],
       "title": "CanvasEnvironmentList",
+      "type": "object"
+    },
+    "CanvasExpressionAnchor": {
+      "additionalProperties": false,
+      "properties": {
+        "component_id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+          "title": "Component Id",
+          "type": "string"
+        },
+        "definition_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Definition Revision",
+          "type": "string"
+        },
+        "resource": {
+          "$ref": "#/$defs/CanvasResourceRef"
+        }
+      },
+      "required": [
+        "resource",
+        "component_id",
+        "definition_revision"
+      ],
+      "title": "CanvasExpressionAnchor",
       "type": "object"
     },
     "CanvasInput": {
@@ -1806,6 +1852,33 @@
     "EnvironmentInspect": {
       "additionalProperties": false,
       "properties": {
+        "component_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Component Id"
+        },
+        "limit": {
+          "default": 4000,
+          "maximum": 12000,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Offset",
+          "type": "integer"
+        },
         "resource": {
           "$ref": "#/$defs/CanvasResourceRef"
         }
@@ -2793,6 +2866,17 @@
     "SemanticExpression": {
       "additionalProperties": false,
       "properties": {
+        "canvas_anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasExpressionAnchor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "choices": {
           "items": {
             "$ref": "#/$defs/SemanticChoice"
@@ -2921,6 +3005,32 @@
     "SemanticSurface": {
       "additionalProperties": false,
       "properties": {
+        "active_component_id": {
+          "anyOf": [
+            {
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,63}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Active Component Id"
+        },
+        "definition_revision": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Definition Revision"
+        },
         "focused": {
           "default": true,
           "title": "Focused",
@@ -3052,6 +3162,17 @@
     "SemanticUIWrite": {
       "additionalProperties": false,
       "properties": {
+        "canvas_anchor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CanvasExpressionAnchor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "choices": {
           "items": {
             "$ref": "#/$defs/SemanticChoice"

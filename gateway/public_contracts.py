@@ -474,6 +474,19 @@ class SemanticChoice(PublicContract):
     label: str = Field(min_length=1, max_length=120)
 
 
+class CanvasExpressionAnchor(PublicContract):
+    model_config = {"extra": "forbid"}
+    resource: CanvasResourceRef
+    component_id: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+    definition_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def canvas_only(self):
+        if self.resource.kind != "canvas" or not self.resource.workspace_id:
+            raise ValueError("a Canvas anchor requires a workspace-scoped canvas")
+        return self
+
+
 class SemanticUIWrite(PublicContract):
     model_config = {"extra": "forbid"}
     expression_id: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
@@ -484,6 +497,7 @@ class SemanticUIWrite(PublicContract):
     tone: Literal["neutral", "warm", "playful", "concerned"] = "neutral"
     session_id: Optional[str] = Field(default=None, max_length=200)
     message_id: Optional[str] = Field(default=None, max_length=200)
+    canvas_anchor: Optional[CanvasExpressionAnchor] = None
     choices: List[SemanticChoice] = Field(default_factory=list, max_length=6)
     hidden: bool = False
 
@@ -495,6 +509,8 @@ class SemanticUIWrite(PublicContract):
             raise ValueError("choice identifiers must be unique")
         if self.message_id and not self.session_id:
             raise ValueError("a message anchor requires its conversation")
+        if self.canvas_anchor and (self.session_id or self.message_id):
+            raise ValueError("Canvas expressions are scoped to the app, not a conversation")
         return self
 
 
@@ -522,11 +538,22 @@ class SemanticSurface(PublicContract):
     objects: List[CanvasResourceRef] = Field(default_factory=list, max_length=8)
     session_id: Optional[str] = Field(default=None, max_length=200)
     message_id: Optional[str] = Field(default=None, max_length=200)
+    active_component_id: Optional[str] = Field(default=None, pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
+    definition_revision: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_attention(self):
+        if self.active_component_id and (not self.definition_revision or len([ref for ref in self.objects if ref.kind == "canvas"]) != 1):
+            raise ValueError("component attention requires one Canvas and its definition revision")
+        return self
 
 
 class EnvironmentInspect(PublicContract):
     model_config = {"extra": "forbid"}
     resource: CanvasResourceRef
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+    limit: int = Field(default=4000, ge=1, le=12000)
+    component_id: Optional[str] = Field(default=None, pattern=r"^[a-zA-Z][a-zA-Z0-9_]{0,63}$")
 
 
 class CanvasInteraction(PublicContract):
@@ -538,7 +565,9 @@ class CanvasInteraction(PublicContract):
     value: Optional[Scalar] = None
 
 
-class EnvironmentInteraction(EnvironmentInspect):
+class EnvironmentInteraction(PublicContract):
+    model_config = {"extra": "forbid"}
+    resource: CanvasResourceRef
     interaction: CanvasInteraction
 
 
@@ -554,6 +583,8 @@ class CanvasComponentView(PublicContract):
     operations: List[Literal["set", "activate"]] = Field(default_factory=list)
     input_schema: Optional[Dict[str, Any]] = None
     options: Optional[List[Dict[str, str]]] = None
+    display: Optional[Dict[str, Any]] = None
+    effects: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class CanvasSemanticSnapshot(PublicContract):

@@ -4,6 +4,7 @@
   let sequence = 0;
   const pending = new Map();
   const listeners = new Set();
+  const presentationListeners = new Set();
   const ready = new Promise((resolve) => {
     window.addEventListener('message', (event) => {
       if (port || event.source !== parent || event.data?.type !== 'promethea:connect' || !event.ports[0]) return;
@@ -11,6 +12,10 @@
       port.onmessage = ({ data }) => {
         if (data?.event === 'state.changed') {
           for (const listener of listeners) listener(data.state);
+          return;
+        }
+        if (data?.event === 'semantic.changed') {
+          for (const listener of presentationListeners) listener(data);
           return;
         }
         const request = pending.get(data?.id);
@@ -43,6 +48,10 @@
       return () => listeners.delete(listener);
     },
   }) });
+  // The trusted expression renderer shares this private bridge, not host credentials.
+  window.addEventListener('DOMContentLoaded', () => {
+    installCanvasExpressions({ call, subscribe: (listener) => presentationListeners.add(listener) });
+  }, { once: true });
   window.addEventListener('error', (event) => {
     void call('diagnostic.report', { message: String(event.message).slice(0, 2000) }).catch(() => {});
   });

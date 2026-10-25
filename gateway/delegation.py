@@ -42,6 +42,7 @@ class DelegationScope:
     agent_task_id: str | None = None
     workspace_id: str | None = None
     background_notification: bool = False
+    observation_workspaces: frozenset[str] = frozenset()
 
 
 _scope: ContextVar[DelegationScope | None] = ContextVar("delegation_scope", default=None)

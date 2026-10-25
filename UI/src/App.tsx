@@ -36,7 +36,7 @@ function Workspace() {
   const [view, setView] = useState<WorkspaceView>('chat')
   const [authOpen, setAuthOpen] = useState(false)
   const [sessionId, setSessionId] = useState<string | null>(null)
-  useEnvironmentObservation(view === 'chat' && !sessionId ? 'home' : view, view === 'chat' && sessionId ? [{ kind: 'session', id: sessionId }] : [], !loading)
+  const observeWorkspace = useEnvironmentObservation(view === 'chat' && !sessionId ? 'home' : view, view === 'chat' && sessionId ? [{ kind: 'session', id: sessionId }] : [], !loading)
   const [chatKey, setChatKey] = useState(0)
   const [revision, setRevision] = useState(0)
   const [treeId, setTreeId] = useState<string | null>(null)
@@ -100,7 +100,7 @@ function Workspace() {
     <div className={`app-shell ${sidebarOpen ? 'sidebar-open' : ''} ${workbenchOpen ? 'workbench-open' : ''}`}>
       <NavigationSidebar activeView={view} onNavigate={navigate} account={user?.username || t('登录', 'Sign in')} onAccount={() => user ? navigate('settings') : setAuthOpen(true)} />
       {sidebarOpen && <><button type="button" className="sidebar-scrim" aria-label={t('关闭会话栏', 'Close sidebar')} onClick={() => setSidebarOpen(false)} /><SessionSidebar sessionId={sessionId} revision={revision} onSelect={selectSession} onNew={newChat} onCollapse={toggleSidebar} onSignIn={() => setAuthOpen(true)} running={running} /></>}
-      <div className="workspace-main">
+      <div ref={observeWorkspace} className="workspace-main">
         <div className="workspace-topbar"><div className="workspace-location"><button type="button" className="icon-button" aria-label={t('展开会话栏', 'Open sidebar')} title={t('展开会话栏', 'Open sidebar')} onClick={toggleSidebar}><PanelLeftOpen size={17} /></button><span>{t('工作空间', 'Workspace')}</span></div><div className="workspace-status">{(!user || authNotice) && <button type="button" className="text-button" onClick={() => setAuthOpen(true)}>{checking ? t('正在校验登录状态', 'Checking sign-in') : authNotice || t('登录', 'Sign in')}</button>}<button type="button" className={`icon-button ${workbenchOpen ? 'is-active' : ''}`} aria-label={t('切换工作台', 'Toggle workbench')} title={t('切换工作台', 'Toggle workbench')} onClick={() => toggleWorkbench(!workbenchOpen)}><PanelRightOpen size={17} /></button></div></div>
         {projectError && <div role="alert" className="page-error"><span>{projectError}</span><button type="button" onClick={() => void assignPending()}>{t('重试', 'Retry')}</button></div>}
         <div className="workspace-body">
