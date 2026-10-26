@@ -4,35 +4,20 @@ import os
 import shutil
 
 import pytest
+from agentkit.security.http import HttpDocument
 
 from agentkit.tools.content_tools.content_tools import ContentToolsService
-
-
-class _FakeResp:
-    def __init__(self, body: str, status: int = 200, content_type: str = "text/html"):
-        self._body = body.encode("utf-8")
-        self.status = status
-        self.headers = {"Content-Type": content_type}
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
 
 
 @pytest.mark.asyncio
 async def test_web_fetch_extracts_title_and_text(monkeypatch):
     svc = ContentToolsService()
 
-    def fake_urlopen(req, timeout=20):
+    async def fake_request(url, **kwargs):
         html = "<html><head><title>Demo</title></head><body><h1>Hello</h1><a href='https://x.com'>x</a></body></html>"
-        return _FakeResp(html)
+        return HttpDocument(url, 200, "text/html", "utf-8", html.encode())
 
-    monkeypatch.setattr("agentkit.tools.content_tools.content_tools.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agentkit.tools.web_content.request_document", fake_request)
 
     out = await svc.web_fetch(url="https://example.com", include_links=True)
     assert out["ok"] is True

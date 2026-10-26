@@ -179,6 +179,59 @@ async def test_runtime_preserves_cancellation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["strict", "fallback"])
+async def test_empty_results_follow_existing_fallback_policy(policy):
+    class Empty(_Provider):
+        async def search(self, query, max_results, settings):
+            self.calls += 1
+            return {"query": query, "provider": self.provider_id, "count": 0, "results": [], "truncated": False}
+    first, second = Empty("one", priority=1), _Provider("two", priority=2)
+    result = await WebSearchRuntime([first, second]).search("query", 8, WebSearchSettings(fallback_policy=policy))
+    assert second.calls == (policy == "fallback")
+    assert result["count"] == (1 if policy == "fallback" else 0)
+    assert result["attempts"][0] == {"provider": "one", "status": "empty"}
+
+
+@pytest.mark.asyncio
+async def test_empty_then_error_remains_honest_zero_not_a_fabricated_failure():
+    class Empty(_Provider):
+        async def search(self, query, max_results, settings):
+            return {"query": query, "provider": self.provider_id, "count": 0, "results": [], "truncated": False}
+    result = await WebSearchRuntime([Empty("empty", priority=1), _Provider("offline", error=WebSearchError("offline", "SEARCH_TIMEOUT"))]).search("query", 8, WebSearchSettings())
+    assert result["count"] == 0
+    assert [row["status"] for row in result["attempts"]] == ["empty", "error"]
+    assert result["provider_errors"][0]["code"] == "SEARCH_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_duckduckgo_uses_structural_parsing_snippets_and_actual_target_urls(monkeypatch):
+    from agentkit.tools.standard import web_search_runtime as module
+    async def page(*args, **kwargs):
+        return '''<div class="result result--web"><h2><a href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fdoc%3Fv%3D2&amp;rut=ignored" data-extra="1" class="extra result__a"><span>Verified</span> document</a></h2><a class="result__snippet">Read <b>this</b> content.</a></div><a class="result__a" href="javascript:alert(1)">Unsafe</a>'''
+    monkeypatch.setattr(module, "_http_text", page)
+    result = await module.DuckDuckGoSearchProvider().search("example", 8, WebSearchSettings())
+    assert result["count"] == 1
+    assert result["results"][0]["url"] == "https://example.org/doc?v=2"
+    assert result["results"][0]["title"] == "Verified document"
+    assert result["results"][0]["snippet"] == "Read this content."
+
+
+@pytest.mark.asyncio
+async def test_only_searxng_sets_the_configured_service_boundary(monkeypatch):
+    from agentkit.tools.standard import web_search_runtime as module
+    calls = []
+    async def request(url, **kwargs):
+        calls.append((url, kwargs))
+        return {"results": [], "organic_results": []}
+    monkeypatch.setattr(module, "_http_json", request)
+    await module.SearxngSearchProvider().search("topic", 8, WebSearchSettings(values={"searxng_url": "http://127.0.0.1:8888/prefix"}))
+    assert calls[-1][0].startswith("http://127.0.0.1:8888/prefix/search?")
+    assert calls[-1][1]["service_url"] == "http://127.0.0.1:8888/prefix"
+    await module.SerpApiSearchProvider().search("topic", 8, WebSearchSettings(values={"serpapi_api_key": "test-only"}))
+    assert "service_url" not in calls[-1][1]
+
+
+@pytest.mark.asyncio
 async def test_public_tool_keeps_provider_policy_out_of_model_args(monkeypatch, tmp_path: Path):
     configured = _Provider("configured")
     runtime = WebSearchRuntime([configured])

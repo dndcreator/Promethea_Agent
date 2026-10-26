@@ -29,6 +29,7 @@ dependencies = [
     "aiohttp>=3.9.0",
     "requests>=2.31.0",
     "ddgs>=9.0.0",
+    "trafilatura>=2.0,<3",
     "playwright>=1.40.0",
     "pyautogui>=0.9.54",
     "pillow>=10.0.0",
@@ -88,7 +89,7 @@ exclude = ["tests*", "UI*"]
 
 [tool.setuptools.package-data]
 "agentkit.tools" = ["**/agent-manifest.json"]
-computer = ["canvas_bridge.js", "canvas_components.js"]
+computer = ["canvas_bridge.js", "canvas_components.js", "canvas_expressions.js"]
 skills = ["packs/official/*/*.yaml", "packs/official/*/*.md", "packs/official/*/*.json"]
 
 [tool.coverage.run]

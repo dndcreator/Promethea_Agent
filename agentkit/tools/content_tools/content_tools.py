@@ -1,13 +1,10 @@
 ﻿from __future__ import annotations
 
-import re
-import time
-from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List
-from urllib import request
 
 from agentkit.security.sandbox import get_sandbox_policy
+from agentkit.tools.web_content import fetch_page
 
 
 class ContentToolsService:
@@ -32,37 +29,11 @@ class ContentToolsService:
         if not decision.allowed:
             raise PermissionError(f"sandbox blocked web_fetch: {decision.reason}")
 
-        req = request.Request(
-            str(url).strip(),
-            headers={"User-Agent": "Promethea-Agent/1.0"},
-            method="GET",
-        )
-        started = time.time()
-        with request.urlopen(req, timeout=max(1, int(timeout))) as resp:  # nosec B310
-            raw = resp.read()
-            content_type = str(resp.headers.get("Content-Type", ""))
-            status_code = int(getattr(resp, "status", 200))
-
-        decoded = raw.decode("utf-8", errors="replace")
-        title = self._extract_title(decoded)
-        text = self._html_to_text(decoded)
-        text = text[: max(200, int(max_chars))]
-
-        links: List[str] = []
-        if include_links:
-            links = self._extract_links(decoded)[:50]
-
-        return {
-            "ok": True,
-            "url": str(url).strip(),
-            "status_code": status_code,
-            "content_type": content_type,
-            "title": title,
-            "content": text,
-            "links": links,
-            "fetched_at": time.time(),
-            "elapsed_ms": int((time.time() - started) * 1000),
-        }
+        page = await fetch_page(str(url).strip(), policy=self._sandbox, timeout_s=max(1, min(int(timeout), 60)),
+                                max_chars=max(200, min(int(max_chars), 200000)), include_links=include_links)
+        # Retain the existing content-tool envelope; acquisition/extraction has one owner.
+        content = page.pop("text")
+        return {**page, "ok": True, "status_code": page["status"], "content": content}
 
     async def pdf_action(
         self,
@@ -159,35 +130,6 @@ class ContentToolsService:
             }
 
         raise ValueError(f"unsupported image action: {action}")
-
-    def _extract_title(self, html: str) -> str:
-        m = re.search(r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL)
-        if not m:
-            return ""
-        title = unescape(m.group(1))
-        return " ".join(title.split())
-
-    def _extract_links(self, html: str) -> List[str]:
-        links = re.findall(r"href=[\\\"']([^\\\"']+)[\\\"']", html, flags=re.IGNORECASE)
-        cleaned: List[str] = []
-        seen = set()
-        for href in links:
-            value = str(href).strip()
-            if not value or value.startswith("#"):
-                continue
-            if value in seen:
-                continue
-            seen.add(value)
-            cleaned.append(value)
-        return cleaned
-
-    def _html_to_text(self, html: str) -> str:
-        text = re.sub(r"<script[^>]*>[\\s\\S]*?</script>", " ", html, flags=re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>[\\s\\S]*?</style>", " ", text, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = unescape(text)
-        text = re.sub(r"\\s+", " ", text)
-        return text.strip()
 
     def _resolve_workspace_path(self, path_str: str) -> Path:
         if not path_str:

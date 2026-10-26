@@ -98,6 +98,11 @@ test('opaque canvas bridge exposes app state, not arbitrary Runtime execution', 
 
 test('Canvas expressions are definition-scoped and feedback cannot target another app', async () => {
   const originalDocument = globalThis.document
+  const originalInterval = globalThis.setInterval
+  const originalClear = globalThis.clearInterval
+  let tick
+  globalThis.setInterval = callback => { tick = callback; return 456 }
+  globalThis.clearInterval = () => {}
   let peer
   const frame = { contentWindow: { postMessage: (_data, _origin, ports) => { peer = ports[0] } } }
   globalThis.document = { visibilityState: 'visible', activeElement: frame }
@@ -139,9 +144,11 @@ test('Canvas expressions are definition-scoped and feedback cannot target anothe
     peer.postMessage({ id: 'blurred', method: 'attention.report', params: { component_id: 'count' } })
     assert.match((await waitFor(data => data.id === 'blurred')).error, /not focused/)
     definition = 'b'.repeat(64)
+    tick()
     const changed = await waitFor(data => data.event === 'semantic.changed' && data.semantics.definition_revision === definition)
     assert.deepEqual(changed.expressions, [])
   } finally {
     disconnect();peer.close();globalThis.document = originalDocument
+    globalThis.setInterval = originalInterval;globalThis.clearInterval = originalClear
   }
 })

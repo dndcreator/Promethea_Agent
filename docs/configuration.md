@@ -450,7 +450,7 @@ value".
 | Variable | Type | Default | Notes |
 |---|---|---|---|
 | `SEARCH__PROVIDER` | enum | `auto` | `auto` \| `brave` \| `tavily` \| `serpapi` \| `searxng` \| `duckduckgo` |
-| `SEARCH__FALLBACK_POLICY` | enum | `fallback` | `fallback` tries eligible providers in order; `strict` does not switch after an execution failure. |
+| `SEARCH__FALLBACK_POLICY` | enum | `fallback` | `fallback` tries eligible providers on failure or zero results; `strict` never switches, including on zero results. |
 | `SEARCH__PROVIDER_ORDER` | comma-separated ids | `brave,tavily,serpapi,searxng,duckduckgo` | User-owned provider preference; unlisted providers follow declared priority. |
 | `SEARCH__BRAVE_API_KEY` | string | _(empty)_ | Enables Brave Search when provider is `auto` or `brave`. |
 | `SEARCH__TAVILY_API_KEY` | string | _(empty)_ | Enables Tavily when provider is `auto` or `tavily`. |
@@ -462,11 +462,15 @@ Provider selection:
 1. If `SEARCH__PROVIDER` names a provider, Promethea selects that registered provider.
 2. If it is `auto`, available providers follow `SEARCH__PROVIDER_ORDER`, then
    their provider-declared priority.
-3. With `SEARCH__FALLBACK_POLICY=fallback`, failures advance through that set
+3. With `SEARCH__FALLBACK_POLICY=fallback`, failures and zero results advance through that set
    and may reach key-free DuckDuckGo. Results record the selected provider and
-   whether fallback occurred.
+   whether fallback supplied the returned result. `attempts` distinguishes empty,
+   failed and successful attempts. If a provider returns a valid empty result and
+   all later attempts fail or are empty, return the empty result with attempt
+   diagnostics instead of fabricating results. Explicit provider mode keeps its
+   existing registered-fallback set; it does not silently enable other paid engines.
 4. With `SEARCH__FALLBACK_POLICY=strict`, Promethea does not silently switch
-   providers after an execution failure.
+   providers after an execution failure or empty response.
 
 Examples:
 
@@ -484,6 +488,23 @@ SEARCH__BRAVE_API_KEY=your-brave-key
 SEARCH__PROVIDER=searxng
 SEARCH__SEARXNG_URL=http://127.0.0.1:8888
 ```
+
+For a local/private SearXNG endpoint, the deployment operator must additionally
+allow that exact configured service base in the root environment:
+
+```bash
+SANDBOX__ALLOWED_SERVICE_URLS=["http://127.0.0.1:8888"]
+```
+
+This setting is part of global Sandbox configuration, not a user secret or model
+tool argument. Restart after changing it. Scheme, host, port and base path must
+match; normal `web.fetch_text`/`web.fetch_json` requests do not inherit this
+exception. `SANDBOX__NETWORK_MODE=none` still denies all requests. The request
+path and DNS result are checked at each redirect; provider requests cannot
+redirect to a different origin. Do not disable private-network protection globally
+to make one service work. SearXNG must enable JSON output in `search.formats`;
+otherwise a `format=json` request can return HTTP 403. See the
+[official Search API](https://docs.searxng.org/dev/search_api.html).
 
 Provider implementation rule:
 

@@ -61,6 +61,29 @@ The main model only selects `web.search`; it does not need to know whether Brave
 Tavily, SerpAPI, SearXNG, or DuckDuckGo will serve the request. Provider choice
 is owned by the search runtime.
 
+`web.fetch_text` and `content_tools.web_fetch` share a bounded asynchronous HTTP
+reader and [Trafilatura](https://trafilatura.readthedocs.io/en/latest/corefunctions.html)
+article extraction. HTML is not returned as purported article text. Plain text
+remains plain text; unsupported binary formats fail explicitly, and empty or
+JavaScript-only extraction returns `read_status=empty` for the Agent to investigate
+using existing browser/document capabilities. These tools do not bypass login,
+CAPTCHAs or paywalls. Raw `web.download_to_workspace` retains its download semantics.
+
+Page results contain the requested/final URL, document title, UTC Unix retrieval
+time, extraction/truncation status and a fingerprint of the text actually returned.
+The existing Action Observation retains the full bounded result; tool lifecycle
+metadata retains the source identity and a small preview, not another full-body
+store. Search snippets are explicitly separate from page reads. A retrieved page
+is evidence of what was fetched, not proof that its claims are true. Runtime audit
+retention remains bounded; this is not a permanent research archive or automatic
+citation-correctness verifier. Use the normal workspace document tool to retain
+research permanently when requested.
+
+HTTP reads cap decompressed response size, enforce timeouts, preserve cancellation
+and recheck sandbox policy on redirects and resolved DNS addresses. For a local
+SearXNG service, use the operator-scoped endpoint setting in
+[Configuration](configuration.md#sensitive-section-web-search-provider-env--secretsenv).
+
 ### Personal Accounts
 
 - `mail.search`, `mail.read`, `mail.send`

@@ -168,3 +168,21 @@ memory backend, session/task identity and approximate time. Redact secrets. Insp
 work products, not only assistant wording or tool-success counters. Live model
 quality, optional multimodal providers, and full task token savings need this
 manual pass; deterministic tests do not establish them.
+
+### External Knowledge Pilot
+
+`tests/fixtures/web_research_cases.json` contains 20 real research questions, not
+fixed answers or a completed benchmark. Run them with a dedicated account and
+your configured model/search provider after the basic business pass. Do not force
+unnecessary extra searches on a question already resolved by reliable material.
+For ambiguous, version-sensitive or contradictory findings, check whether the
+Agent autonomously reads sources and searches again when needed.
+
+For each case record the session/run identity, provider attempts (including empty
+results), retrieved URL/title/time/source fingerprint, relevant quoted passage,
+answer citations, model calls, elapsed time and known/unknown cost. Distinguish
+search snippets from actual page reads. Review whether the cited text supports the
+answer and belongs to the applicable version; a nonempty response alone is not a
+pass. Mark blocked access, empty extraction, missing provider configuration and
+unsupported content separately from model reasoning failures. The automated
+scripted-loop tests establish the protocol path, not a score on these questions.

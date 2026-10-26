@@ -5,7 +5,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 
 DEFAULT_DENY_FRAGMENTS = [
@@ -72,6 +72,7 @@ class SandboxPolicy:
         deny_fragments: Optional[Iterable[str]] = None,
         network_mode: str = "restricted",
         allowed_domains: Optional[Iterable[str]] = None,
+        allowed_service_urls: Optional[Iterable[str]] = None,
         block_private_network: bool = True,
         desktop_mode: str = "approval",
         process_mode: str = "managed_only",
@@ -84,6 +85,7 @@ class SandboxPolicy:
         self.deny_fragments = [str(x).strip().lower() for x in (deny_fragments or DEFAULT_DENY_FRAGMENTS) if str(x).strip()]
         self.network_mode = str(network_mode or "restricted").strip().lower()
         self.allowed_domains = [str(x).strip().lower() for x in (allowed_domains or []) if str(x).strip()]
+        self.allowed_service_urls = tuple(str(value).strip().rstrip("/") for value in (allowed_service_urls or []))
         self.block_private_network = bool(block_private_network)
         self.desktop_mode = str(desktop_mode or "observe_only").strip().lower()
         self.process_mode = str(process_mode or "managed_only").strip().lower()
@@ -107,6 +109,7 @@ class SandboxPolicy:
             deny_fragments=sb.get("deny_fragments") or DEFAULT_DENY_FRAGMENTS,
             network_mode=str(sb.get("network_mode", "restricted")),
             allowed_domains=sb.get("allowed_domains") or [],
+            allowed_service_urls=sb.get("allowed_service_urls") or [],
             block_private_network=bool(sb.get("block_private_network", True)),
             desktop_mode=str(sb.get("desktop_mode", "approval")),
             process_mode=str(sb.get("process_mode", "managed_only")),
@@ -207,6 +210,33 @@ class SandboxPolicy:
 
         return SandboxDecision(True, "url allowed")
 
+    def is_service_url_allowed(self, url: str, service_url: str) -> bool:
+        """An operator endpoint exception is not a general private-network grant."""
+        def parts(value):
+            parsed = urlparse(value)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.fragment:
+                raise ValueError("invalid service URL")
+            path = unquote(parsed.path).rstrip("/")
+            if ".." in path.split("/") or "\\" in path:
+                raise ValueError("invalid service path")
+            return (parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)), path, parsed.query
+        try:
+            origin, path, _ = parts(url)
+            base_origin, base_path, query = parts(service_url)
+            if query or origin != base_origin or not (path == base_path or path.startswith(base_path + "/")):
+                return False
+            return any(parts(allowed) == (base_origin, base_path, "") for allowed in self.allowed_service_urls)
+        except ValueError:
+            return False
+
+    def check_service_url(self, url: str, *, service_url: str) -> SandboxDecision:
+        ordinary = self.check_url(url)
+        if ordinary.allowed or not self.is_enforced() or self.network_mode == "none":
+            return ordinary
+        if self.is_service_url_allowed(url, service_url):
+            return SandboxDecision(True, "configured service endpoint allowed")
+        return ordinary
+
     def check_desktop_action(self, action: str) -> SandboxDecision:
         """Authorize direct host-screen input without pretending it is isolated."""
         if not self.is_enforced():
@@ -259,7 +289,7 @@ class SandboxPolicy:
             return True
         try:
             ip = ipaddress.ip_address(host)
-            return ip.is_private or ip.is_loopback or ip.is_link_local
+            return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified
         except ValueError:
             return False
 

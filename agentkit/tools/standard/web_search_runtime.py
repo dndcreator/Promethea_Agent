@@ -4,7 +4,6 @@ import abc
 import asyncio
 import html
 import json
-import re
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -12,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 import aiohttp
 
 from agentkit.security.sandbox import get_sandbox_policy
+from agentkit.security.http import request_document
+from agentkit.tools.web_content import decode_text
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ async def _http_json(
     headers: Optional[Dict[str, str]] = None,
     body: Optional[Dict[str, Any]] = None,
     timeout_s: int = 20,
+    service_url: str | None = None,
 ) -> Dict[str, Any]:
     text = await _http_text(
         url,
@@ -76,6 +78,7 @@ async def _http_json(
         headers={"Accept": "application/json", **(headers or {})},
         body=body,
         timeout_s=timeout_s,
+        service_url=service_url,
     )
     try:
         payload = json.loads(text)
@@ -101,44 +104,47 @@ async def _http_text(
     headers: Optional[Dict[str, str]] = None,
     body: Optional[Dict[str, Any]] = None,
     timeout_s: int = 20,
+    service_url: str | None = None,
 ) -> str:
-    decision = get_sandbox_policy().check_url(url)
-    if not decision.allowed:
-        raise WebSearchError(
-            f"sandbox blocked search URL: {decision.reason}",
-            "SEARCH_URL_BLOCKED",
-        )
-    timeout = aiohttp.ClientTimeout(total=timeout_s)
     request_headers = {"User-Agent": "PrometheaAgent/1.0", **(headers or {})}
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(method, url, headers=request_headers, json=body) as response:
-                text = await response.text(errors="replace")
-                if response.status >= 400:
-                    raise WebSearchError(
-                        f"search provider returned HTTP {response.status}",
-                        "SEARCH_PROVIDER_HTTP_ERROR",
-                        retryable=response.status == 429 or response.status >= 500,
-                        details={"status": response.status},
-                    )
-                return text
+        response = await request_document(url, policy=get_sandbox_policy(), method=method, headers=request_headers,
+                                          body=body, timeout_s=timeout_s, max_bytes=2_000_000,
+                                          service_url=service_url, same_origin=True)
+        if response.status >= 400:
+            raise WebSearchError(f"search provider returned HTTP {response.status}", "SEARCH_PROVIDER_HTTP_ERROR",
+                                 retryable=response.status == 429 or response.status >= 500,
+                                 details={"status": response.status})
+        return decode_text(response.body, response.charset)
     except asyncio.CancelledError:
         raise
     except asyncio.TimeoutError as exc:
         raise WebSearchError("search provider timed out", "SEARCH_TIMEOUT", retryable=True) from exc
     except WebSearchError:
         raise
+    except PermissionError as exc:
+        raise WebSearchError(str(exc), "SEARCH_URL_BLOCKED") from exc
+    except ValueError as exc:
+        raise WebSearchError(str(exc), "SEARCH_PROVIDER_INVALID_RESPONSE") from exc
     except aiohttp.ClientError as exc:
         raise WebSearchError(
-            f"search provider request failed: {exc}",
+            "search provider request failed",
             "SEARCH_PROVIDER_UNAVAILABLE",
             retryable=True,
         ) from exc
 
 
 def _clean_text(value: Any) -> str:
-    text = re.sub(r"<.*?>", "", html.unescape(str(value or "")))
-    return re.sub(r"\s+", " ", text).strip()
+    value = str(value or "")
+    if "<" in value:
+        from lxml import html as html_tree, etree
+        try:
+            value = html_tree.fromstring(value).text_content()
+        except (ValueError, etree.ParserError):
+            return ""
+    else:
+        value = html.unescape(value)
+    return " ".join(value.split())
 
 
 def _result(title: Any, url: Any, snippet: Any = "", source: Any = "", published_at: Any = "") -> Dict[str, Any]:
@@ -160,7 +166,8 @@ def _compact_results(rows: Iterable[Dict[str, Any]], max_results: int) -> tuple[
     truncated = False
     for row in rows:
         url = str(row.get("url") or "").strip()
-        if not url or url in seen:
+        parsed = urllib.parse.urlsplit(url)
+        if not parsed.hostname or parsed.scheme not in {"http", "https"} or parsed.username or url in seen:
             continue
         seen.add(url)
         if len(compact) >= max_results:
@@ -185,6 +192,7 @@ def _search_payload(
         "count": len(results),
         "results": results,
         "truncated": truncated,
+        "evidence_kind": "search_results_not_page_reads",
     }
     if content:
         payload["content"] = content
@@ -279,7 +287,7 @@ class SearxngSearchProvider(WebSearchProvider):
                 "SEARCH_PROVIDER_CONFIG_INVALID",
             )
         url = base + "/search?" + urllib.parse.urlencode({"q": query, "format": "json"})
-        payload = await _http_json(url)
+        payload = await _http_json(url, service_url=base)
         rows = (
             _result(item.get("title"), item.get("url"), item.get("content"), item.get("engine"))
             for item in (payload.get("results") or [])
@@ -296,19 +304,24 @@ class DuckDuckGoSearchProvider(WebSearchProvider):
 
     async def search(self, query: str, max_results: int, settings: WebSearchSettings) -> Dict[str, Any]:
         _ = settings
+        from lxml import html as html_tree
         endpoint = f"https://duckduckgo.com/html/?q={urllib.parse.quote_plus(query)}"
         page = await _http_text(endpoint)
         rows: List[Dict[str, Any]] = []
-        for match in re.finditer(
-            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
-            page,
-            flags=re.IGNORECASE | re.DOTALL,
-        ):
-            href = html.unescape(match.group(1)).strip()
-            title = _clean_text(match.group(2))
-            if href:
-                rows.append(_result(title, href, "", "DuckDuckGo"))
-        return _search_payload(query, self.provider_id, rows, max_results)
+        tree = html_tree.fromstring(page or "<html></html>")
+        for anchor in tree.xpath('//a[contains(concat(" ", normalize-space(@class), " "), " result__a ")][@href]'):
+            href = urllib.parse.urljoin(endpoint, anchor.get("href"))
+            parsed = urllib.parse.urlsplit(href)
+            if parsed.hostname in {"duckduckgo.com", "www.duckduckgo.com"}:
+                href = (urllib.parse.parse_qs(parsed.query).get("uddg") or [href])[0]
+            container = next((node for node in anchor.iterancestors() if "result" in (node.get("class") or "").split()), anchor.getparent())
+            snippets = container.xpath('.//*[contains(concat(" ", normalize-space(@class), " "), " result__snippet ")]') if container is not None else []
+            snippet = " ".join(node.text_content() for node in snippets)
+            rows.append(_result(anchor.text_content(), href, snippet, "DuckDuckGo"))
+        payload = _search_payload(query, self.provider_id, rows, max_results)
+        if not rows:
+            payload["empty_reason"] = "no_results_or_unrecognized_page"
+        return payload
 
 
 class WebSearchRuntime:
@@ -361,6 +374,8 @@ class WebSearchRuntime:
             )
 
         errors: List[Dict[str, Any]] = []
+        attempts: List[Dict[str, Any]] = []
+        empty = None
         if selected != "auto" and not self._providers[selected].is_available(settings):
             errors.append(
                 {
@@ -381,14 +396,22 @@ class WebSearchRuntime:
         for index, provider in enumerate(candidates):
             try:
                 payload = await provider.search(query, max_results, settings)
+                is_empty = not payload.get("results")
+                attempts.append({"provider": provider.provider_id, "status": "empty" if is_empty else "success"})
                 payload["configured_provider"] = selected
                 payload["fallback_used"] = index > 0 or (selected != "auto" and provider.provider_id != selected)
+                payload["attempts"] = list(attempts)
                 if errors:
-                    payload["provider_errors"] = errors
+                    payload["provider_errors"] = list(errors)
+                if is_empty and fallback_policy == "fallback":
+                    if empty is None:
+                        empty = payload
+                    continue
                 return payload
             except asyncio.CancelledError:
                 raise
             except WebSearchError as exc:
+                attempts.append({"provider": provider.provider_id, "status": "error", "code": exc.code})
                 errors.append(
                     {
                         "provider": provider.provider_id,
@@ -398,6 +421,7 @@ class WebSearchRuntime:
                     }
                 )
             except Exception as exc:
+                attempts.append({"provider": provider.provider_id, "status": "error", "code": "SEARCH_PROVIDER_ERROR"})
                 errors.append(
                     {
                         "provider": provider.provider_id,
@@ -407,6 +431,11 @@ class WebSearchRuntime:
                     }
                 )
 
+        if empty is not None:
+            empty["attempts"] = attempts
+            if errors:
+                empty["provider_errors"] = errors
+            return empty
         raise WebSearchError(
             "all eligible web search providers failed",
             "SEARCH_PROVIDER_ERROR",

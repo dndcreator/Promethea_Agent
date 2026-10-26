@@ -1,0 +1,22 @@
+[
+  {"id":"web-01","question":"FastAPI 中什么时候使用 async def，什么时候使用普通 def？请根据官方文档说明线程池与事件循环的区别。"},
+  {"id":"web-02","question":"Pydantic v2 的 field_validator 和 model_validator 分别适合验证哪些约束？请引用当前官方文档。"},
+  {"id":"web-03","question":"asyncio 任务被取消后，清理代码应放在哪里？捕获取消异常后是否应该继续传播？请核对官方说明。"},
+  {"id":"web-04","question":"SSE 断线重连时，id、retry 和 Last-Event-ID 分别有什么作用？请阅读标准或权威文档。"},
+  {"id":"web-05","question":"Playwright 的 locator 自动等待能否代替所有显式等待？请区分动作可执行检查和业务完成条件。"},
+  {"id":"web-06","question":"Neo4j 中索引与唯一性约束有什么区别？请按当前版本文档说明，不要仅根据搜索摘要。"},
+  {"id":"web-07","question":"为什么 SearXNG 的 format=json 请求可能返回 403？如何在实例配置中启用 JSON？"},
+  {"id":"web-08","question":"Brave Search API 如何控制结果数量与翻页？有哪些需要核对的参数限制？"},
+  {"id":"web-09","question":"Trafilatura 如何排除评论并保留表格？请查阅最新接口，确认是否有已弃用的参数。"},
+  {"id":"web-10","question":"MCP 的 tools 和 resources 有什么区别？请阅读规范，并给出一个适合各自的例子。"},
+  {"id":"web-11","question":"WebSocket 关闭码 1000 和 1006 各表示什么？1006 是否能作为关闭帧发送？"},
+  {"id":"web-12","question":"OpenAI API 的缓存输入 token 如何在 usage 中体现？请确认接口类型，避免混淆不同响应结构。"},
+  {"id":"web-13","question":"DeepSeek API 如何报告上下文缓存命中与未命中 token？请读取官方缓存文档并列出字段。"},
+  {"id":"web-14","question":"Docker bind mount 的只读选项限制了什么？是否等同于整个容器文件系统只读？请核对官方文档。"},
+  {"id":"web-15","question":"Python 在 Windows 上创建符号链接有哪些权限和开发者模式限制？请核对当前官方文档。"},
+  {"id":"web-16","question":"焦点位于 iframe 内部时，父页面 document.activeElement 通常是什么？跨源边界允许观察到什么？"},
+  {"id":"web-17","question":"AbortController.abort 能否证明服务器没有执行请求？请区分取消客户端等待与远端副作用。"},
+  {"id":"web-18","question":"JavaScript 字符串长度和 Python 字符串长度为什么可能不同？请用补充平面字符说明 UTF-16 与码点。"},
+  {"id":"web-19","question":"把文件加入 .gitignore 后，已经被 Git 跟踪的文件会自动取消跟踪吗？怎样保留本地文件并取消跟踪？"},
+  {"id":"web-20","question":"使用 setuptools 打包 Python 模块时，如何确保运行时需要的 JS 静态文件也进入 wheel？请核对 package-data 配置。"}
+]

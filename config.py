@@ -414,6 +414,7 @@ class SandboxConfig(BaseSettings):
     ])
     network_mode: str = Field(default="restricted")  # restricted|none
     allowed_domains: list[str] = Field(default_factory=list)
+    allowed_service_urls: list[str] = Field(default_factory=list)
     block_private_network: bool = Field(default=True)
 
     @field_validator("profile")
