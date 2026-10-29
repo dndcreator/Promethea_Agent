@@ -1,7 +1,7 @@
 param(
     [string]$BaseUrl = "http://127.0.0.1:8000",
-    [ValidateSet("smoke", "core", "contracts", "business", "full")]
-    [string[]]$Suites = @("smoke", "core", "contracts", "business"),
+    [ValidateSet("unit", "integration", "system", "critical", "smoke", "core", "contracts", "business", "full")]
+    [string[]]$Suites = @("full"),
     [switch]$SkipSuites,
     [int]$TimeoutSec = 20,
     [switch]$FailOnHighDoctor

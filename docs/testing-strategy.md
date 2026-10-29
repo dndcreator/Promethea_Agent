@@ -1,131 +1,203 @@
 # Testing Strategy
 
-This project uses layered testing to balance speed, confidence, and product realism.
+Promethea separates Runtime correctness from model quality. Deterministic tests
+must not require paid models, personal memory or host-desktop interaction.
+See [the audit and coverage matrix](testing-audit.md) for retained risks and
+[tests/README.md](../tests/README.md) for the entry point.
 
-## 1. Test Layers
+## Layers And Ownership
 
-### Layer A: Unit Tests
-- Goal: verify local logic with deterministic inputs.
-- Typical modules:
-  - policy checks
-  - model mappers
-  - serialization contracts
+| Layer | Purpose | Actual Boundary |
+| --- | --- | --- |
+| Unit | Deterministic contracts, policy, state transitions, data transformations | Explicit file list in `tests/evaluation/suites.json`; mixed files stay integration |
+| Module integration | Cross-service contracts, ownership, approvals, persistence and recovery | Existing service tests plus `tests/integration/test_runtime_journeys.py`; model outputs scripted at the model boundary |
+| Intelligent behavior | Model decisions, extraction, recall relevance, situation and initiative | Versioned `tests/evaluation/behavior.json`, run independently of normal product operation |
+| System | HTTP/authentication, streaming, actual artifacts and process restart | `tests/system/` composes real routes/services; isolated source snapshot for TCP/restart |
+| Browser | Real React rendering, interactions, races and disclosure | Existing Playwright tests mostly use API fixtures; not real-provider E2E |
+| Live acceptance | Operator-owned deployment/provider checks and real business tasks | Explicit opt-in only; no automatic credentials or personal data |
 
-### Layer B: Service Contract Tests
-- Goal: verify service APIs and response shapes.
-- Typical modules:
-  - config service
-  - capability service
-  - workflow engine
-  - protocol surface contracts
+Tests at different boundaries are not duplicates merely because they concern
+the same capability. A new regression should fail on the original defect and
+assert observable facts, not just a successful response. Replace the external
+model/network boundary when needed; do not replace the whole service whose
+behavior the test claims to verify.
 
-### Layer C: Business Journey Tests
-- Goal: simulate realistic user-facing workflows across multiple services.
-- Typical paths:
-  - `chat -> tool confirmation -> resume`
-  - `batch -> workflow.define -> workflow.start -> workspace artifacts`
-  - `tools.list -> tool.call`
-  - provider-dependent voice route boundaries when an audio transcription provider is configured
+## Deterministic Execution
 
-## 2. Why Business Journey Tests Matter
-
-Pure unit tests can pass while user-facing flows fail due to:
-- integration wiring issues
-- session/state transition bugs
-- policy or permission mismatches
-- payload shape drift across boundaries
-
-Business tests are designed to catch these issues early.
-
-## 3. Current High-Value Journey Suites
-
-- `tests/test_mvp_business_smoke.py`
-- `tests/test_business_journeys.py`
-- `tests/test_voice_routes.py` for experimental/provider-dependent voice API boundaries
-
-## 4. Gate Recommendations
-
-Before release, require:
-1. Core contract tests passing.
-2. Business journey suites passing.
-3. Readiness endpoints healthy or explicitly acknowledged degradation.
-
-## 5. CI Prioritization
-
-Fast PR stage:
-- unit + contract tests
-
-Main branch stage:
-- business journeys
-- readiness/report generation
-
-Pre-release stage:
-- full test matrix + manual sanity checklist
-
-## 6. Known Constraints
-
-- External providers (OpenAI / ElevenLabs / Neo4j / MCP remote) should be mocked in CI.
-- Local environment tests should avoid hard network requirements unless explicitly marked integration.
-- DeepSeek-only configurations do not provide STT/audio transcription, so voice-input tests are not part of the supported preview smoke path unless an audio transcription provider is explicitly configured.
-
-### Browser Test Target
-
-The browser suite includes source fixtures at `UI/tests/message-content.html` as
-well as the actual application shell. Run the complete suite against a Vite
-**development server**; the production build deliberately excludes these test
-pages. Pointing fixture tests at `vite preview` loads the SPA fallback instead
-and produces misleading failures. Always set the URL explicitly:
+Install the existing project development dependencies (`pip install -e ".[dev]"`).
+Use Node 22 or later for the existing UI strip-types test command.
 
 ```powershell
-# Terminal 1, from UI/; choose another port if occupied.
+python tests/run_all_tests.py                         # default: unit
+python tests/run_all_tests.py --suite critical --repeat 3 --timeout 300
+python tests/run_all_tests.py --suite integration
+python tests/run_all_tests.py --suite system
+python tests/run_all_tests.py --suite full --coverage --timeout 600
+python tests/run_all_tests.py --suite full --output .tmp/evaluations/current --compare .tmp/evaluations/before/junit.xml
+python -m pytest -q tests/test_memory_regressions.py   # focused file
+```
+
+The timeout covers all repetitions. A failed repetition remains a failure even
+if the next attempt passes. Exit-code failures, missing JUnit reports, expected
+failures and optional skips are recorded separately. A timeout terminates only
+the runner's owned child process tree. `--file` without an explicit suite runs
+that file regardless of layer; an explicitly selected layer still filters it.
+The generic runner does not instrument provider calls and reports their count
+as unknown; only the behavior runner meters its own model boundary.
+
+`critical/contracts/smoke/core/business` are risk filters, not additional layers.
+Release preflight runs full once instead of repeating overlapping profiles.
+Two strict xfails expose known keyword-recommendation diagnostic defects
+(`runtime_status`, `graph_relations`); they are not a general-Agent quality
+score and must not be silently counted as passes.
+
+CI runs Python on three operating systems, SDK generation/typecheck/tests,
+React lint/tests/build and a bounded Chromium source-fixture smoke. Changes to
+CI configuration are not evidence of a successful remote CI run.
+
+## Behavior Evaluation
+
+The initial corpus has 22 versioned cases covering direct/tool actions,
+unsupported capabilities, recovery, cross-turn updates, memory extraction and
+Gate semantics, SQLite recall/isolation, current/stale observations and bounded
+Ambient behavior. Cases include positive, negative, boundary and curated
+historical failures. They contain synthetic data, not personal logs.
+
+```powershell
+python scripts/run_evaluations.py --mode validate
+# Real local recall; no model endpoint needed and no paid calls:
+python scripts/run_evaluations.py --mode live --group retrieval --repeat 3
+
+# After explicitly configuring evaluation-only credentials:
+python scripts/run_evaluations.py --mode live --group action --repeat 3 --max-calls 40 --max-tokens 80000 --deadline 300
+```
+
+Only explicit `PROMETHEA_EVAL_AGENT_BASE_URL`, `PROMETHEA_EVAL_AGENT_API_KEY`,
+and `PROMETHEA_EVAL_AGENT_MODEL` are accepted. Product credentials are not
+inherited. Live evaluations copy whitelisted source and evaluation assets into
+a disposable directory, without `.env`, user stores, logs or downloaded models.
+Real services operate on synthetic per-case storage. No new product loop or
+production policy exists in the evaluator. The classification adapter calls
+production extraction/verification/Gate; retrieval currently calls the real
+SQLite store and adapter, not Neo4j or embedding quality.
+
+Defaults: 3 trials, 30 shared model admissions, 16,000 reported tokens, 800 output
+tokens per call, 180 seconds total, 60 seconds per case, stop after 3 failures.
+Select one group and set its budget explicitly; default limits need not fit all
+22 cases. There are no hidden provider retries. Failed API admissions consume
+call budget. Missing usage stops further calls and leaves cost unknown.
+Input reservations use a conservative text-byte estimate, not a provider quote.
+
+Optional `--max-cost-usd` requires explicit agent/Judge
+`PROMETHEA_EVAL_<ROLE>_INPUT_USD_PER_MILLION` and
+`PROMETHEA_EVAL_<ROLE>_OUTPUT_USD_PER_MILLION`. These are operator-supplied
+flat text tariffs, not invoices or cache pricing. Reports never invent prices.
+
+### Independent Judge
+
+`judge.json` v2 defines separate task-outcome and behavior axes, plus dimensions,
+blocker diagnosis and evidence references. There is no combined verdict:
+`task_outcome = completed/incomplete/unverifiable`,
+`behavior = correct/incorrect/insufficient_evidence`.
+`task_fulfillment` belongs only to the task axis; it cannot make an otherwise
+correct boundary response behaviorally wrong. Known incomplete reasons require
+Runtime-owned evidence, not an assistant claim or missing observations alone.
+Unknown reasons stay `unknown`. Group reports count both axes separately.
+Hard failures in ownership, permissions, files or persistence cannot be
+overruled by semantic scores. The Agent's own claims are never the final grade.
+No Judge calls occur during ordinary product use or deterministic tests.
+
+Three calibration seeds were approved by the project owner on 2026-10-28
+(Beijing). Their v2 translations preserve verified output, false success and
+insufficient desktop evidence separately. On 2026-10-29 the owner approved the
+two-axis policy; a fourth synthetic fixture instantiates the Runtime-confirmed
+unavailable capability rule: task incomplete, behavior correct. Its metadata
+explicitly distinguishes policy approval from individual fixture review. The
+no-evidence seed remains unverifiable/insufficient evidence with unknown cause.
+These are minimal seeds, not a representative gold dataset or proof of accuracy.
+
+Configure separate `PROMETHEA_EVAL_JUDGE_BASE_URL/API_KEY/MODEL` and add
+`--judge`. An identical tested model/endpoint is refused. Every invocation
+first runs each reviewed calibration case three times, requiring at least
+90% accuracy, 90% repeat agreement and zero false passes. Invalid evidence IDs,
+missing dimensions and contradictory axes are rejected. Calibration votes and
+separate task/behavior confusion matrices are recorded. False behavioral passes
+and false task completions both disqualify a Judge. Human-reviewed labels
+alone do not enable scores: the configured Judge must actually pass calibration.
+Expand human labels and inspect disagreements before trusting release scores.
+CLI acceptance compares the two axes against case expectations, defaulting to
+completed/correct. A negative capability-boundary case explicitly expects
+incomplete/correct: that regression can pass without counting the task as
+completed. Unexpected uncertainty remains unresolved, not a semantic pass.
+Unjudged cases remain unmeasured, not semantic passes. Hard failures remain
+failures even when a Judge diagnoses correct behavior under a capability limit.
+Judge parsing/provider failures are evaluation errors, not an Agent behavior
+label, and do not overwrite an already computed hard-check result.
+
+### Comparison And Regression Records
+
+Reports include case/rubric/calibration hashes, source hash and Git revision,
+model identities, trials, failure types, elapsed time, calls, known tokens and
+known/unknown cost. Group hard-check rates have Wilson intervals; correlated
+trials and tiny corpora do not establish broad statistical significance.
+
+`--compare <behavior.json>` requires the same mode, corpus, rubric, cases,
+repetitions and complete runs. It reports differences, not an automatic claim
+of improvement. Unjudged semantic quality remains `not_measured`.
+`--mode replay --records <behavior.json>` reruns evidence checks (and optional
+independent Judge), not the Agent: replay cannot show that new Runtime code
+improved previously recorded behavior.
+
+For each incident, add a synthetic fixed case tied to the failed authority,
+preserve its expected state/artifact, and run before/after under the same
+configuration. Keep raw personal traces local. Test count and line coverage are
+diagnostics, not capability scores.
+
+## Browser And Deployment Checks
+
+Use a Vite development server: source fixtures under `UI/tests/` are deliberately
+excluded from the production build.
+
+```powershell
+# Terminal 1, from UI/; choose another port if occupied:
 npm run dev -- --host 127.0.0.1 --port 5186 --strictPort
-
-# Terminal 2, from the project root, using the project virtual environment.
-$env:CANVAS_TEST_BROWSER_CHANNEL = 'msedge'
-$env:PROMETHEA_UI_TEST_URL = 'http://127.0.0.1:5186'
-python -m pytest -q
+# Terminal 2, from the repository:
+$env:CANVAS_TEST_BROWSER_CHANNEL='msedge'
+$env:PROMETHEA_UI_TEST_URL='http://127.0.0.1:5186'
+python tests/run_all_tests.py --suite browser --timeout 300
 ```
 
-`msedge` selects an installed Edge browser. A configured browser must be installed;
-this acceptance run should not download dependencies or enable
-`PROMETHEA_LIVE_TEST` against real accounts/desktops. Separately run the UI
-production build and inspect production-shell flows. Browser API fixtures must
-follow current public response shapes, including an empty array for a deployment
-with no enabled messaging channels. Inject failures at the intended operation,
-not by assuming that the first global config request belongs to Settings.
+An installed Edge or Playwright Chromium is required. Run UI/SDK checks separately:
+`npm --prefix UI test`, `npm --prefix UI run lint`,
+`npm --prefix UI run build`, `npm --prefix sdk/typescript run generate:check`,
+`npm --prefix sdk/typescript run typecheck`, `npm --prefix sdk/typescript test`.
+Browser fixture success is not full production-shell + Gateway + provider E2E.
 
-## 7. Test Artifact Policy
-
-- Test artifacts are expected to be created under `.tmp/pytest-runtime/`.
-- `tests/conftest.py` sets `TEMP`, `TMP`, `TMPDIR`, `PYTEST_DEBUG_TEMPROOT`, and `PROMETHEA_TEST_TMP_ROOT` to this runtime directory.
-- `tests/run_all_tests.py` also uses `.tmp/pytest-runtime/runner/` for pytest `--basetemp`.
-- On normal completion, pytest removes `.tmp/pytest-runtime/`.
-- If a run is interrupted, the expected residue is a single `.tmp/pytest-runtime/` directory.
-- Tests should not create new root-level `.pytest-*`, `tmp_*`, `_pytest_case_tmp`, or `_pytest_session_tmp` directories.
-- Cleanup must not target runtime user data such as `config/users/`, uploaded files, `memory/`, `logs/`, or the L0 raw-log files `memory/raw_log.jsonl` and `memory/raw_log.state.json`.
-
-## 8. Release-Focused Coverage
-
-Recent release-focused regression tests cover:
-
-- user file upload/search and RuntimeBlock-based chat attachment context
-- stored-only behavior for image attachments without OCR text on text-only models
-- chat route preservation of structured attachments without prompt-level merging
-- enterprise `org_brain` configuration fields in the basic config view
-
-Recommended targeted command:
+Only the following live suite is the opt-in read-only deployment probe:
 
 ```powershell
-python -m pytest tests/test_files_routes.py tests/test_chat_routes_args_resilience.py tests/test_config_routes_contract.py -q
+$env:PROMETHEA_TEST_BASE_URL='http://127.0.0.1:8000'
+$env:PROMETHEA_TEST_TOKEN='<dedicated-test-account-token>'
+python tests/run_all_tests.py --suite live --live
 ```
 
-## 9. Next Expansion Targets
+Explicitly enabled but missing deployment settings fail rather than silently
+skip. This probe checks readiness, profile and session listing, not model
+quality or desktop controls. Existing host-interaction tests need separate
+operator consent and must never be enabled against valuable files.
 
-- Operator-owned live acceptance for bot/application channels, beyond the existing local protocol and delivery fixtures.
-- More negative-path tests for memory/reasoning degradation reason codes.
-- Release-grade scenario replay packs for regression prevention.
+## Artifact Policy
 
-## 10. Manual Business Acceptance
+Direct pytest uses `.tmp/pytest-runtime/`; runner trials use a dedicated
+`<output>/pytest-runtime/` so concurrent invocations cannot clean each other's
+data. Both remove their own temporary tree on normal completion.
+Interrupted cleanup may leave residue there. Persistent reports, coverage and
+local evidence belong in ignored `.tmp/evaluations/`. The runner chooses unique
+output directories by default; an explicit output path may be overwritten.
+Versioned, sanitized audit/baseline summaries live in `tests/evaluation/`.
+Cleanup must never target personal runtime directories.
+
+## Manual Business Acceptance
 
 Use a dedicated test account. Automated suites use synthetic models/providers;
 passing them does not validate a live provider, search quality, or the operator's

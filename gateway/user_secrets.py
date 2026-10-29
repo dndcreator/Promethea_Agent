@@ -34,6 +34,8 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "MEMORY__API__API_KEY",
     "MEMORY__API__BASE_URL",
     "MEMORY__API__MODEL",
+    "MEMORY__EMBEDDING__API_KEY",
+    "MEMORY__EMBEDDING__BASE_URL",
     "MEMORY__NEO4J__ENABLED",
     "MEMORY__NEO4J__URI",
     "MEMORY__NEO4J__USERNAME",
@@ -295,6 +297,8 @@ def get_user_secrets_status(user_id: str) -> Dict[str, Any]:
             "model": model,
         },
         "memory": {
+            "embedding_api_key_configured": bool(_resolve_value(values, "MEMORY__EMBEDDING__API_KEY")),
+            "embedding_base_url": _resolve_value(values, "MEMORY__EMBEDDING__BASE_URL"),
             "api_key_configured": bool(memory_api_key),
             "neo4j_password_configured": bool(neo4j_password),
         },

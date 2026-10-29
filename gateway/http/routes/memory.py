@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 
 from typing import Any, Dict, Optional
 
@@ -7,12 +8,28 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from gateway.protocol import RequestType
-from gateway.public_contracts import CognitionResponse
+from gateway.public_contracts import CognitionResponse, MemoryEmbeddingStatus, MemoryEmbeddingCommand
 from ..dispatcher import get_gateway_server, dispatch_gateway_method
 from .auth import get_current_user_id
 
 
 router = APIRouter()
+
+
+@router.get("/memory/embedding", response_model=MemoryEmbeddingStatus)
+async def get_memory_embedding(user_id: str = Depends(get_current_user_id)):
+    return _get_runtime_components().embedding_status(user_id)
+
+
+@router.post("/memory/embedding", response_model=MemoryEmbeddingStatus)
+async def control_memory_embedding(command: MemoryEmbeddingCommand, user_id: str = Depends(get_current_user_id)):
+    service = _get_runtime_components()
+    if not service.enabled:
+        raise HTTPException(status_code=503, detail="memory_not_enabled")
+    try:
+        return service.semantic_recall.request_sync(user_id, download=command.action == "download")
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 class MemoryEntryCreateRequest(BaseModel):
@@ -362,10 +379,11 @@ async def search_memory_entries(
     user_id: str = Depends(get_current_user_id),
 ):
     memory_service = _get_runtime_components()
-    result = memory_service.search_entries(
+    result = await asyncio.to_thread(memory_service.search_entries,
         user_id=user_id,
         query=q,
         limit=limit,
+        semantic=True,
     )
     if not result.get("ok"):
         reason = str(result.get("reason") or "search_failed")

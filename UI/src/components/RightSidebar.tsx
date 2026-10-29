@@ -390,7 +390,7 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false, o
                 type="text"
                 value={steerNote}
                 onChange={(e) => setSteerNote(e.target.value)}
-                placeholder={t('给当前任务一个方向...', 'Steer the current task...')}
+                placeholder={t('引导当前推理...', 'Guide the current reasoning...')}
                 className="min-w-0 flex-1 rounded-md border border-black/10 bg-bg-card px-3 py-2 text-xs outline-none focus:ring-1 focus:ring-brand-500"
               />
               <button
@@ -399,7 +399,7 @@ export default function RightSidebar({ sessionId, treeId, chatRunning = false, o
                 disabled={taskControlPending || !steerNote.trim()}
                 className="rounded-md bg-brand-100 px-3 py-2 text-xs font-semibold text-brand-700 hover:bg-brand-200 disabled:opacity-50"
               >
-                {t('引导', 'Steer')}
+                {t('引导推理', 'Guide reasoning')}
               </button>
             </div>
           </div>

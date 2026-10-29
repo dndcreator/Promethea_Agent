@@ -35,6 +35,28 @@ is projected to the output sink, while tool actions and protocol JSON never
 become transport text. Disconnect cancellation still cancels the owning Action
 task.
 
+The projector walks only root action members, not nested tool arguments or
+metadata. Draft text remains provisional until the complete canonical action
+and evidence validate. Failed drafts are explicitly replaced before recovery;
+SSE clients receive delta/replacement updates and the final canonical content.
+An answer whose discriminator follows its content is necessarily buffered until
+that discriminator arrives; streaming cannot safely infer it from nested text.
+
+Current-turn steering enters through ConversationService and the owned pending
+turn in MessageManager. ActionService admits instructions only for its active
+user/session/turn, consumes them at safe boundaries, checkpoints applied command
+IDs and emits durable receipt/application events. The existing Workbench
+projection merges them into one localized activity per instruction. No separate
+control loop, model router or Task scheduler is introduced. Guidance withdraws
+an unexecuted stale proposal and clears old approvals; dispatched batches finish
+and retain their Observations before replanning. It cannot undo executed effects
+or increase budgets. Pending turns, final history and confirmation checkpoints
+preserve guidance; restored Action checkpoints reconcile already-consumed IDs
+without inserting the same user instruction again. Preparation, finalization and
+confirmation waiting reject new instructions rather than falsely acknowledging
+an inactive execution. The main composer keeps stop separate from steering;
+the reasoning-tree control still targets that specific reasoning invocation.
+
 Confirmation resumes the pending tool batch inside the same ActionService loop,
 retaining its Action ID, model step, observations, budget, and token usage. The
 transport consumes approval once, preserves the conversation turn identity, and

@@ -1,5 +1,6 @@
 export { PrometheaClient, type PrometheaClientOptions } from './client.js'
 export { PrometheaError } from './errors.js'
+export { applyAnswerUpdate } from './runs.js'
 export { type TaskListOptions } from './tasks.js'
 export { type FileUploadOptions } from './files.js'
 export { type WorkbenchQuery, type WorkbenchWatchOptions } from './workbench.js'
@@ -8,8 +9,14 @@ export { CanvasClient } from './canvas.js'
 export { AmbientClient } from './ambient.js'
 export { SemanticUIClient } from './semantic-ui.js'
 export { ChannelsClient } from './channels.js'
+export { MemoryClient } from './memory.js'
 export { connectCanvasFrame, type CanvasFrameOptions } from './canvas-bridge.js'
 export type {
+  AnswerUpdate,
+  RunSteerRequest,
+  RunSteerResponse,
+  MemoryEmbeddingCommand,
+  MemoryEmbeddingStatus,
   ChannelAccount,
   ChannelDelivery,
   ChannelPairing,

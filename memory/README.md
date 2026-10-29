@@ -16,7 +16,11 @@ The `memory` module transforms raw conversation turns into long-lived structured
 - `memory/cold_layer.py`: summarization and compression
 - `memory/forgetting.py`: decay and cleanup policy
 - `memory/hippocampus/replay.py`: durable, idle-time reflection over already accepted memory
-- `memory/auto_recall.py`: retrieval logic and layer ranking
+- `memory/retrieval.py`: shared deterministic tokenization and reciprocal rank fusion
+- `memory/semantic_recall.py`: optional background semantic indexing and graceful retrieval fallback
+- `memory/embedding.py`: local CPU / compatible embedding endpoint I/O and explicit model download
+- `memory/backends/neo4j_retrieval.py`: owned graph views and derived per-user vector indexes
+- `memory/auto_recall.py`: legacy adapter context retrieval; structured Runtime recall uses backend candidates
 - `memory/llm_extractor.py`: fact/entity extraction
 - `memory/session_scope.py`: user/session scoping helpers
 - `memory/graph_reader.py`: read-only backend graph views and normalization; no write governance or service lifecycle
@@ -38,7 +42,7 @@ Recall path:
 
 1. Decide whether recall should run.
 2. Search user-scoped memory.
-3. Aggregate multi-layer results: summary, concept, direct, related, and recent.
+3. Fuse keyword/graph candidates with optional semantic candidates, preserving stable memory IDs and ownership.
 4. Inject useful results into model context.
 
 ## Store Backends
@@ -79,6 +83,7 @@ If write and recall are healthy, cross-session recall should retrieve age=26.
 
 - Isolation boundary is user-level, not session-level.
 - Recall should primarily solve long-horizon context gaps.
+- Optional vectors are rebuildable indexes, not a separate memory store or a replacement for write governance. See [setup and limits](../docs/configuration.md#optional-memory-embeddings).
 - Extraction failures should not crash primary chat flow.
 - Hippocampus replay is maintenance, not a fourth storage layer. It does not replace the write gate, warm clustering, cold summarization, or forgetting.
 - Replay starts only while foreground runs and memory synchronization are idle. It is checkpointed, interruptible, restart-resumable, and backend-neutral.

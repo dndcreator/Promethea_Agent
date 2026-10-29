@@ -47,12 +47,31 @@ See [operational boundaries](channels/README.md).
 
 - `POST /api/chat`
 - `POST /api/chat/confirm`
+- `POST /api/chat/{session_id}/steer`
 - `POST /api/followup`
 
 Chat requests may include an owned `task_id` to bind the run to durable Task
 goal state. This applies to HTTP, SSE and the TypeScript SDK; omission keeps
 ordinary conversation behavior. Task read models expose `goal_gaps` without
 internal monitoring frames or execution tokens.
+
+Streaming `text` events contain `content` and an optional `operation`:
+`delta` (the legacy default) appends, while `replace` replaces the current draft,
+including clearing it with empty content. The final `done.content` is the
+committed assistant answer. Consumers must handle replacement to avoid retaining
+invalid or superseded drafts. SSE comment heartbeats do not alter content.
+
+The authenticated steer endpoint accepts generated `RunSteerRequest`:
+`{conversation_turn_id, message_id, message}`. It persists a bounded instruction
+for the exact current user/session/turn and returns `RunSteerResponse` with
+`queued` or `applied`. Retry the same ID and text after uncertain delivery;
+conflicting content returns 409. The stream's `steering` event reports applied
+command IDs. History preserves guidance as user messages with `steering_id` and
+`steering_status`; unconsumed settled guidance is `not_applied`.
+Unknown/foreign sessions return 404; inactive, preparing, confirmation-waiting
+or finalizing turns return 409. Instructions apply at Action safe boundaries,
+not by cancelling running tools. No approvals or additional budget are granted.
+See the [SDK streaming contract](../sdk/typescript/README.md#streaming-and-steering).
 
 ### Tools and Extensions
 

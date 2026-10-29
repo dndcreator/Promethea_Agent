@@ -3,6 +3,7 @@
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List
@@ -157,18 +158,23 @@ async def run_capability_smoke(workspace_root: Path) -> Dict[str, Any]:
     }
 
 
-async def main() -> None:
+async def main() -> int:
     root = ROOT
     task_file = root / "benchmarks" / "general_capability_tasks.json"
     strategy = run_strategy_benchmark(task_file)
-    smoke = await run_capability_smoke(root)
+    temporary_root = root / ".tmp/evaluations"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="legacy-diagnostics-", dir=temporary_root) as temporary:
+        smoke = await run_capability_smoke(Path(temporary))
     report = {
         "strategy": strategy,
         "smoke": smoke,
-        "overall_ok": bool(strategy.get("score", 0.0) >= 0.75 and smoke.get("ok", False)),
+        "scope": "legacy rule recommender and deterministic smoke; not Agent quality",
+        "overall_ok": bool(all(row["ok"] for row in strategy["rows"]) and smoke.get("ok", False)),
     }
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["overall_ok"] else 1
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

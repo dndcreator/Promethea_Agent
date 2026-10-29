@@ -124,6 +124,8 @@ class EventType(str, Enum):
     TOOL_CALL_RESULT = "tool.call.result"
     TOOL_CALL_ERROR = "tool.call.error"
     ACTION_STATE_CHANGED = "action.state.changed"
+    ACTION_STEERING_RECEIVED = "action.steering.received"
+    ACTION_STEERING_APPLIED = "action.steering.applied"
     ACTION_OBSERVATION_COMMITTED = "action.observation.committed"
     GOAL_GAPS_UPDATED = "goal.gaps.updated"
     MODEL_CALL_RECORDED = "model.call.recorded"

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from .base import MemoryStore
 from memory.session_scope import scoped_session_id
+from memory.retrieval import tokenize_text
 
 
 def _utc_now_iso() -> str:
@@ -23,14 +24,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _tokenize(text: str) -> List[str]:
-    chunks = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9_]+", _normalize_text(text))
-    out: List[str] = []
-    for c in chunks:
-        if re.fullmatch(r"[a-z0-9_]+", c):
-            out.extend([p for p in c.split("_") if p])
-        else:
-            out.append(c)
-    return [x for x in out if len(x) >= 2]
+    return tokenize_text(text)
 
 
 def _score_overlap(tokens: List[str], text: str) -> float:
@@ -275,7 +269,7 @@ class SqliteGraphMemoryStore(MemoryStore):
         if not q:
             return []
         scoped_sid = scoped_session_id(session_id, user_id)
-        tokens = list(dict.fromkeys(_tokenize(q)))[:6]
+        tokens = list(dict.fromkeys(_tokenize(q)))[:64]
         if not tokens:
             tokens = [q[:16].lower()]
 
@@ -289,6 +283,8 @@ class SqliteGraphMemoryStore(MemoryStore):
                 SELECT id, source_layer, content, importance, created_at, session_id
                 FROM memory_items
                 WHERE user_id = ? AND ({where_like})
+                  AND coalesce(json_extract(metadata_json, '$.status'), 'active') = 'active'
+                  AND json_extract(metadata_json, '$.superseded_by') IS NULL
                 ORDER BY created_at DESC
                 LIMIT 64
                 """,
@@ -312,7 +308,7 @@ class SqliteGraphMemoryStore(MemoryStore):
                 }
 
             if not seed:
-                return self._recent_candidates(user_id=user_id, session_id=scoped_sid, limit=top_k)
+                return []
 
             # Step-2 recursive graph expansion from seed-linked nodes.
             seed_ids = list(seed.keys())[:12]
@@ -356,6 +352,8 @@ class SqliteGraphMemoryStore(MemoryStore):
                     FROM walk w
                     JOIN memory_links ml ON ml.node_id = w.node_id
                     JOIN memory_items mi ON mi.id = ml.memory_id AND mi.user_id = ?
+                      AND coalesce(json_extract(mi.metadata_json, '$.status'), 'active') = 'active'
+                      AND json_extract(mi.metadata_json, '$.superseded_by') IS NULL
                     GROUP BY ml.memory_id
                     ORDER BY graph_score DESC
                     LIMIT 96
@@ -401,7 +399,6 @@ class SqliteGraphMemoryStore(MemoryStore):
                     }
                 )
 
-            assembled.extend(self._recent_candidates(user_id=user_id, session_id=scoped_sid, limit=max(2, top_k // 2)))
             dedup: Dict[str, Dict[str, Any]] = {}
             for row in assembled:
                 dedup[row["memory_id"]] = row

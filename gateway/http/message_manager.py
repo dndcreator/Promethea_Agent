@@ -31,6 +31,8 @@ class Message(BaseModel):
     reasoning_steps: List[Dict[str, Any]] = Field(default_factory=list)
     run_status: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
+    steering_id: Optional[str] = None
+    steering_status: Optional[str] = None
 
 
 class FollowUp(BaseModel):
@@ -439,6 +441,68 @@ class MessageManager:
         self.session_store.save_all(self.session)
         return True
 
+    def turn_steering(self, session_id: str, turn_id: str, *, user_id: str) -> List[Dict[str, Any]]:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        turn = self.session[key].pending_turns.get(turn_id) if key else None
+        return deepcopy(turn.get("steering", [])) if turn else []
+
+    def steering_receipt(self, session_id: str, turn_id: str, *, user_id: str, message_id: str):
+        for row in self.turn_steering(session_id, turn_id, user_id=user_id):
+            if row["message_id"] == message_id:
+                return row
+        for row in self.get_messages(session_id, user_id=user_id):
+            if row.get("conversation_turn_id") == turn_id and row.get("steering_id") == message_id:
+                return {"message_id": message_id, "content": row["content"], "status": row["steering_status"]}
+        return None
+
+    def add_turn_steering(self, session_id: str, turn_id: str, *, user_id: str, message_id: str, content: str) -> Dict[str, Any]:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        turn = self.session[key].pending_turns.get(turn_id) if key else None
+        if not turn or turn.get("user_role") == "runtime":
+            raise ValueError("turn_not_active")
+        rows = turn.get("steering", [])
+        for row in rows:
+            if row["message_id"] == message_id:
+                if row["content"] != content:
+                    raise ValueError("steering_id_conflict")
+                return deepcopy(row)
+        if any(message.id == message_id for message in self.session[key].messages) or any(
+            row["message_id"] == message_id for pending_id, pending in self.session[key].pending_turns.items()
+            if pending_id != turn_id for row in pending.get("steering", [])
+        ):
+            raise ValueError("steering_id_conflict")
+        if len(rows) >= 32 or sum(len(row["content"]) for row in rows) + len(content) > 32000:
+            raise ValueError("steering_limit_reached")
+        previous = self.session[key].model_copy(deep=True)
+        row = {"message_id": message_id, "content": content, "status": "queued", "created_at": time.time()}
+        turn.setdefault("steering", []).append(row)
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key] = previous
+            raise
+        return deepcopy(row)
+
+    def acknowledge_turn_steering(self, session_id: str, turn_id: str, *, user_id: str, message_ids: List[str]) -> None:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key or turn_id not in self.session[key].pending_turns:
+            raise ValueError("turn_not_active")
+        previous = self.session[key].model_copy(deep=True)
+        for row in self.session[key].pending_turns[turn_id].get("steering", []):
+            if row["message_id"] in message_ids:
+                row["status"] = "applied"
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key] = previous
+            raise
+
+    @staticmethod
+    def _steering_messages(turn, turn_id):
+        return [Message(id=row["message_id"], role="user", content=row["content"], conversation_turn_id=turn_id,
+                        steering_id=row["message_id"], steering_status=row["status"] if row["status"] == "applied" else "not_applied")
+                for row in turn.get("steering", [])]
+
     def commit_turn(
         self,
         session_id: str,
@@ -479,6 +543,7 @@ class MessageManager:
                     conversation_turn_id=turn_id,
                 )
             )
+        session.messages.extend(self._steering_messages(turn, turn_id))
         session.messages.append(
             Message(
                 role="assistant",
@@ -577,6 +642,7 @@ class MessageManager:
             turn = session.pending_turns.pop(turn_id)
             if turn.get("user_role") != "runtime":
                 session.messages.append(Message(role=turn.get("user_role", "user"), content=turn.get("user_content", ""), conversation_turn_id=turn_id))
+            session.messages.extend(self._steering_messages(turn, turn_id))
             session.messages.append(Message(role="status", content="", conversation_turn_id=turn_id,
                     run_status="failed" if error else "interrupted",
                     error=error, reasoning_tree_id=reasoning_tree_id,

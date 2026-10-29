@@ -18,9 +18,14 @@ import {
   type SemanticSurface,
   type SemanticUIFeedback,
   type ChannelPairingRequest,
+  type MemoryEmbeddingCommand,
+  type RunSteerRequest,
 } from '@promethea/sdk'
 
 export type {
+  AnswerUpdate,
+  RunSteerResponse,
+  MemoryEmbeddingStatus,
   AmbientState,
   Event as RuntimeEvent,
   GuestChatStatus,
@@ -53,6 +58,9 @@ export const observeSemanticSurface = (surface: SemanticSurface, signal?: AbortS
 export const listChannelAccounts = (signal?: AbortSignal) => sdkCall((client) => client.channels.list(signal))
 export const pairChannelAccount = (command: ChannelPairingRequest, signal?: AbortSignal) => sdkCall((client) => client.channels.pair(command, signal))
 export const unbindChannelAccount = (channel: string, signal?: AbortSignal) => sdkCall((client) => client.channels.unbind(channel, signal))
+export const getMemoryEmbedding = (signal?: AbortSignal) => sdkCall((client) => client.memory.embeddingStatus(signal))
+export const controlMemoryEmbedding = (command: MemoryEmbeddingCommand, signal?: AbortSignal) => sdkCall((client) => client.memory.controlEmbedding(command, signal))
+export const steerChat = (sessionId: string, command: RunSteerRequest, signal?: AbortSignal) => sdkCall((client) => client.runs.steer(sessionId, command, signal))
 
 const DEFAULT_API_BASE = ''
 

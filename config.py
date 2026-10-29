@@ -207,6 +207,27 @@ class HippocampusConfig(BaseSettings):
     decay_interval_s: Optional[int] = Field(default=None, ge=60)
 
 
+class MemoryEmbeddingConfig(BaseSettings):
+    provider: str = "disabled"
+    model: str = "BAAI/bge-small-zh-v1.5"
+    revision: str = "7999e1d3359715c523056ef9478215996d62a620"
+    base_url: str = ""
+    api_key: str = ""
+    cache_dir: str = "memory/embedding_models"
+    batch_size: int = Field(default=16, ge=1, le=64)
+    timeout_s: float = Field(default=5, ge=0.1, le=30)
+    idle_unload_s: int = Field(default=600, ge=60)
+    max_download_mb: int = Field(default=512, ge=32, le=4096)
+    min_similarity: float = Field(default=0.75, ge=0, le=1)
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        if value not in {"disabled", "local", "openai-compatible"}:
+            raise ValueError("unsupported embedding provider")
+        return value
+
+
 class MemoryConfig(BaseSettings):
     enabled: bool = Field(default=True)
     profile: str = Field(default="balanced")
@@ -223,6 +244,7 @@ class MemoryConfig(BaseSettings):
     migration: MemoryMigrationConfig = Field(default_factory=MemoryMigrationConfig)
     raw_log: MemoryRawLogConfig = Field(default_factory=MemoryRawLogConfig)
     hippocampus: HippocampusConfig = Field(default_factory=HippocampusConfig)
+    embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
 
     @field_validator("store_backend")
     @classmethod

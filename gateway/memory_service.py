@@ -40,6 +40,8 @@ from .protocol import EventType
 from memory.hippocampus import HippocampusReplayPolicy, HippocampusReplayService
 from memory.session_scope import ensure_session_owned, scoped_session_id
 from memory.session_scope import user_node_id
+from memory.retrieval import fuse_candidates
+from memory.semantic_recall import SemanticRecall
 
 
 class MemoryService:
@@ -121,6 +123,16 @@ class MemoryService:
 
         self._refresh_thresholds()
         self.hippocampus = self._create_hippocampus_service()
+        from config import config as runtime_config
+        store = getattr(self.memory_adapter, "store", None)
+        index = getattr(store, "vector_index", None)
+        # A real backend capability, not an attribute synthesized by test doubles.
+        from memory.backends.neo4j_retrieval import Neo4jVectorIndex
+        self.semantic_recall = SemanticRecall(
+            index if isinstance(index, Neo4jVectorIndex) else None,
+            settings_for_user=self._embedding_settings_for_user,
+            cache_dir=runtime_config.memory.embedding.cache_dir,
+        )
 
         if self.event_emitter:
             self._subscribe_events()
@@ -386,6 +398,26 @@ class MemoryService:
             return global_config.model_dump()
         except Exception:
             return None
+
+    def _embedding_settings_for_user(self, user_id: str) -> Dict[str, Any]:
+        from config import MemoryEmbeddingConfig
+        from gateway.user_secrets import load_user_secrets
+        memory_config = (self._get_merged_config(user_id) or {}).get("memory", {})
+        settings = dict(memory_config.get("embedding") or {})
+        if not self.enabled or not memory_config.get("enabled", True):
+            settings["provider"] = "disabled"
+        secrets = load_user_secrets(user_id, ensure=False)
+        if secrets.get("MEMORY__EMBEDDING__API_KEY"):
+            settings["api_key"] = secrets["MEMORY__EMBEDDING__API_KEY"]
+        if secrets.get("MEMORY__EMBEDDING__BASE_URL"):
+            settings["base_url"] = secrets["MEMORY__EMBEDDING__BASE_URL"]
+        return MemoryEmbeddingConfig(**settings).model_dump()
+
+    def embedding_status(self, user_id: str) -> Dict[str, Any]:
+        state = self.semantic_recall.status(user_id)
+        if state["provider"] != "disabled" and state["supported"]:
+            self.semantic_recall.start()
+        return state
 
     @staticmethod
     def _to_bool(value: Any, default: bool = False) -> bool:
@@ -1437,6 +1469,7 @@ class MemoryService:
                 )
 
         if saved_count:
+            self.embedding_status(user_id)
             if self.hippocampus:
                 await self.hippocampus.notify_memory_saved(user_id, saved_count)
             logger.info(
@@ -1490,7 +1523,9 @@ class MemoryService:
         timeout_s = self._resolve_sync_policy().get("drain_timeout_s", 20.0)
         if self.hippocampus:
             await self.hippocampus.stop()
+        semantic_stopped = await asyncio.to_thread(self.semantic_recall.stop, min(5.0, float(timeout_s)))
         drained = await self.wait_until_idle(timeout_s=timeout_s)
+        drained = bool(drained and semantic_stopped)
         self._sync_shutdown_requested = True
         worker = self._sync_worker
         if worker and not worker.done():
@@ -1567,6 +1602,14 @@ class MemoryService:
     def _collect_recall_candidates(self, request: MemoryRecallRequest) -> List[Dict[str, Any]]:
         if not self.memory_adapter:
             return []
+        collect = getattr(self.memory_adapter, "collect_recall_candidates", None)
+        if callable(collect):
+            rows = collect(request)
+            if isinstance(rows, list):
+                lexical = [row for row in rows if isinstance(row, dict)
+                           and str(row.get("owner_user_id") or request.user_id) == request.user_id]
+                vectors = self.semantic_recall.search(request.user_id, request.query_text, max(8, request.top_k * 3))
+                return fuse_candidates(lexical, vectors)
         recall_engine = getattr(self.memory_adapter, "recall_engine", None)
         if recall_engine is None:
             context = self.memory_adapter.get_context(
@@ -1586,61 +1629,7 @@ class MemoryService:
                 "owner_user_id": request.user_id,
             }]
 
-        entities: List[str] = []
-        try:
-            extraction = recall_engine.extractor.extract(role="user", content=request.query_text)
-            entities = extraction.entities if extraction and extraction.entities else []
-        except Exception:
-            entities = []
-
-        recent_days = int(request.filters.get("recent_days") or 7)
-        try:
-            if hasattr(recall_engine, "_calculate_params"):
-                params = recall_engine._calculate_params(request.query_text, entities)
-                recent_days = int(params.get("recent_days", recent_days))
-        except Exception as e:
-            logger.debug("MemoryService: failed to calculate recall params, fallback to default recent_days: {}", e)
-
-        try:
-            results = recall_engine._three_layer_query(entities, request.session_id, request.user_id, recent_days)
-        except Exception:
-            return []
-
-        rows: List[Dict[str, Any]] = []
-        for layer in ("summary", "concept", "direct", "related", "salient", "recent"):
-            items = results.get(layer, []) if isinstance(results, dict) else []
-            for idx, item in enumerate(items or []):
-                if not isinstance(item, dict):
-                    continue
-                content = str(item.get("content") or "").strip()
-                if not content:
-                    continue
-                source_session = item.get("session_id")
-                rows.append({
-                    "memory_id": f"{layer}_{idx}_{abs(hash(content)) % 10000000}",
-                    "source_layer": layer,
-                    "content": content,
-                    "importance": float(item.get("importance") or 0.0),
-                    "created_at": str(item.get("time") or "") or None,
-                    "source_session": str(source_session) if source_session else None,
-                    "owner_user_id": request.user_id,
-                    "via": item.get("via"),
-                    "metadata": {
-                        key: item.get(key)
-                        for key in (
-                            "semantic_keys",
-                            "community_id",
-                            "cluster_id",
-                            "revision_chain_id",
-                            "memory_relationship",
-                            "conflict_flag",
-                            "supersedes",
-                            "superseded_by",
-                        )
-                        if item.get(key) is not None
-                    },
-                })
-        return rows
+        return []
 
     def retrieve_candidates(
         self,
@@ -1692,7 +1681,9 @@ class MemoryService:
             content_tokens = set(self._tokenize_text(content))
             overlap = len(query_tokens.intersection(content_tokens)) / max(1, len(query_tokens))
             importance = max(0.0, min(1.0, float(raw.get("importance") or 0.0)))
-            relevance = max(0.0, min(1.0, (overlap * 0.75) + (importance * 0.25)))
+            relevance = max(0.0, min(1.0, float(raw.get("retrieval_score", (overlap * 0.75) + (importance * 0.25)))))
+            if str(raw.get("status") or "active") != "active" or raw.get("superseded_by"):
+                continue
             metadata = dict(raw.get("metadata") or {}) if isinstance(raw.get("metadata"), dict) else {}
             for key in (
                 "semantic_keys",
@@ -1721,6 +1712,7 @@ class MemoryService:
                         **metadata,
                         "via": raw.get("via"),
                         "source_session": raw.get("source_session"),
+                        "retrieval_channels": raw.get("retrieval_channels", []),
                     },
                 }
             )
@@ -2113,10 +2105,20 @@ class MemoryService:
         user_id: str,
         query: str,
         limit: int = 30,
+        semantic: bool = False,
     ) -> Dict[str, Any]:
         q = str(query or "").strip()
         if not q:
             return {"ok": False, "reason": "query_required"}
+        if semantic:
+            pool = self.retrieve_candidates(query=q, session_id="", user_id=user_id, limit=limit)
+            if not pool.get("ok"):
+                return pool
+            entries = [{**row, "user_id": user_id,
+                        "session_id": (row.get("metadata") or {}).get("source_session") or "",
+                        "match_type": "hybrid", "score": row.get("relevance_score", 0)}
+                       for row in pool.get("candidates", [])]
+            return {"ok": True, "query": q, "entries": entries, "total": len(entries)}
         result = self.list_entries(
             user_id=user_id,
             query=q,
@@ -2553,7 +2555,7 @@ class MemoryService:
             self._store_recall_run(result, query_text=request.query_text)
             return result
 
-        candidates = self._collect_recall_candidates(request)
+        candidates = await asyncio.to_thread(self._collect_recall_candidates, request)
         q_tokens = set(self._tokenize_text(request.normalized_query))
         now = datetime.now(timezone.utc)
         max_age_days = int(policy.get("max_age_days", 30))
@@ -2569,6 +2571,10 @@ class MemoryService:
             content = str(item.get("content") or "").strip()
             memory_id = str(item.get("memory_id") or f"m_{abs(hash(content)) % 100000}")
             if not content:
+                continue
+
+            if str(item.get("status") or "active") != "active" or item.get("superseded_by"):
+                dropped.append(DroppedRecallCandidate(memory_id=memory_id, source_layer=source_layer, content=content[:180], reason="inactive_candidate"))
                 continue
 
             if allowed_layers and source_layer not in allowed_layers:
@@ -2614,11 +2620,9 @@ class MemoryService:
             c_tokens = set(self._tokenize_text(content))
             overlap = len(q_tokens.intersection(c_tokens)) / max(1, len(c_tokens))
             importance = float(item.get("importance") or 0.0)
-            relevance = min(1.0, round((overlap * 0.8) + (importance * 0.2), 4))
+            relevance = min(1.0, float(item.get("retrieval_score", round((overlap * 0.8) + (importance * 0.2), 4))))
 
-            conflict_flag = False
-            if " not " in f" {normalized_content} " and any(x in normalized_content for x in ["always", "must", "prefer"]):
-                conflict_flag = True
+            conflict_flag = bool(item.get("conflict_flag") or (item.get("metadata") or {}).get("conflict_flag"))
 
             selected.append(
                 RecalledMemoryItem(
@@ -2633,7 +2637,7 @@ class MemoryService:
                     created_at=item.get("created_at"),
                     staleness_flag=staleness_flag,
                     conflict_flag=conflict_flag,
-                    metadata={"importance": importance, "via": item.get("via")},
+                    metadata={"importance": importance, "via": item.get("via"), "retrieval_channels": item.get("retrieval_channels", [])},
                 )
             )
             seen_content.add(normalized_content)

@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 
 from .base import MemoryStore
 from memory.session_scope import scoped_session_id, user_node_id
+from memory.retrieval import tokenize_text
+from .neo4j_retrieval import OWNED, ACTIVE, RETURN_ROW, Neo4jVectorIndex
 
 
 def _utc_now_iso() -> str:
@@ -54,6 +56,7 @@ class Neo4jMemoryStore(MemoryStore):
         self.adapter = adapter
         self.connector = connector
         self.recall_engine = recall_engine
+        self.vector_index = Neo4jVectorIndex(connector) if connector else None
 
     def is_ready(self) -> bool:
         return self.connector is not None
@@ -165,44 +168,35 @@ class Neo4jMemoryStore(MemoryStore):
     ) -> List[Dict[str, Any]]:
         if not self.connector:
             return []
-        rows: List[Dict[str, Any]] = []
         try:
-            q = str(query or "").strip().lower()
-            if not q:
+            tokens = tokenize_text(query)[:64]
+            if not tokens:
                 return []
-            result = self.connector.query(
-                """
-                MATCH (u:User {id: $user_node_id})<-[:OWNED_BY]-(s:Session)<-[:PART_OF_SESSION]-(m:Message)
-                WHERE toLower(m.content) CONTAINS $query
-                RETURN m.id AS memory_id,
-                       m.content AS content,
-                       m.created_at AS created_at,
-                       s.id AS source_session
-                ORDER BY m.created_at DESC
-                LIMIT $limit
+            params = {"uid": user_node_id(user_id), "tokens": tokens, "limit": min(200, max(4, top_k * 3))}
+            result = self.connector.query(f"""
+                MATCH (m) WHERE (m:Message OR m:Concept OR m:Summary) AND {OWNED} AND {ACTIVE}
+                  AND any(term IN $tokens WHERE toLower(m.content) CONTAINS term)
+                WITH m, toFloat(size([term IN $tokens WHERE toLower(m.content) CONTAINS term])) / size($tokens) AS score
+                RETURN {RETURN_ROW}, score AS relevance_score
+                ORDER BY score DESC, m.importance DESC, m.id LIMIT $limit
                 """,
-                {
-                    "user_node_id": user_node_id(user_id),
-                    "query": q,
-                    "limit": int(max(4, top_k * 3)),
-                },
+                params,
             )
-            for row in result or []:
-                rows.append(
-                    {
-                        "memory_id": str(row.get("memory_id") or ""),
-                        "source_layer": "direct",
-                        "content": str(row.get("content") or ""),
-                        "importance": 0.6,
-                        "created_at": row.get("created_at") or _utc_now_iso(),
-                        "source_session": row.get("source_session"),
-                        "owner_user_id": user_id,
-                        "relevance_score": 0.72,
-                    }
-                )
+            rows = [{**row, "owner_user_id": user_id, "retrieval_channels": ["keyword"]} for row in result or []]
+            if rows:
+                related = self.connector.query(f"""
+                    MATCH (seed) WHERE seed.id IN $seeds AND
+                      EXISTS {{ MATCH (seed)-[:PART_OF_SESSION|SUMMARIZES]->(:Session)-[:OWNED_BY]->(:User {{id: $uid}}) }}
+                    MATCH (seed)-[:FROM_MESSAGE|BELONGS_TO*1..2]-(m)
+                    WHERE (m:Message OR m:Concept) AND {OWNED} AND {ACTIVE}
+                    RETURN DISTINCT {RETURN_ROW} ORDER BY importance DESC, memory_id LIMIT $limit
+                """, {**params, "seeds": [row["memory_id"] for row in rows[:12]]})
+                known = {row["memory_id"] for row in rows}
+                rows.extend({**row, "owner_user_id": user_id, "retrieval_channels": ["graph"]}
+                            for row in related or [] if row["memory_id"] not in known)
+            return rows
         except Exception:
             return []
-        return rows
 
     def export_mef(self, *, user_id: Optional[str] = None) -> Dict[str, Any]:
         # Export user-scoped graph snapshot (messages + nodes + edges).
@@ -271,8 +265,8 @@ class Neo4jMemoryStore(MemoryStore):
         nodes: List[Dict[str, Any]] = []
         element_to_node_id: Dict[str, str] = {}
         for row in node_rows or []:
-            props = dict(row.get("props") or {})
-            labels = [str(x) for x in (row.get("labels") or [])]
+            props = {key: value for key, value in (row.get("props") or {}).items() if not key.startswith("embedding_")}
+            labels = [str(x) for x in (row.get("labels") or []) if not str(x).startswith("MemoryVector_")]
             element_id = str(row.get("element_id") or "")
             node_id = str(props.get("id") or f"neo4j_node:{element_id.replace(':', '_')}")
             element_to_node_id[element_id] = node_id
@@ -388,7 +382,7 @@ class Neo4jMemoryStore(MemoryStore):
                 props = {}
                 original_props = metadata.get("original_properties")
                 if isinstance(original_props, dict):
-                    props.update(original_props)
+                    props.update({key: value for key, value in original_props.items() if not key.startswith("embedding_")})
                 props.update(
                     {
                         "id": node_id,

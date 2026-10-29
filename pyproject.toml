@@ -50,6 +50,7 @@ dependencies = [
 promethea = "promethea_cli.main:main"
 
 [project.optional-dependencies]
+embedding = ["sentence-transformers>=3.0,<6", "huggingface-hub>=0.25,<2"]
 productivity = ["caldav>=2.2.6,<3"]
 dev = [
     "pytest>=7.0.0",
@@ -76,6 +77,10 @@ addopts = [
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 1
 markers = [
+    "unit: deterministic local logic; explicit file classification",
+    "integration: real service collaboration or boundary contracts; no live providers by default",
+    "system: isolated whole-path functional acceptance",
+    "browser: real browser with explicitly documented API fixtures",
     "asyncio: async tests",
     "live: integration tests requiring running services",
     "slow: slow tests",

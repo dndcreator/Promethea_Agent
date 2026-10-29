@@ -3,22 +3,12 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from memory.retrieval import tokenize_text
 
 
 def normalize_query_text(text: str) -> str:
     lowered = (text or "").strip().lower()
     return re.sub(r"\s+", " ", lowered)
-
-
-def tokenize_text(text: str) -> List[str]:
-    chunks = re.findall(r"[\u4e00-\u9fff]+|[a-z0-9_]+", normalize_query_text(text))
-    tokens: List[str] = []
-    for chunk in chunks:
-        if re.match(r"^[a-z0-9_]+$", chunk):
-            tokens.extend([x for x in chunk.split("_") if x])
-        else:
-            tokens.append(chunk)
-    return tokens
 
 
 def resolve_recall_policy(

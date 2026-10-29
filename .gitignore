@@ -103,6 +103,7 @@ memory/self_evolve_tasks.json
 memory/hippocampus/replay_state.json*
 memory/hippocampus/.replay_state.json.*.tmp
 memory/migrations/
+memory/embedding_models/
 
 # Local benchmark and scratch workspaces
 .benchmark-workspace/

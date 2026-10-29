@@ -1,5 +1,6 @@
 ﻿{
   "version": 1,
+  "scope": "Legacy ToolStrategyEngine rule diagnostics, not Agent task completion or model quality",
   "tasks": [
     {
       "id": "browser_download_page",
@@ -39,6 +40,7 @@
     },
     {
       "id": "runtime_status",
+      "known_failure": "Legacy keyword recommender misses runtime inspection; not an ActionService decision score.",
       "user_message": "Check runtime status of agent memory and plugins",
       "step": {"goal": "inspect runtime state"},
       "expect": {"service_name": "computer_control", "tool_name": "runtime_action"}
@@ -51,6 +53,7 @@
     },
     {
       "id": "graph_relations",
+      "known_failure": "Legacy keyword recommender incorrectly prefers perception over graph relation operations.",
       "user_message": "Build a node graph and link relation dependencies",
       "step": {"goal": "graph relation updates"},
       "expect": {"service_name": "computer_control", "tool_name": "graph_action"}

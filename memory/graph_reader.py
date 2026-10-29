@@ -90,7 +90,7 @@ def read_user_graph(adapter: Any, *, user_id: str) -> Dict[str, Any]:
         UNWIND all_nodes AS node
         WITH DISTINCT node
         WHERE node IS NOT NULL
-        RETURN node.id AS id, labels(node)[0] AS type, node.content AS content,
+        RETURN node.id AS id, head([label IN labels(node) WHERE NOT label STARTS WITH 'MemoryVector_']) AS type, node.content AS content,
                node.layer AS layer, node.importance AS importance,
                node.access_count AS access_count, node.created_at AS created_at,
                node.role AS role, node.memory_type AS memory_type, node.memory_source AS memory_source

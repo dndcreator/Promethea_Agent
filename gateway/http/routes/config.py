@@ -38,6 +38,10 @@ ENV_ONLY_SECRET_PATHS = [
     "memory.store_backend",
     "memory.sqlite_graph_path",
     "memory.flat_memory_path",
+    "memory.embedding.api_key",
+    "memory.embedding.base_url",
+    "memory.embedding.cache_dir",
+    "memory.embedding.max_download_mb",
     "search.provider",
     "search.fallback_policy",
     "search.provider_order",
@@ -58,6 +62,9 @@ SIMPLE_CONFIG_FIELDS = [
 ]
 
 ADVANCED_CONFIG_FIELDS = [
+    "memory.embedding.provider",
+    "memory.embedding.model",
+    "memory.embedding.revision",
     "api.temperature",
     "api.max_tokens",
     "api.max_history_rounds",
@@ -151,6 +158,10 @@ def _deep_update(base_dict: Dict[str, Any], update_dict: Dict[str, Any]) -> None
 
 def _sanitize_config_for_client(config_data: Dict[str, Any]) -> Dict[str, Any]:
     sanitized = copy.deepcopy(config_data or {})
+    embedding = sanitized.get("memory", {}).get("embedding")
+    if isinstance(embedding, dict):
+        embedding.pop("api_key", None)
+        embedding.pop("cache_dir", None)
     if isinstance(sanitized.get("api"), dict):
         for key in ("api_key", "base_url", "model", "failover_models"):
             sanitized["api"].pop(key, None)

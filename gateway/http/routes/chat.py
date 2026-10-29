@@ -12,6 +12,7 @@ from loguru import logger
 
 from gateway.action.models import resolve_action_budget
 from gateway.protocol import EventType, RequestType
+from gateway.public_contracts import RunSteerRequest, RunSteerResponse
 
 from ..dispatcher import dispatch_gateway_method, get_gateway_server
 from ..schemas import ChatRequest, ChatResponse, ConfirmToolRequest
@@ -19,6 +20,20 @@ from .auth import get_current_user_id
 
 
 router = APIRouter()
+
+
+@router.post("/chat/{session_id}/steer", response_model=RunSteerResponse)
+async def steer_chat(session_id: str, command: RunSteerRequest, user_id: str = Depends(get_current_user_id)):
+    service = get_gateway_server().conversation_service
+    if service is None:
+        raise HTTPException(status_code=503, detail="Conversation service not initialized")
+    try:
+        return await service.steer_turn(session_id=session_id, user_id=user_id, turn_id=command.conversation_turn_id,
+                                        message_id=command.message_id, message=command.message)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Session not found") from None
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
 
 
 def _normalize_tool_args(value):
@@ -273,9 +288,11 @@ async def chat(
                     output_queue: asyncio.Queue = asyncio.Queue()
                     stream_finished = object()
 
-                    async def _publish_answer_delta(delta: str) -> None:
-                        if delta:
-                            await output_queue.put(("text", delta))
+                    async def _publish_answer_delta(delta) -> None:
+                        if isinstance(delta, dict):
+                            await output_queue.put((str(delta.get("type") or "text"), delta))
+                        elif delta:
+                            await output_queue.put(("text", {"operation": "delta", "content": delta}))
 
                     async def _publish_reasoning_delta(payload: Dict[str, Any]) -> None:
                         if payload:
@@ -307,13 +324,21 @@ async def chat(
                     streamed_text = ""
                     try:
                         while True:
-                            item = await output_queue.get()
+                            try:
+                                item = await asyncio.wait_for(output_queue.get(), timeout=15)
+                            except asyncio.TimeoutError:
+                                yield ": keep-alive\n\n"
+                                continue
                             if item is stream_finished:
                                 break
                             event_type, event_payload = item
                             if event_type == "text":
-                                streamed_text += str(event_payload)
-                                yield _sse({"type": "text", "content": event_payload})
+                                update = dict(event_payload)
+                                text = str(update.get("content") or "")
+                                streamed_text = text if update.get("operation") == "replace" else streamed_text + text
+                                yield _sse({"type": "text", **update})
+                            elif event_type == "steering":
+                                yield _sse({"type": "steering", "conversation_turn_id": turn_id, **event_payload})
                             else:
                                 yield _sse({
                                     "type": "reasoning",
@@ -363,6 +388,8 @@ async def chat(
                         yield _sse({"type": "text", "content": full_text})
                     elif full_text.startswith(streamed_text) and len(full_text) > len(streamed_text):
                         yield _sse({"type": "text", "content": full_text[len(streamed_text) :]})
+                    elif full_text != streamed_text:
+                        yield _sse({"type": "text", "operation": "replace", "content": full_text})
 
                     if confirmation_payload:
                         yield _sse({"type": "done", "session_id": session_id, **confirmation_payload})
@@ -426,6 +453,7 @@ async def chat(
                         "type": "done",
                         "session_id": session_id,
                         "conversation_turn_id": turn_id,
+                        "content": full_text,
                     }
                     if confirmation_payload:
                         done_payload.update(confirmation_payload)

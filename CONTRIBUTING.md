@@ -57,30 +57,34 @@ pytest tests/test_reasoning_service.py \
 ### Full suite (no live services required)
 
 ```bash
-python tests/run_all_tests.py
+python tests/run_all_tests.py --suite full
 ```
 
 ### Full suite with coverage
 
 ```bash
-python tests/run_all_tests.py --coverage
+python tests/run_all_tests.py --suite full --coverage
 ```
 
 ### Enable live integration tests (requires running services)
 
 ```bash
-PROMETHEA_LIVE_TEST=1 python tests/run_all_tests.py --live
+PROMETHEA_TEST_BASE_URL=http://127.0.0.1:8000 PROMETHEA_TEST_TOKEN=<test-token> python tests/run_all_tests.py --suite live --live
 ```
 
 ### Single file
 
 ```bash
-python tests/run_all_tests.py --file test_memory_regressions.py
+python -m pytest -q tests/test_memory_regressions.py
 ```
 
 ---
 
 ## Code style
+
+See [Testing Strategy](docs/testing-strategy.md) for repeatable critical runs,
+browser prerequisites, isolated behavior evaluations and independent Judge
+calibration. The default runner selects unit tests, not the full suite.
 
 We use `black`, `isort`, and `flake8`. Run before committing:
 

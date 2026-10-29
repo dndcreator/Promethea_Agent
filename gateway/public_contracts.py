@@ -28,6 +28,23 @@ class PublicContract(BaseModel):
     model_config = {"extra": "ignore"}
 
 
+class MemoryEmbeddingCommand(PublicContract):
+    action: Literal["download", "reindex"]
+
+
+class MemoryEmbeddingStatus(PublicContract):
+    provider: Literal["disabled", "local", "openai-compatible"]
+    model: str
+    revision: str = ""
+    model_state: Literal["disabled", "missing_dependencies", "missing_model", "downloading", "ready", "configured"]
+    supported: bool
+    index_state: Literal["idle", "indexing", "ready", "failed", "unsupported"]
+    indexed: int = 0
+    total: int = 0
+    reason: Optional[str] = None
+    fallback: Literal["keyword_graph"] = "keyword_graph"
+
+
 class ChannelPairingRequest(PublicContract):
     channel: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,79}$")
 
@@ -240,6 +257,26 @@ class Event(PublicContract):
     trace_id: Optional[str] = None
     source: str = "gateway"
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AnswerUpdate(PublicContract):
+    operation: Literal["delta", "replace"] = "delta"
+    content: str
+
+
+class RunSteerRequest(PublicContract):
+    model_config = {"extra": "forbid"}
+    conversation_turn_id: str = Field(min_length=1, max_length=200)
+    message_id: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1, max_length=8000)
+
+
+class RunSteerResponse(PublicContract):
+    session_id: str
+    conversation_turn_id: str
+    message_id: str
+    status: Literal["queued", "applied", "not_applied"]
+    action_loop_id: Optional[str] = None
 
 
 class TaskRun(PublicContract):
@@ -624,6 +661,11 @@ class WorkbenchSnapshot(PublicContract):
 PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
     model.__name__: model
     for model in (
+        AnswerUpdate,
+        RunSteerRequest,
+        RunSteerResponse,
+        MemoryEmbeddingCommand,
+        MemoryEmbeddingStatus,
         ChannelPairingRequest,
         ChannelPairing,
         ChannelAccount,

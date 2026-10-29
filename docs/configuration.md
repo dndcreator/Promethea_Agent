@@ -1,5 +1,89 @@
 # Configuration Reference
 
+## Optional Memory Embeddings
+
+Keyword and graph retrieval remain available without extra models. The initial
+semantic-index implementation uses the existing Neo4j database (5.15+ with vector
+index support); SQLite/flat backends keep their basic retrieval and explicitly
+report vector indexing as unsupported. No second vector database is created.
+The configured Neo4j account needs index-management permissions in addition to
+ordinary memory read/write access.
+
+For local CPU encoding, install the optional runtime in the same Python environment
+as the Gateway, then restart it:
+
+```powershell
+python -m pip install -e ".[embedding]"
+```
+
+Open **Settings > Memory retrieval**, select **Local model**, then **Download
+model**. The default BGE Chinese model is pinned to an immutable upstream commit.
+Downloading is explicit and asynchronous; closing Settings does not cancel it.
+The UI reports download/dependency/failure states and actual indexed/total counts,
+not an estimated download percentage. If dependencies are missing, install the
+extra above; the server never runs pip on a user's behalf. Interrupted Hugging
+Face downloads can reuse their local cache on the next explicit attempt.
+
+Only safe tensor weights and JSON/text configuration are downloaded, bounded by
+`MEMORY__EMBEDDING__MAX_DOWNLOAD_MB` (512 by default). No repository Python or pickle
+weights are fetched and remote model code is disabled. Model weights are about
+96 MB for the default model; the optional inference libraries and resident memory
+are additional and can be substantially larger. Normal encoding is local-only,
+CPU-only, and never implicitly downloads missing files. Cold queries use basic
+retrieval while the local encoder warms in the background. Idle models are
+eligible for unloading after `MEMORY__EMBEDDING__IDLE_UNLOAD_S` (600 by default).
+
+Root `.env` follows the existing nested configuration convention:
+
+```dotenv
+MEMORY__EMBEDDING__PROVIDER=local
+MEMORY__EMBEDDING__MODEL=BAAI/bge-small-zh-v1.5
+MEMORY__EMBEDDING__REVISION=7999e1d3359715c523056ef9478215996d62a620
+MEMORY__EMBEDDING__CACHE_DIR=memory/embedding_models
+MEMORY__EMBEDDING__BATCH_SIZE=16
+MEMORY__EMBEDDING__TIMEOUT_S=5
+MEMORY__EMBEDDING__MIN_SIMILARITY=0.75
+```
+
+Provider/model choices can be saved in personal settings. Deployment cache paths
+and download ceilings are operator-owned. Endpoint credentials are stored through
+the existing per-user `config/users/<user_id>/secrets.env` mechanism, with root
+deployment defaults; keys are never returned by the status/config APIs. Model
+cache files are ignored by Git. Cache files contain public model data, not personal
+memory. Downloaded models remain on disk after switching providers and may be reused.
+
+For an existing Ollama embedding model, select **External endpoint / Ollama**, set
+the model name to the exact installed embedding model and the endpoint to
+`http://127.0.0.1:11434/v1`. Other compatible services use their explicit
+`/v1/embeddings` API. No new inference server is installed. External encoding sends
+the indexed memory text and queries to that configured endpoint, so choose it
+deliberately. It never inherits the chat model's endpoint or API key implicitly.
+There is no automatic local-to-cloud or paid-provider fallback.
+
+Failed, busy, cold or unavailable semantic retrieval falls back to keyword/graph
+retrieval, with the reason visible in status. A remote request has a bounded
+timeout and no transport retry. A local CPU inference already in progress cannot
+be forcibly killed; its result is fenced against changed configuration and shutdown.
+This mechanism does not guarantee identical recall quality while degraded.
+
+Accepted memories and summaries/concepts are indexed in bounded background batches;
+raw unclassified chat turns are not embedded. Reconciliation runs for activated
+personal spaces, including after writes; the first recall/settings visit after a
+restart reactivates that space. Contents and active/superseded state in Neo4j remain
+authoritative, so interrupted indexing resumes from missing/current records rather
+than replaying a second write log. Updating content invalidates its old embedding
+immediately at read time. Switching model/revision/endpoint builds a separate index
+identity; old derived generations are retired only after the replacement completes.
+For a mutable external model, explicitly change the configured revision when its
+weights change. Database export excludes embedding properties and index labels;
+imported memories rebuild the index instead of trusting transferred vectors.
+
+Status/control API: `GET /api/memory/embedding` and authenticated
+`POST /api/memory/embedding` with `{"action":"download"}` or
+`{"action":"reindex"}` (incremental reconciliation). The SDK exposes
+`client.memory.embeddingStatus()` and `client.memory.controlEmbedding(...)` using
+generated public contracts. No embedding or Agent decisions live in the SDK.
+
 ## Model Cost Estimates
 
 The old fixed example tariff is removed. Runtime metrics use the actual returned

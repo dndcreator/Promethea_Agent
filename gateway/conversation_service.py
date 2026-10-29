@@ -1235,6 +1235,7 @@ class ConversationService:
                     prepare_messages=lambda current, observations: self._prepare_action_messages(
                         current, observations, run_context=run_context, user_config=user_config,
                     ),
+                    **self._steering_callbacks(session_id, user_id, getattr(run_context, "conversation_turn_id", None)),
                 )
                 if result.get("status") == "needs_confirmation":
                     result["delegation_checkpoint"] = {
@@ -1252,6 +1253,35 @@ class ConversationService:
             )
             return result
         raise RuntimeError("ActionService is required for conversation execution")
+
+    def _steering_callbacks(self, session_id, user_id, turn_id):
+        manager = self.message_manager
+        if not turn_id or not all(callable(getattr(manager, name, None)) for name in ("turn_steering", "acknowledge_turn_steering")):
+            return {}
+        return {
+            "read_steering": lambda: manager.turn_steering(session_id, turn_id, user_id=user_id),
+            "acknowledge_steering": lambda ids: manager.acknowledge_turn_steering(session_id, turn_id, user_id=user_id, message_ids=ids),
+        }
+
+    async def steer_turn(self, *, session_id: str, user_id: str, turn_id: str, message_id: str, message: str):
+        manager = self.message_manager
+        if manager is None or not manager.get_session(session_id, user_id=user_id):
+            raise KeyError("session_not_found")
+        clean = message.strip()
+        if not clean:
+            raise ValueError("message_required")
+        def lookup():
+            previous = manager.steering_receipt(session_id, turn_id, user_id=user_id, message_id=message_id)
+            if previous is not None and previous["content"] != clean:
+                raise ValueError("steering_id_conflict")
+            return previous
+
+        receipt = await self.action_service.steer_turn(
+            user_id=user_id, session_id=session_id, turn_id=turn_id, lookup=lookup,
+            persist=lambda: manager.add_turn_steering(session_id, turn_id, user_id=user_id, message_id=message_id, content=clean),
+        )
+        return {"session_id": session_id, "conversation_turn_id": turn_id, "message_id": message_id,
+                "status": receipt["status"], "action_loop_id": receipt.get("action_loop_id")}
 
     async def run_delegated_turn(self, *, objective: str, label: str, run_context: Any, user_config: Dict[str, Any], max_steps: int, history=None, checkpoint_sink=None, checkpoint=None) -> Dict:
         from agentkit.security.approval import approval_scope
@@ -1558,6 +1588,7 @@ class ConversationService:
             result = await self.action_service.resume_action(
                 pending=pending,
                 approved_call_id=approved_call_id,
+                **self._steering_callbacks(session_id, user_id, (pending.get("runtime_scope") or {}).get("conversation_turn_id")),
                 user_config=user_config,
                 session_id=session_id,
                 user_id=user_id,
@@ -1617,6 +1648,7 @@ class ConversationService:
         with self.delegation.turn(spent=int(checkpoint.get("spent") or 0)) as delegation:
             result = await self.action_service.reject_pending_action(
                 pending=pending,
+                **self._steering_callbacks(session_id, user_id, (pending.get("runtime_scope") or {}).get("conversation_turn_id")),
                 user_config=user_config,
                 session_id=session_id,
                 user_id=user_id,

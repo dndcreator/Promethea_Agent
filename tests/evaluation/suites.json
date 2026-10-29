@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "unit": [
+    "tests/test_config_protocol.py", "tests/test_config_schema_migration.py",
+    "tests/test_datetime_timezone_regression.py",
+    "tests/test_http_dispatcher_error_model.py", "tests/test_model_pricing.py",
+    "tests/test_protocol_contract_registry.py", "tests/test_public_contracts.py",
+    "tests/test_request_validation.py", "tests/test_runtime_context_models.py",
+    "tests/test_sandbox_policy.py", "tests/test_text_normalization.py",
+    "tests/test_tool_approval_scope.py", "tests/test_tool_policy_engine.py",
+    "tests/test_tool_result_contract.py", "tests/test_tool_strategy_engine.py",
+    "tests/test_memory_write_gate.py", "tests/test_memory_utils.py",
+    "tests/test_reasoning_node_state_machine.py"
+  ],
+  "critical": [
+    "tests/test_action_service.py", "tests/test_action_recovery.py",
+    "tests/test_action_steering.py", "tests/test_capability_confirmation.py",
+    "tests/test_capability_projection.py", "tests/test_task_service.py",
+    "tests/test_background_agents.py", "tests/test_memory_write_gate.py",
+    "tests/test_memory_semantic_recall.py", "tests/test_environment_collaboration.py",
+    "tests/test_ambient_service.py", "tests/test_message_manager_turns.py",
+    "tests/integration/test_runtime_journeys.py"
+  ],
+  "contracts": [
+    "tests/test_protocol_surface_contracts.py", "tests/test_http_contract_registry.py",
+    "tests/test_generated_public_contracts.py", "tests/test_config_protocol.py",
+    "tests/test_gateway_tools_list_contract.py", "tests/test_gateway_ws_error_model.py"
+  ],
+  "smoke": ["tests/integration/test_runtime_journeys.py", "tests/test_mvp_business_smoke.py"],
+  "core": ["tests/test_action_service.py", "tests/test_task_service.py", "tests/test_capability_service.py", "tests/test_workflow_engine_mvp.py"],
+  "business": ["tests/integration/test_runtime_journeys.py", "tests/test_business_journeys.py", "tests/test_workflow_gateway_journeys.py", "tests/test_gap_business_journey.py"]
+}

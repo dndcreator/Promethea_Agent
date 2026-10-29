@@ -1,86 +1,48 @@
-# Tests
+# Tests And Evaluations
 
-## 中文
+测试保护 Runtime 的事实、权限、状态与恢复；评测单独衡量模型行为。
+完整分层、模型预算、Judge 校准和人工验收见
+[Testing Strategy](../docs/testing-strategy.md)，审计依据与覆盖矩阵见
+[Testing Audit](../docs/testing-audit.md)。
 
-### 目标
-`tests/` 用于保护核心能力：对话编排、工具调用、Moirai 工作流、记忆系统、配置与策略。
+## 常用命令
 
-### 分层约定
-- 单元测试：纯逻辑与边界行为，无外部依赖。
-- 集成测试：跨模块协作（网关、工具服务、策略引擎）。
-- Live 测试：依赖运行中的服务或外部组件（通过 `PROMETHEA_LIVE_TEST=1` 启用）。
+在项目虚拟环境中，从仓库根目录执行：
 
-### 常用命令
 ```powershell
-# 全量（默认不跑 live）
+# 默认只跑低成本单元层
 python tests/run_all_tests.py
+python tests/run_all_tests.py --suite critical --repeat 3 --timeout 300
+python tests/run_all_tests.py --suite integration
+python tests/run_all_tests.py --suite system
+python tests/run_all_tests.py --suite full --coverage
 
-# 分层套件（推荐先跑 business）
-python tests/run_all_tests.py --suite smoke
-python tests/run_all_tests.py --suite core
-python tests/run_all_tests.py --suite contracts
-python tests/run_all_tests.py --suite business
-python tests/run_all_tests.py --suite business_plus
-python tests/run_all_tests.py --suite full
+# 显式单文件，不受默认 unit 标记过滤
+python -m pytest -q tests/test_memory_regressions.py
 
-# 全量 + 覆盖率
-python tests/run_all_tests.py --coverage
+# 只验证评测资产；不调用模型
+python scripts/run_evaluations.py --mode validate
 
-# 单文件
-python tests/run_all_tests.py --file test_moirai_service.py
-
-# 按关键字过滤
-python tests/run_all_tests.py --pattern "memory and not live"
-
-# 开启 live 测试
-python tests/run_all_tests.py --live
-
-# 开启压力测试（默认关闭）
-$env:RUN_STRESS_TESTS="1"
-pytest -q -m stress tests/test_memory_stress.py
-
-# 发布前业务回归（自动找解释器并写日志）
-powershell -ExecutionPolicy Bypass -File scripts/run_business_audit.ps1 -Suite business
+# 实际 SQLite 召回，每例三次；此组不调用模型
+python scripts/run_evaluations.py --mode live --group retrieval --repeat 3
 ```
 
-### 最小回归集合（推荐）
-```powershell
-pytest -q tests/test_reasoning_service.py tests/test_moirai_service.py tests/test_memory_regressions.py tests/test_capability_service.py
-```
+`unit/integration/system/browser` 是层；`critical/contracts/smoke/core/business`
+是风险筛选集合，不应顺序全跑后再跑 full。混合测试文件保守归入集成层，
+并未为了目录整齐移动全部旧测试。注册表在 `evaluation/suites.json`。
 
-### 临时文件策略
-- 测试临时文件统一写入 `.tmp/pytest-runtime/`。
-- `tests/conftest.py` 会把 `TEMP`、`TMP`、`TMPDIR`、`PYTEST_DEBUG_TEMPROOT` 和 `PROMETHEA_TEST_TMP_ROOT` 指向该目录。
-- 测试正常结束时会清理 `.tmp/pytest-runtime/`。
-- 如果测试被中断，最多残留 `.tmp/pytest-runtime/` 一个目录；不应再在仓库根目录生成新的 `.pytest-*`、`tmp_*`、`_pytest_case_tmp` 或 `_pytest_session_tmp` 目录。
-- 清理逻辑只允许删除当前仓库内计算出的 `.tmp/pytest-runtime/`，不清理用户数据、上传文件、`config/users/`、`memory/` 或 `logs/`。
+## 目录职责
 
-### 场景增强测试组织
-- `tests/business_plus/`: 贴近业务链路的轻量真实场景测试（chat/tool/workflow 组合流程）。
-- `tests/business_plus/README.md`: `business_plus` 用例边界、命名约定与新增标准。
+- `test_*.py`：保留的确定性、契约和模块测试。
+- `integration/`：真实服务组合，模型边界使用脚本输出。
+- `system/`：真实 HTTP、认证、文件产物和隔离子进程重启。
+- `live/`：显式开启的只读部署检查，不是全产品业务验收。
+- `evaluation/`：版本化案例、评价标准、人工标签、基线。
+- `support/`：测试所有的组合根、报告与预算工具，产品不可依赖。
 
-## English
+pytest 临时数据写入 `.tmp/pytest-runtime/`，正常结束后清理。
+需保留的 JUnit、覆盖率、重复运行结果写入 `.tmp/evaluations/`，不上传。
+不要把个人日志、会话、数据库、凭据或生成应用加入固定评测集。
 
-### Purpose
-`tests/` protects critical paths: orchestration, tool execution, Moirai workflows, memory behavior, and policy/config logic.
-
-### Test Layers
-- Unit: pure logic and boundary behavior.
-- Integration: cross-module behavior.
-- Live: requires running services or external dependencies (enabled by `PROMETHEA_LIVE_TEST=1`).
-
-### Common Commands
-```powershell
-python tests/run_all_tests.py
-python tests/run_all_tests.py --coverage
-python tests/run_all_tests.py --file test_moirai_service.py
-python tests/run_all_tests.py --pattern "memory and not live"
-python tests/run_all_tests.py --live
-$env:RUN_STRESS_TESTS="1"; pytest -q -m stress tests/test_memory_stress.py
-```
-
-### Temporary Files
-- Test artifacts should live under `.tmp/pytest-runtime/`.
-- Normal pytest completion removes `.tmp/pytest-runtime/`.
-- Interrupted runs may leave that single directory behind.
-- Test cleanup is intentionally narrow and must not delete runtime user data such as `config/users/`, `memory/`, or `logs/`.
+浏览器、实时部署与真实模型均须显式选择，详见策略文档。
+测试通过不等于真实模型质量、Neo4j 或外部工具已经通过业务验收。

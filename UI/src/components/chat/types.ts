@@ -9,6 +9,7 @@ export interface MessageData {
   reasoningSteps?: ReasoningStep[]
   runStatus?: string
   error?: Record<string, unknown>
+  steeringStatus?: 'queued' | 'applied' | 'not_applied'
 }
 
 export type ReasoningStep = {

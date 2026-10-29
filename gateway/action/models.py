@@ -34,6 +34,8 @@ class ActionContext:
     metadata: Dict[str, Any] = field(default_factory=dict)
     prepare_messages: Optional[Callable[[List[Dict[str, Any]], List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]]] = None
     checkpoint_sink: Optional[Callable[[Dict[str, Any]], Any]] = None
+    read_steering: Optional[Callable[[], List[Dict[str, Any]]]] = None
+    acknowledge_steering: Optional[Callable[[List[str]], Any]] = None
 
 
 @dataclass
@@ -60,6 +62,9 @@ class ActionRun:
     gap_task_revision: Optional[int] = None
     gap_task_objective: str = ""
     gap_execution_token: Dict[str, Any] = field(default_factory=dict)
+    applied_steering_ids: List[str] = field(default_factory=list)
+    accepting_steering: bool = True
+    streamed_answer: str = ""
 
     def add_trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         self.trace.append(

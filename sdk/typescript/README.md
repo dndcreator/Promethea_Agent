@@ -54,6 +54,42 @@ if (ambient.pending) {
 }
 ```
 
+## Streaming And Steering
+
+SSE `text` payloads follow the generated `AnswerUpdate` contract. Apply
+`operation: "replace"` as a replacement, including an empty string; omitted
+operations remain legacy append-only deltas. `applyAnswerUpdate(current, update)`
+implements this projection. A `done.content` string is the authoritative final
+answer. Draft text can be withdrawn after action validation or user steering;
+clients must not concatenate discarded drafts with a recovered answer.
+
+Use `session_started.conversation_turn_id` to target the current chat execution:
+
+```ts
+const commandId = crypto.randomUUID()
+const receipt = await client.runs.steer(sessionId, {
+  conversation_turn_id: turnId,
+  message_id: commandId,
+  message: 'Keep the existing files and summarize only.',
+}, signal)
+```
+
+Retry uncertain delivery with the same ID and message. `queued` confirms durable
+receipt, not application; the stream emits `steering` with `status: "applied"`
+and `message_ids` after consumption. Saved user messages retain the command ID
+and `steering_status`. Stopped/failed turns preserve unconsumed guidance as
+`not_applied` rather than claiming execution. Reusing an ID with different text
+returns 409. Foreign sessions return 404.
+
+V1 accepts guidance only while that owned Action loop is active. Preparation,
+confirmation waiting and finalization are not steerable (409); clients retain
+unsent text. Guidance joins the existing model messages at a safe boundary,
+withdraws an unexecuted stale proposal and clears its old approvals. It does not
+cancel a dispatched tool batch, undo side effects, extend the step budget or
+authorize a replacement action. Explicit stop/abort remains separate. This is
+current chat-turn control, not a new detached-task scheduler or a WebSocket
+command protocol.
+
 ## Guest Chat
 
 `client.runs.guestStatus()` reads operator-owned availability and limits.

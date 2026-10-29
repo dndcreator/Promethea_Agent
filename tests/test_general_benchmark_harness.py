@@ -1,16 +1,25 @@
 ﻿from pathlib import Path
 
 import pytest
+import json
 
 from scripts.run_general_benchmark import run_capability_smoke, run_strategy_benchmark
 
 
-def test_strategy_benchmark_score_threshold():
-    root = Path(__file__).resolve().parent.parent
-    task_file = root / "benchmarks" / "general_capability_tasks.json"
-    out = run_strategy_benchmark(task_file)
-    assert out["total"] >= 10
-    assert out["score"] >= 0.75
+ROOT = Path(__file__).resolve().parents[1]
+CASES = json.loads((ROOT / "benchmarks/general_capability_tasks.json").read_text(encoding="utf-8-sig"))["tasks"]
+
+
+@pytest.fixture(scope="module")
+def recommendation_report():
+    return run_strategy_benchmark(ROOT / "benchmarks/general_capability_tasks.json")
+
+
+@pytest.mark.parametrize("case_id", [pytest.param(case["id"], marks=pytest.mark.xfail(reason=case["known_failure"], strict=True))
+                                  if case.get("known_failure") else case["id"] for case in CASES])
+def test_legacy_rule_recommendation_case(case_id, recommendation_report):
+    row = next(row for row in recommendation_report["rows"] if row["id"] == case_id)
+    assert row["ok"], row
 
 
 @pytest.mark.asyncio

@@ -111,25 +111,6 @@ async def test_non_stream_model_output_errors_preserve_terminal_facts(content, f
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("content,finish_reason,code", [
-    ("", "stop", "MODEL_EMPTY_RESPONSE"),
-    ("   ", "stop", "MODEL_EMPTY_RESPONSE"),
-    ("partial action", "length", "MODEL_OUTPUT_LIMIT"),
-])
-async def test_non_stream_model_output_errors_preserve_terminal_facts(content, finish_reason, code):
-    response = SimpleNamespace(
-        id="provider-sync", choices=[SimpleNamespace(finish_reason=finish_reason, message=SimpleNamespace(content=content))],
-        usage=SimpleNamespace(prompt_tokens=12, completion_tokens=5),
-    )
-    create = _FakeCreate(response)
-    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
-    out = await conv.call_llm([{"role": "user", "content": "build"}])
-    assert out["status"] == "error" and out["code"] == code
-    assert out["finish_reason"] == finish_reason and out["request_id"] == "provider-sync"
-    assert out["max_tokens"] == 200 and out["usage"]["completion_tokens"] == 5
-
-
-@pytest.mark.asyncio
 async def test_call_llm_stream_requests_and_records_stream_usage(monkeypatch):
     async def stream():
         yield SimpleNamespace(

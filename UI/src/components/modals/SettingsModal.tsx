@@ -9,6 +9,7 @@ import PluginCapabilitiesPanel from './settings/PluginCapabilitiesPanel'
 import PersonalAccountsPanel from './settings/PersonalAccountsPanel'
 import ChannelAccountsPanel from './settings/ChannelAccountsPanel'
 import SoulReadOnlyPanel from './settings/SoulReadOnlyPanel'
+import MemoryEmbeddingPanel from './settings/MemoryEmbeddingPanel'
 import AvatarSettingsPanel from '../avatar/AvatarSettingsPanel'
 import FeatureSurface from '../FeatureSurface'
 import { X } from 'lucide-react'
@@ -377,6 +378,7 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
               </Field>
             </section>
 
+            <MemoryEmbeddingPanel value={config?.memory?.embedding || {}} endpoint={secrets?.memory?.embedding_base_url || config?.memory?.embedding?.base_url || ''} onChange={(embedding) => setConfig({ ...config, memory: { ...config.memory, embedding } })} />
             <details className="rounded-xl border border-black/5 bg-white/70 p-4">
               <summary className="cursor-pointer text-sm font-semibold text-text-strong">
                 {t('企业大脑', 'Enterprise Brain')}

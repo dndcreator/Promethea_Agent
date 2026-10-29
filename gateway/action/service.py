@@ -27,7 +27,7 @@ from .checkpoint import capture as capture_checkpoint, restore as restore_checkp
 
 CapabilityInspector = Callable[[List[str]], Awaitable[Dict[str, Any]]]
 CapabilityResolver = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
-OutputSink = Callable[[str], Awaitable[None]]
+OutputSink = Callable[[Any], Awaitable[None]]
 ReasoningSink = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
@@ -46,6 +46,67 @@ class ActionService:
         self.conversation_core = conversation_core
         self.task_service = task_service
         self.capability_service = capability_service
+        self._active_runs: Dict[str, ActionRun] = {}
+        self.control_lock = asyncio.Lock()
+
+    def active_turn(self, *, user_id: str, session_id: str, turn_id: str) -> Optional[ActionRun]:
+        return next((run for run in self._active_runs.values()
+                     if run.accepting_steering and run.context.user_id == user_id and run.context.session_id == session_id
+                     and getattr(run.context.run_context, "conversation_turn_id", None) == turn_id
+                     and run.machine.phase not in {ActionPhase.COMPLETED, ActionPhase.FAILED, ActionPhase.CANCELLED, ActionPhase.WAITING_CONFIRMATION}), None)
+
+    async def steer_turn(self, *, user_id, session_id, turn_id, persist, lookup=None):
+        async with self.control_lock:
+            previous = lookup() if lookup is not None else None
+            if previous is not None:
+                return previous
+            run = self.active_turn(user_id=user_id, session_id=session_id, turn_id=turn_id)
+            if run is None or run.context.read_steering is None:
+                raise ValueError("turn_not_steerable")
+            row = persist()
+            await self._emit_event(EventType.ACTION_STEERING_RECEIVED, run, self._steering_presentation(row, "pending"))
+            return {**row, "action_loop_id": run.run_id}
+
+    @staticmethod
+    async def _replace_answer(run, content, output_sink):
+        if run.streamed_answer != content and output_sink is not None:
+            await output_sink({"operation": "replace", "content": content} if run.streamed_answer else content)
+        run.streamed_answer = content
+
+    async def _apply_steering(self, run, messages, usage, output_sink) -> bool:
+        source = run.context.read_steering
+        if source is None:
+            return False
+        async with self.control_lock:
+            pending = source()
+            # A checkpoint may survive a crash just before the receipt was saved.
+            recovered = [row["message_id"] for row in pending
+                         if row["message_id"] in run.applied_steering_ids and row.get("status") != "applied"]
+            if recovered and run.context.acknowledge_steering:
+                run.context.acknowledge_steering(recovered)
+            rows = [row for row in pending if row["message_id"] not in run.applied_steering_ids]
+            if not rows:
+                return False
+            await self._replace_answer(run, "", output_sink)
+            run.status = "running"
+            run.approved_call_ids.clear()
+            messages.extend({"role": "user", "content": row["content"]} for row in rows)
+            ids = [row["message_id"] for row in rows]
+            run.applied_steering_ids.extend(ids)
+            await self._checkpoint(run, messages, usage)
+            if run.context.acknowledge_steering:
+                run.context.acknowledge_steering(ids)
+            for row in rows:
+                await self._emit_event(EventType.ACTION_STEERING_APPLIED, run, {**self._steering_presentation(row, "completed"), "step": run.step})
+            if output_sink is not None:
+                await output_sink({"type": "steering", "status": "applied", "message_ids": ids})
+            return True
+
+    @staticmethod
+    def _steering_presentation(row, status):
+        return {"kind": "task", "activity_id": f"steering:{row['message_id']}", "message_id": row["message_id"],
+                "status": status, "content": row["content"], "summary": row["content"],
+                "presentation": {"title": "Execution guidance", "title_i18n": {"zh": "调整执行方向", "en": "Execution guidance"}}}
 
     async def run_action(
         self,
@@ -68,6 +129,8 @@ class ActionService:
         prepare_messages: Optional[Callable] = None,
         checkpoint_sink: Optional[Callable] = None,
         checkpoint: Optional[Dict[str, Any]] = None,
+        read_steering: Optional[Callable] = None,
+        acknowledge_steering: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         action_run = ActionRun(
             goal=str(goal or ""),
@@ -80,6 +143,8 @@ class ActionService:
                 metadata=dict(metadata or {}),
                 prepare_messages=prepare_messages,
                 checkpoint_sink=checkpoint_sink,
+                read_steering=read_steering,
+                acknowledge_steering=acknowledge_steering,
             ),
             budget=budget,
             approved_call_ids=set(approved_call_ids or ()),
@@ -143,6 +208,8 @@ class ActionService:
         reasoning_sink: Optional[ReasoningSink] = None,
         prepare_messages: Optional[Callable] = None,
         checkpoint_sink: Optional[Callable] = None,
+        read_steering: Optional[Callable] = None,
+        acknowledge_steering: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         transitions = [dict(item) for item in (pending.get("action_state_transitions") or [])]
         if str(approved_call_id) != str(pending.get("tool_call_id") or ""):
@@ -162,6 +229,8 @@ class ActionService:
                 metadata={"source": "action_confirmation_resume"},
                 prepare_messages=prepare_messages,
                 checkpoint_sink=checkpoint_sink,
+                read_steering=read_steering,
+                acknowledge_steering=acknowledge_steering,
             ),
             budget=int(pending.get("budget") or 5),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
@@ -173,6 +242,7 @@ class ActionService:
             execution_path=[dict(item) for item in (pending.get("execution_path") or [])],
             reasoning_steps=[dict(item) for item in (pending.get("reasoning_steps") or [])],
             approved_call_ids=set(pending.get("approved_call_ids") or ()) | {str(approved_call_id)},
+            applied_steering_ids=list(pending.get("applied_steering_ids") or []),
             gap_state=GoalGapState.model_validate(pending.get("goal_gaps") or {}),
             gap_task_objective=str((pending.get("task_checkpoint") or {}).get("objective") or ""),
             gap_execution_token=dict((pending.get("task_checkpoint") or {}).get("execution_token") or {}),
@@ -227,6 +297,8 @@ class ActionService:
         reasoning_sink: Optional[ReasoningSink] = None,
         prepare_messages: Optional[Callable] = None,
         checkpoint_sink: Optional[Callable] = None,
+        read_steering: Optional[Callable] = None,
+        acknowledge_steering: Optional[Callable] = None,
     ) -> Dict[str, Any]:
         """Commit a human denial as an observation and let the model replan or answer."""
         transitions = [dict(item) for item in (pending.get("action_state_transitions") or [])]
@@ -245,6 +317,8 @@ class ActionService:
                 metadata={"source": "action_confirmation_rejected"},
                 prepare_messages=prepare_messages,
                 checkpoint_sink=checkpoint_sink,
+                read_steering=read_steering,
+                acknowledge_steering=acknowledge_steering,
             ),
             budget=int(pending.get("budget") or 5),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
@@ -256,6 +330,7 @@ class ActionService:
             execution_path=[dict(item) for item in (pending.get("execution_path") or [])],
             reasoning_steps=[dict(item) for item in (pending.get("reasoning_steps") or [])],
             approved_call_ids=set(pending.get("approved_call_ids") or ()),
+            applied_steering_ids=list(pending.get("applied_steering_ids") or []),
             gap_state=GoalGapState.model_validate(pending.get("goal_gaps") or {}),
             gap_task_objective=str((pending.get("task_checkpoint") or {}).get("objective") or ""),
             gap_execution_token=dict((pending.get("task_checkpoint") or {}).get("execution_token") or {}),
@@ -349,9 +424,14 @@ class ActionService:
             await self._emit_lifecycle("action.started", action_run, {"goal": action_run.goal, "budget": budget})
             await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="loop_started")
 
+        self._active_runs[action_run.run_id] = action_run
         try:
             while resumed_action is not None or action_run.step < budget:
                 self._assert_task_execution(action_run)
+                if await self._apply_steering(action_run, messages, usage, output_sink) and resumed_action is not None:
+                    resumed_action = None
+                    await self._transition(action_run, ActionPhase.OBSERVING, cause="outdated_approval_withdrawn")
+                    await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
                 await self._checkpoint(action_run, messages, usage)
                 if resumed_action is not None:
                     action = resumed_action
@@ -370,6 +450,7 @@ class ActionService:
                             reasoning_sink=reasoning_sink,
                         )
                     except ModelResponseError as exc:
+                        await self._replace_answer(action_run, "", output_sink)
                         if exc.code not in {"MODEL_EMPTY_RESPONSE", "MODEL_OUTPUT_LIMIT"}:
                             raise
                         self._merge_usage(usage, exc.usage)
@@ -401,6 +482,7 @@ class ActionService:
                             raise InvalidModelAction("procedure_refs must reference experience exposed in this action loop")
                         self._validate_answer_evidence(action_run, action)
                     except InvalidModelAction as exc:
+                        await self._replace_answer(action_run, "", output_sink)
                         await self._observe_outcome(
                             action_run, messages, model_step_id=model_step_id,
                             result=ToolExecutionResult(
@@ -415,11 +497,17 @@ class ActionService:
                         continue
 
                 self._assert_task_execution(action_run)
+                if await self._apply_steering(action_run, messages, usage, output_sink):
+                    await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
+                    continue
                 if "gap_update" in action.raw:
                     await self._apply_goal_delta(action_run, action.raw["gap_update"])
+                if await self._apply_steering(action_run, messages, usage, output_sink):
+                    await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
+                    continue
 
                 if action.kind == "answer":
-                    return await self._complete_answer(
+                    result = await self._complete_answer(
                         action_run,
                         action=action,
                         usage=usage,
@@ -427,6 +515,8 @@ class ActionService:
                         model_step_id=model_step_id,
                         messages=messages,
                     )
+                    await self._replace_answer(action_run, action.content, output_sink)
+                    return result
 
                 if action.kind == "capability_inspect":
                     await self._transition(
@@ -494,6 +584,10 @@ class ActionService:
                     confirmation_resolver=confirmation_resolver,
                 )
                 preparation_error = pending if isinstance(pending, ToolErrorInfo) else None
+                if await self._apply_steering(action_run, messages, usage, output_sink):
+                    await self._transition(action_run, ActionPhase.OBSERVING, cause="outdated_proposal_withdrawn")
+                    await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
+                    continue
                 if isinstance(pending, ActionResult):
                     pending.usage = dict(usage)
                     return pending
@@ -540,6 +634,7 @@ class ActionService:
             action_run.ended_at = time.time()
             raise
         except Exception as exc:
+            await self._replace_answer(action_run, "", output_sink)
             if isinstance(exc, ModelResponseError):
                 self._merge_usage(usage, exc.usage)
             if isinstance(exc, (ModelResponseError, InvalidModelAction)):
@@ -578,6 +673,9 @@ class ActionService:
                 trace=list(action_run.trace),
                 usage=usage if any(usage.values()) else None,
             )
+        finally:
+            action_run.accepting_steering = False
+            self._active_runs.pop(action_run.run_id, None)
 
     async def _prepare_tool_batch(
         self,
@@ -632,6 +730,7 @@ class ActionService:
                 "current_messages": list(messages),
                 "pending_tool_calls": raw_calls,
                 "approved_call_ids": sorted(action_run.approved_call_ids),
+                "applied_steering_ids": list(action_run.applied_steering_ids),
                 "procedure_refs": list(action.raw.get("procedure_refs", [])),
                 "content": assistant_content,
                 "model_step_id": model_step_id,
@@ -945,6 +1044,7 @@ class ActionService:
     ) -> ActionResult:
         self._assert_task_execution(action_run)
         self._validate_answer_evidence(action_run, action)
+        action_run.accepting_steering = False
         await self._transition(
             action_run,
             ActionPhase.COMPLETED,
@@ -987,6 +1087,8 @@ class ActionService:
         output_sink: Optional[OutputSink],
         reasoning_sink: Optional[ReasoningSink],
     ) -> ActionResult:
+        action_run.accepting_steering = False
+        await self._apply_steering(action_run, messages, usage, output_sink)
         self._assert_task_execution(action_run)
         await self._observe_outcome(
             action_run, messages, model_step_id=f"step_{uuid.uuid4().hex}",
@@ -1021,7 +1123,7 @@ class ActionService:
             raise InvalidModelAction("model proposed a non-answer after the runtime budget was exhausted")
         if "gap_update" in action.raw:
             await self._apply_goal_delta(action_run, action.raw["gap_update"])
-        return await self._complete_answer(
+        result = await self._complete_answer(
             action_run,
             action=action,
             usage=usage,
@@ -1029,6 +1131,8 @@ class ActionService:
             model_step_id=model_step_id,
             messages=messages,
         )
+        await self._replace_answer(action_run, action.content, output_sink)
+        return result
 
     async def _call_model(
         self,
@@ -1044,6 +1148,7 @@ class ActionService:
         messages = self._with_goal_projection(action_run, messages)
         streamer = getattr(self.conversation_core, "call_llm_stream", None)
         if output_sink is not None and callable(streamer):
+            await self._replace_answer(action_run, "", output_sink)
             projector = AnswerDeltaProjector()
             chunks: List[str] = []
             reasoning_chunks: List[str] = []
@@ -1078,6 +1183,7 @@ class ActionService:
                 chunks.append(text)
                 delta = projector.feed(text)
                 if delta:
+                    action_run.streamed_answer += delta
                     await output_sink(delta)
             else:
                 raw = {"status": "success", "content": "".join(chunks)}

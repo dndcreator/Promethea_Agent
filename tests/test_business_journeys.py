@@ -13,15 +13,7 @@ from gateway.workflow_engine import WorkflowEngine
 from gateway.workspace_service import WorkspaceService
 
 
-class _EchoTool:
-    tool_id = "utils.echo"
-    name = "utils.echo"
-    description = "Echo input text."
-    side_effect_level = "read_only"
-
-    async def invoke(self, args, ctx=None):
-        _ = ctx
-        return {"echo": str((args or {}).get("text") or "")}
+from tests.support.tools import EchoTool as _EchoTool
 
 
 class _InMemoryMessageManager:

@@ -213,6 +213,28 @@
       "title": "AmbientState",
       "type": "object"
     },
+    "AnswerUpdate": {
+      "properties": {
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "operation": {
+          "default": "delta",
+          "enum": [
+            "delta",
+            "replace"
+          ],
+          "title": "Operation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "title": "AnswerUpdate",
+      "type": "object"
+    },
     "Attachment": {
       "properties": {
         "content_type": {
@@ -2437,6 +2459,109 @@
       "title": "GuestChatStatus",
       "type": "object"
     },
+    "MemoryEmbeddingCommand": {
+      "properties": {
+        "action": {
+          "enum": [
+            "download",
+            "reindex"
+          ],
+          "title": "Action",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "title": "MemoryEmbeddingCommand",
+      "type": "object"
+    },
+    "MemoryEmbeddingStatus": {
+      "properties": {
+        "fallback": {
+          "const": "keyword_graph",
+          "default": "keyword_graph",
+          "title": "Fallback",
+          "type": "string"
+        },
+        "index_state": {
+          "enum": [
+            "idle",
+            "indexing",
+            "ready",
+            "failed",
+            "unsupported"
+          ],
+          "title": "Index State",
+          "type": "string"
+        },
+        "indexed": {
+          "default": 0,
+          "title": "Indexed",
+          "type": "integer"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "model_state": {
+          "enum": [
+            "disabled",
+            "missing_dependencies",
+            "missing_model",
+            "downloading",
+            "ready",
+            "configured"
+          ],
+          "title": "Model State",
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "disabled",
+            "local",
+            "openai-compatible"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "revision": {
+          "default": "",
+          "title": "Revision",
+          "type": "string"
+        },
+        "supported": {
+          "title": "Supported",
+          "type": "boolean"
+        },
+        "total": {
+          "default": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "model_state",
+        "supported",
+        "index_state"
+      ],
+      "title": "MemoryEmbeddingStatus",
+      "type": "object"
+    },
     "MemoryRecallSummary": {
       "properties": {
         "dropped_count": {
@@ -2839,6 +2964,81 @@
         }
       },
       "title": "RunResponse",
+      "type": "object"
+    },
+    "RunSteerRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "conversation_turn_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Conversation Turn Id",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 8000,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "message_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Message Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "conversation_turn_id",
+        "message_id",
+        "message"
+      ],
+      "title": "RunSteerRequest",
+      "type": "object"
+    },
+    "RunSteerResponse": {
+      "properties": {
+        "action_loop_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action Loop Id"
+        },
+        "conversation_turn_id": {
+          "title": "Conversation Turn Id",
+          "type": "string"
+        },
+        "message_id": {
+          "title": "Message Id",
+          "type": "string"
+        },
+        "session_id": {
+          "title": "Session Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "applied",
+            "not_applied"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "conversation_turn_id",
+        "message_id",
+        "status"
+      ],
+      "title": "RunSteerResponse",
       "type": "object"
     },
     "SemanticChoice": {

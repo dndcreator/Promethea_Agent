@@ -13,6 +13,7 @@ def capture(run, messages, usage, *, pending_calls=None, result=None):
         "observations": deepcopy(run.observations), "execution_path": deepcopy(run.execution_path),
         "reasoning_steps": deepcopy(run.reasoning_steps), "pending_calls": deepcopy(pending_calls or []),
         "result": deepcopy(result),
+        "applied_steering_ids": list(run.applied_steering_ids),
     }
 
 
@@ -25,4 +26,5 @@ def restore(value, context):
         step=int(value["step"]), machine=RuntimeActionStateMachine.restore(value["transitions"]),
         trace=deepcopy(value["trace"]), observations=deepcopy(value["observations"]),
         execution_path=deepcopy(value["execution_path"]), reasoning_steps=deepcopy(value["reasoning_steps"]),
+        applied_steering_ids=list(value.get("applied_steering_ids") or []),
     )

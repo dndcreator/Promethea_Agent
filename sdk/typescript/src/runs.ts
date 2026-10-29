@@ -1,9 +1,13 @@
-import type { Event, RunRequest, RunResponse, GuestChatRequest, GuestChatResponse, GuestChatStatus } from './generated/public-contracts.js'
+import type { AnswerUpdate, Event, RunRequest, RunResponse, RunSteerRequest, RunSteerResponse, GuestChatRequest, GuestChatResponse, GuestChatStatus } from './generated/public-contracts.js'
 import { errorFromPayload } from './errors.js'
 import { HttpTransport } from './transport/http.js'
 import { parseSse, type SseMessage } from './transport/sse.js'
 
 type JsonObject = Record<string, unknown>
+
+export function applyAnswerUpdate(current: string, update: AnswerUpdate): string {
+  return update.operation === 'replace' ? update.content : current + update.content
+}
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -53,6 +57,12 @@ export class RunsClient {
       method: 'POST',
       body: JSON.stringify({ ...request, stream: false }),
       signal,
+    })
+  }
+
+  async steer(sessionId: string, request: RunSteerRequest, signal?: AbortSignal): Promise<RunSteerResponse> {
+    return this.transport.json(`/api/chat/${encodeURIComponent(sessionId)}/steer`, {
+      method: 'POST', body: JSON.stringify(request), signal,
     })
   }
 

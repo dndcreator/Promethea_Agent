@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import sys
 import tempfile
@@ -84,6 +85,23 @@ def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001
     """Best-effort cleanup so successful test runs do not leave many case dirs."""
     _ = (session, exitstatus)
     _cleanup_pytest_temp_roots()
+
+
+def pytest_collection_modifyitems(items):
+    """Conservative file-level classification; mixed service files stay integration."""
+    manifest = json.loads((PROJECT_ROOT / "tests/evaluation/suites.json").read_text(encoding="utf-8"))
+    unit_files = set(manifest["unit"])
+    for item in items:
+        path = Path(str(item.path)).relative_to(PROJECT_ROOT).as_posix()
+        if path.startswith("tests/live/"):
+            item.add_marker(pytest.mark.live)
+        elif "browser" in Path(path).stem:
+            item.add_marker(pytest.mark.system)
+            item.add_marker(pytest.mark.browser)
+        elif path.startswith("tests/system/"):
+            item.add_marker(pytest.mark.system)
+        else:
+            item.add_marker(pytest.mark.unit if path in unit_files else pytest.mark.integration)
 
 
 @pytest.fixture

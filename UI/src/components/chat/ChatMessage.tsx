@@ -26,9 +26,10 @@ type MessageProps = {
   runStatus?: string
   error?: Record<string, unknown>
   onRetry?: () => void
+  steeringStatus?: MessageData['steeringStatus']
 }
 
-export default function ChatMessage({ role, avatar, name, time, content, messageId, sessionId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry }: MessageProps) {
+export default function ChatMessage({ role, avatar, name, time, content, messageId, sessionId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry, steeringStatus }: MessageProps) {
   const { t } = useLanguage()
   const [selectedNote, setSelectedNote] = useState<string | null>(null)
   const [noteFocus, setNoteFocus] = useState(0)
@@ -78,9 +79,10 @@ export default function ChatMessage({ role, avatar, name, time, content, message
         {isAgent && avatar === 'agent' ? 'P' : avatar}
       </div>
       <div className="mt-0.5 flex w-full flex-col gap-1 overflow-hidden">
-        <div className="flex items-baseline gap-2">
+        <div className="flex flex-wrap items-baseline gap-2">
           <span className="text-[13px] font-semibold text-text-strong">{name}</span>
           {time && <span className="text-[11px] text-text-muted">{time}</span>}
+          {steeringStatus && <span className="text-[11px] text-text-muted">{steeringStatus === 'applied' ? t('引导已应用', 'Guidance applied') : steeringStatus === 'not_applied' ? t('引导未应用', 'Guidance not applied') : t('引导已接收', 'Guidance received')}</span>}
         </div>
         {isAgent && (reasoningTreeId || reasoningSteps.length > 0 || processActivities.length > 0 || processRunning) && (
           <TurnProcess

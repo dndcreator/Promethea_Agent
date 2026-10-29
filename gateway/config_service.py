@@ -50,6 +50,10 @@ ENV_ONLY_SECRET_PATHS = (
     ("memory", "store_backend"),
     ("memory", "sqlite_graph_path"),
     ("memory", "flat_memory_path"),
+    ("memory", "embedding", "api_key"),
+    ("memory", "embedding", "base_url"),
+    ("memory", "embedding", "cache_dir"),
+    ("memory", "embedding", "max_download_mb"),
 )
 
 

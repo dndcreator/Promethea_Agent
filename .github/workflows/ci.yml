@@ -7,6 +7,7 @@ on:
 
 jobs:
   python:
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -39,18 +40,18 @@ jobs:
 
       - name: Run tests
         if: matrix.coverage == false
-        run: python -m pytest -q
+        run: python tests/run_all_tests.py --suite full --timeout 600 --output .tmp/evaluations/ci
 
       - name: Run tests with coverage
         if: matrix.coverage == true
-        run: python -m pytest --cov=. --cov-report=term-missing --cov-report=xml -q
+        run: python tests/run_all_tests.py --suite full --coverage --timeout 600 --output .tmp/evaluations/ci
 
-      - name: Upload coverage xml
-        if: matrix.coverage == true
+      - name: Upload test evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml
-          path: coverage.xml
+          name: test-evidence-${{ runner.os }}
+          path: .tmp/evaluations/ci/
 
   typescript:
     runs-on: ubuntu-latest
@@ -66,7 +67,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: |
             sdk/typescript/package-lock.json
@@ -88,4 +89,39 @@ jobs:
         run: |
           npm ci
           npm run lint
+          npm test
           npm run build
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install existing test dependencies
+        run: |
+          pip install -e .[dev]
+          python -m playwright install --with-deps chromium
+          npm --prefix sdk/typescript ci
+          npm --prefix UI ci
+      - name: Source-fixture browser regression
+        env:
+          CANVAS_TEST_BROWSER_CHANNEL: chromium
+          PROMETHEA_UI_TEST_URL: http://127.0.0.1:5186
+        run: |
+          mkdir -p .tmp/evaluations/browser
+          npm --prefix UI run dev -- --host 127.0.0.1 --port 5186 --strictPort > .tmp/evaluations/browser/vite.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" || true' EXIT
+          timeout 90 bash -c 'until curl -fsS http://127.0.0.1:5186/tests/message-content.html > /dev/null; do sleep 1; done'
+          python -m pytest -q tests/test_chat_steering_browser.py tests/test_chat_runtime_browser.py --junitxml=.tmp/evaluations/browser/results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-evidence
+          path: .tmp/evaluations/browser/

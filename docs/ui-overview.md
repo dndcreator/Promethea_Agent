@@ -11,6 +11,7 @@ UI entrypoint:
 - Sign up / log in with user identity isolation.
 - Open diagnostics before sign-in. Identity is independent of the selected memory backend; memory availability is not a condition for account existence. The login screen includes a diagnostics entry and can be dismissed without signing in.
 - Chat with streaming responses (when stream mode is enabled).
+- Send additional direction from the composer while an authenticated chat turn is running; Enter/send steers that execution, while the separate stop button cancels it. Receipts distinguish received/applied guidance; failed delivery retains input for idempotent retry. Preparation/finalization and approval waiting do not silently queue guidance for a different turn. Guests retain temporary basic chat without steering.
 - Manage sessions and continue previous conversations.
 - Group conversations into persistent projects, rename groups, move conversations, and pin sessions. Projects are organizational metadata, not sandbox/execution workspaces; deleting a project leaves its conversations intact. Groups and memberships are included in personal workspace transfer.
 - Monitor cross-conversation Tasks from a separate Tasks page and issue revision-aware pause/resume/cancel commands. Workflow definitions and runs remain a separate surface.
@@ -51,7 +52,7 @@ Use this map when rebuilding the Web UI. Layout can change, but these function s
 | UI surface | Primary behavior | Backend interface |
 | --- | --- | --- |
 | Auth modal | Sign up, log in, and keep user isolation through the backend-independent identity store. | `/api/auth/*` through `AuthContext` |
-| Chat console | Stream chat, continue or create sessions, show tool events and confirmation requests. | `POST /api/chat`, `GET /api/sessions/{session_id}`, `POST /api/chat/confirm` |
+| Chat console | Stream chat, steer the active turn, continue or create sessions, show tool events and confirmation requests. | `POST /api/chat`, `POST /api/chat/{session_id}/steer`, `GET /api/sessions/{session_id}`, `POST /api/chat/confirm` |
 | Projects and conversations | Create, rename, delete groups; assign/unassign conversations without changing their execution identity. | SDK over `/api/projects`, `/api/projects/{project_id}`, `PUT /api/sessions/{session_id}/project`; existing session pin API |
 | Tasks | List cross-conversation Tasks, inspect objective and runs, open their Workbench, pause/resume/cancel using expected revision. | SDK over `GET /api/tasks`, `/api/tasks/{task_id}/*` |
 | File panel | Upload a user file into the backend file store; list, search, and attach extracted text to the next chat turn. | `POST /api/files/upload`, `GET /api/files?q=&limit=` |

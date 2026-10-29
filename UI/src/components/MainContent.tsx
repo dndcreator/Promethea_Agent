@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
+import { applyAnswerUpdate } from '@promethea/sdk'
 import { BarChart3, Clock3, MessageCircleQuestion, Mic, Paperclip, Plus, Search, Send, Smile, Square, UsersRound } from 'lucide-react'
 import ConfirmModal from './modals/ConfirmModal'
-import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, sendVoicePtt, stopReasoningTree, streamChat } from '../services/api'
+import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, sendVoicePtt, steerChat, stopReasoningTree, streamChat } from '../services/api'
 import SemanticExpressions from './SemanticExpressions'
 import { useWorkbench } from '../store/WorkbenchContext'
 import type { ChatAttachment, GuestChatStatus, StreamHandler } from '../services/api'
@@ -34,6 +35,7 @@ interface MainContentProps {
 }
 
 type StreamPayload = Record<string, any>
+type ActiveStream = { controller: AbortController; sessionId: string | null; outcome: string; turnId?: string; agentMessageId: string }
 type MemoryNotice = {
   text: string
   requiresReview: boolean
@@ -124,6 +126,10 @@ export default function MainContent({
   const [input, setInput] = useState('')
   const [sessionTitle, setSessionTitle] = useState('')
   const [isStreaming, setIsStreaming] = useState(false)
+  const [isSteering, setIsSteering] = useState(false)
+  const [steeringError, setSteeringError] = useState('')
+  const steeringRetryRef = useRef<{ turnId: string; text: string; id: string } | null>(null)
+  const appliedSteeringRef = useRef(new Set<string>())
   const [multiAgent, setMultiAgent] = useState(false)
   const [multiAgentAvailable, setMultiAgentAvailable] = useState(false)
   const [guestStatus, setGuestStatus] = useState<GuestChatStatus | null>(null)
@@ -155,7 +161,7 @@ export default function MainContent({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const abortControllerRef = useRef<AbortController | null>(null)
-  const activeStreamRef = useRef<{ controller: AbortController; sessionId: string | null; outcome: string } | null>(null)
+  const activeStreamRef = useRef<ActiveStream | null>(null)
   const viewSessionRef = useRef(sessionId)
   viewSessionRef.current = sessionId
   const activeTreeIdRef = useRef<string | null>(null)
@@ -375,6 +381,7 @@ export default function MainContent({
             reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
             runStatus: message.run_status,
             error: message.error,
+            steeringStatus: message.steering_status,
           }
         })
         setMessages(loadedMessages)
@@ -404,6 +411,9 @@ export default function MainContent({
   }
 
   const handleNewChat = () => {
+    setSteeringError('')
+    steeringRetryRef.current = null
+    appliedSteeringRef.current.clear()
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
     activeStreamRef.current = null
@@ -488,6 +498,34 @@ export default function MainContent({
     }
   }
 
+  const handleSteer = async () => {
+    const request = activeStreamRef.current
+    const text = input.trim()
+    if (!user || !text || isSteering || !request?.sessionId || !request.turnId || request.outcome !== 'running') return
+    if (steeringRetryRef.current?.turnId !== request.turnId || steeringRetryRef.current.text !== text) {
+      steeringRetryRef.current = { turnId: request.turnId, text, id: crypto.randomUUID() }
+    }
+    const id = steeringRetryRef.current.id
+    setIsSteering(true); setSteeringError('')
+    try {
+      const receipt = await steerChat(request.sessionId, { conversation_turn_id: request.turnId, message_id: id, message: text }, request.controller.signal)
+      if (activeStreamRef.current !== request || viewSessionRef.current !== request.sessionId) return
+      setMessages((previous) => {
+        if (previous.some((message) => message.id === id)) return previous
+        const note: MessageData = { id, role: 'user', name: user.username, content: text, conversationTurnId: request.turnId,
+          steeringStatus: appliedSteeringRef.current.has(id) ? 'applied' : receipt.status }
+        const index = previous.findIndex((message) => message.id === request.agentMessageId)
+        const next = [...previous]
+        next.splice(index < 0 ? next.length : index, 0, note)
+        return next
+      })
+      setInput((current) => current.trim() === text ? '' : current)
+      steeringRetryRef.current = null
+    } catch {
+      if (!request.controller.signal.aborted && activeStreamRef.current === request) setSteeringError(t('引导未确认送达，输入已保留，可重试。', 'Guidance delivery was not confirmed. Your input is retained for retry.'))
+    } finally { setIsSteering(false) }
+  }
+
   const handleSend = async (text: string = input) => {
     if (!text.trim() || isStreaming) return
     if (!user && !guestStatus?.available) {
@@ -520,6 +558,7 @@ export default function MainContent({
       },
     ])
     setInput('')
+    setSteeringError('')
     setMemoryNotice(null)
     setIsStreaming(true)
     setMeta({ tokens: null, latency: null })
@@ -528,7 +567,7 @@ export default function MainContent({
     setIsNearBottom(true)
     const controller = new AbortController()
     abortControllerRef.current = controller
-    const request = { controller, sessionId, outcome: 'running' }
+    const request: ActiveStream = { controller, sessionId, outcome: 'running', agentMessageId }
     activeStreamRef.current = request
 
     const startTime = Date.now()
@@ -538,7 +577,13 @@ export default function MainContent({
         const payload = asStreamPayload(data)
         if (event === 'text') {
           const chunk = typeof data === 'string' ? data : String(payload.content || '')
-          setMessages((prev) => prev.map((m) => (m.id === agentMessageId ? { ...m, content: m.content + chunk } : m)))
+          setMessages((prev) => prev.map((m) => (m.id === agentMessageId ? { ...m, content: applyAnswerUpdate(m.content, { content: chunk, operation: payload.operation === 'replace' ? 'replace' : 'delta' }) } : m)))
+          return
+        }
+        if (event === 'steering') {
+          const ids = Array.isArray(payload.message_ids) ? payload.message_ids.map(String) : []
+          ids.forEach((id: string) => appliedSteeringRef.current.add(id))
+          setMessages((previous) => previous.map((message) => ids.includes(message.id) ? { ...message, steeringStatus: 'applied' } : message))
           return
         }
         if (event === 'tool_call' || event === 'tool_start') {
@@ -554,6 +599,7 @@ export default function MainContent({
             setSessionId(request.sessionId)
           }
           if (payload.conversation_turn_id) {
+            request.turnId = String(payload.conversation_turn_id)
             setMessages((prev) => prev.map((message) => (
               message.id === agentMessageId
                 ? { ...message, conversationTurnId: String(payload.conversation_turn_id) }
@@ -603,6 +649,7 @@ export default function MainContent({
           return
         }
         if (event === 'done') {
+          if (typeof payload.content === 'string') setMessages((previous) => previous.map((message) => message.id === agentMessageId ? { ...message, content: payload.content } : message))
           request.outcome = payload.status === 'needs_confirmation' ? 'waiting_confirmation' : 'completed'
           abortControllerRef.current = null
           setIsStreaming(false)
@@ -640,6 +687,7 @@ export default function MainContent({
                       reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
                       runStatus: message.run_status,
                       error: message.error,
+                      steeringStatus: message.steering_status,
                     }
                   })
                   setMessages(loadedMessages)
@@ -835,6 +883,7 @@ export default function MainContent({
               reasoningSteps={msg.reasoningSteps}
               runStatus={msg.runStatus}
               error={msg.error}
+              steeringStatus={msg.steeringStatus}
               onRetry={index > 0 && messages[index - 1].role === 'user' ? () => void handleSend(messages[index - 1].content) : undefined}
               processActivities={processActivities.filter((activity) => (
                 Boolean(msg.conversationTurnId)
@@ -859,6 +908,7 @@ export default function MainContent({
       </div>
 
       <div className="chat-composer relative z-20 bg-white px-4 pb-4 pt-2 sm:px-6">
+        {steeringError && <div role="alert" className="mb-2 text-xs text-amber-700">{steeringError}</div>}
         {!user && <div className="guest-chat-status" role="status"><span className={`health-dot ${guestStatus?.available ? 'healthy' : 'unknown'}`} />{guestStatus?.available ? t('临时对话', 'Temporary chat') : guestStatus ? t('游客对话暂不可用', 'Guest chat unavailable') : t('正在连接', 'Connecting')}</div>}
         <div className={`composer-surface overflow-hidden ${isRecording ? 'border-red-300 ring-2 ring-red-100' : ''}`}>
           {attachments.length > 0 && (
@@ -892,7 +942,7 @@ export default function MainContent({
                   if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                     e.preventDefault()
                     if (isStreaming) {
-                      void handleStopStreaming()
+                      void handleSteer()
                     } else {
                       void handleSend()
                     }
@@ -937,17 +987,19 @@ export default function MainContent({
                 <Mic size={16} />
               </button>
             </div>
+            <div className="flex shrink-0 items-center gap-2">
+            {isStreaming && <button type="button" onClick={() => void handleStopStreaming()} className="icon-button text-red-600" title={t('停止当前任务', 'Stop current task')} aria-label={t('停止当前任务', 'Stop current task')}><Square size={14} /></button>}
             <button
               type="button"
-              onClick={() => (isStreaming ? handleStopStreaming() : handleSend(input))}
-              disabled={(!isStreaming && (!input.trim() || (!user && !guestStatus?.available))) || isRecording}
-              title={isStreaming ? t('停止当前任务', 'Stop current task') : t('发送', 'Send')}
-              className={`composer-submit ${isStreaming ? 'is-stopping' : ''} flex h-8 w-8 cursor-pointer items-center justify-center rounded-md transition-colors disabled:opacity-50 ${
-                isStreaming ? 'bg-red-100 text-red-600 hover:bg-red-200' : 'bg-brand-100 text-brand-700 hover:bg-brand-200'
-              }`}
+              onClick={() => void (isStreaming ? handleSteer() : handleSend(input))}
+              disabled={!input.trim() || isRecording || isSteering || (isStreaming ? !user || !activeStreamRef.current?.turnId : !user && !guestStatus?.available)}
+              title={isStreaming ? t('引导当前执行', 'Steer current run') : t('发送', 'Send')}
+              aria-label={isStreaming ? t('引导当前执行', 'Steer current run') : t('发送', 'Send')}
+              className="composer-submit flex h-8 w-8 cursor-pointer items-center justify-center rounded-md bg-brand-100 text-brand-700 transition-colors hover:bg-brand-200 disabled:opacity-50"
             >
-              {isStreaming ? <Square size={14} /> : <Send size={14} className="translate-x-[1px]" />}
+              <Send size={14} className="translate-x-[1px]" />
             </button>
+            </div>
           </div>
         </div>
       </div>
@@ -983,6 +1035,7 @@ export default function MainContent({
                 reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
                 runStatus: message.run_status,
                 error: message.error,
+                steeringStatus: message.steering_status,
               })))
             }).catch(console.error)
           }}

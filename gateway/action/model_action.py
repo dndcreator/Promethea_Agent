@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional
@@ -54,10 +53,11 @@ class AnswerDeltaProjector:
             self._mode = "action" if stripped.startswith("{") else "invalid"
         if self._mode == "invalid":
             return ""
-        action, action_complete = _json_string_field_prefix(self._buffer, "action")
-        if not action_complete or action != "answer":
+        fields = _root_string_fields(self._buffer)
+        action, action_complete = fields.get("action", ("", False))
+        if not action_complete or action.strip().lower() != "answer":
             return ""
-        content, _ = _json_string_field_prefix(self._buffer, "content")
+        content, _ = fields.get("content", fields.get("answer", ("", False)))
         if not content.startswith(self._emitted):
             return ""
         delta = content[len(self._emitted) :]
@@ -65,11 +65,47 @@ class AnswerDeltaProjector:
         return delta
 
 
-def _json_string_field_prefix(text: str, field: str) -> tuple[str, bool]:
-    match = re.search(rf'"{re.escape(field)}"\s*:\s*"', text)
-    if match is None:
-        return "", False
-    source = text[match.end() :]
+def _root_string_fields(text: str) -> Dict[str, tuple[str, bool]]:
+    """Walk root members with the standard decoder; nested values stay opaque."""
+    decoder = json.JSONDecoder()
+    fields: Dict[str, tuple[str, bool]] = {}
+    index = len(text) - len(text.lstrip())
+    if index >= len(text) or text[index] != "{":
+        return fields
+    index += 1
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        try:
+            key, index = decoder.raw_decode(text, index)
+            if not isinstance(key, str) or key in fields:
+                return {}
+            while index < len(text) and text[index].isspace():
+                index += 1
+            if index >= len(text) or text[index] != ":":
+                return fields
+            index += 1
+            while index < len(text) and text[index].isspace():
+                index += 1
+            if index >= len(text):
+                return fields
+            if text[index] == '"':
+                prefix, complete = _json_string_prefix(text[index + 1:])
+                fields[key] = (prefix, complete)
+                if not complete:
+                    return fields
+            _, index = decoder.raw_decode(text, index)
+            while index < len(text) and text[index].isspace():
+                index += 1
+            if index >= len(text) or text[index] != ",":
+                return fields
+            index += 1
+        except (json.JSONDecodeError, ValueError):
+            return fields
+    return fields
+
+
+def _json_string_prefix(source: str) -> tuple[str, bool]:
     decoded: List[str] = []
     index = 0
     escapes = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -78,6 +114,8 @@ def _json_string_field_prefix(text: str, field: str) -> tuple[str, bool]:
         if char == '"':
             return "".join(decoded), True
         if char != "\\":
+            if ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF:
+                break
             decoded.append(char)
             index += 1
             continue
@@ -114,12 +152,21 @@ def _json_string_field_prefix(text: str, field: str) -> tuple[str, bool]:
     return "".join(decoded), False
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidModelAction("duplicate runtime action fields")
+        result[key] = value
+    return result
+
+
 def parse_model_action(content: str) -> ModelAction:
     text = str(content or "").strip()
     if not text:
         raise InvalidModelAction("model returned no assistant content")
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(text, object_pairs_hook=_unique_object)
     except json.JSONDecodeError as exc:
         raise InvalidModelAction("model returned a non-canonical runtime action") from exc
     if not isinstance(parsed, dict):
