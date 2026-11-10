@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolCapabilityUnavailableError
+from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolCapabilityUnavailableError, ToolPolicyViolationError
 from gateway.tools.spec import ToolSource
 
 
@@ -19,6 +19,7 @@ def _package(root, monkeypatch, name="factory_demo"):
             name = tool_id
             description = "Read the supplied value"
             domain = "demo"
+            provides = ["text.echo"]
             input_schema = {"type": "object", "properties": {"value": {"type": "string"}}}
             side_effect_level = "read_only"
             concurrency_safe = True
@@ -60,7 +61,10 @@ async def test_factory_packages_share_registry_readiness_policy_and_schema(tmp_p
     assert spec.input_schema["properties"]["value"] == {"type": "string"}
     assert spec.concurrency_safe is True
     assert spec.presentation["title"] == "Read value"
-    assert service.requires_confirmation("demo.echo", {}) is False
+    assert spec.provides == ["text.echo"]
+    assert service.requires_confirmation("demo.echo", {}, run_context=ToolInvocationContext(user_id="alice")) is False
+    with pytest.raises(ToolPolicyViolationError, match="account_unavailable"):
+        service.requires_confirmation("demo.echo", {}, run_context=ToolInvocationContext(user_id="bob"))
     assert not hasattr(service._registered_tools["demo.echo"], "official")
     for user, ready in (("alice", True), ("bob", False)):
         ctx = ToolInvocationContext(user_id=user)
@@ -156,7 +160,7 @@ def test_full_reload_preserves_standard_tool_ids_and_refreshes_native_implementa
         assert service._registered_tools["web.search"] is not before_tool
         assert type(service._registered_tools["web.search"]) is not type(before_tool)
         assert service.tool_registry.resolve(tool_name="mail.send", params={}).input_schema["type"] == "object"
-        assert service.requires_confirmation("mail.send", {}) is True
+        assert service.inspect_capabilities(["mail.send"])["items"][0]["requires_confirmation"] is True
     finally:
         # Reload rebinds exported Python classes; do not leak them to other tests.
         for module, namespace in snapshots:
@@ -224,7 +228,9 @@ async def test_mcp_collision_does_not_duplicate_catalog_or_downgrade_native_perm
     send = [row for row in catalog if row["tool_name"] == "mail.send"]
     assert len(send) == 1
     assert send[0]["requires_confirmation"] is True
-    assert service.requires_confirmation("mail.send", {}) is True
+    assert service.inspect_capabilities(["mail.send"])["items"][0]["requires_confirmation"] is True
+    with pytest.raises(ToolPolicyViolationError):
+        service.requires_confirmation("mail.send", {})
     remote = next(row for row in catalog if row["service_name"] == "remote")
     assert remote["callable_now"] is False
     assert remote["callable_reason"] == "mcp_registry_refresh_failed"

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from agentkit.mcp.invocation_context import get_invocation_context
+from agentkit.mcp.tool_result import error_from_exception
 from gateway.tools.presentation import validate_presentation_declaration
 
 from .generated_runtime import GeneratedCapabilityService
@@ -35,6 +36,16 @@ _RESERVED_FILES = {"agent-manifest.json", ".published.json"}
 _SCAFFOLD_MARKER = "raise NotImplementedError"
 _STORE_LOCKS: Dict[str, threading.RLock] = {}
 _STORE_LOCKS_GUARD = threading.Lock()
+
+
+def _validation_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if payload.get("ok") is False:
+        errors = payload.get("errors") or ["Artifact validation failed"]
+        payload["error_detail"] = {
+            "code": "ARTIFACT_VALIDATION_FAILED", "category": "validation", "retryable": True,
+            "message": "; ".join(str(error) for error in errors), "details": {"errors": errors},
+        }
+    return payload
 
 
 def _store_lock(path: Path) -> threading.RLock:
@@ -158,12 +169,22 @@ class SelfEvolveService:
                 raise ValueError(f"command test_args must be an object: {name}")
             test_args = dict(raw["test_args"])
             presentation = validate_presentation_declaration(raw.get("presentation"))
+            from gateway.tools.spec import validate_provides
+            provides = validate_provides(raw.get("provides", []))
+            schemas = {}
+            for key in ("inputSchema", "outputSchema"):
+                if key in raw:
+                    if not isinstance(raw[key], dict):
+                        raise ValueError(f"command {key} must be an object: {name}")
+                    schemas[key] = raw[key]
             normalized.append({
                 "command": name,
                 "description": description,
                 "test_args": test_args,
                 **({"expected_result": raw["expected_result"]} if "expected_result" in raw else {}),
                 **({"presentation": presentation} if presentation else {}),
+                **({"provides": provides} if provides else {}),
+                **schemas,
             })
         return normalized
 
@@ -457,6 +478,7 @@ class SelfEvolveService:
                 "sideEffectLevel": "privileged_host_action",
                 "ownerUserId": task["owner_user_id"],
                 **({"presentation": row["presentation"]} if row.get("presentation") else {}),
+                **({key: row[key] for key in ("provides", "inputSchema", "outputSchema") if key in row}),
             }
             for row in task["commands"]
         ]
@@ -536,7 +558,7 @@ class SelfEvolveService:
             service = GeneratedCapabilityService(
                 manifest=preview_manifest,
                 manifest_path=preview_path,
-                runtime_root=self.workspace_root / ".runtime" / "self-evolve" / "validation" / task_id,
+                runtime_root=self.workspace_root / ".runtime" / "generated-capabilities",
             )
             try:
                 for row in task["commands"]:
@@ -546,8 +568,10 @@ class SelfEvolveService:
                             raise ValueError(f"expected {row['expected_result']!r}, received {value!r}")
                         smoke_results.append({"command": row["command"], "ok": True, "result": value})
                     except Exception as exc:
-                        smoke_results.append({"command": row["command"], "ok": False, "error": str(exc)})
-                        errors.append(f"smoke test failed for {row['command']}: {exc}")
+                        error = error_from_exception(exc)
+                        smoke_results.append({"command": row["command"], "ok": False, "error": error.message,
+                                              "error_detail": error.as_dict()})
+                        errors.append(f"smoke test failed for {row['command']}: {error.message}")
             finally:
                 preview_path.unlink(missing_ok=True)
 
@@ -576,7 +600,7 @@ class SelfEvolveService:
                 row.pop("validated_digest", None)
 
         self._update_task(task_id, _record)
-        return {"ok": ok, "task_id": task_id, "errors": errors, "smoke_tests": smoke_results}
+        return _validation_response({"ok": ok, "task_id": task_id, "errors": errors, "smoke_tests": smoke_results})
 
     async def _validate_canvas(self, task: Dict[str, Any]) -> Dict[str, Any]:
         task_id = task["task_id"]
@@ -593,7 +617,7 @@ class SelfEvolveService:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            result = {"ok": False, "errors": [str(exc)[:4000]], "steps": []}
+            result = {"ok": False, "errors": [error_from_exception(exc).message[:4000]], "steps": []}
         if self._tree_digest(root, self._manifest(task)) != digest:
             result = {**result, "ok": False, "errors": [*result["errors"], "canvas changed during validation"]}
         def record(row):
@@ -605,7 +629,7 @@ class SelfEvolveService:
             if result["ok"]:
                 row["validated_digest"] = digest
         self._update_task(task_id, record)
-        return {"task_id": task_id, **result}
+        return _validation_response({"task_id": task_id, **result})
 
     async def evolve_run_check(self, task_id: str, argv: List[str], timeout: int = 30) -> Dict[str, Any]:
         from agentkit.security.process_sandbox import SandboxedProcessRunner
@@ -711,7 +735,8 @@ class SelfEvolveService:
                     ),
                     encoding="utf-8",
                 )
-                temporary.rename(destination)
+                from utils.persistence import rename_with_retry
+                rename_with_retry(temporary, destination)
             finally:
                 shutil.rmtree(temporary, ignore_errors=True)
 

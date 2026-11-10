@@ -13,6 +13,7 @@ except Exception:  # pragma: no cover
     field_validator = None
 
 from .session_store import SessionStorage
+from gateway.public_contracts import RunOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class Message(BaseModel):
     reasoning_steps: List[Dict[str, Any]] = Field(default_factory=list)
     run_status: Optional[str] = None
     error: Optional[Dict[str, Any]] = None
+    execution_outcome: Optional[RunOutcome] = None
     steering_id: Optional[str] = None
     steering_status: Optional[str] = None
 
@@ -68,6 +70,7 @@ class Session(BaseModel):
     followups: List[FollowUp] = Field(default_factory=list)
 
     pending_confirmation: Optional[Dict] = None
+    action_checkpoint: Optional[Dict] = None
     pending_turns: Dict[str, Dict] = Field(default_factory=dict)
     completed_turn_ids: List[str] = Field(default_factory=list)
     agent_receipts: List[str] = Field(default_factory=list)
@@ -346,6 +349,7 @@ class MessageManager:
         reasoning_tree_id: Optional[str] = None,
         conversation_turn_id: Optional[str] = None,
         reasoning_steps: Optional[List[Dict[str, Any]]] = None,
+        execution_outcome: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """Append a message to a session and optionally sync to memory."""
         key = self._resolve_session_key(session_id, user_id=user_id)
@@ -361,6 +365,7 @@ class MessageManager:
                 reasoning_tree_id=str(reasoning_tree_id or "") or None,
                 conversation_turn_id=str(conversation_turn_id or "") or None,
                 reasoning_steps=list(reasoning_steps or []),
+                execution_outcome=execution_outcome,
             )
         )
         session.last_activity = time.time()
@@ -512,6 +517,7 @@ class MessageManager:
         reasoning_tree_id: Optional[str] = None,
         reasoning_steps: Optional[List[Dict[str, Any]]] = None,
         agent_message_ids: Optional[List[str]] = None,
+        execution_outcome: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         Commit a turn: write user + assistant messages into the final message
@@ -529,6 +535,7 @@ class MessageManager:
         if turn_id in session.completed_turn_ids:
             return True
 
+        outcome = RunOutcome.model_validate(execution_outcome) if execution_outcome else None
         previous = session.model_copy(deep=True)
         turn = session.pending_turns.pop(turn_id, None)
         if not turn:
@@ -546,11 +553,12 @@ class MessageManager:
         session.messages.extend(self._steering_messages(turn, turn_id))
         session.messages.append(
             Message(
-                role="assistant",
+                role="status" if outcome and outcome.response_source == "runtime" else "assistant",
                 content=assistant_content or "",
                 reasoning_tree_id=str(reasoning_tree_id or "") or None,
                 conversation_turn_id=turn_id,
                 reasoning_steps=list(reasoning_steps or []),
+                execution_outcome=outcome,
             )
         )
         session.last_activity = time.time()
@@ -926,6 +934,7 @@ class MessageManager:
                     reasoning_steps=list(msg.get("reasoning_steps") or []),
                     run_status=msg.get("run_status"),
                     error=msg.get("error"),
+                    execution_outcome=msg.get("execution_outcome"),
                 ))
             session.followups = []
             known_message_ids = {message.id for message in session.messages}
@@ -1000,6 +1009,22 @@ class MessageManager:
             self.session_store.save_all(self.session)
         return len(expired_session_ids)
 
+    def get_action_checkpoint(self, session_id: str, *, user_id: str) -> Optional[Dict]:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        return deepcopy(self.session[key].action_checkpoint) if key else None
+
+    def set_action_checkpoint(self, session_id: str, checkpoint: Optional[Dict], *, user_id: str) -> None:
+        key = self._resolve_session_key(session_id, user_id=user_id)
+        if not key:
+            raise KeyError("session not found")
+        previous = self.session[key].action_checkpoint
+        self.session[key].action_checkpoint = deepcopy(checkpoint)
+        try:
+            self.session_store.save_all(self.session)
+        except Exception:
+            self.session[key].action_checkpoint = previous
+            raise
+
     def set_pending_confirmation(
         self,
         session_id: str,
@@ -1009,8 +1034,16 @@ class MessageManager:
         """Store pending tool confirmation data for a session."""
         key = self._resolve_session_key(session_id, user_id=user_id)
         if key in self.session:
+            previous = self.session[key].model_copy(deep=True)
             self.session[key].pending_confirmation = deepcopy(confirmation_data)
-            self.session_store.save_all(self.session)
+            checkpoint = self.session[key].action_checkpoint or {}
+            if checkpoint.get("action_loop_id") == confirmation_data.get("action_run_id"):
+                self.session[key].action_checkpoint = None
+            try:
+                self.session_store.save_all(self.session)
+            except Exception:
+                self.session[key] = previous
+                raise
             return True
         return False
 

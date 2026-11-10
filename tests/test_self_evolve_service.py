@@ -49,6 +49,9 @@ async def _create_echo_task(service: SelfEvolveService, *, version: str = "1.0.0
                 "command": "echo",
                 "description": "Return the supplied text",
                 "test_args": {"text": "hello"},
+                "provides": ["text.echo"],
+                "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+                "outputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
                 "presentation": {
                     "title": "Echo text",
                     "subject_arg": "text",
@@ -84,6 +87,32 @@ async def test_self_evolve_writes_only_inside_capability_staging():
 
 
 @pytest.mark.asyncio
+async def test_validation_timeout_remains_actionable_in_runtime_observation(monkeypatch):
+    from agentkit.mcp.tool_result import normalize_tool_result
+
+    async def timeout(*args, **kwargs):
+        raise TimeoutError()
+
+    ws = _make_workspace()
+    try:
+        service = _make_service(ws)
+        task_id = (await _create_echo_task(service))["task"]["task_id"]
+        await service.evolve_write_file(task_id, "tool.py", "def handle(command, args):\n    return args\n")
+        monkeypatch.setattr("agentkit.tools.self_evolve.generated_runtime.GeneratedCapabilityService.invoke", timeout)
+        result = await service.evolve_validate(task_id)
+        assert not result["ok"] and "TimeoutError" in result["errors"][0]
+        assert result["smoke_tests"][0]["error_detail"]["code"] == "TOOL_TIMEOUT"
+        normalized = normalize_tool_result("self_evolve.evolve_validate", result)
+        assert not normalized.ok and normalized.error.code == "ARTIFACT_VALIDATION_FAILED"
+        assert "TimeoutError" in normalized.error.message
+        assert normalized.error.details["errors"] == result["errors"]
+        with pytest.raises(ValueError, match="validation"):
+            await service.evolve_publish(task_id)
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
+
+
+@pytest.mark.asyncio
 async def test_self_evolve_validates_publishes_and_invokes_generated_tool(monkeypatch):
     ws = _make_workspace()
     service_name = ""
@@ -112,6 +141,10 @@ async def test_self_evolve_validates_publishes_and_invokes_generated_tool(monkey
         assert published["tool_ids"] == [f"{service_name}.echo"]
         capability_service = service._test_capability_service
         assert f"{service_name}.echo" in capability_service._registered_tools
+        spec = capability_service.tool_registry.resolve(tool_name=f"{service_name}.echo", params={})
+        assert spec.provides == ["text.echo"]
+        assert spec.input_schema["required"] == ["text"]
+        assert spec.output_schema["properties"]["text"] == {"type": "string"}
         assert capability_service.tool_registry.resolve(
             tool_name=f"{service_name}.echo", params={}
         ).presentation["title"] == "Echo text"

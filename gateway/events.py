@@ -18,6 +18,7 @@ _DURABLE_RUNTIME_EVENTS = {
     EventType.ACTION_OBSERVATION_COMMITTED,
     EventType.MODEL_CALL_RECORDED,
     EventType.CAPABILITY_SNAPSHOT_CREATED,
+    EventType.ENVIRONMENT_STATE_CHANGED,
 }
 _FAIL_CLOSED_RUNTIME_EVENTS = _DURABLE_RUNTIME_EVENTS - {EventType.INTERACTION_COMPLETED}
 
@@ -59,17 +60,21 @@ class EventEmitter:
 
         self.on(event, wrapper)
 
-    async def emit(self, event: EventType, payload: Dict[str, Any]) -> None:
+    async def emit(self, event: EventType, payload: Dict[str, Any], *, idempotency_key: Optional[str] = None) -> None:
         """Emit event to all listeners."""
         persisted = None
         requires_commit = event in _DURABLE_RUNTIME_EVENTS
+        if idempotency_key and self.event_log is None:
+            raise RuntimeError("idempotent events require a persistent Runtime event log")
         if self.event_log is not None:
             try:
+                options = {"idempotency_key": idempotency_key} if idempotency_key else {}
                 persisted = await asyncio.to_thread(
                     self.event_log.append,
                     event_type=event.value,
                     payload=payload,
                     durable=requires_commit,
+                    **options,
                 )
             except Exception as exc:
                 logger.error(f"Runtime event log append failed: {exc}")

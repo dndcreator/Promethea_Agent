@@ -431,7 +431,7 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             tools=tools,
         )
         outcome = _capability_outcome(response.response_data)
-        runtime_failed = response.status not in {"success", "needs_confirmation"}
+        runtime_failed = response.status not in {"success", "needs_confirmation", "needs_input"}
         await _emit_stage(
             service,
             stage=current_stage,
@@ -515,13 +515,14 @@ async def run_staged_pipeline(service: Any, run_input: ConversationRunInput) -> 
             mode=outcome["mode"],
             used_reasoning=outcome["used_reasoning"],
         )
-        await schedule_soul_evolution(
-            service=service,
-            user_id=user_id,
-            user_config=user_config,
-            user_message=normalized.user_message,
-            assistant_message=response.content,
-        )
+        if (raw.get("execution_outcome") or {}).get("response_source") != "runtime":
+            await schedule_soul_evolution(
+                service=service,
+                user_id=user_id,
+                user_config=user_config,
+                user_message=normalized.user_message,
+                assistant_message=response.content,
+            )
         await _emit_stage(service, stage=current_stage, status="finished", run_context=run_context, session_id=session_id, user_id=user_id)
         return ConversationRunOutput(
             status=response.status,

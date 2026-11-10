@@ -9,6 +9,7 @@ import pytest
 from gateway.action import ActionService
 from gateway.action.state_machine import ActionPhase, InvalidActionTransition, RuntimeActionStateMachine
 from gateway.conversation_service import ConversationService
+from tests.support.runtime import observation_fact
 
 
 class _Core:
@@ -41,17 +42,20 @@ async def test_provider_output_limit_is_not_retried_as_a_protocol_parse_error():
     core = Core()
     result = await ActionService(conversation_core=core).run_action(goal="Create UI", messages=[], output_sink=publish, budget=2)
     assert core.calls == 3
-    assert result["status"] == "error" and result["content"] == ""
-    assert result["error"]["code"] == "MODEL_OUTPUT_LIMIT"
+    assert result["status"] == "success" and result["content"].startswith("Runtime:")
+    assert result["completion_error"]["code"] == "MODEL_OUTPUT_LIMIT"
+    assert result["execution_outcome"] == {
+        "stop_reason": "budget_exhausted", "goal_status": "unverified", "response_source": "runtime",
+    }
     assert [item["error"]["code"] for item in result["observations"]] == [
-        "MODEL_OUTPUT_LIMIT", "MODEL_OUTPUT_LIMIT", "ACTION_BUDGET_EXHAUSTED",
+        "MODEL_OUTPUT_LIMIT", "MODEL_OUTPUT_LIMIT", "ACTION_BUDGET_EXHAUSTED", "MODEL_OUTPUT_LIMIT",
     ]
     assert result["reasoning_steps"][0]["content"] == "plan the application"
     assert result["usage"]["completion_tokens"] == 6000
 
 
 def _answer_from_observations(messages):
-    observation = json.loads(messages[-1]["content"][0]["text"])
+    observation = observation_fact(messages)
     observation_id = observation["observation_id"]
     return {
         "content": json.dumps(
@@ -159,7 +163,7 @@ async def test_action_service_executes_batch_and_commits_observations():
     assert [name for name, _ in executed] == ["math.calculate", "utils.now"]
     assert len(out["observations"]) == 2
     assert all(item["action_loop_id"] == out["action_run_id"] for item in out["observations"])
-    visible_fact = json.loads(core.calls[1]["messages"][-1]["content"][0]["text"])
+    visible_fact = observation_fact(core.calls[1]["messages"])
     assert visible_fact["subject"] == "math.calculate"
     assert visible_fact["scope"] == {
         "action_loop_id": out["action_run_id"],
@@ -175,7 +179,7 @@ async def test_action_service_executes_batch_and_commits_observations():
 @pytest.mark.asyncio
 async def test_action_service_resolves_capability_before_binding_tool():
     def choose_resolved_tool(messages):
-        observation = json.loads(messages[-1]["content"][0]["text"])
+        observation = observation_fact(messages)
         assert observation["subject"] == "runtime.capability_resolve"
         return {
             "content": json.dumps(
@@ -340,8 +344,12 @@ async def test_resumed_batch_uses_normal_failure_and_cancellation_boundary(cance
         entered.set()
         await asyncio.Event().wait()
 
+    policy_checks = []
     def policy(*_):
-        raise RuntimeError("policy unavailable")
+        policy_checks.append(True)
+        if len(policy_checks) > 1:
+            raise RuntimeError("policy unavailable")
+        return True
 
     # A second call still needs a policy check after the first approval.
     if not cancel:
@@ -352,7 +360,7 @@ async def test_resumed_batch_uses_normal_failure_and_cancellation_boundary(cance
         tool_executor=executor, confirmation_resolver=policy,
     ))
     if cancel:
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), timeout=5)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -361,7 +369,8 @@ async def test_resumed_batch_uses_normal_failure_and_cancellation_boundary(cance
         result = await task
         assert result["status"] == "success"
         assert result["content"] == "Authorization is unavailable; nothing was executed."
-        assert all(item["error"]["code"] == "TOOL_AUTHORIZATION_UNAVAILABLE" for item in result["observations"])
+        assert [item["error"]["code"] for item in result["observations"]] == ["BATCH_NOT_EXECUTED", "TOOL_AUTHORIZATION_UNAVAILABLE"]
+        assert len(policy_checks) == 2
         assert all(not item["executed"] for item in result["execution_path"])
         assert not entered.is_set()
 

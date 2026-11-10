@@ -133,8 +133,36 @@ def test_tools_block_uses_live_registered_tool_snapshot():
     tools_block = next(b for b in blocks if b.block_type == PromptBlockType.TOOLS)
     assert "Runtime capabilities:" in tools_block.content
     assert "computer_control.write_file" in tools_block.content
-    assert '"callable_now":true' in tools_block.content
+    assert '"available":["computer_control.write_file"]' in tools_block.content
     assert "math.calculate" not in tools_block.content
+
+
+def test_tool_prompt_is_bounded_and_large_directories_remain_discoverable():
+    from gateway.tool_prompt_blocks import build_tool_execution_prompt
+    tools = [{"name": f"fixture.tool_{index}", "description": "NO-IMPLICIT-DESCRIPTION" * 500,
+              "input_schema": {"description": "NO-IMPLICIT-SCHEMA" * 500}, "callable_now": True} for index in range(300)]
+    text = build_tool_execution_prompt(registered_tools=tools, max_chars=1000)
+    assert len(text) <= 1000
+    assert '"namespace":"fixture"' in text and "capability_request" in text
+    assert "NO-IMPLICIT" not in text
+    assert build_tool_execution_prompt(registered_tools=tools, max_chars=10) == ""
+
+
+def test_refresh_respects_explicit_budget_after_compaction_without_dropping_user_data():
+    assembler = PromptAssembler()
+    context = SimpleNamespace(token_budget=100, prompt_blocks={})
+    blocks = [PromptBlock(block_id="identity", block_type=PromptBlockType.IDENTITY, source="fixture", content="identity", can_compact=False),
+              PromptBlock(block_id="tools", block_type=PromptBlockType.TOOLS, source="fixture", content="x" * 10000)]
+    compacted = assembler.compact_blocks(blocks, 100)
+    assert compacted["dropped_block_ids"] == ["tools"]
+    messages = assembler.render_messages(compacted["blocks"]) + [{"role": "user", "content": "Keep my original request"}]
+    tools = [{"name": f"fixture.tool_{index}", "callable_now": True, "description": "x" * 1000} for index in range(300)]
+    refreshed = assembler.refresh_tool_message(messages, tools=tools, snapshot={}, run_context=context)
+    assert sum(len(row["content"]) for row in refreshed) <= 400
+    assert all(row in refreshed for row in messages)
+    assert context.prompt_blocks["block_manifest"]["tools"]["projection_chars"] <= 400
+    context.token_budget = 1
+    assert assembler.refresh_tool_message(messages, tools=tools, snapshot={}, run_context=context) == messages
 
 
 def test_reasoning_block_asks_for_deep_user_facing_synthesis():

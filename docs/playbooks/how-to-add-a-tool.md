@@ -19,6 +19,36 @@ local: inspect configuration/dependency availability without network calls or
 secret values in the returned reason. Do not equate configuration with remote
 service health. The existing manifest `requiresConfig` check remains unchanged.
 
+### Offered Capabilities And Prerequisites
+
+Declare optional `provides` identifiers on a local tool, `ToolSpec`, or manifest
+command, for example `provides = ["weather.current"]`. Use up to 16 dotted ASCII
+identifiers (letters, digits, underscores and hyphens; at most 160 characters
+each). The Registry validates the declaration and projects it through the same
+catalog, snapshot and inspection path. An MCP adapter may supply this optional
+metadata through its existing registration record; no additional MCP protocol
+is required. Tools without it remain discoverable by their canonical tool ID.
+
+Local tools receive the effective invocation's RunContext and configuration in
+`ctx.metadata`, set by CapabilityService from its trusted call parameters. Treat
+these as internal references; do not serialize configuration into results or
+external requests. Tool arguments and preexisting caller metadata cannot replace
+the configuration used by Runtime authorization.
+
+`provides` describes an offered operation. `requiresCapability` describes a
+Runtime prerequisite, such as browser availability; it is used for readiness,
+not as an offered capability. Declare both when both meanings apply. Namespace
+matching supports parent/child requests, not free-text inference or a complete
+proof that a tool can fulfill an arbitrary goal.
+
+Capability resolution distinguishes an absent declaration from an existing but
+unavailable or out-of-scope tool. `task_feasibility: "not_assessed"` means an
+unmatched intent is not proof the task is impossible: the Agent can inspect
+available groups, compose existing tools or, when enabled, use Self Evolve to
+create a reusable implementation. Large candidate schemas are deferred to the
+existing `capability_inspect` action. Declarations never grant permission,
+credentials, approval or a bypass for an external site's restrictions.
+
 ## Tool, Extension, And Skill Boundaries
 
 | Type | Use it for | Runtime surface |
@@ -28,6 +58,59 @@ service health. The existing manifest `requiresConfig` check remains unchanged.
 | Skill | Reusable task instruction plus metadata and optional tool policy hints. | Skill registry and `skill.run` lazy expansion |
 
 If the capability performs an action, implement it as a tool. If the capability is distributed as a drop-in package, wrap it as an extension. If the capability is primarily task guidance or reusable expertise, package it as a skill.
+
+## Persistent Observation Sources
+
+A registered tool can optionally declare `observation_source = True` together
+with `side_effect_level = "read_only"`. It still uses the same manifest, Registry,
+CapabilityService and policy path; no source-specific service or Agent loop is
+needed. The callable schema must accept a JSON-object `cursor`. Return:
+
+```json
+{
+  "observations": [
+    {"key": "document:42", "version": "revision:8", "data": {"state": "updated"}, "references": []}
+  ],
+  "cursor": {"last_revision": 8}
+}
+```
+
+Use stable object keys and source versions that distinguish transitions. Do not
+use poll timestamps as versions. Results may contain at most 100 unique objects
+and 256KB per batch; retain larger evidence at the source and expose a paged read
+tool. The Runtime remembers the latest versions for up to 4,096 object keys per
+schedule; historical backfill and long-term retention are not unlimited.
+
+Create a schedule with the ordinary `runtime.schedule` tool:
+
+```json
+{
+  "name": "Observe document updates",
+  "service_name": "documents",
+  "tool_name": "changes",
+  "args": {},
+  "interval_seconds": 300,
+  "observe": true
+}
+```
+
+Temporal persists cursor/version changes and an outbox before publishing
+`environment.state.changed`. RuntimeEventLog commits the fact before listeners
+run; retained idempotency keys make a publication-before-ack crash safe to replay.
+Delivery is at least once, not exactly-once arbitrary tool execution. Runtime
+assigns the owner and source identity; tools cannot supply another user ID.
+Polling identical versions does not publish another change or call a model.
+Permission and source declarations are checked again at each collection.
+
+Ambient admits bounded event batches into its existing Task runs and acknowledges
+their cursor only after a completed activation. Waiting for approval or stopping
+on an execution budget does not consume that batch. SelfModel resolves each
+reference from the owner-scoped log; `runtime.read_event` pages retained evidence.
+Sources report facts, never whether to repair something or create a task.
+
+This contract does not make plugin code a sandbox: installed implementations
+remain trusted host code, and incorrect read-only declarations are not a process
+security boundary. Command execution retains the existing approval requirements.
 
 ## Capability Provider Runtimes
 
@@ -62,6 +145,7 @@ weather_spec = ToolSpec(
     description="Get current weather for a city.",
     source=ToolSource.LOCAL,
     capability_type="local",
+    provides=["weather.current"],
     side_effect_level=SideEffectLevel.READ_ONLY,
     permission_scope="read",
     input_schema={
@@ -94,6 +178,7 @@ class WeatherTool:
     tool_id = "weather.current"
     name = "weather.current"
     description = "Get current weather for a city."
+    provides = ["weather.current"]
     side_effect_level = "read_only"
     input_schema = {
         "type": "object",

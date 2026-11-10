@@ -63,12 +63,13 @@ class _InMemoryMessageManager:
         reasoning_tree_id: Optional[str] = None,
         reasoning_steps: Optional[List[Dict[str, Any]]] = None,
         agent_message_ids: Optional[List[str]] = None,
+        execution_outcome: Optional[Dict[str, Any]] = None,
     ) -> bool:
         key = self._k(user_id, session_id)
         sess = self.sessions.get(key)
         if not sess:
             return False
-        sess["messages"].append({"role": "assistant", "content": assistant_content, "turn_id": turn_id, "reasoning_tree_id": reasoning_tree_id, "reasoning_steps": reasoning_steps or []})
+        sess["messages"].append({"role": "status" if (execution_outcome or {}).get("response_source") == "runtime" else "assistant", "content": assistant_content, "turn_id": turn_id, "reasoning_tree_id": reasoning_tree_id, "reasoning_steps": reasoning_steps or [], "execution_outcome": execution_outcome})
         sess.setdefault("agent_receipts", []).extend(agent_message_ids or [])
         self.turns.pop(turn_id, None)
         return True

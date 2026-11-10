@@ -50,6 +50,9 @@ async def execute_case(case, model, root):
         return {"status": "success", "candidates": candidates, "evidence": {"extraction": candidates}, "adapter": "classify_interaction/verify_candidates/MemoryWriteGate"}
     from tests.support.runtime import runtime_at
     host = runtime_at(root, model)
+    if case["kind"] == "delegation":
+        from agentkit.tools.subagent import DelegateTool
+        host.capability_service.register_tool(DelegateTool(host))
     handle = host.workspace_service.resolve_workspace_handle(user_id="alice", workspace_id="evaluation")
     for name, content in case.get("files", {}).items():
         host.workspace_service.create_document(handle=handle, relative_path=name, content=content, requester_user_id="alice")
@@ -103,14 +106,14 @@ async def execute_case(case, model, root):
             await runtime.shutdown()
     response = None
     for turn in case["turns"]:
-        response = await host.handle_http_request(method=RequestType.CHAT, params={"message": turn, "session_id": "evaluation"}, user_id="alice")
+        response = await host.handle_http_request(method=RequestType.CHAT, params={"message": turn, "session_id": "evaluation", "metadata": {"multi_agent": case["kind"] == "delegation"}}, user_id="alice")
         if not response.ok or response.payload.get("status") != "success":
             break
     facts = {f"event:{i}": row.payload for i, row in enumerate(host.event_emitter.get_history(EventType.ACTION_OBSERVATION_COMMITTED))}
     facts.update({f"runtime:capabilities:{i}": row.payload for i, row in enumerate(host.event_emitter.get_history(EventType.CAPABILITY_SNAPSHOT_CREATED))})
     tools = [row.get("tool_name") for row in facts.values() if row.get("tool_name")]
     artifacts = {}
-    for name in case.get("expect", {}).get("artifacts", {}):
+    for name in set(case.get("expect", {}).get("artifacts", {})) | set(case.get("expect", {}).get("absent_artifacts", [])):
         target = (Path(handle.root_path) / name).resolve()
         if not target.is_relative_to(Path(handle.root_path).resolve()):
             raise ValueError("Evaluation artifact escapes its workspace")

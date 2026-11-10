@@ -7,6 +7,7 @@ from agentkit.security.approval import approval_scope
 from unittest.mock import MagicMock, AsyncMock
 from gateway.capability_service import CapabilityService, ToolInvocationContext, ToolPolicyViolationError, ToolConfirmationRequiredError
 from gateway.events import EventEmitter
+from types import SimpleNamespace
 
 
 class TestCapabilityService:
@@ -24,6 +25,33 @@ class TestCapabilityService:
         assert service._required_config_ready(requirement, None)[0] is False
         assert service._required_config_ready(requirement, {"self_evolve": {"enabled": False}})[0] is False
         assert service._required_config_ready(requirement, {"self_evolve": {"enabled": True}}) == (True, "")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("metadata_source", ["current", "missing", "stale"])
+    async def test_runtime_list_uses_trusted_user_configuration_not_tool_arguments(self, enabled, metadata_source):
+        from agentkit.tools.standard.runtime_tools import RuntimeListToolsTool
+        service = CapabilityService(mcp_manager=SimpleNamespace(get_available_services_filtered=lambda: {"mcp_services": []}))
+        service._tool_discovery_initialized = True
+        service.register_tool(SimpleNamespace(tool_id="fixture.author", description="Prepare a tool", input_schema={"type": "object"},
+            provides=["software.tools.create"], side_effect_level="workspace_write", invoke=AsyncMock(),
+            requires_config={"path": "feature.enabled", "equals": True}))
+        service.register_tool(RuntimeListToolsTool(gateway_server=SimpleNamespace(capability_service=service)))
+        settings = {"feature": {"enabled": enabled}}
+        context = SimpleNamespace(user_id="alice", session_id="s")
+        metadata = {} if metadata_source == "missing" else {
+            "run_context": context,
+            "user_config": settings if metadata_source == "current" else {"feature": {"enabled": not enabled}},
+        }
+        invocation = ToolInvocationContext(user_id="alice", session_id="s", source="workflow", metadata=metadata)
+        out = await service.call_tool("runtime.list_tools", {"tool_id": "fixture.author", "user_config": {"feature": {"enabled": not enabled}}},
+            run_context=context, user_config=settings,
+            ctx=invocation)
+        assert out["tools"][0]["callable_now"] is enabled
+        assert out["tools"][0]["provides"] == ["software.tools.create"]
+        assert invocation.metadata is metadata
+        if metadata_source == "stale":
+            assert invocation.metadata["user_config"]["feature"]["enabled"] is not enabled
 
     def test_computer_manifest_separates_observation_from_host_control(self):
         service = CapabilityService()

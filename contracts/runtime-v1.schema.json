@@ -2199,6 +2199,17 @@
           "default": null,
           "title": "Focus"
         },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GapRecoveryDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "revision": {
           "minimum": 0,
           "title": "Revision",
@@ -2217,6 +2228,50 @@
         "revision"
       ],
       "title": "GapDelta",
+      "type": "object"
+    },
+    "GapRecoveryDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "reason": {
+          "maxLength": 400,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "repair_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Repair Refs",
+          "type": "array"
+        },
+        "strategy": {
+          "enum": [
+            "investigate",
+            "replan",
+            "retry"
+          ],
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy",
+        "reason",
+        "evidence_refs"
+      ],
+      "title": "GapRecoveryDecision",
       "type": "object"
     },
     "GapSpec": {
@@ -2367,6 +2422,48 @@
       "title": "GoalGapView",
       "type": "object"
     },
+    "GoalProgress": {
+      "properties": {
+        "blocked": {
+          "default": 0,
+          "title": "Blocked",
+          "type": "integer"
+        },
+        "checks_passed": {
+          "default": 0,
+          "title": "Checks Passed",
+          "type": "integer"
+        },
+        "goal_verification": {
+          "const": "unknown",
+          "default": "unknown",
+          "title": "Goal Verification",
+          "type": "string"
+        },
+        "open": {
+          "default": 0,
+          "title": "Open",
+          "type": "integer"
+        },
+        "resolved": {
+          "default": 0,
+          "title": "Resolved",
+          "type": "integer"
+        },
+        "revision": {
+          "default": 0,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "tracked": {
+          "default": 0,
+          "title": "Tracked",
+          "type": "integer"
+        }
+      },
+      "title": "GoalProgress",
+      "type": "object"
+    },
     "GuestChatMessage": {
       "additionalProperties": false,
       "properties": {
@@ -2457,6 +2554,59 @@
         "max_input_chars"
       ],
       "title": "GuestChatStatus",
+      "type": "object"
+    },
+    "InputReply": {
+      "properties": {
+        "content": {
+          "maxLength": 16000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "content"
+      ],
+      "title": "InputReply",
+      "type": "object"
+    },
+    "InputRequest": {
+      "properties": {
+        "content": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "input_kind": {
+          "default": "acknowledgement",
+          "enum": [
+            "acknowledgement",
+            "text"
+          ],
+          "title": "Input Kind",
+          "type": "string"
+        },
+        "request_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "request_id",
+        "content"
+      ],
+      "title": "InputRequest",
       "type": "object"
     },
     "MemoryEmbeddingCommand": {
@@ -2751,6 +2901,39 @@
       "title": "ProjectWrite",
       "type": "object"
     },
+    "RunOutcome": {
+      "description": "Turn termination is not proof that the user's goal was delivered.",
+      "properties": {
+        "goal_status": {
+          "const": "unverified",
+          "default": "unverified",
+          "title": "Goal Status",
+          "type": "string"
+        },
+        "response_source": {
+          "default": "model",
+          "enum": [
+            "model",
+            "runtime"
+          ],
+          "title": "Response Source",
+          "type": "string"
+        },
+        "stop_reason": {
+          "enum": [
+            "budget_exhausted",
+            "recovery_exhausted"
+          ],
+          "title": "Stop Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stop_reason"
+      ],
+      "title": "RunOutcome",
+      "type": "object"
+    },
     "RunRequest": {
       "properties": {
         "attachments": {
@@ -2768,6 +2951,20 @@
           "additionalProperties": true,
           "title": "Metadata",
           "type": "object"
+        },
+        "reply_to_input": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reply To Input"
         },
         "requested_mode": {
           "anyOf": [
@@ -2860,6 +3057,28 @@
           "anyOf": [
             {
               "$ref": "#/$defs/Error"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "execution_outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "input_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputRequest"
             },
             {
               "type": "null"
@@ -3496,6 +3715,28 @@
           "title": "Message Count",
           "type": "integer"
         },
+        "pending_confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pending_input": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "pinned": {
           "default": false,
           "title": "Pinned",
@@ -3609,6 +3850,17 @@
           ],
           "default": null
         },
+        "goal_progress": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GoalProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "objective": {
           "default": "",
           "title": "Objective",
@@ -3695,6 +3947,33 @@
       "title": "TaskCancelRequest",
       "type": "object"
     },
+    "TaskConfirmationRequest": {
+      "properties": {
+        "action": {
+          "enum": [
+            "approve",
+            "reject"
+          ],
+          "title": "Action",
+          "type": "string"
+        },
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "tool_call_id": {
+          "title": "Tool Call Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "tool_call_id",
+        "action"
+      ],
+      "title": "TaskConfirmationRequest",
+      "type": "object"
+    },
     "TaskControlRequest": {
       "properties": {
         "expected_revision": {
@@ -3754,6 +4033,36 @@
       "title": "TaskResponse",
       "type": "object"
     },
+    "TaskResumeRequest": {
+      "properties": {
+        "expected_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Revision"
+        },
+        "input_reply": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "TaskResumeRequest",
+      "type": "object"
+    },
     "TaskRun": {
       "properties": {
         "attempt_count": {
@@ -3772,6 +4081,40 @@
           ],
           "default": null,
           "title": "Ended At"
+        },
+        "input_request": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InputRequest"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "output": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output"
+        },
+        "pending_confirmation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolCall"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "run_id": {
           "title": "Run Id",
@@ -4049,6 +4392,315 @@
         "filename"
       ],
       "title": "UserFile",
+      "type": "object"
+    },
+    "VoiceCapabilities": {
+      "properties": {
+        "speak_replies": {
+          "default": false,
+          "title": "Speak Replies",
+          "type": "boolean"
+        },
+        "stt": {
+          "$ref": "#/$defs/VoiceEndpointStatus"
+        },
+        "tts": {
+          "$ref": "#/$defs/VoiceEndpointStatus"
+        }
+      },
+      "required": [
+        "stt",
+        "tts"
+      ],
+      "title": "VoiceCapabilities",
+      "type": "object"
+    },
+    "VoiceDiscoveryRequest": {
+      "properties": {
+        "kind": {
+          "enum": [
+            "stt",
+            "tts"
+          ],
+          "title": "Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "VoiceDiscoveryRequest",
+      "type": "object"
+    },
+    "VoiceEndpointStatus": {
+      "properties": {
+        "api_key_configured": {
+          "title": "Api Key Configured",
+          "type": "boolean"
+        },
+        "base_url": {
+          "title": "Base Url",
+          "type": "string"
+        },
+        "configured": {
+          "title": "Configured",
+          "type": "boolean"
+        },
+        "format": {
+          "default": "mp3",
+          "title": "Format",
+          "type": "string"
+        },
+        "model": {
+          "title": "Model",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "speed": {
+          "default": 1,
+          "title": "Speed",
+          "type": "number"
+        },
+        "voice": {
+          "default": "",
+          "title": "Voice",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "base_url",
+        "configured",
+        "api_key_configured"
+      ],
+      "title": "VoiceEndpointStatus",
+      "type": "object"
+    },
+    "VoiceModelList": {
+      "properties": {
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Models",
+          "type": "array"
+        }
+      },
+      "required": [
+        "models"
+      ],
+      "title": "VoiceModelList",
+      "type": "object"
+    },
+    "VoiceSTTResult": {
+      "properties": {
+        "duration_seconds": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duration Seconds"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "VoiceSTTResult",
+      "type": "object"
+    },
+    "VoiceTTSRequest": {
+      "properties": {
+        "format": {
+          "anyOf": [
+            {
+              "enum": [
+                "mp3",
+                "wav",
+                "opus",
+                "aac",
+                "flac",
+                "pcm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Format"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "similarity_boost": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Similarity Boost"
+        },
+        "speed": {
+          "anyOf": [
+            {
+              "maximum": 4,
+              "minimum": 0.25,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speed"
+        },
+        "stability": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stability"
+        },
+        "style": {
+          "anyOf": [
+            {
+              "maximum": 1,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Style"
+        },
+        "text": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "use_speaker_boost": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Use Speaker Boost"
+        },
+        "voice": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Voice"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "VoiceTTSRequest",
+      "type": "object"
+    },
+    "VoiceTranscription": {
+      "properties": {
+        "status": {
+          "default": "success",
+          "title": "Status",
+          "type": "string"
+        },
+        "stt": {
+          "$ref": "#/$defs/VoiceSTTResult"
+        },
+        "user_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "User Id"
+        }
+      },
+      "required": [
+        "stt"
+      ],
+      "title": "VoiceTranscription",
       "type": "object"
     },
     "WorkbenchActivity": {

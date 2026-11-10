@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "cases": [
+    {"id": "direct", "request": "只回答 READY，不调用任何工具。", "expect": {"answer_contains": ["READY"], "no_tools": true}},
+    {"id": "arithmetic", "request": "17 乘 19 等于多少？直接回答数字，不用工具。", "expect": {"answer_contains": ["323"], "no_tools": true}},
+    {"id": "write", "request": "在工作区创建 note.txt，内容精确为 ORCHID-29，不要添加换行。", "expect": {"required_tools": ["workspace.write_file"], "artifacts": {"note.txt": "ORCHID-29"}}},
+    {"id": "read", "request": "读取工作区 code.txt，告诉我其中的验证码。", "files": {"code.txt": "ECHO-31"}, "expect": {"required_tools": ["workspace.read_file"], "answer_contains": ["ECHO-31"]}},
+    {"id": "write-two", "request": "分别创建 a.txt 和 b.txt，内容精确为 ALPHA 和 BETA，不添加换行。两项互不依赖，可以批量处理。", "expect": {"required_tools": ["workspace.write_file"], "artifacts": {"a.txt": "ALPHA", "b.txt": "BETA"}}},
+    {"id": "read-two", "request": "读取 a.txt 和 b.txt，告诉我这两个文件的内容，可以批量读取。", "files": {"a.txt": "LIME-17", "b.txt": "PLUM-42"}, "expect": {"required_tools": ["workspace.read_file"], "answer_contains": ["LIME-17", "PLUM-42"]}},
+    {"id": "recover-missing", "request": "先读取 missing.txt。如果文件不存在，就创建它，内容精确为 RECOVERED，不添加换行。", "expect": {"required_tools": ["workspace.read_file", "workspace.write_file"], "failed_tools": ["workspace.read_file"], "artifacts": {"missing.txt": "RECOVERED"}}},
+    {"id": "inspect", "request": "先通过能力检查查询 workspace.write_file 的参数定义，再创建 schema.txt，内容精确为 CHECKED，不添加换行。", "expect": {"required_tools": ["runtime.capability_inspect", "workspace.write_file"], "artifacts": {"schema.txt": "CHECKED"}}},
+    {"id": "resolve", "request": "使用 capability_request（能力请求，不是 capability_inspect 参数检查）向 Runtime 查询 fixture.absent 能力是否存在，按真实查询结果报告。不要虚构工具，也不要执行其他工具。", "expect": {"required_tools": ["runtime.capability_resolve"], "resolution_candidates": 0}},
+    {"id": "approval", "request": "使用 fixture.send 提交发送 HELLO 的请求，只有我批准以后才能执行。不要声称已经发送。", "expect": {"status": "needs_confirmation"}}
+  ]
+}

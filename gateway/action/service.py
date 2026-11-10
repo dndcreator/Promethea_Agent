@@ -10,19 +10,23 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
 
-from agentkit.mcp.tool_result import ToolErrorInfo, ToolExecutionResult, failed_tool_result, normalize_tool_result
+from agentkit.mcp.tool_result import ToolErrorInfo, ToolExecutionResult, error_from_exception, failed_tool_result, normalize_tool_result
 from agentkit.security.approval import approval_scope
 from gateway.events import EventEmitter
 from gateway.protocol import EventType
-from config import GoalGapConfig
-from gateway.goal_gaps import GoalGapState, apply_gap_delta, gap_event_delta, gap_outcome, gap_projection, observe_gap_step
+from config import GoalGapConfig, ActionConfig, config as global_config
+from gateway.goal_gaps import GoalGapState, GapRecoveryState, apply_gap_delta, admit_gap_action, gap_event_delta, gap_outcome, gap_projection, observe_gap_step
 
 from .model_action import AnswerDeltaProjector, InvalidModelAction, ModelAction, ToolCallProposal, parse_model_action
-from .models import ActionContext, ActionResult, ActionRun
+from .models import MAX_ACTION_BUDGET, ActionContext, ActionResult, ActionRun, resolve_action_budget
 from .observation import RuntimeObservation
 from .state_machine import ActionPhase
 from .state_machine import RuntimeActionStateMachine
-from .checkpoint import capture as capture_checkpoint, restore as restore_checkpoint
+from .checkpoint import capture as capture_checkpoint, restore as restore_checkpoint, continue_run as continue_checkpoint
+from .completion import parse_final_answer, runtime_progress_notice
+from .context_window import compact_action_history
+from .recovery import recover as recover_model_output, reset_failures
+from gateway.tools.registry import ToolNotFoundError
 
 
 CapabilityInspector = Callable[[List[str]], Awaitable[Dict[str, Any]]]
@@ -32,10 +36,11 @@ ReasoningSink = Callable[[Dict[str, Any]], Awaitable[None]]
 
 
 class ModelResponseError(RuntimeError):
-    def __init__(self, message: str, *, code: str = "MODEL_REQUEST_FAILED", usage: Optional[Dict[str, Any]] = None):
+    def __init__(self, message: str, *, code: str = "MODEL_REQUEST_FAILED", usage: Optional[Dict[str, Any]] = None, signature: str = ""):
         super().__init__(message)
         self.code = code
         self.usage = usage
+        self.signature = signature
 
 
 class ActionService:
@@ -122,6 +127,7 @@ class ActionService:
         capability_inspector: Optional[CapabilityInspector] = None,
         capability_resolver: Optional[CapabilityResolver] = None,
         budget: Optional[int] = None,
+        allow_progress_grace: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
         approved_call_ids: Optional[set[str]] = None,
         output_sink: Optional[OutputSink] = None,
@@ -132,6 +138,10 @@ class ActionService:
         read_steering: Optional[Callable] = None,
         acknowledge_steering: Optional[Callable] = None,
     ) -> Dict[str, Any]:
+        grace_steps = 0
+        if allow_progress_grace and all(getattr(run_context, key, None) is None for key in ("cost_budget", "token_budget")):
+            policy = ActionConfig(**{**global_config.action.model_dump(), **((user_config or {}).get("action") or {})})
+            grace_steps = policy.progress_grace_steps
         action_run = ActionRun(
             goal=str(goal or ""),
             messages=list(messages or []),
@@ -147,19 +157,54 @@ class ActionService:
                 acknowledge_steering=acknowledge_steering,
             ),
             budget=budget,
+            progress_grace_steps=grace_steps,
             approved_call_ids=set(approved_call_ids or ()),
         )
+        continuing = bool(checkpoint and checkpoint.get("resume_result") and
+                          (checkpoint.get("result") or {}).get("execution_outcome"))
+        input_response = (checkpoint or {}).get("input_response")
         if checkpoint:
-            if checkpoint.get("result"):
+            restore_checkpoint(checkpoint, action_run.context)
+            if checkpoint.get("result") and not continuing and input_response is None:
                 return dict(checkpoint["result"])
-            action_run = restore_checkpoint(checkpoint, action_run.context)
+            if continuing:
+                action_run = continue_checkpoint(checkpoint, action_run.context, goal=action_run.goal, budget=budget)
+                action_run.messages.append({"role": "user", "_runtime_rebuild": action_run.goal, "content": (
+                    "The user explicitly resumed this task. A new bounded execution slice is active. "
+                    "Continue from the committed observations and remaining goal gaps; previous budget-stop "
+                    "observations describe the earlier slice. Do not repeat already committed side effects "
+                    "without checking whether another operation is actually required."
+                )})
+            else:
+                action_run = restore_checkpoint(checkpoint, action_run.context)
+            action_run.progress_grace_steps = min(action_run.progress_grace_steps, grace_steps)
         self._load_goal_gaps(action_run)
         restored_messages = None
-        if checkpoint:
+        if checkpoint and not continuing:
             restored_messages = list(action_run.messages)
+            if input_response is not None:
+                pending_input = action_run.pending_input or {}
+                if action_run.machine.phase != ActionPhase.WAITING_INPUT or not isinstance(input_response, dict) or input_response.get("request_id") != pending_input.get("request_id"):
+                    raise ValueError("input response does not match a waiting Runtime request")
+                reply = input_response.get("content")
+                if not isinstance(reply, str) or not reply.strip() or len(reply) > 16000:
+                    raise ValueError("input response requires bounded non-empty text")
+                action_run.budget = action_run.step + int(budget or resolve_action_budget(user_config))
+                await self._observe_outcome(
+                    action_run, restored_messages, model_step_id=pending_input["model_step_id"],
+                    assistant_content=pending_input["action_content"],
+                    result=ToolExecutionResult(tool_name="runtime.user_input", ok=True, value={
+                        "request_id": pending_input["request_id"], "user_report": reply,
+                        "external_result_verified": False, "tool_authorization_granted": False,
+                        "execution_slice_steps": action_run.budget - action_run.step,
+                    }),
+                )
+                action_run.pending_input = None
+                await self._checkpoint(action_run, restored_messages, checkpoint.get("usage") or {})
             pending = checkpoint.get("pending_calls") or []
             if pending:
-                calls = [ToolCallProposal(tool_name=row["tool_name"], arguments=dict(row["arguments"]), call_id=row["call_id"]) for row in pending]
+                calls = [ToolCallProposal(tool_name=row["tool_name"], arguments=dict(row["arguments"]), call_id=row["call_id"],
+                                          operation=row.get("operation", "tool_call")) for row in pending]
                 action = ModelAction(kind="tool_calls", calls=calls)
                 results = [ToolExecutionResult(
                     tool_name=call.tool_name, ok=False,
@@ -233,6 +278,7 @@ class ActionService:
                 acknowledge_steering=acknowledge_steering,
             ),
             budget=int(pending.get("budget") or 5),
+            progress_grace_steps=int(pending.get("progress_grace_steps") or 0),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
             status="running",
             trace=[dict(item) for item in (pending.get("action_trace") or [])],
@@ -243,6 +289,9 @@ class ActionService:
             reasoning_steps=[dict(item) for item in (pending.get("reasoning_steps") or [])],
             approved_call_ids=set(pending.get("approved_call_ids") or ()) | {str(approved_call_id)},
             applied_steering_ids=list(pending.get("applied_steering_ids") or []),
+            model_recovery=dict(pending.get("model_recovery") or {}),
+            model_protocol=pending.get("model_protocol", "prompt_json"),
+            model_wire=dict(pending.get("model_wire") or {}),
             gap_state=GoalGapState.model_validate(pending.get("goal_gaps") or {}),
             gap_task_objective=str((pending.get("task_checkpoint") or {}).get("objective") or ""),
             gap_execution_token=dict((pending.get("task_checkpoint") or {}).get("execution_token") or {}),
@@ -253,6 +302,7 @@ class ActionService:
                 tool_name=str(item.get("name") or item.get("tool_name") or ""),
                 arguments=dict(item.get("args") or {}),
                 call_id=str(item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex}"),
+                operation=item.get("operation", "tool_call"),
             )
             for item in (pending.get("pending_tool_calls") or [])
             if isinstance(item, dict)
@@ -321,6 +371,7 @@ class ActionService:
                 acknowledge_steering=acknowledge_steering,
             ),
             budget=int(pending.get("budget") or 5),
+            progress_grace_steps=int(pending.get("progress_grace_steps") or 0),
             run_id=str(pending.get("action_run_id") or pending.get("action_loop_id") or f"act_{uuid.uuid4().hex}"),
             status="running",
             trace=[dict(item) for item in (pending.get("action_trace") or [])],
@@ -331,6 +382,9 @@ class ActionService:
             reasoning_steps=[dict(item) for item in (pending.get("reasoning_steps") or [])],
             approved_call_ids=set(pending.get("approved_call_ids") or ()),
             applied_steering_ids=list(pending.get("applied_steering_ids") or []),
+            model_recovery=dict(pending.get("model_recovery") or {}),
+            model_protocol=pending.get("model_protocol", "prompt_json"),
+            model_wire=dict(pending.get("model_wire") or {}),
             gap_state=GoalGapState.model_validate(pending.get("goal_gaps") or {}),
             gap_task_objective=str((pending.get("task_checkpoint") or {}).get("objective") or ""),
             gap_execution_token=dict((pending.get("task_checkpoint") or {}).get("execution_token") or {}),
@@ -342,6 +396,7 @@ class ActionService:
                 tool_name=str(item.get("name") or item.get("tool_name") or ""),
                 arguments=dict(item.get("args") or {}),
                 call_id=str(item.get("id") or item.get("call_id") or f"call_{uuid.uuid4().hex}"),
+                operation=item.get("operation", "tool_call"),
             )
             for item in (pending.get("pending_tool_calls") or [])
             if isinstance(item, dict)
@@ -381,7 +436,7 @@ class ActionService:
                 "procedure_refs": list(pending.get("procedure_refs", [])),
             })
         await self._commit_observations(action_run, observations)
-        messages.extend(self._observation_messages(str(pending.get("content") or ""), observations))
+        messages.extend(self._observation_messages(str(pending.get("content") or ""), observations, model_step_id=model_step_id if model_step_id in action_run.model_wire else None))
         await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="confirmation_rejection_observed")
         result = await self._run(
             action_run,
@@ -415,24 +470,34 @@ class ActionService:
         reasoning_sink: Optional[ReasoningSink] = None,
     ) -> ActionResult:
         started = time.perf_counter()
-        budget = max(1, int(action_run.budget or 5))
+        action_run.budget = max(1, int(action_run.budget or 5))
         messages = list(resume_messages) if resume_messages is not None else list(action_run.messages)
         usage = dict(resume_usage or {"prompt_tokens": 0, "completion_tokens": 0})
         action_run.status = "running"
+        stop_reason = "budget_exhausted"
+        unavailable_model = None
         if resume_messages is None:
-            action_run.add_trace("action.started", {"goal": action_run.goal, "budget": budget})
-            await self._emit_lifecycle("action.started", action_run, {"goal": action_run.goal, "budget": budget})
+            action_run.add_trace("action.started", {"goal": action_run.goal, "budget": action_run.budget})
+            await self._emit_lifecycle("action.started", action_run, {"goal": action_run.goal, "budget": action_run.budget})
             await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="loop_started")
 
         self._active_runs[action_run.run_id] = action_run
         try:
-            while resumed_action is not None or action_run.step < budget:
+            while resumed_action is not None or action_run.step < action_run.budget:
                 self._assert_task_execution(action_run)
                 if await self._apply_steering(action_run, messages, usage, output_sink) and resumed_action is not None:
                     resumed_action = None
                     await self._transition(action_run, ActionPhase.OBSERVING, cause="outdated_approval_withdrawn")
                     await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
                 await self._checkpoint(action_run, messages, usage)
+                control = action_run.gap_state.recovery
+                limit = self._gap_policy(action_run).max_recovery_attempts
+                if self._gap_policy(action_run).enabled and max(control.rejections, control.failed_trials) >= limit:
+                    stop_reason = "recovery_exhausted"
+                    break
+                if action_run.machine.phase == ActionPhase.AWAITING_MODEL and control.mode == "reassess":
+                    await self._transition(action_run, ActionPhase.REASSESSING, cause="goal_progress_reassessment",
+                                           facts={"reason": control.reason, "evidence_refs": control.evidence_refs})
                 if resumed_action is not None:
                     action = resumed_action
                     resumed_action = None
@@ -452,19 +517,26 @@ class ActionService:
                     except ModelResponseError as exc:
                         await self._replace_answer(action_run, "", output_sink)
                         if exc.code not in {"MODEL_EMPTY_RESPONSE", "MODEL_OUTPUT_LIMIT"}:
-                            raise
+                            if not action_run.observations and exc.code not in {"MODEL_ADMISSION_CLOSED", "MODEL_TRANSPORT_TRANSIENT"}:
+                                raise
+                            stop_reason = "recovery_exhausted"
+                            unavailable_model = exc
+                            break
                         self._merge_usage(usage, exc.usage)
+                        retry, advice = self._recover_output(action_run, exc.code, exc.signature)
                         await self._observe_outcome(
                             action_run, messages, model_step_id=model_step_id,
                             result=ToolExecutionResult(
                                 tool_name="runtime.model_response", ok=False,
                                 error=ToolErrorInfo(
                                     code=exc.code, message=str(exc), category="model_output",
-                                    retryable=True,
-                                    advice="Return one concise, complete runtime action; split large work into smaller actions. No partial action was executed.",
+                                    retryable=retry, advice=advice,
                                 ),
                             ),
                         )
+                        if not retry:
+                            stop_reason = "recovery_exhausted"
+                            break
                         continue
                     self._merge_usage(usage, response.get("usage"))
                     content = str(response.get("content") or "")
@@ -481,21 +553,27 @@ class ActionService:
                         if not set(action.raw.get("procedure_refs", [])).issubset(exposed):
                             raise InvalidModelAction("procedure_refs must reference experience exposed in this action loop")
                         self._validate_answer_evidence(action_run, action)
+                        # Audit retains provider bytes; accepted history uses the canonical object.
+                        content = json.dumps(action.raw, ensure_ascii=False)
                     except InvalidModelAction as exc:
                         await self._replace_answer(action_run, "", output_sink)
+                        retry, advice = self._recover_output(action_run, exc.reason, _stable_hash(content))
                         await self._observe_outcome(
                             action_run, messages, model_step_id=model_step_id,
                             result=ToolExecutionResult(
                                 tool_name="runtime.model_action", ok=False,
                                 error=ToolErrorInfo(
                                     code="INVALID_MODEL_ACTION", message=str(exc), category="validation",
-                                    retryable=True,
-                                    advice="The proposed action was not executed. Return one valid JSON runtime action, using only supplied evidence and procedure references.",
+                                    retryable=retry, advice=advice, details={"reason": exc.reason},
                                 ),
                             ),
                         )
+                        if not retry:
+                            stop_reason = "recovery_exhausted"
+                            break
                         continue
 
+                reset_failures(action_run.model_recovery)
                 self._assert_task_execution(action_run)
                 if await self._apply_steering(action_run, messages, usage, output_sink):
                     await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
@@ -518,61 +596,10 @@ class ActionService:
                     await self._replace_answer(action_run, action.content, output_sink)
                     return result
 
-                if action.kind == "capability_inspect":
-                    await self._transition(
-                        action_run,
-                        ActionPhase.VALIDATING,
-                        cause="capability_inspection_proposed",
-                        facts={"model_step_id": model_step_id, "names": action.capability_names},
-                    )
-                    await self._transition(action_run, ActionPhase.EXECUTING, cause="capability_inspection_started")
-                    result = await self._capability_outcome(
-                        "runtime.capability_inspect", capability_inspector, action.capability_names,
-                    )
-                    await self._observe_outcome(
-                        action_run, messages, model_step_id=model_step_id,
-                        result=result, assistant_content=content,
-                    )
-                    continue
+                if action.kind == "await_user":
+                    return await self._await_input(action_run, action, messages, usage, model_step_id, output_sink)
 
-                if action.kind == "capability_request":
-                    if action.capability_request is None:
-                        raise RuntimeError("capability resolution is unavailable")
-                    request = {
-                        "objective": action.capability_request.objective,
-                        "required_capabilities": list(action.capability_request.required_capabilities),
-                        "preferred_modalities": list(action.capability_request.preferred_modalities),
-                        "max_side_effect": action.capability_request.max_side_effect,
-                    }
-                    await self._transition(
-                        action_run,
-                        ActionPhase.VALIDATING,
-                        cause="capability_resolution_proposed",
-                        facts={"model_step_id": model_step_id, "request": request},
-                    )
-                    await self._transition(action_run, ActionPhase.EXECUTING, cause="capability_resolution_started")
-                    result = await self._capability_outcome(
-                        "runtime.capability_resolve", capability_resolver, request,
-                    )
-                    projection = result.value if isinstance(result.value, dict) else {}
-                    action_run.execution_path.append(
-                        {
-                            "kind": "capability_request",
-                            **request,
-                            "exposed_procedures": [
-                                item["reference"] for item in projection.get("process_experience", {}).get("rules", [])
-                            ],
-                            "candidate_names": [
-                                str(item.get("name") or "")
-                                for item in (projection.get("candidates") or [])
-                                if isinstance(item, dict) and str(item.get("name") or "").strip()
-                            ],
-                        }
-                    )
-                    await self._observe_outcome(
-                        action_run, messages, model_step_id=model_step_id,
-                        result=result, assistant_content=content,
-                    )
+                if await self._control_progress(action_run, action, messages, model_step_id, content, output_sink):
                     continue
 
                 pending = await self._prepare_tool_batch(
@@ -591,13 +618,21 @@ class ActionService:
                 if isinstance(pending, ActionResult):
                     pending.usage = dict(usage)
                     return pending
-                if preparation_error is None and tool_executor is None:
+                if preparation_error is None and tool_executor is None and any(not call.is_capability for call in action.calls):
                     preparation_error = ToolErrorInfo(
                         code="TOOL_EXECUTOR_UNAVAILABLE", message="Runtime tool execution is unavailable; no calls were executed.",
                         category="capability", retryable=False,
                     )
                 if preparation_error is not None:
-                    results = [ToolExecutionResult(tool_name=call.tool_name, ok=False, error=preparation_error) for call in action.calls]
+                    results = []
+                    for call in action.calls:
+                        blocked_by = preparation_error.details.get("tool_call_id")
+                        error = preparation_error if not blocked_by or call.call_id == blocked_by else ToolErrorInfo(
+                            code="BATCH_NOT_EXECUTED", message="Another proposed operation failed admission; this call was not executed.",
+                            category="validation", retryable=False,
+                            details={"blocking_call_id": blocked_by, "cause_code": preparation_error.code},
+                        )
+                        results.append(ToolExecutionResult(tool_name=call.tool_name, ok=False, error=error))
                 else:
                     await self._transition(
                         action_run,
@@ -607,25 +642,34 @@ class ActionService:
                     )
                     await self._checkpoint(action_run, messages, usage, pending_calls=[{
                         "tool_name": call.tool_name, "arguments": call.arguments, "call_id": call.call_id,
+                        "operation": call.operation,
                     } for call in action.calls])
-                    results = await self._execute_batch(action_run, action, tool_executor, model_step_id=model_step_id)
+                    results = await self._execute_batch(
+                        action_run, action, tool_executor, model_step_id=model_step_id,
+                        capability_inspector=capability_inspector, capability_resolver=capability_resolver,
+                    )
                 from gateway.delegation import take_delegated_usage
 
-                self._merge_usage(usage, take_delegated_usage())
+                delegated_usage = take_delegated_usage()
+                if delegated_usage:
+                    self._merge_usage(usage, delegated_usage)
                 observations = await self._record_tool_results(
                     action_run, action, results, model_step_id=model_step_id,
                     started_ids={call.call_id for call in action.calls} if preparation_error is None else set(),
                 )
-                messages.extend(self._observation_messages(content, observations))
+                messages.extend(self._observation_messages(content, observations, model_step_id=model_step_id if model_step_id in action_run.model_wire else None))
                 await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="observation_committed")
+                self._grant_progress_grace(action_run, messages, observations)
 
-            return await self._finish_budget_exhausted(
+            return await self._finish_stopped(
                 action_run,
                 messages,
                 usage,
                 started,
                 output_sink=output_sink,
                 reasoning_sink=reasoning_sink,
+                stop_reason=stop_reason,
+                unavailable_model=unavailable_model,
             )
         except asyncio.CancelledError:
             if action_run.machine.phase not in {ActionPhase.FAILED, ActionPhase.CANCELLED, ActionPhase.COMPLETED}:
@@ -671,11 +715,28 @@ class ActionService:
                 },
                 run_id=action_run.run_id,
                 trace=list(action_run.trace),
-                usage=usage if any(usage.values()) else None,
+                usage=usage or None,
             )
         finally:
             action_run.accepting_steering = False
             self._active_runs.pop(action_run.run_id, None)
+
+    async def _await_input(self, run, action, messages, usage, model_step_id, output_sink):
+        request = {"request_id": f"input_{uuid.uuid4().hex}", "content": action.content,
+                   "input_kind": action.raw.get("input_kind", "acknowledgement")}
+        run.pending_input = {**request, "model_step_id": model_step_id, "action_content": json.dumps(action.raw, ensure_ascii=False)}
+        await self._transition(run, ActionPhase.WAITING_INPUT, cause="user_input_requested",
+                               facts={"request_id": request["request_id"], "model_step_id": model_step_id})
+        run.status = "needs_input"
+        waiting = ActionResult(status="needs_input", content=action.content, run_id=run.run_id,
+            usage=usage, trace=list(run.trace), raw={
+                "messages": messages, "input_request": request, "observations": list(run.observations),
+                "reasoning_steps": list(run.reasoning_steps), **self._gap_result(run),
+                "action_state": run.machine.snapshot(), "action_state_transitions": list(run.machine.transitions),
+            })
+        await self._checkpoint(run, messages, usage, result=waiting.to_chat_loop_result())
+        await self._replace_answer(run, action.content, output_sink)
+        return waiting
 
     async def _prepare_tool_batch(
         self,
@@ -693,8 +754,9 @@ class ActionService:
             cause="tool_batch_proposed",
             facts={"model_step_id": model_step_id, "call_count": len(action.calls)},
         )
+        pending_call = None
         for call in action.calls:
-            if call.call_id in action_run.approved_call_ids:
+            if call.is_capability:
                 continue
             requires_confirmation = False
             if confirmation_resolver is not None:
@@ -703,63 +765,71 @@ class ActionService:
                     if inspect.isawaitable(requires_confirmation):
                         requires_confirmation = await requires_confirmation
                 except Exception as exc:
+                    if getattr(exc, "code", None):
+                        error = error_from_exception(exc)
+                        return ToolErrorInfo(error.code, error.message, error.category, error.retryable, error.advice,
+                                             {**error.details, "tool_call_id": call.call_id})
                     return ToolErrorInfo(
                         code="TOOL_AUTHORIZATION_UNAVAILABLE", message=str(exc) or type(exc).__name__,
                         category="policy", retryable=False,
                         advice="This batch was not executed. Authorization could not be established; do not bypass it.",
-                        details={"tool_name": call.tool_name},
+                        details={"tool_name": call.tool_name, "tool_call_id": call.call_id},
                     )
-            if not requires_confirmation:
+            if not requires_confirmation or call.call_id in action_run.approved_call_ids:
                 continue
-            await self._transition(
-                action_run,
-                ActionPhase.WAITING_CONFIRMATION,
-                cause="confirmation_required",
-                facts={"model_step_id": model_step_id, "tool_call_id": call.call_id, "tool_name": call.tool_name},
-            )
-            action_run.status = "needs_confirmation"
-            raw_calls = [
-                {"id": item.call_id, "name": item.tool_name, "args": dict(item.arguments)}
-                for item in action.calls
-            ]
-            raw = {
-                "status": "needs_confirmation",
-                "tool_call_id": call.call_id,
-                "tool_name": call.tool_name,
-                "args": dict(call.arguments),
-                "current_messages": list(messages),
-                "pending_tool_calls": raw_calls,
-                "approved_call_ids": sorted(action_run.approved_call_ids),
-                "applied_steering_ids": list(action_run.applied_steering_ids),
-                "procedure_refs": list(action.raw.get("procedure_refs", [])),
-                "content": assistant_content,
-                "model_step_id": model_step_id,
-                "step": action_run.step,
-                "budget": action_run.budget,
-                "goal": action_run.goal,
-                "runtime_scope": {
-                    "user_id": action_run.context.user_id,
-                    "session_id": action_run.context.session_id,
-                    **{key: getattr(action_run.context.run_context, key, None) for key in
-                       ("task_id", "task_run_id", "workflow_run_id", "conversation_turn_id")},
-                },
-                "task_checkpoint": {"objective": action_run.gap_task_objective, "execution_token": action_run.gap_execution_token}
-                    if self.task_service is not None and getattr(action_run.context.run_context, "task_id", None) else None,
-                "observations": list(action_run.observations),
-                "execution_path": list(action_run.execution_path),
-                "reasoning_steps": list(action_run.reasoning_steps),
-                **self._gap_result(action_run),
-                "action_state": action_run.machine.snapshot(),
-                "action_state_transitions": list(action_run.machine.transitions),
-            }
-            return ActionResult(
-                status="needs_confirmation",
-                content=assistant_content,
-                raw=raw,
-                run_id=action_run.run_id,
-                trace=list(action_run.trace),
-            )
-        return None
+            pending_call = pending_call or call
+        if pending_call is None:
+            return None
+        call = pending_call
+        await self._transition(
+            action_run,
+            ActionPhase.WAITING_CONFIRMATION,
+            cause="confirmation_required",
+            facts={"model_step_id": model_step_id, "tool_call_id": call.call_id, "tool_name": call.tool_name},
+        )
+        action_run.status = "needs_confirmation"
+        raw_calls = [
+            {"id": item.call_id, "name": item.tool_name, "args": dict(item.arguments), "operation": item.operation}
+            for item in action.calls
+        ]
+        raw = {
+            "status": "needs_confirmation",
+            "tool_call_id": call.call_id,
+            "tool_name": call.tool_name,
+            "args": dict(call.arguments),
+            "current_messages": list(messages),
+            "pending_tool_calls": raw_calls,
+            "approved_call_ids": sorted(action_run.approved_call_ids),
+            "applied_steering_ids": list(action_run.applied_steering_ids),
+            "procedure_refs": list(action.raw.get("procedure_refs", [])),
+            "content": assistant_content,
+            "model_step_id": model_step_id,
+            "step": action_run.step,
+            "budget": action_run.budget,
+            "progress_grace_steps": action_run.progress_grace_steps,
+            "goal": action_run.goal,
+            "runtime_scope": {
+                "user_id": action_run.context.user_id,
+                "session_id": action_run.context.session_id,
+                **{key: getattr(action_run.context.run_context, key, None) for key in
+                   ("task_id", "task_run_id", "workflow_run_id", "conversation_turn_id")},
+            },
+            "task_checkpoint": {"objective": action_run.gap_task_objective, "execution_token": action_run.gap_execution_token}
+                if self.task_service is not None and getattr(action_run.context.run_context, "task_id", None) else None,
+            "observations": list(action_run.observations),
+            "execution_path": list(action_run.execution_path),
+            "reasoning_steps": list(action_run.reasoning_steps),
+            "model_recovery": dict(action_run.model_recovery),
+            "model_protocol": action_run.model_protocol,
+            "model_wire": dict(action_run.model_wire),
+            **self._gap_result(action_run),
+            "action_state": action_run.machine.snapshot(),
+            "action_state_transitions": list(action_run.machine.transitions),
+        }
+        return ActionResult(
+            status="needs_confirmation", content=assistant_content, raw=raw,
+            run_id=action_run.run_id, trace=list(action_run.trace),
+        )
 
     @staticmethod
     def _restore_confirmation_scope(pending: Dict[str, Any], *, session_id: Optional[str],
@@ -811,6 +881,10 @@ class ActionService:
         if task is None or not context.user_id:
             raise PermissionError("goal state requires an owned Runtime task")
         action_run.gap_state = GoalGapState.model_validate(task.get("goal_gaps") or {})
+        if not action_run.observations:
+            # Goal requirements survive Task runs; execution guards need this loop's receipts.
+            action_run.gap_state.recent = []
+            action_run.gap_state.recovery = GapRecoveryState()
         action_run.gap_task_revision = action_run.gap_state.revision
         if capture_token:
             action_run.gap_task_objective = task.get("objective", "")
@@ -868,21 +942,15 @@ class ActionService:
         if not self._gap_policy(action_run).enabled:
             return messages
         view = self._gap_view(action_run)
-        if not (action_run.gap_state.gaps or action_run.gap_feedback or view.get("recent_obstacles")):
+        if not (action_run.gap_state.gaps or action_run.gap_state.recent or action_run.gap_feedback or view.get("recent_obstacles") or view.get("execution_control")):
             return messages
         context = "Runtime goal gaps (authoritative revision; interpretations may be provisional):\n" + json.dumps(view, ensure_ascii=False, separators=(",", ":"))
-        result = [dict(item) for item in messages]
-        for message in result:
-            if message.get("role") == "system" and isinstance(message.get("content"), str):
-                message["content"] += "\n\n" + context
-                break
-        else:
-            result.insert(0, {"role": "system", "content": context})
-        return result
+        from gateway.runtime_io import replace_context, GOAL_CONTEXT
+        return replace_context(messages, GOAL_CONTEXT, context)
 
     @staticmethod
     def _gap_result(action_run: ActionRun) -> Dict[str, Any]:
-        if not action_run.gap_state.gaps:
+        if not (action_run.gap_state.gaps or action_run.gap_state.recent or action_run.gap_state.recovery.failed_calls):
             return {}
         return {"goal_gaps": action_run.gap_state.model_dump(), "goal_progress": gap_outcome(action_run.gap_state)}
 
@@ -893,17 +961,59 @@ class ActionService:
             capability_snapshot_id=self._capability_snapshot_id(action_run), scope=self._observation_scope(action_run),
         ) for call, result in zip(action.calls, results)]
         for call, result, observation in zip(action.calls, results, observations):
-            action_run.execution_path.append({
-                "kind": "tool_call", "tool_call_id": call.call_id, "tool_name": call.tool_name,
+            record = {
+                "kind": call.operation, "tool_call_id": call.call_id, "tool_name": call.tool_name,
                 "args": dict(call.arguments), "ok": bool(result.ok), "observation_id": observation.observation_id,
                 "executed": call.call_id in started_ids, "requires_confirmation": call.call_id in action_run.approved_call_ids,
                 "procedure_refs": list(action.raw.get("procedure_refs", [])),
-            })
+            }
+            if call.operation == "capability_request":
+                projection = result.value if result.ok and isinstance(result.value, dict) else {}
+                record.update({**call.arguments,
+                    "exposed_procedures": [item["reference"] for item in (projection.get("process_experience") or {}).get("rules", [])],
+                    "candidate_names": [str(item.get("name")) for item in (projection.get("candidates") or [])
+                                        if isinstance(item, dict) and item.get("name")],
+                })
+            action_run.execution_path.append(record)
         action_run.approved_call_ids.difference_update(call.call_id for call in action.calls)
         await self._commit_observations(action_run, observations)
         return observations
 
-    async def _execute_batch(self, action_run: ActionRun, action: ModelAction, executor: Any, *, model_step_id: str) -> List[ToolExecutionResult]:
+    def _grant_progress_grace(self, run: ActionRun, messages: List[Dict[str, Any]], observations: List[RuntimeObservation]) -> None:
+        extra = min(run.progress_grace_steps, MAX_ACTION_BUDGET - run.budget)
+        if extra <= 0 or run.step != run.budget or run.gap_state.recovery.mode != "execute":
+            return
+        context = run.context.run_context
+        if any(getattr(context, key, None) is not None for key in ("cost_budget", "token_budget")):
+            return
+        if not observations or any(not row.ok for row in observations):
+            return
+        executed = {row["observation_id"] for row in run.execution_path[-len(observations):]
+                    if row.get("executed") and row.get("kind") == "tool_call"}
+        def evidence(row):
+            value = row.get("structured_result")
+            return row.get("model_projection") if value is None else value
+
+        prior, latest = run.observations[:-len(observations)], run.observations[-len(observations):]
+        for row in latest:
+            value = evidence(row)
+            if row["observation_id"] not in executed or value in (None, "", [], {}):
+                continue
+            # Changing arguments alone does not make an unchanged result new evidence.
+            if any(item.get("ok") and item.get("tool_name") == row["tool_name"] and evidence(item) == value for item in prior):
+                continue
+            run.budget += extra
+            run.progress_grace_steps = 0
+            run.add_trace("action.budget_extended", {"step": run.step, "extra_steps": extra, "observation_id": row["observation_id"]})
+            messages.append({"role": "user", "name": "promethea_action_budget", "content": (
+                f"Runtime granted {extra} additional decisions after new tool evidence. "
+                "Use them for the most important remaining checks or to finish the answer. "
+                "Do not repeat completed work. No further automatic extension is available."
+            )})
+            break
+
+    async def _execute_batch(self, action_run: ActionRun, action: ModelAction, executor: Any, *, model_step_id: str,
+                             capability_inspector=None, capability_resolver=None) -> List[ToolExecutionResult]:
         from config import ActionConfig, config
 
         policy = ActionConfig(**{**config.action.model_dump(), **((action_run.context.user_config or {}).get("action") or {})})
@@ -923,14 +1033,20 @@ class ActionService:
             for index, call in enumerate(action.calls):
                 while True:
                     registry = getattr(self.capability_service, "tool_registry", None)
-                    spec = registry.resolve_for_call(tool_name=call.tool_name, params=call.arguments) if registry is not None else None
+                    try:
+                        spec = registry.resolve_for_call(tool_name=call.tool_name, params=call.arguments) if registry is not None and not call.is_capability else None
+                    except ToolNotFoundError:
+                        spec = None  # Dispatch revalidates; lookup failure is not a scheduler crash.
                     parallel = bool(spec is not None and spec.concurrency_safe)
                     if running and (not parallel or len(running) >= policy.max_parallel_tool_calls):
                         await settle(all_pending=not parallel)
                         continue
                     break
                 self._assert_task_execution(action_run)
-                task = asyncio.create_task(self._execute_call(executor, call, call.call_id in action_run.approved_call_ids, action_run=action_run))
+                task = asyncio.create_task(self._execute_call(
+                    executor, call, call.call_id in action_run.approved_call_ids, action_run=action_run,
+                    capability_inspector=capability_inspector, capability_resolver=capability_resolver,
+                ))
                 tasks[task] = index
                 running.add(task)
                 if not parallel:
@@ -961,8 +1077,15 @@ class ActionService:
             raise
         return [results[index] for index in range(len(action.calls))]
 
-    async def _execute_call(self, executor: Any, call: ToolCallProposal, approved: bool, *, action_run: ActionRun) -> ToolExecutionResult:
+    async def _execute_call(self, executor: Any, call: ToolCallProposal, approved: bool, *, action_run: ActionRun,
+                            capability_inspector=None, capability_resolver=None) -> ToolExecutionResult:
         self._assert_task_execution(action_run)
+        if call.is_capability:
+            inspector = call.operation == "capability_inspect"
+            return await self._capability_outcome(
+                call.tool_name, capability_inspector if inspector else capability_resolver,
+                call.arguments["capability_names"] if inspector else call.arguments,
+            )
         try:
             with approval_scope(call.tool_name, call.arguments, confirmed=approved):
                 value = executor(call.tool_name, dict(call.arguments))
@@ -987,6 +1110,26 @@ class ActionService:
         except Exception as exc:
             return failed_tool_result(name, exc)
 
+    async def _control_progress(self, run, action, messages, model_step_id, content, output_sink) -> bool:
+        if not self._gap_policy(run).enabled:
+            return False
+        diagnostic = bool(action.calls) and all(call.is_capability for call in action.calls)
+        calls = [{"tool_name": call.tool_name, "args": call.arguments} for call in action.calls]
+        candidate, denial = admit_gap_action(run.gap_state, calls, run.observations, diagnostic=diagnostic)
+        if candidate.revision != run.gap_state.revision and not await self._save_goal_gaps(run, candidate):
+            denial = "Goal state changed; reassess the current Runtime revision before execution."
+        if not denial:
+            return False
+        await self._replace_answer(run, "", output_sink)
+        results = [ToolExecutionResult(tool_name=call["tool_name"], ok=False, error=ToolErrorInfo(
+            code="ACTION_REASSESSMENT_REQUIRED", message=denial, category="progress_control", retryable=False,
+            advice="No proposed operation executed. Inspect another capability, propose an evidence-backed recovery, answer or await_user.",
+        )) for call in calls]
+        observations = await self._record_tool_results(run, action, results, model_step_id=model_step_id, started_ids=set())
+        messages.extend(self._observation_messages(content, observations, model_step_id=model_step_id if model_step_id in run.model_wire else None))
+        await self._transition(run, ActionPhase.AWAITING_MODEL, cause="progress_control_rejected_proposal")
+        return True
+
     async def _observe_outcome(
         self, action_run: ActionRun, messages: List[Dict[str, Any]], *,
         model_step_id: str, result: ToolExecutionResult, assistant_content: str = "",
@@ -998,7 +1141,7 @@ class ActionService:
             scope=self._observation_scope(action_run),
         )
         await self._commit_observations(action_run, [observation])
-        messages.extend(self._observation_messages(assistant_content, [observation]))
+        messages.extend(self._observation_messages(assistant_content, [observation], model_step_id=model_step_id if assistant_content and model_step_id in action_run.model_wire else None))
         await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="observation_committed")
 
     @staticmethod
@@ -1020,6 +1163,7 @@ class ActionService:
         )
         for observation in observations:
             payload = _json_safe(observation.as_dict())
+            payload["model_projection"] = [block for block in payload["model_projection"] if not block.get("_workspace_media")]
             action_run.observations.append(payload)
             await self._emit_event(
                 EventType.ACTION_OBSERVATION_COMMITTED,
@@ -1041,6 +1185,8 @@ class ActionService:
         started: float,
         model_step_id: str,
         messages: List[Dict[str, Any]],
+        execution_outcome: Optional[Dict[str, Any]] = None,
+        completion_error: Optional[Dict[str, Any]] = None,
     ) -> ActionResult:
         self._assert_task_execution(action_run)
         self._validate_answer_evidence(action_run, action)
@@ -1063,21 +1209,26 @@ class ActionService:
             "observations": list(action_run.observations),
             "execution_path": list(action_run.execution_path),
             "reasoning_steps": list(action_run.reasoning_steps),
+            "model_recovery": dict(action_run.model_recovery),
             "evidence_refs": list(action.evidence_refs),
             **self._gap_result(action_run),
             "action_state": action_run.machine.snapshot(),
             "action_state_transitions": list(action_run.machine.transitions),
         }
+        if execution_outcome is not None:
+            raw["execution_outcome"] = execution_outcome
+        if completion_error is not None:
+            raw["completion_error"] = completion_error
         return ActionResult(
             status="success",
             content=action.content,
             raw=raw,
             run_id=action_run.run_id,
             trace=list(action_run.trace),
-            usage=usage if any(usage.values()) else None,
+            usage=usage or None,
         )
 
-    async def _finish_budget_exhausted(
+    async def _finish_stopped(
         self,
         action_run: ActionRun,
         messages: List[Dict[str, Any]],
@@ -1086,43 +1237,72 @@ class ActionService:
         *,
         output_sink: Optional[OutputSink],
         reasoning_sink: Optional[ReasoningSink],
+        stop_reason: str = "budget_exhausted",
+        unavailable_model: Optional[ModelResponseError] = None,
     ) -> ActionResult:
         action_run.accepting_steering = False
         await self._apply_steering(action_run, messages, usage, output_sink)
         self._assert_task_execution(action_run)
+        progress_recovery = max(action_run.gap_state.recovery.rejections, action_run.gap_state.recovery.failed_trials) >= self._gap_policy(action_run).max_recovery_attempts
         await self._observe_outcome(
             action_run, messages, model_step_id=f"step_{uuid.uuid4().hex}",
             result=ToolExecutionResult(
-                tool_name="runtime.action_budget", ok=False,
+                tool_name="runtime.action_budget" if stop_reason == "budget_exhausted" else "runtime.action_recovery" if progress_recovery else "runtime.model_recovery", ok=False,
                 error=ToolErrorInfo(
-                    code="ACTION_BUDGET_EXHAUSTED", message="The action budget is exhausted; no further tools may execute in this turn.",
-                    category="budget", retryable=False,
+                    code="ACTION_BUDGET_EXHAUSTED" if stop_reason == "budget_exhausted" else "ACTION_RECOVERY_EXHAUSTED" if progress_recovery else "MODEL_RECOVERY_EXHAUSTED",
+                    message="Execution stopped; no further tools may execute in this turn.",
+                    category="budget" if stop_reason == "budget_exhausted" else "execution_boundary", retryable=False,
                     advice="Give the user a concise answer explaining the verified results and remaining obstacles; do not claim unfinished work succeeded.",
                 ),
             ),
         )
-        messages.append({
+        completion_messages = [*messages, {
             "role": "user",
             "content": (
-                "The runtime action budget is exhausted. Return an action=answer JSON object based only on committed "
-                "observations. Do not propose another runtime action."
+                f"Execution has stopped ({stop_reason}). Give a concise final progress report in the "
+                "user's language, based only on committed observations. Explain what remains unverified or blocked. "
+                "Return ordinary user-facing text or an answer action. If progress specifically needs a human "
+                "response, use await_user to persist the question and pause instead of only describing a wait. "
+                "No tools can execute in this phase. Do not promise an unavailable capability."
             ),
-        })
+        }]
         model_step_id = f"step_{uuid.uuid4().hex}"
-        response = await self._call_model(
-            action_run,
-            messages,
-            model_step_id,
-            output_sink=output_sink,
-            reasoning_sink=reasoning_sink,
-        )
-        self._merge_usage(usage, response.get("usage"))
-        await self._transition(action_run, ActionPhase.EVALUATING, cause="budget_final_response_received")
-        action = parse_model_action(str(response.get("content") or ""))
-        if action.kind != "answer":
-            raise InvalidModelAction("model proposed a non-answer after the runtime budget was exhausted")
+        completion_error = None
+        response_source = "model"
+        try:
+            if unavailable_model is not None:
+                raise unavailable_model
+            response = await self._call_model(
+                action_run, completion_messages, model_step_id,
+                output_sink=output_sink, reasoning_sink=reasoning_sink,
+                final_answer=True,
+            )
+            self._merge_usage(usage, response.get("usage"))
+            action = parse_final_answer(str(response.get("content") or ""))
+            self._validate_answer_evidence(action_run, action)
+        except Exception as exc:
+            if isinstance(exc, ModelResponseError):
+                self._merge_usage(usage, exc.usage)
+            completion_error = {"code": getattr(exc, "code", "FINAL_RESPONSE_FAILED"), "message": str(exc), "type": type(exc).__name__}
+            await self._observe_outcome(
+                action_run, messages, model_step_id=model_step_id,
+                result=ToolExecutionResult(tool_name="runtime.completion", ok=False, error=ToolErrorInfo(
+                    completion_error["code"], str(exc), "completion", False,
+                )),
+            )
+            response_source = "runtime"
+            payload = getattr(action_run.context.run_context, "input_payload", None) or {}
+            metadata = payload.get("metadata") or {}
+            action = ModelAction(kind="answer", content=runtime_progress_notice(
+                action_run.observations, str(metadata.get("ui_language") or "en"), stop_reason=stop_reason,
+                completion_code=completion_error["code"],
+            ))
+            action_run.add_trace("action.completion_failed", completion_error)
+        await self._transition(action_run, ActionPhase.EVALUATING, cause="budget_final_response_settled")
         if "gap_update" in action.raw:
             await self._apply_goal_delta(action_run, action.raw["gap_update"])
+        if action.kind == "await_user":
+            return await self._await_input(action_run, action, messages, usage, model_step_id, output_sink)
         result = await self._complete_answer(
             action_run,
             action=action,
@@ -1130,6 +1310,11 @@ class ActionService:
             started=started,
             model_step_id=model_step_id,
             messages=messages,
+            execution_outcome={
+                "stop_reason": stop_reason, "goal_status": "unverified",
+                "response_source": response_source,
+            },
+            completion_error=completion_error,
         )
         await self._replace_answer(action_run, action.content, output_sink)
         return result
@@ -1142,10 +1327,69 @@ class ActionService:
         *,
         output_sink: Optional[OutputSink],
         reasoning_sink: Optional[ReasoningSink],
+        final_answer: bool = False,
     ) -> Dict[str, Any]:
+        policy = ActionConfig(**{**global_config.action.model_dump(), **((action_run.context.user_config or {}).get("action") or {})})
+        self._assert_task_execution(action_run)
+        prepared = self._with_goal_projection(action_run, messages)
+        remaining = [gap.requirement for gap in action_run.gap_state.gaps if gap.state != "resolved"][:3]
+        prepared, compacted = compact_action_history(prepared, action_run.observations,
+            max_chars=min(policy.context_action_chars, policy.observation_history_chars),
+            max_batches=policy.context_action_batches, per_result_chars=policy.observation_chars,
+            goal="\n".join([action_run.goal, *remaining]))
+        if compacted:
+            action_run.add_trace("action.context_rebuilt", {"step": action_run.step, "retained_observations": len(action_run.observations)})
         if action_run.context.prepare_messages is not None:
-            messages = await action_run.context.prepare_messages(messages, action_run.observations)
-        messages = self._with_goal_projection(action_run, messages)
+            prepared = await action_run.context.prepare_messages(prepared, action_run.observations)
+        # Checkpoints retain the accepted bounded view; full observations remain Runtime-owned.
+        messages[:] = prepared
+        usage = {}
+        for attempt in range(policy.max_model_recoveries + 1):
+            self._assert_task_execution(action_run)
+            try:
+                response = await self._call_model_once(
+                    action_run, messages, model_step_id, output_sink=output_sink,
+                    reasoning_sink=reasoning_sink, final_answer=final_answer,
+                )
+            except ModelResponseError as exc:
+                self._merge_usage(usage, exc.usage)
+                exc.usage = usage
+                if exc.code != "MODEL_TRANSPORT_TRANSIENT" or attempt >= policy.max_model_recoveries:
+                    raise
+                action_run.add_trace("action.model_transport_retry", {"model_step_id": model_step_id, "retry": attempt + 1})
+                await self._replace_answer(action_run, "", output_sink)
+                await asyncio.sleep(0.25 * 2 ** attempt)
+            else:
+                if attempt:
+                    self._merge_usage(usage, response.get("usage"))
+                    response["usage"] = usage
+                return response
+
+    async def _call_model_once(
+        self,
+        action_run: ActionRun,
+        messages: List[Dict[str, Any]],
+        model_step_id: str,
+        *,
+        output_sink: Optional[OutputSink],
+        reasoning_sink: Optional[ReasoningSink],
+        final_answer: bool = False,
+    ) -> Dict[str, Any]:
+        messages = list(messages)
+        initial, ceiling = self._output_limits(action_run)
+        user_config = dict(action_run.context.user_config or {})
+        user_config["api"] = {**user_config.get("api", {}), "max_tokens": min(ceiling, initial if final_answer else int(action_run.model_recovery.get("output_tokens") or initial))}
+        purpose = "final_response" if final_answer else "action"
+        if not action_run.model_protocol:
+            from gateway.user_secrets import resolve_llm_runtime_settings
+            action_run.model_protocol = resolve_llm_runtime_settings(action_run.context.user_id, behavior_config=user_config)["tool_protocol"]
+        if action_run.model_protocol not in {"prompt_json", "native"}:
+            raise ModelResponseError("Unsupported API__TOOL_PROTOCOL", code="MODEL_PROTOCOL_CONFIG")
+        retained_steps = {row.get("_model_step_id") for row in messages}
+        action_run.model_wire = {key: value for key, value in action_run.model_wire.items() if key in retained_steps}
+        user_config["_runtime_call"] = {"purpose": purpose, "protocol": action_run.model_protocol,
+                                        "wire_history": action_run.model_wire, "observations": action_run.observations}
+        action_run.model_recovery["model_calls"] = int(action_run.model_recovery.get("model_calls", 0)) + 1
         streamer = getattr(self.conversation_core, "call_llm_stream", None)
         if output_sink is not None and callable(streamer):
             await self._replace_answer(action_run, "", output_sink)
@@ -1171,7 +1415,7 @@ class ActionService:
 
             async for chunk in streamer(
                 messages,
-                user_config=action_run.context.user_config,
+                user_config=user_config,
                 user_id=action_run.context.user_id,
                 reasoning_sink=publish_reasoning,
                 result_sink=publish_result,
@@ -1181,7 +1425,9 @@ class ActionService:
                     raw = {"status": "error", "error": text.removeprefix("[error]").strip(), "content": "".join(chunks)}
                     break
                 chunks.append(text)
-                delta = projector.feed(text)
+                # Final prose is released only after the complete answer-only response
+                # is validated, so a late tool envelope or truncation cannot leak.
+                delta = "" if final_answer else projector.feed(text)
                 if delta:
                     action_run.streamed_answer += delta
                     await output_sink(delta)
@@ -1201,25 +1447,43 @@ class ActionService:
         else:
             response = await self.conversation_core.call_llm(
                 messages,
-                user_config=action_run.context.user_config,
+                user_config=user_config,
                 user_id=action_run.context.user_id,
             )
             raw = response if isinstance(response, dict) else {"content": str(response or "")}
             source = "runtime"
         if str(raw.get("status") or "success").lower() in {"success", "ok", "completed"} and not str(raw.get("content") or "").strip():
             raw = {**raw, "status": "error", "code": "MODEL_EMPTY_RESPONSE", "error": "Model returned no action or answer."}
+        if str(raw.get("status") or "success").lower() in {"success", "ok", "completed"} and raw.get("native_message") and "native_bindings" in raw:
+            action_run.model_wire[model_step_id] = {"message": raw["native_message"], "bindings": raw["native_bindings"]}
         await self._record_model_call(
             action_run,
             messages=messages,
             model_step_id=model_step_id,
             response=raw,
             source=source,
+            purpose=purpose,
         )
         status = str(raw.get("status") or "success").strip().lower()
         if status not in {"success", "ok", "completed"}:
             detail = str(raw.get("error") or raw.get("content") or "model provider request failed")
-            raise ModelResponseError(detail, code=str(raw.get("code") or "MODEL_REQUEST_FAILED"), usage=raw.get("usage"))
+            raise ModelResponseError(detail, code=str(raw.get("code") or "MODEL_REQUEST_FAILED"), usage=raw.get("usage"),
+                                     signature=_stable_hash({"code": raw.get("code"), "content": raw.get("content")}))
         return raw
+
+    @staticmethod
+    def _output_limits(action_run: ActionRun) -> tuple[int, int]:
+        api = {**global_config.api.model_dump(), **((action_run.context.user_config or {}).get("api") or {})}
+        ceiling = max(1, int(api["output_token_limit"]))
+        return min(ceiling, max(1, int(api["max_tokens"]))), ceiling
+
+    def _recover_output(self, action_run: ActionRun, code: str, signature: str) -> tuple[bool, str]:
+        initial, ceiling = self._output_limits(action_run)
+        policy = ActionConfig(**{**global_config.action.model_dump(), **((action_run.context.user_config or {}).get("action") or {})})
+        result = recover_model_output(action_run.model_recovery, code=code, signature=signature,
+                                      initial=initial, ceiling=ceiling, retries=policy.max_model_recoveries)
+        action_run.add_trace("action.model_recovery", {"code": code, "retry": result[0], **action_run.model_recovery})
+        return result
 
     async def _record_model_call(
         self,
@@ -1229,14 +1493,21 @@ class ActionService:
         model_step_id: str,
         response: Dict[str, Any],
         source: str,
+        purpose: str = "action",
     ) -> None:
         self_model_context = self._self_model_context(action_run)
         manifest = {
             "model_call_id": f"model_{uuid.uuid4().hex}",
             "model_step_id": model_step_id,
             "provider_request_id": str(response.get("request_id")) if response.get("request_id") else None,
+            "request_sent": response.get("request_sent"),
             "action_loop_id": action_run.run_id,
+            "continuation_of": action_run.context.metadata.get("continuation_of"),
             "source": source,
+            "purpose": purpose,
+            "input_chars": len(json.dumps(messages, ensure_ascii=False, default=str)),
+            "message_metrics": [{"role": row.get("role"), "name": row.get("name"), "hash": _stable_hash(row),
+                                 "chars": len(json.dumps(row.get("content"), ensure_ascii=False, default=str))} for row in messages],
             "capability_snapshot_id": self._capability_snapshot_id(action_run),
             "self_model_snapshot_id": self._self_model_snapshot_id(action_run),
             "self_model_revision": self_model_context.get("revision") or self_model_context.get("version"),
@@ -1252,12 +1523,17 @@ class ActionService:
             "response_hash": _stable_hash(response.get("content", "")),
             "model_used": response.get("model_used"),
             "provider_status": response.get("status"),
+            "provider_http_status": response.get("provider_status"),
             "provider_error_code": response.get("code"),
             "finish_reason": response.get("finish_reason"),
             "usage": response.get("usage"),
             "cost_estimate": response.get("cost_estimate"),
             "max_tokens": response.get("max_tokens"),
             "reasoning_chars": response.get("reasoning_chars"),
+            "model_protocol": action_run.model_protocol,
+            "provider_message": response.get("native_message"),
+            "wire_request_hash": _stable_hash(response["wire_request"]) if response.get("wire_request") else None,
+            "wire_request": {**response["wire_request"], "messages": _audit_messages(response["wire_request"]["messages"])} if response.get("wire_request") else None,
         }
         await self._emit_event(EventType.MODEL_CALL_RECORDED, action_run, manifest)
 
@@ -1322,6 +1598,7 @@ class ActionService:
     def _observation_messages(
         assistant_content: str,
         observations: List[RuntimeObservation],
+        *, model_step_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         # Keep the latest bounded projection, not a growing history of gap deltas.
         try:
@@ -1334,8 +1611,10 @@ class ActionService:
         blocks: List[Dict[str, Any]] = []
         for observation in observations:
             blocks.extend(observation.model_content())
-        messages = [{"role": "assistant", "content": assistant_content}] if assistant_content.strip() else []
-        return [*messages, {"role": "user", "content": blocks}]
+        messages = [{"role": "assistant", "content": assistant_content, "_runtime_action": True}] if assistant_content.strip() else []
+        if messages and model_step_id:
+            messages[0]["_model_step_id"] = model_step_id
+        return [*messages, {"role": "user", "content": blocks, "_runtime_observation": True}]
 
     @staticmethod
     def _observation_scope(action_run: ActionRun) -> Dict[str, Any]:
@@ -1357,10 +1636,8 @@ class ActionService:
 
     @staticmethod
     def _merge_usage(total: Dict[str, int], usage: Any) -> None:
-        if not isinstance(usage, dict):
-            return
-        total["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-        total["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+        from gateway.model_usage import merge_usage
+        merge_usage(total, usage)
 
     @staticmethod
     def _capability_snapshot_id(action_run: ActionRun) -> Optional[str]:
@@ -1414,8 +1691,11 @@ def _audit_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(content, list):
             projected.append({
                 "role": str(message.get("role") or ""),
+                **({"name": message["name"]} if message.get("name") else {}),
                 "content": _bounded_text(str(content or ""), max_chars=12000),
                 "content_hash": _stable_hash(content),
+                "original_chars": len(str(content or "")),
+                "content_truncated": len(str(content or "")) > 12000,
             })
             continue
         blocks: List[Dict[str, Any]] = []
@@ -1429,10 +1709,12 @@ def _audit_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     "type": "text",
                     "text": _bounded_text(text, max_chars=12000),
                     "content_hash": _stable_hash(text),
+                    "original_chars": len(text),
+                    "content_truncated": len(text) > 12000,
                 })
             else:
                 blocks.append({"type": block_type, "content_hash": _stable_hash(block)})
-        projected.append({"role": str(message.get("role") or ""), "content": blocks})
+        projected.append({"role": str(message.get("role") or ""), **({"name": message["name"]} if message.get("name") else {}), "content": blocks})
     return projected
 
 

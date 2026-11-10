@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 from agentkit.security.process_sandbox import SandboxedProcessRunner
 from gateway.capability_service import ToolInvocationContext
 from gateway.tools.schema import array, boolean, input_object, integer, text
+from .process_output import process_output
 from .workspace_tools import _resolve_identity
 
 
@@ -22,6 +23,7 @@ class RuntimeExecCommandTool:
         required=("command",),
     )
     tool_id = "runtime.exec_command"
+    provides = ["software.command.execute"]
     name = "runtime.exec_command"
     description = "Execute a shell command under sandbox policy."
     domain = "runtime"
@@ -46,21 +48,13 @@ class RuntimeExecCommandTool:
             command, cwd=cwd, workspace_root=root, shell=True, timeout=timeout_s,
             session_id=ctx.session_id if ctx else None,
         )
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
         max_chars = int((args or {}).get("max_output_chars") or 20000)
         max_chars = max(200, min(max_chars, 500000))
         return {
-            "ok": proc.returncode == 0,
+            **process_output(proc, max_chars=max_chars),
             "command": command,
             "cwd": str((root / cwd).resolve()),
             "workspace_id": handle.workspace_id,
-            "returncode": proc.returncode,
-            "sandbox": proc.sandbox,
-            "stdout": stdout[:max_chars],
-            "stderr": stderr[:max_chars],
-            "truncated_stdout": len(stdout) > max_chars,
-            "truncated_stderr": len(stderr) > max_chars,
             "duration_ms": int((time.time() - started) * 1000),
             "session_id": (ctx.session_id if ctx else None),
             "user_id": (ctx.user_id if ctx else None),

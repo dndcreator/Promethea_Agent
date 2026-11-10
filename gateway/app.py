@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -38,6 +39,7 @@ class SystemInfoResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global Promethea_agent, gateway_integration
+    gateway_integration = None
     startup_components: List[Dict[str, str]] = []
 
     def _mark_component(name: str, status: str, detail: str = "") -> None:
@@ -147,8 +149,8 @@ async def lifespan(app: FastAPI):
             _mark_component("gateway_integration", "ok")
         except Exception as e:
             logger.warning(f"Gateway initialization failed: {e}")
-            traceback.print_exc()
             _mark_component("gateway_integration", "failed", str(e))
+            raise
 
         try:
             scheduler_enabled = _env_bool("KERNEL_SCHEDULER__ENABLED", True)
@@ -202,7 +204,6 @@ async def lifespan(app: FastAPI):
                 "failed": failed_count,
             },
         }
-
         yield
     except Exception as e:
         state.startup_report = {
@@ -347,8 +348,7 @@ async def root():
     }
 
 
-@app.get("/health")
-async def health_check():
+def get_health_status():
     startup = dict(state.startup_report or {})
     startup_status = str(startup.get("status") or "unknown")
     gateway_ready = bool(gateway_integration and gateway_integration.get_gateway_server().is_running)
@@ -361,8 +361,13 @@ async def health_check():
         "agent_ready": Promethea_agent is not None,
         "gateway_ready": gateway_ready,
         "startup_status": startup_status,
-        "timestamp": str(asyncio.get_event_loop().time()),
+        "timestamp": str(time.monotonic()),
     }
+
+
+@app.get("/health")
+async def health_check():
+    return get_health_status()
 
 
 @app.get("/system/info", response_model=SystemInfoResponse)

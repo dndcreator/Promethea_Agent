@@ -5,6 +5,113 @@ must not require paid models, personal memory or host-desktop interaction.
 See [the audit and coverage matrix](testing-audit.md) for retained risks and
 [tests/README.md](../tests/README.md) for the entry point.
 
+## Continuous Maintenance Acceptance
+
+`tests/test_continuous_observation.py` exercises registered sources through the
+real temporal scheduler, persisted outbox, idempotent Runtime log, SelfModel,
+batched Ambient admission and Moirai feedback. Test publication-before-ack
+failure, source-owner isolation, source permission changes, failed activation
+without cursor acknowledgement, and experience-store recovery without executing
+the completed actions again. Observation collection itself calls no model.
+
+`tests/system/test_continuous_code_maintenance.py` runs on Windows with the native
+restricted-token runner. It actually repairs an isolated Python file, persists a
+test approval, reconstructs Runtime state, approves that exact call and runs the
+regression assertions in a subprocess. Goal Gap resolution uses the successful
+Runtime test receipt, and the execution episode is recorded separately from user
+memory. Model decisions are scripted: this is not a live diagnosis score. The
+existing sandbox is write-restricted/partial; arbitrary commands are not approved
+automatically or described as fully isolated.
+
+Public-source acceptance is independently opt-in and anonymous:
+
+```powershell
+$env:PROMETHEA_LIVE_GITHUB_REPO = 'owner/project'
+..\.venv\Scripts\python.exe -m pytest tests/system/test_github_observation_live.py
+```
+
+This checks GitHub metadata -> tool runtime -> durable events -> Ambient Task
+admission, with zero model requests and no GitHub mutations. It does not claim a
+live-model repair, PR delivery, unknown-effect crash certification or an advantage
+over a fixed workflow. Real-model trials require separate spend authorization.
+
+## Per-Call Output Budget Pilot
+
+The separate per-call candidate pilot is:
+
+```powershell
+..\.venv\Scripts\python.exe scripts/evaluate_call_budget.py --live --env-file .env.eval --max-cost-usd 0.30 --output .tmp/evaluations/call-budget-20261101
+```
+
+This command requires a **new** explicit authorization; it does not inherit the
+Native/budget experiment's remaining funds. Three new cases, three arms and two
+repeats are frozen in `tests/evaluation/call-budget-live.json`. Shared evaluation
+Runtime contracts make short outputs genuinely bounded; merely requesting a
+concise answer or an answer-only phase does not qualify. Contracts and permission
+checks are identical across arms. The candidate uses 4,096 only for the enforced
+short form, otherwise 8,192, and reuses existing truncation recovery. Report scope
+changes separately from recovery growth. This is not a shipped product policy or
+a predictor of arbitrary future actions. No extra classifier or Thinking switch
+is added. Source archives, request ledgers and independent gold/browser checks
+remain required; unfinished groups are not scored as task failures.
+
+## Native Acceptance And Independent Budget Replication
+
+The current full-production browser regression is
+`tests/system/test_native_production_browser.py`. Its normal case uses a local
+scripted HTTP provider with real React/App, SDK, Gateway, disk stores and process
+restarts, including restored approval and a single inert side-effect receipt:
+
+```powershell
+$env:CANVAS_TEST_BROWSER_CHANNEL = 'msedge'
+..\.venv\Scripts\python.exe -m pytest tests/system/test_native_production_browser.py -k 'not live_authorized'
+```
+
+The separate live case requires a new explicit authorization, evaluation-only
+`.env.eval` settings and `PROMETHEA_NATIVE_LIVE_USD=0.10`. It meters **all** model
+traffic, including greetings, through one proxy retained across backend restarts.
+The conservative reserve of each request must fit the remaining total budget;
+unknown usage prevents resuming. Existing ledgers cannot be silently replaced.
+See the audit for the completed cohort's scope and unresolved background-call
+exposure. Neither a passing scripted run nor this limited live journey certifies
+arbitrary process termination during an external side effect.
+
+`tests/test_model_protocol.py` exercises the product Chat codec through
+`PrometheaConversation` and ActionService, including streaming, approval/denial,
+checkpoint restart, unknown effects, compaction and receipt isolation. Experimental
+and product decoders share `gateway/model_protocol.py`; the older append-only
+pilot transcript is not the production implementation.
+
+`tests/evaluation/budget-independent-live.json` freezes four new tasks and the
+same structural predictor before any paid request. Every task uses all three
+policies twice (24 planned runs), with identical Prompt JSON, tools, acceptance
+checks and recovery. The prospective underestimation category is not selected
+after observing results. Browser calibration includes correct code, broken
+semantics and a prose-only negative control.
+
+With explicit authorization, run the combined isolated experiment:
+
+```powershell
+..\.venv\Scripts\python.exe scripts/evaluate_native_budget.py --live --env-file .env.eval --max-cost-usd 0.75 --output .tmp/evaluations/native-budget-20261101
+```
+
+The three Native smoke cases and 24 budget runs share **one in-memory admission
+ledger**. No cost reset occurs between phases; request content and the conservative
+reserve are fsynced before sending. Per-request reserve is capped at $0.03,
+requests time out at 120 seconds and SDK retries are disabled. Unknown usage stops
+the experiment and retains the request reserve. A budget/deadline stop leaves
+uncompleted runs unscored, not failed. This command always needs a fresh directory
+and a new explicit authorization; it does not silently restart an earlier budget.
+The launcher archives the clean source snapshot before creating deployment state;
+archives, credentials and evidence remain ignored runtime artifacts. The completed
+2026-11-01 cohort and its limitations are recorded in the testing audit.
+
+The earlier 2026-11-01 live Native acceptance uses the product codec and real Action/Capability path,
+with a single-provider metered test transport. Product streaming and restart have
+offline integration coverage; this is not live coverage of every provider, MCP,
+Canvas, or an end-to-end desktop UI. Compare functional completion and cost per
+delivered goal first, not response length or configured output ceilings.
+
 ## Layers And Ownership
 
 | Layer | Purpose | Actual Boundary |
@@ -12,8 +119,8 @@ See [the audit and coverage matrix](testing-audit.md) for retained risks and
 | Unit | Deterministic contracts, policy, state transitions, data transformations | Explicit file list in `tests/evaluation/suites.json`; mixed files stay integration |
 | Module integration | Cross-service contracts, ownership, approvals, persistence and recovery | Existing service tests plus `tests/integration/test_runtime_journeys.py`; model outputs scripted at the model boundary |
 | Intelligent behavior | Model decisions, extraction, recall relevance, situation and initiative | Versioned `tests/evaluation/behavior.json`, run independently of normal product operation |
-| System | HTTP/authentication, streaming, actual artifacts and process restart | `tests/system/` composes real routes/services; isolated source snapshot for TCP/restart |
-| Browser | Real React rendering, interactions, races and disclosure | Existing Playwright tests mostly use API fixtures; not real-provider E2E |
+| System | HTTP/authentication, streaming, actual artifacts and process restart | `tests/system/` includes the actual production launcher, plus explicitly composed HTTP Runtime journeys |
+| Browser | Real React rendering, interactions, races and disclosure | Fixture-based UI regressions plus `test_production_browser.py` against the real launcher/API; no live-model quality claim |
 | Live acceptance | Operator-owned deployment/provider checks and real business tasks | Explicit opt-in only; no automatic credentials or personal data |
 
 Tests at different boundaries are not duplicates merely because they concern
@@ -22,7 +129,213 @@ assert observable facts, not just a successful response. Replace the external
 model/network boundary when needed; do not replace the whole service whose
 behavior the test claims to verify.
 
+The calculator budget-stop regression is covered by
+`tests/test_action_completion.py`, `tests/system/test_http_runtime.py` and
+`tests/system/test_chat_completion_browser.py`: actual file writes, no execution
+during final completion, nonempty model/Runtime reports, SSE/HTTP parity and
+reopened history. The browser case uses real React, SDK and HTTP services with
+scripted model I/O, not API interception; it does not claim live-model calculator
+generation or successful Canvas mounting. Task tests additionally verify explicit
+continuation without repeating the committed write and goal-progress persistence.
+
+`tests/test_action_protocol.py` checks complete-fence compatibility without JSON
+repair, concatenated actions, nested duplicate fields, non-JSON constants, exact
+argument preservation, batch IDs, approval blocking and safe streamed disclosure.
+It also exercises independent recovery families, the shared step/final-response
+boundary, checkpoint restoration and original-response versus canonical-history
+audit records. These scripted-model checks establish protocol behavior, not a
+measured improvement in live-model delivery or cost. Keep all budget-comparison
+arms on the same parser and recovery policy before evaluating prediction.
+
 ## Deterministic Execution
+
+### Runtime Efficiency Experiments
+
+`scripts/evaluate_runtime_efficiency.py` compares the versioned ten-case offline
+corpus through real Runtime/Workspace services and scripted model I/O:
+
+```powershell
+python scripts/evaluate_runtime_efficiency.py --output .tmp/evaluations/efficiency-before
+# Apply the change, then use the same corpus and machine:
+python scripts/evaluate_runtime_efficiency.py --output .tmp/evaluations/efficiency-after --baseline .tmp/evaluations/efficiency-before/report.json
+```
+
+Offline request characters and scripted model calls are not provider tokens,
+cache hits, real-model quality or invoiced savings. Raw observations/artifacts
+must remain intact. Never regenerate the old report using modified code and
+present it as a historical baseline.
+
+For live paired policy tests, put only `PROMETHEA_EVAL_*` settings in ignored
+`.env.eval`: AGENT_BASE_URL, AGENT_API_KEY, AGENT_MODEL,
+AGENT_INPUT_USD_PER_MILLION, AGENT_OUTPUT_USD_PER_MILLION and MAX_COST_USD
+(all with the prefix). Use current conservative price ceilings. No product
+credentials are inherited. SDK retries are disabled in the evaluation endpoint;
+every paid request shares one call/token/time/currency admission budget. Missing
+provider usage stops further calls. The calculator check uses a sandboxed browser
+with all network requests blocked, not assistant claims.
+
+```powershell
+python scripts/evaluate_runtime_efficiency.py --live --env-file .env.eval --output .tmp/evaluations/efficiency-live
+# Continue within the ORIGINAL currency ceiling, rather than reset spending:
+python scripts/evaluate_runtime_efficiency.py --live --env-file .env.eval --case long-source-tail --previous-report .tmp/evaluations/efficiency-live/report.json --output .tmp/evaluations/efficiency-followup
+```
+
+The live comparison shares current Runtime safety and stable-prefix behavior;
+it ablates fixed-output/legacy observation limits against adaptive/compact ones,
+not historical Python checkouts. Alternate A/B order; compare only fully paired,
+fully evaluated cases. Keep costs of incomplete attempts in total spend. Report
+provider tokens, cache usage, actual artifact checks and failure types. One
+repetition is a smoke experiment, not a statistically established improvement.
+The known-cost estimate is not an invoice; product SDK-level call metrics also
+cannot reveal hidden transport retries by an upstream SDK/server.
+
+### Goal Progress Versus Output Length
+
+`scripts/evaluate_task_progress.py` reuses the isolated Runtime and evaluation
+endpoint for a three-arm output-budget experiment: fixed 2,000, fixed 8,192,
+and adaptive 2,000 to 8,192 tokens. All arms share eight decision steps, the same
+8,000/32,000-character Observation policy, recovery rules, tools and prompts.
+The fixed-large control separates adaptation from merely permitting more output.
+This is not the previous two-factor Observation/recovery ablation.
+
+The versioned `tests/evaluation/task-progress-live.json` defines calculator
+repair, quotation validation and persisted to-do interactions. Before execution
+and after committed observations, an evaluator records actual artifact versions
+and independently runs browser assertions. Golden inputs/results are not sent
+back to the Agent. Report initial/final checks, first verified delivery, gains,
+regressions, repeated observations, code artifacts, calls, output tokens and
+conservative cost per verified goal. Code length, reasoning length and longer
+answers earn no points. Calls after the last check gain include necessary final
+reporting; repeated reads are not automatically classified as useless.
+
+```powershell
+# No provider requests; do not invent historical intermediate artifact versions:
+python scripts/evaluate_task_progress.py --previous .tmp/evaluations/efficiency-live/report.json --output .tmp/evaluations/task-progress-previous
+# Only after NEW explicit spending authorization; CLI budget applies to this run:
+python scripts/evaluate_task_progress.py --live --env-file .env.eval --max-cost-usd 0.50 --repeat 2 --output .tmp/evaluations/task-progress-live
+```
+
+Live execution copies distributable source into the existing disposable snapshot
+mechanism, excludes operator config/data, disables personal memory and reads only
+the explicitly selected evaluation credentials. Browser checks use independent
+contexts, a synthetic origin and a restrictive CSP/network route; they do not
+execute generated Python/shell code on the host. The browser canary must pass
+before any paid request. Model time and grader time are separate. A single shared
+call/token/time/currency cap admits requests; no hidden SDK retries. Unknown
+billing or evaluator failure stops further work. Use a fresh output directory;
+this runner does not resume or silently reset the original experiment budget.
+
+Use a recorded seeded shuffle of task/arm order and repeat each task twice by default. Compare only groups with
+all three arms evaluated, including genuine functional failures; quota stops
+and evaluator failures remain visible but are not Agent failures. Report total
+spending including incomplete groups. If no output truncation occurs, the sample
+does not demonstrate adaptive recovery effectiveness. This small experiment
+tests within-run progress and standalone code delivery, not statistical superiority,
+production Canvas mounting, cross-restart continuity or long-term cognition.
+
+### Declared-Contract Budget Prediction
+
+`tests/evaluation/budget-prediction-live.json` defines a separate held-out pilot:
+Unicode scratchpad, bill splitter and persistent inventory. Compare fixed 8,192,
+predicted fixed, and predicted adaptive. Prediction uses named fields/actions/
+persistent collections explicitly provided to every arm as delivery requirements.
+The candidate weighted count selects 2,048/4,096/8,192; absent a contract, fall
+back conservatively to 8,192. Weights and thresholds are experimental hypotheses,
+not a proven complexity estimator. No keywords, hidden checks, model classifier
+or as-yet-unselected tool action are used. The B/C initial prediction is identical;
+only C can increase its allowance on truncation, through current Runtime recovery.
+
+```powershell
+python scripts/evaluate_task_progress.py --live --corpus tests/evaluation/budget-prediction-live.json --seed 20261031 --env-file .env.eval --max-cost-usd 0.50 --repeat 2 --output .tmp/evaluations/budget-prediction-live
+```
+
+Use separate spending authorization and a fresh directory. Before the first paid
+call, retain the corpus, source hash, resolved policies and schedule in `plan.json`
+and `corpus.json`. All arms share the corrected parser/recovery and standalone
+workspace tools; the Agent cannot access the evaluator/browser checks. Reference
+and deliberately broken implementations validate the grader before execution.
+The live report records actual per-request allowances, functional gains, failures,
+artifact versions, input/output/cache tokens and conservative cost. Do not adjust
+thresholds or rerun failed cases inside the same pilot. This evaluates a declared
+contract prior, not general natural-language budget prediction or per-step phase
+adaptation. Leave product defaults unchanged until representative evidence exists.
+
+### Four-Category Budget Pilot
+
+The follow-up `tests/evaluation/budget-four-category-live.json` pre-registers one
+case per simple/medium/large/underestimated category. Three existing regression
+tasks anchor the previous pilot; a new CSV reconciliation page probes semantic
+complexity missed by the unchanged structural predictor. Full parsing, validation,
+aggregation and money rules are public requirements. No minimum code length,
+hidden requirement or forced truncation is imposed. Category labels and browser
+answers are not used by the predictor. B/C initial limits are identical; only
+real provider truncation allows C to expand. Keep Prompt JSON fixed in all arms.
+
+```powershell
+# NEW authorization required; a four-case single-repeat pilot, not 108 trials:
+python scripts/evaluate_task_progress.py --live --corpus tests/evaluation/budget-four-category-live.json --repeat 1 --request-timeout 120 --max-request-cost-usd 0.03 --max-cost-usd 0.50 --env-file .env.eval --output .tmp/evaluations/budget-four-category
+```
+
+The report includes per-category paired results, actual token/call costs,
+recovery retries and observed allowance growth. JSON browser assertions compare
+actual structured results, not substrings. Calibrate the grader with correct and
+incorrect CSV implementations before paid requests. No growth in a real-model
+pilot means expansion benefit remains untested, not that the task must be rerun
+until it truncates. Keep all incomplete/non-paired costs in the admission ledger.
+
+### Protocol Reliability Pilot
+
+`scripts/evaluate_protocol.py` compares Prompt JSON with experimental native
+canonical-action functions through the same ActionService and CapabilityService.
+Ten cases cover direct answers, arithmetic, file reads/writes, batches, missing
+file recovery, capability inspection, absent capability resolution and approval.
+The approval fixture has no real external send; any invocation is a safety failure.
+Both modes retain the same registry/schema context, validation, four-decision
+limit, one final-only request and 8,192 allowance. Native functions encode the
+canonical actions, not a second tool registry or per-tool strict schemas.
+
+```powershell
+# Requires separate, explicit live authorization:
+python scripts/evaluate_protocol.py --live --env-file .env.eval --max-cost-usd 0.50 --max-request-cost-usd 0.03 --output .tmp/evaluations/protocol-pilot
+```
+
+Native reasoning and tool-call receipt associations are replayed as required by
+the [provider](https://api-docs.deepseek.com/guides/thinking_mode/#tool-calls)
+and included in input costs. No extra summarizer or Agent loop is
+introduced. The adapter is evaluation-only; the normal product protocol does not
+switch. One trial per task/mode is a pilot, not statistical proof or a production
+compatibility claim. Compare only complete task pairs. A provider/adapter failure
+stops the experiment instead of being scored as a task failure.
+
+The prototype supports append-only text histories only. It fails closed on
+rewritten/compacted history and is not integrated with product streaming or
+checkpoint restoration. Native pilot success does not establish production
+readiness. Required tool checks assert successful observations; a case explicitly
+expecting a failed read must separately assert the failure. Calling an operation
+is not proof that it worked. Corpus v2 explicitly names capability-request versus
+parameter-inspection paths because this pilot tests both action encodings, not
+free-form planner quality.
+
+Before transport, the evaluator durably appends the actual request, its hash,
+input byte size, output allowance and conservative reservation to `requests.jsonl`.
+Credentials are not part of the request body. Native schemas and replayed reasoning
+are included in admission. Successful usage settles the record; timeout/crash leaves
+that specific request reserved. Unknown usage stops further calls. Journal failure
+before sending prevents transport; malformed journals are not silently treated as
+zero exposure. All evidence remains ignored local evaluation data. The CLI uses
+disposable source/workspaces, never personal memory or valuable host files.
+
+An interrupted paid pilot is not silently resumed. If the operator explicitly
+authorizes a new attempt inside the original currency ceiling, use a fresh output
+directory and `--prior-run <original-report>` to carry known spending and reserve
+unreceipted requests. `--request-timeout 120` applies equally to every arm, without
+SDK retries. Legacy failed receipts lacking input size require an explicit
+`--unknown-input-token-cap` based on that provider's context limit; this can reserve
+most of the budget and prevent the planned repetitions. New failure receipts keep
+input bytes. Reports distinguish current known costs, prior known costs, unknown
+reserves and overall usage uncertainty. An upper exposure estimate is not actual
+spend. Repeated/nested restart ledgers are deliberately unsupported; never reset
+the ceiling or splice an abandoned trial into the new paired cohort.
 
 Install the existing project development dependencies (`pip install -e ".[dev]"`).
 Use Node 22 or later for the existing UI strip-types test command.
@@ -57,11 +370,23 @@ CI configuration are not evidence of a successful remote CI run.
 
 ## Behavior Evaluation
 
-The initial corpus has 22 versioned cases covering direct/tool actions,
+The current corpus has 37 versioned cases covering direct/tool actions,
 unsupported capabilities, recovery, cross-turn updates, memory extraction and
 Gate semantics, SQLite recall/isolation, current/stale observations and bounded
 Ambient behavior. Cases include positive, negative, boundary and curated
 historical failures. They contain synthetic data, not personal logs.
+Each of action, memory classification, retrieval, situation, Ambient,
+continuity and delegation has 5-7 cases. `tests/test_ci_runner.py` guards
+the group/risk structure, not a target total. Executable Gold expectations are
+engineering-reviewed contracts over synthetic facts, not additional individually
+human-reviewed Judge labels. Do not call an unmeasured model a passing model.
+
+Four cross-service Agent journeys in
+`tests/integration/test_agent_business_tasks.py` verify autonomous local work,
+parent/child artifact delivery and context isolation, persistent memory after
+database reopening, and a Canvas expression/feedback/edit/next-turn cycle.
+Their offline model is scripted; the services, files, SQLite and component state
+are real. Canvas service interaction is not a full browser/provider E2E test.
 
 ```powershell
 python scripts/run_evaluations.py --mode validate
@@ -84,7 +409,7 @@ SQLite store and adapter, not Neo4j or embedding quality.
 Defaults: 3 trials, 30 shared model admissions, 16,000 reported tokens, 800 output
 tokens per call, 180 seconds total, 60 seconds per case, stop after 3 failures.
 Select one group and set its budget explicitly; default limits need not fit all
-22 cases. There are no hidden provider retries. Failed API admissions consume
+37 cases. There are no hidden provider retries. Failed API admissions consume
 call budget. Missing usage stops further calls and leaves cost unknown.
 Input reservations use a conservative text-byte estimate, not a provider quote.
 
@@ -144,6 +469,10 @@ trials and tiny corpora do not establish broad statistical significance.
 `--compare <behavior.json>` requires the same mode, corpus, rubric, cases,
 repetitions and complete runs. It reports differences, not an automatic claim
 of improvement. Unjudged semantic quality remains `not_measured`.
+Judge identity and calibration hash must also match. Reports include per-case
+acceptance changes and call/token/estimated-cost deltas, not only group averages;
+an improved hard check does not establish improved semantic quality. Keep the
+Agent identity in comparisons so intentional model changes remain visible.
 `--mode replay --records <behavior.json>` reruns evidence checks (and optional
 independent Judge), not the Agent: replay cannot show that new Runtime code
 improved previously recorded behavior.
@@ -172,6 +501,47 @@ An installed Edge or Playwright Chromium is required. Run UI/SDK checks separate
 `npm --prefix UI run build`, `npm --prefix sdk/typescript run generate:check`,
 `npm --prefix sdk/typescript run typecheck`, `npm --prefix sdk/typescript test`.
 Browser fixture success is not full production-shell + Gateway + provider E2E.
+
+### Production Startup Acceptance
+
+`tests/system/test_production_startup.py` runs the actual `start_gateway_service.py`
+in a disposable source deployment, with production lifespan, plugin discovery,
+service wiring and real SQLite/identity/file stores. It covers startup, HTTP
+registration/login, upload, `environment.inspect` through the real batch/tool
+boundary, process restart and persisted identity/file access. Malformed deployment
+config and a file blocking workspace-directory creation must produce a nonzero
+exit without false readiness, scheduler startup or repeated health polling.
+These cases are included in full, critical and smoke execution.
+
+`tests/system/test_production_browser.py` uses real React and Vite against that
+production process. It performs registration/login/upload/read/reload without
+Playwright API interception or dependency overrides. It requires installed UI/SDK
+dependencies and `CANVAS_TEST_BROWSER_CHANNEL`; CI includes it alongside the
+existing fixture browser checks. Synthetic screenshots and launcher diagnostics
+are retained under ignored `.tmp/production-qa/`.
+
+```powershell
+python -m pytest -q tests/system/test_production_startup.py
+$env:CANVAS_TEST_BROWSER_CHANNEL='msedge'
+python -m pytest -q tests/system/test_production_browser.py
+```
+
+No personal `.env`, accounts, logs or databases are copied. Speech/embedding
+providers and cloud credentials are not inherited. Browser/desktop controllers
+are disabled in the test deployment; filesystem and environment controllers are
+real. A no-credential loopback-only model endpoint prevents paid model access;
+these tests do not score LLM behavior, Neo4j integration, computer control or
+first-install dependency downloads. Real startup acceptance complements, rather
+than replaces, unit tests and live-provider task evaluation.
+
+Speech regression uses `tests/test_voice_routes.py`, SDK `voice.test.mjs` and
+`tests/test_voice_browser.py`. Network responses and microphone input are synthetic;
+provider request encoding, user isolation, ordinary Chat/history, approval waiting,
+audio failure preservation and resource cleanup remain observable assertions.
+For live acceptance, explicitly configure a dedicated STT/TTS service and test
+sample synthesis/download, recording/transcription, normal chat and optional spoken
+replies in Settings. Check the provider's actual usage separately; do not interpret
+chat token totals as speech charges. No audio provider is called by CI.
 
 Only the following live suite is the opt-in read-only deployment probe:
 

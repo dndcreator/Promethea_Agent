@@ -46,6 +46,7 @@ class ActionRun:
     messages: List[Dict[str, Any]]
     context: ActionContext
     budget: Optional[int] = None
+    progress_grace_steps: int = 0
     run_id: str = field(default_factory=lambda: f"act_{uuid.uuid4().hex}")
     status: str = "pending"
     trace: List[Dict[str, Any]] = field(default_factory=list)
@@ -65,6 +66,10 @@ class ActionRun:
     applied_steering_ids: List[str] = field(default_factory=list)
     accepting_steering: bool = True
     streamed_answer: str = ""
+    model_recovery: Dict[str, Any] = field(default_factory=dict)
+    model_protocol: str = ""
+    model_wire: Dict[str, Any] = field(default_factory=dict)
+    pending_input: Optional[Dict[str, Any]] = None
 
     def add_trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         self.trace.append(

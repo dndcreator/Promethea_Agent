@@ -10,6 +10,7 @@ from gateway.goal_gaps import GoalGapState, apply_gap_delta, gap_outcome, gap_pr
 from gateway.public_contracts import Task
 from gateway.public_views import public_task
 from gateway.task_service import TaskService, TaskRevisionConflict, TaskExecutionConflict
+from tests.support.runtime import observation_fact, goal_context
 
 
 SPEC = {"id": "artifact", "kind": "achievement", "requirement": "The exported document passes validation",
@@ -43,12 +44,11 @@ class Core:
 
 
 def last_observation(messages):
-    return json.loads(messages[-1]["content"][0]["text"])
+    return observation_fact(messages)
 
 
 def current_revision(messages):
-    system = next(item["content"] for item in messages if item["role"] == "system" and "Runtime goal gaps" in item["content"])
-    return json.loads(system.split("\n")[-1])["revision"]
+    return goal_context(messages)["revision"]
 
 
 def test_checks_are_real_but_not_proof_of_full_goal_coverage():
@@ -259,13 +259,18 @@ def test_task_gap_state_is_durable_isolated_and_prevents_false_completion(tmp_pa
         restarted.commit_goal_gaps(task_id=task_id, user_id="bob", state=state, expected_revision=0, expected_objective="Export correctly")
     view = Task.model_validate(public_task(restarted.get_task(task_id))).model_dump()["goal_gaps"]
     assert view is not None and "recent" not in view and "barriers" not in view
+    progress = public_task(restarted.get_task(task_id))["goal_progress"]
+    assert progress == {"revision": state.revision, "tracked": 1, "open": 1, "blocked": 0,
+                        "resolved": 0, "checks_passed": 0, "goal_verification": "unknown"}
     restored = TaskService(storage_path=str(tmp_path / "copy.json"))
     restored.import_user_state(user_id="alice", payload=restarted.export_user_state(user_id="alice"))
     assert restored.get_task(task_id)["goal_gaps"] == state.model_dump()
+    assert public_task(restored.get_task(task_id))["goal_progress"] == progress
     restarted.update_task(task_id=task_id, user_id="alice", objective="Different goal")
     with pytest.raises(TaskExecutionConflict):
         restarted.commit_goal_gaps(task_id=task_id, user_id="alice", state=state, expected_revision=0, expected_objective="Export correctly")
     assert "goal_gaps" not in restarted.get_task(task_id)
+    assert public_task(restarted.get_task(task_id))["goal_progress"]["tracked"] == 0
 
 
 def test_task_gap_commits_reject_stale_writers_and_execution_epochs(tmp_path):

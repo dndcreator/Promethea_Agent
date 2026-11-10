@@ -4,6 +4,37 @@ This page lists the toolbox shipped as the `standard` manifest package. All tool
 
 If your question is "what can the agent do out of the box", start here.
 
+## Discovery And Capability Acquisition
+
+Tools can declare the operations they offer in `provides`; `requiresCapability`
+remains a readiness prerequisite. Both bundled and external tools use the same
+Registry projection. Resolution reports declaration coverage and unavailable
+candidates, but does not determine whether a whole task is feasible. Ordinary
+tool IDs remain discoverable without additional annotations.
+
+The default model context is a bounded namespace/tool-ID directory. Runtime
+retains the complete definitions; it does not inject every description, readiness
+record or an alphabetical batch of schemas into each request. Use
+`capability_request` for a namespace/offered operation and `capability_inspect`
+for exact schemas and effect/confirmation details. A wildcard request (`["*"]`)
+returns the complete owner-scoped directory through existing Observation paging
+when necessary. This is discovery, not authorization. Explicit skill preferences
+can preload only callable definitions within the same projection budget.
+
+When an operation has no direct provider, the Agent can inspect available
+capability groups and compose existing tools. If a reusable implementation is
+needed and Self Evolve is enabled, its existing create/edit/validate/publish
+tools can supply one. One-off code execution need not become a plugin. Generated
+commands preserve `provides`, `inputSchema` and `outputSchema`; successful
+publication hot-registers them and refreshes the capability context in the same
+Action loop. These are available paths, not a guarantee of model strategy quality.
+
+Generated code remains owner-private and subject to the existing process
+sandbox and approval policy; metadata cannot lower its effect level. The native
+Windows runner provides partial/write isolation, not full read/network/desktop
+isolation. New tools do not create external permissions or solve website access
+restrictions. See the [tool authoring contract](playbooks/how-to-add-a-tool.md#offered-capabilities-and-prerequisites).
+
 ## Tool Pack Goal
 
 The standard package covers common agent tasks without requiring custom plugin work:
@@ -14,6 +45,53 @@ The standard package covers common agent tasks without requiring custom plugin w
 - operate workflow and memory
 
 ## Categories
+
+### Persistent Schedules And Source Evidence
+
+- `runtime.schedule`: persist an owner-scoped registered-tool target and trigger;
+  `observe=true` requires an explicitly declared read-only observation source.
+- `runtime.schedules`, `runtime.pause_schedule`, `runtime.resume_schedule`,
+  `runtime.remove_schedule`: manage the current owner's schedules.
+- `runtime.read_event`: page an owner-scoped retained Runtime event by ID.
+
+See the [observation-source contract](playbooks/how-to-add-a-tool.md#persistent-observation-sources).
+The existing scheduler owns collection and recovery; these are normal manifest
+tools, not a new service or GitHub-specific automation loop.
+
+### GitHub Read Adapter
+
+The separate `agentkit/tools/github` manifest contributes `github.observe_ci` and
+`github.read_ci` through that same tool runtime. The observer reports run metadata,
+including success/recovery, and does not create a repair task by itself.
+`github.read_ci` reads run metadata, paged jobs/steps and bounded job log text.
+Signed log downloads never receive the GitHub authorization token.
+
+For private repositories or higher request limits, put `GITHUB__TOKEN` in the
+current user's `config/users/<user_id>/secrets.env`, with repository-scoped Actions
+read permission. It is not copied from the operator's root environment or another
+account. Public anonymous reads are supported subject to GitHub rate limits.
+
+Example `runtime.schedule` arguments:
+
+```json
+{
+  "name": "Repository CI",
+  "service_name": "github",
+  "tool_name": "observe_ci",
+  "args": {"repository": "owner/project", "branch": "develop"},
+  "interval_seconds": 300,
+  "observe": true
+}
+```
+
+The first observation covers the latest five matching runs, not historical
+backfill. Later polls paginate new runs, track unfinished runs across restarts
+and include recent completed runs so rerun/recovery changes are visible. Catch-up
+beyond ten pages or more than 100 active runs fails without advancing the cursor;
+narrow the scope or perform explicit backfill. Reruns of old completed runs outside
+the retained recent window are not guaranteed by polling; a future webhook input
+may complement this adapter without changing the cognition/execution path.
+This release does not enable GitHub mutation, pushing, PR creation or merging.
 
 ### Data and Text
 
@@ -195,6 +273,108 @@ Not all tools are equal risk.
 
 `CapabilityService`, `ToolRegistry`, and `ToolPolicy` are the runtime authority for
 that decision. The model cannot grant approval through tool arguments.
+
+### Workspace Media
+
+Install the optional codec support with `pip install ".[media]"`. No system
+FFmpeg executable or shell approval is needed for `video.inspect` (duration,
+streams and first-frame decode), `video.frame` (visual frame at a timestamp),
+or `video.edit` (ordered trim and join to a new H.264 MP4). All times are in
+milliseconds. The first edit format is silent video; output does not overwrite
+existing files. Inputs are local MP4, MOV, WebM or MKV under the owned workspace.
+Edits accept up to 12 segments and 120 seconds of output. `image.view` reads a
+workspace image or screenshot into the existing multimodal model route. Frame
+and screenshot understanding requires a configured vision-capable model.
+
+For browser capture, install the recording component with
+`python -m playwright install ffmpeg`. Use `record_start` on an allowed URL,
+then `record_snapshot` or `record_screenshot` to observe that isolated tab.
+`record_click` and `record_press` retain external interaction approval;
+`record_press` accepts up to 32 explicit keys in one approved call. Action times
+are approximate offsets from capture start; use `video.frame` to verify exact
+edit points. `record_stop` closes the isolated context and returns the finalized
+WebM path. The recorder stops at its time limit, never attaches to the desktop,
+and does not share normal tabs or their browser credentials. It does not capture
+audio.
+
+### Browser Observation And Account Boundaries
+
+`computer_control.browser_action` uses the same registry and policy path as other
+tools. `snapshot` reports main-document controls and bounded embedded-frame
+metadata; an empty control list does not prove that a page has no embedded UI.
+Frame contents are not included or inspected automatically.
+
+For a static HTML artifact, use `browser_action(action="preview", path="app/index.html")`.
+Use the same action with `operation` set to `snapshot`, `click`, `fill`, `press`,
+`reload`, or `close`. Use selectors from the preview snapshot. Runtime reads the
+entry file and supported static assets from the trusted workspace and serves them
+inside a separate browser context without opening a port. No normal tabs,
+credential store, `file://` access, or private-network exception is granted.
+The preview blocks outbound web requests; it is not an OS process sandbox.
+Local storage survives a reload of the same preview but is discarded when the
+preview closes or changes to a different app. This verifies browser behavior,
+not persistence after closing the preview.
+
+Browser observations report connection state, launch mode and active/open tab
+IDs. Headed mode does not certify that the user saw the window. Closed pages are
+removed and the active handle falls back to a surviving page. If no page remains,
+reads fail without reopening; `new_tab` is an explicit operation. New-tab replies
+report whether that tab is active; use `switch_tab` when necessary. A generated
+credential reference proves storage only, not successful registration or login.
+
+Screenshot tool replies contain a validated PNG `image_path` under the trusted
+workspace, not Base64 text or an inferred visual description. The image remains
+available as a file. Set `include_image=true` on `screenshot` or
+`record_screenshot` to also send pixels via the standard visual observation
+path for the next model decision. This requires a vision-capable model; the
+default remains file-only. Raw controller images remain available to existing
+OCR code.
+
+Form observations omit field values and ordinary fills do not echo their text.
+`create_credential` generates a password for the current HTTPS origin inside
+Runtime. Its output is an opaque `credential_ref`, origin and username, never the
+password. `list_credentials` lists the same metadata for the current owner;
+`fill_credential(selector, credential_ref)` checks owner, exact origin and password
+field type, and remains an external-write operation requiring normal approval.
+Plaintext password fills are rejected. Retain account metadata/references in
+normal Agent state, not secret values in prompts or Memory.
+
+Windows uses DPAPI in the current OS-user context with owner/reference binding.
+Browser cookies and local storage for owner-scoped workspaces are encrypted in
+the same protected store; successful browser operations attempt a durable save.
+Persistence failure after an operation is reported without pretending the
+operation did not occur. Anonymous/unscoped browsers remain ephemeral. Platforms
+without this protected-storage implementation cannot generate or fill managed
+credentials and do not silently fall back to plaintext authentication files.
+Existing workspace `browser_state.json` files are left untouched and not
+automatically trusted/imported. Passwords and browser authentication are not
+portable personal-space data; DPAPI records require their original OS context.
+
+Protected credential profiles disable arbitrary `evaluate`. Creating/filling
+credentials after arbitrary script execution is refused; start a clean context.
+Fixed DOM snapshot/content operations remain available, and screenshots mask
+password fields. This does not isolate secrets from trusted Python extensions,
+approved host code, administrators, or the destination website. Keep privileged
+command approval and sandbox boundaries intact. Do not reuse personal browser
+profiles. Site challenges require human handling, never automated bypass.
+Email-code handoff does not grant mailbox access.
+
+### Waiting For Human Input
+
+The canonical `await_user` action requests a non-secret text reply or human
+acknowledgement. Runtime persists `waiting_input` before publishing the request;
+it is nonterminal and performs no model polling. Session detail exposes only
+`pending_input`; internal messages, native wire history and checkpoints remain
+private. Chat replies use the existing `message` plus `reply_to_input` request ID.
+The UI binds this field automatically. Clients must refresh a stale request
+rather than assuming a reply addresses the newest question.
+
+Task-backed waits use the existing TaskRuntime lifecycle. Resume an
+acknowledgement through the ordinary Task resume command, or supply
+`input_reply={request_id,content}` for text input. Neither operation approves a
+tool, proves that a website operation succeeded, nor resolves a Goal Gap by
+itself. The model receives the user's report as an explicit unverified
+Observation and can inspect the environment before deciding what to do next.
 
 ## Example: General Task Pattern
 

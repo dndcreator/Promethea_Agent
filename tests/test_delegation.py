@@ -17,6 +17,7 @@ from gateway.models.session_state import SessionState
 from gateway.protocol import EventType
 from gateway.runtime_event_log import RuntimeEventLog
 from gateway.workbench_projection import WorkbenchProjection
+from tests.support.runtime import observation_fact
 
 
 def context(enabled=True):
@@ -299,10 +300,10 @@ async def test_parent_model_delegates_through_registry_and_synthesizes_from_obse
                 child_calls.append(messages)
                 assert "parent-only history" not in str(messages)
                 content = {"action": "answer", "content": "independent finding"}
-            elif messages[-1]["content"] == "parent-only history":
+            elif not any(isinstance(row.get("content"), list) for row in messages):
                 content = {"action": "tool_calls", "calls": [{"id": "delegate-1", "name": "subagent.delegate", "args": request().model_dump()}]}
             else:
-                observation = json.loads(messages[-1]["content"][0]["text"])
+                observation = observation_fact(messages)
                 assert observation["result"]["output"] == "independent finding"
                 content = {"action": "answer", "content": "parent synthesis", "evidence_refs": [observation["observation_id"]]}
             return {"status": "success", "content": json.dumps(content), "usage": {"prompt_tokens": 3, "completion_tokens": 2}}

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "sokoban",
+  "goal": "Open https://tudi.games/sokoban/play/ and play the first level yourself. Record your actual session. After playing, choose the most meaningful moments and produce a short MP4 highlight in the current workspace, ideally 15 to 30 seconds if there is enough material. Check that it plays and shows what actually happened, then report the result and file path. If blocked, keep the original footage and state exactly what you could verify. Do not claim a level was completed without evidence. Do not interact with accounts, payments, or other sites.",
+  "independent_checks": [
+    "Corroborate level completion from recorded game evidence, not self-report.",
+    "Decode the MP4 and confirm the selected footage corresponds to the original capture.",
+    "Verify the driver provided neither a move sequence nor edit points."
+  ]
+}

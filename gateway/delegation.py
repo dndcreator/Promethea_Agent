@@ -84,6 +84,7 @@ def child_configuration(user_config, limits):
     result.setdefault("action", {}).setdefault("gaps", {})["enabled"] = False
     api = result.setdefault("api", {})
     api["max_tokens"] = min(int(api.get("max_tokens") or config.api.max_tokens), limits["child_max_tokens"])
+    api["output_token_limit"] = min(int(api.get("output_token_limit") or config.api.output_token_limit), limits["child_max_tokens"])
     return result
 
 
@@ -164,13 +165,14 @@ class DelegationRuntime:
                     user_config=child_config, max_steps=limits["child_steps"],
                 )
             status = str(result.get("status") or "failed")
-            for key in ("prompt_tokens", "completion_tokens"):
-                scope.usage[key] = scope.usage.get(key, 0) + max(0, int((result.get("usage") or {}).get(key) or 0))
+            from gateway.model_usage import merge_usage
+            merge_usage(scope.usage, result.get("usage"))
             outcome.update(
-                status="completed" if status == "success" else status,
+                status="paused" if result.get("execution_outcome") else "completed" if status == "success" else status,
                 output=str(result.get("content") or "")[:limits["result_chars"]],
                 truncated=len(str(result.get("content") or "")) > limits["result_chars"],
                 action_loop_id=result.get("action_run_id"), usage=result.get("usage"),
+                execution_outcome=result.get("execution_outcome"),
             )
             if outcome["status"] != "completed":
                 outcome["error_detail"] = {

@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, ReactNode } from 'react'
-import { applyAnswerUpdate } from '@promethea/sdk'
+import { applyAnswerUpdate, type ToolCall, type VoiceCapabilities, type InputRequest } from '@promethea/sdk'
 import { BarChart3, Clock3, MessageCircleQuestion, Mic, Paperclip, Plus, Search, Send, Smile, Square, UsersRound } from 'lucide-react'
 import ConfirmModal from './modals/ConfirmModal'
-import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, sendVoicePtt, steerChat, stopReasoningTree, streamChat } from '../services/api'
+import { getActiveReasoning, getConfig, getGuestChatStatus, getMetrics, getSession, getWelcome, sendGuestChat, getVoiceStatus, transcribeSpeech, synthesizeSpeech, steerChat, stopReasoningTree, streamChat } from '../services/api'
+import { useAudioRecorder } from '../hooks/useAudioRecorder'
+import { useAudioPreview } from '../hooks/useAudioPreview'
+import { voiceError } from '../utils/voice-error'
 import SemanticExpressions from './SemanticExpressions'
 import { useWorkbench } from '../store/WorkbenchContext'
 import type { ChatAttachment, GuestChatStatus, StreamHandler } from '../services/api'
@@ -133,8 +136,13 @@ export default function MainContent({
   const [multiAgent, setMultiAgent] = useState(false)
   const [multiAgentAvailable, setMultiAgentAvailable] = useState(false)
   const [guestStatus, setGuestStatus] = useState<GuestChatStatus | null>(null)
-  const [isRecording, setIsRecording] = useState(false)
-  const [confirmRequest, setConfirmRequest] = useState<any>(null)
+  const [voiceStatus, setVoiceStatus] = useState<VoiceCapabilities | null>(null)
+  const [voiceStatusLoading, setVoiceStatusLoading] = useState(Boolean(user))
+  const [voiceFailure, setVoiceFailure] = useState('')
+  const voicePlaybackAllowed = useRef(false)
+  voicePlaybackAllowed.current = Boolean(visible && voiceStatus?.speak_replies && voiceStatus.tts.configured)
+  const [confirmRequest, setConfirmRequest] = useState<{ sessionId: string; toolCallId: string; toolName: string; toolArgs: string } | null>(null)
+  const [pendingInput, setPendingInput] = useState<{ sessionId: string; request: InputRequest } | null>(null)
   const [memoryNotice, setMemoryNotice] = useState<MemoryNotice | null>(null)
   const [welcome, setWelcome] = useState<WelcomeState | null>(null)
   const [welcomeRefreshToken, setWelcomeRefreshToken] = useState(0)
@@ -158,8 +166,37 @@ export default function MainContent({
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const usageRef = useRef<HTMLDetailsElement>(null)
   const followOutputRef = useRef(true)
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
-  const audioChunksRef = useRef<Blob[]>([])
+  const voiceRequest = useRef<AbortController | null>(null)
+  const speech = useAudioPreview()
+  const recorder = useAudioRecorder(async (audio, filename) => {
+    const controller = new AbortController()
+    voiceRequest.current?.abort(); voiceRequest.current = controller
+    setVoiceFailure('')
+    const result = await transcribeSpeech(audio, filename, controller.signal)
+    if (controller.signal.aborted) return
+    if (!result.stt.text.trim()) throw new Error('VOICE_EMPTY_TRANSCRIPT')
+    await handleSend(result.stt.text)
+  })
+  const isRecording = recorder.recording
+  useEffect(() => {
+    if (!user) return
+    const controller = new AbortController()
+    const load = () => { setVoiceStatusLoading(true); void getVoiceStatus(controller.signal).then(state => {
+      if (!controller.signal.aborted && state.stt && state.tts) setVoiceStatus(state)
+    }).catch(() => { if (!controller.signal.aborted) setVoiceFailure('VOICE_STATUS_UNAVAILABLE') })
+      .finally(() => { if (!controller.signal.aborted) setVoiceStatusLoading(false) }) }
+    load()
+    window.addEventListener('voice-settings-changed', load)
+    return () => { controller.abort(); voiceRequest.current?.abort(); window.removeEventListener('voice-settings-changed', load) }
+  }, [user?.user_id])
+  useEffect(() => {
+    if (activeStreamRef.current?.sessionId === sessionId) return
+    voiceRequest.current?.abort(); recorder.cancel(); speech.stop(); setVoiceFailure('')
+  }, [sessionId, recorder.cancel, speech.stop])
+  useEffect(() => {
+    if (visible) return
+    recorder.cancel(); voiceRequest.current?.abort(); speech.stop()
+  }, [visible, recorder.cancel, speech.stop])
   const abortControllerRef = useRef<AbortController | null>(null)
   const activeStreamRef = useRef<ActiveStream | null>(null)
   const viewSessionRef = useRef(sessionId)
@@ -186,7 +223,6 @@ export default function MainContent({
     activeStreamRef.current?.controller.abort()
     activeStreamRef.current = null
     abortControllerRef.current = null
-    mediaRecorderRef.current?.stream.getTracks().forEach((track) => track.stop())
   }, [])
   const localWelcomeFallback = useMemo<WelcomeState>(() => ({
     greeting: t(
@@ -345,6 +381,7 @@ export default function MainContent({
       setChatRunning(false)
       return
     }
+    if (active && active.sessionId !== sessionId) activeStreamRef.current = null
     if (isStreaming) {
       return
     }
@@ -355,6 +392,7 @@ export default function MainContent({
       setSessionTitle('')
       setTreeId(null)
       setMemoryNotice(null)
+      setConfirmRequest(null)
       return
     }
     let cancelled = false
@@ -367,6 +405,12 @@ export default function MainContent({
         syncedAgentTurnsRef.current = completedAgentTurns
         setTreeId(data.tree_id || null)
         const sessionInfo = data.session_info || data
+        setPendingInput(sessionInfo.pending_input ? { sessionId, request: sessionInfo.pending_input } : null)
+        const pending: ToolCall | null = sessionInfo.pending_confirmation || null
+        setConfirmRequest(pending?.status === 'needs_confirmation' ? {
+          sessionId, toolCallId: pending.tool_call_id, toolName: pending.tool_name,
+          toolArgs: JSON.stringify(pending.arguments || {}, null, 2),
+        } : null)
         setSessionTitle(String(sessionInfo.title || '').trim())
         setFollowups(Array.isArray(sessionInfo.followups) ? sessionInfo.followups : [])
         const loadedMessages: MessageData[] = (data.messages || []).map((message: any, index: number) => {
@@ -380,6 +424,7 @@ export default function MainContent({
             conversationTurnId: message.conversation_turn_id || undefined,
             reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
             runStatus: message.run_status,
+            executionOutcome: message.execution_outcome,
             error: message.error,
             steeringStatus: message.steering_status,
           }
@@ -411,6 +456,8 @@ export default function MainContent({
   }
 
   const handleNewChat = () => {
+    setPendingInput(null)
+    voiceRequest.current?.abort(); recorder.cancel(); speech.stop()
     setSteeringError('')
     steeringRetryRef.current = null
     appliedSteeringRef.current.clear()
@@ -426,6 +473,7 @@ export default function MainContent({
     setMessages([])
     setSessionTitle('')
     setMemoryNotice(null)
+    setConfirmRequest(null)
     setFollowups([])
     setTextSelection(null)
     setFollowupDraft(null)
@@ -475,6 +523,7 @@ export default function MainContent({
   }
 
   const handleStopStreaming = async () => {
+    voiceRequest.current?.abort(); speech.stop()
     if (activeStreamRef.current) activeStreamRef.current.outcome = 'interrupted'
     abortControllerRef.current?.abort()
     abortControllerRef.current = null
@@ -528,6 +577,7 @@ export default function MainContent({
 
   const handleSend = async (text: string = input) => {
     if (!text.trim() || isStreaming) return
+    voiceRequest.current?.abort(); speech.stop(); setVoiceFailure('')
     if (!user && !guestStatus?.available) {
       onRequireAuth()
       return
@@ -649,8 +699,13 @@ export default function MainContent({
           return
         }
         if (event === 'done') {
-          if (typeof payload.content === 'string') setMessages((previous) => previous.map((message) => message.id === agentMessageId ? { ...message, content: payload.content } : message))
-          request.outcome = payload.status === 'needs_confirmation' ? 'waiting_confirmation' : 'completed'
+          if (payload.execution_outcome?.response_source !== 'runtime') speakReply(payload.content, payload.status)
+          if (typeof payload.content === 'string') setMessages((previous) => previous.map((message) => message.id === agentMessageId ? {
+            ...message, content: payload.content, executionOutcome: payload.execution_outcome,
+            role: payload.execution_outcome?.response_source === 'runtime' ? 'status' : message.role,
+          } : message))
+          request.outcome = payload.status === 'needs_confirmation' ? 'waiting_confirmation' : payload.status === 'needs_input' ? 'waiting_input' : 'completed'
+          setPendingInput(payload.input_request ? { sessionId: String(payload.session_id || sessionId || ''), request: payload.input_request } : null)
           abortControllerRef.current = null
           setIsStreaming(false)
           setChatRunning(false)
@@ -686,6 +741,7 @@ export default function MainContent({
                       conversationTurnId: message.conversation_turn_id || undefined,
                       reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
                       runStatus: message.run_status,
+                      executionOutcome: message.execution_outcome,
                       error: message.error,
                       steeringStatus: message.steering_status,
                     }
@@ -725,66 +781,19 @@ export default function MainContent({
           error: { code: 'code' in error ? error.code : 'RUN_FAILED', message: error.message },
         } : item))
       }
-    if (user) await streamChat(userMessage.content, sessionId, attachments, onEvent, onError, controller.signal, multiAgent)
+    if (user) await streamChat(userMessage.content, sessionId, attachments, onEvent, onError, controller.signal, multiAgent,
+      pendingInput?.sessionId === sessionId ? pendingInput.request.request_id : undefined)
     else if (guestStatus) await sendGuestChat(guestTranscript(messages, text, guestStatus), onEvent, onError, controller.signal)
   }
 
-  const startRecording = async () => {
-    if (!user) {
-      onRequireAuth()
-      return
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const mediaRecorder = new MediaRecorder(stream)
-      mediaRecorderRef.current = mediaRecorder
-      audioChunksRef.current = []
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) audioChunksRef.current.push(event.data)
-      }
-      mediaRecorder.start()
-      setIsRecording(true)
-    } catch {
-      alert(t('无法访问麦克风。', 'Microphone access denied or unavailable.'))
-    }
-  }
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
-        const formData = new FormData()
-        formData.append('audio', audioBlob, 'voice.webm')
-        if (sessionId) formData.append('session_id', sessionId)
-        formData.append('speak', 'true')
-        try {
-          setIsStreaming(true)
-          setChatRunning(true)
-          const res = await sendVoicePtt(formData)
-          if (res.ok) {
-            const data = await res.json()
-            setMessages((prev) => [
-              ...prev,
-              { id: `${Date.now()}-voice-user`, role: 'user', content: data.transcript || t('语音消息', 'voice message'), name: user?.username || 'You' },
-              { id: `${Date.now()}-voice-agent`, role: 'agent', content: data.turn?.response || '', name: user?.agent_name || 'Promethea' },
-            ])
-            if (data.turn?.session_id) setSessionId(data.turn.session_id)
-            if (data.tts?.audio_base64) {
-              const audioUrl = `data:${data.tts.mime || 'audio/mp3'};base64,${data.tts.audio_base64}`
-              new Audio(audioUrl).play()
-            }
-          }
-        } catch (error) {
-          console.error('Voice PTT failed', error)
-        } finally {
-          setIsStreaming(false)
-          setChatRunning(false)
-        }
-      }
-      mediaRecorderRef.current.stop()
-      mediaRecorderRef.current.stream.getTracks().forEach((track) => track.stop())
-      setIsRecording(false)
-    }
+  function speakReply(content: unknown, status: unknown) {
+    if (!user || !voicePlaybackAllowed.current || status !== 'success' || typeof content !== 'string' || !content.trim()) return
+    if (content.length > 4096) { setVoiceFailure('VOICE_TEXT_TOO_LONG'); return }
+    const controller = new AbortController()
+    voiceRequest.current?.abort(); voiceRequest.current = controller
+    void synthesizeSpeech(content, controller.signal).then(audio => {
+      if (!controller.signal.aborted) speech.load(audio)
+    }).catch(failure => { if (!controller.signal.aborted) setVoiceFailure(voiceError(failure, t)) })
   }
 
   return (
@@ -794,6 +803,7 @@ export default function MainContent({
           <h1 className="flex items-center gap-2 truncate font-display text-[15px] font-semibold text-text-strong">
             {sessionTitle || (sessionId ? t('对话', 'Conversation') : user ? t('新的对话', 'New conversation') : t('临时对话', 'Temporary chat'))}
           </h1>
+          {pendingInput?.sessionId === sessionId && !isStreaming && <span className="inline-flex items-center gap-1 text-xs text-text-muted"><Clock3 size={12} />{t('等待你回复', 'Waiting for your reply')}</span>}
         </div>
         <div className="ml-2 flex shrink-0 items-center gap-1.5 sm:gap-4">
           <details ref={usageRef} className="chat-usage" onKeyDown={(event) => { if (event.key === 'Escape') event.currentTarget.open = false }}>
@@ -882,6 +892,7 @@ export default function MainContent({
               reasoningTreeId={msg.reasoningTreeId}
               reasoningSteps={msg.reasoningSteps}
               runStatus={msg.runStatus}
+              executionOutcome={msg.executionOutcome}
               error={msg.error}
               steeringStatus={msg.steeringStatus}
               onRetry={index > 0 && messages[index - 1].role === 'user' ? () => void handleSend(messages[index - 1].content) : undefined}
@@ -908,6 +919,9 @@ export default function MainContent({
       </div>
 
       <div className="chat-composer relative z-20 bg-white px-4 pb-4 pt-2 sm:px-6">
+        {(voiceFailure || recorder.error) && <div role="alert" className="mb-2 text-xs text-amber-700">{voiceFailure.startsWith('VOICE_') ? voiceError(voiceFailure, t) : voiceFailure || voiceError(recorder.error, t)}</div>}
+        {recorder.pending && !isStreaming && <div role="status" className="mb-2 flex items-center gap-2 text-xs text-text-muted">{t('正在识别语音', 'Transcribing speech')}<button type="button" className="icon-button" aria-label={t('取消语音识别', 'Cancel transcription')} title={t('取消语音识别', 'Cancel transcription')} onClick={() => { voiceRequest.current?.abort(); recorder.cancel() }}><Square size={14} /></button></div>}
+        {speech.url && <div className="mb-2 flex min-w-0 items-center gap-2"><audio aria-label={t('语音回复', 'Spoken reply')} className="min-w-0 flex-1" ref={speech.element} src={speech.url} controls /><button type="button" className="icon-button" aria-label={t('停止播放', 'Stop playback')} title={t('停止播放', 'Stop playback')} onClick={speech.stop}><Square size={14} /></button></div>}
         {steeringError && <div role="alert" className="mb-2 text-xs text-amber-700">{steeringError}</div>}
         {!user && <div className="guest-chat-status" role="status"><span className={`health-dot ${guestStatus?.available ? 'healthy' : 'unknown'}`} />{guestStatus?.available ? t('临时对话', 'Temporary chat') : guestStatus ? t('游客对话暂不可用', 'Guest chat unavailable') : t('正在连接', 'Connecting')}</div>}
         <div className={`composer-surface overflow-hidden ${isRecording ? 'border-red-300 ring-2 ring-red-100' : ''}`}>
@@ -983,7 +997,7 @@ export default function MainContent({
                   ))}
                 </div>
               )}
-              <button type="button" onMouseDown={startRecording} onMouseUp={stopRecording} onMouseLeave={stopRecording} className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${isRecording ? 'bg-red-100 text-red-600' : 'text-text-muted hover:bg-black/5 hover:text-text-strong'}`}>
+              <button type="button" disabled={isStreaming || recorder.pending || (Boolean(user) && voiceStatusLoading)} title={voiceStatusLoading ? t('正在读取语音配置', 'Loading speech settings') : isRecording ? t('停止录音', 'Stop recording') : t('语音输入', 'Voice input')} aria-label={voiceStatusLoading ? t('正在读取语音配置', 'Loading speech settings') : isRecording ? t('停止录音', 'Stop recording') : t('语音输入', 'Voice input')} onClick={() => { if (!user) onRequireAuth(); else if (isRecording) recorder.stop(); else if (!voiceStatus) setVoiceFailure('VOICE_STATUS_UNAVAILABLE'); else if (!voiceStatus.stt.configured) setVoiceFailure('VOICE_DISABLED'); else void recorder.start() }} className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${isRecording ? 'bg-red-100 text-red-600' : 'text-text-muted hover:bg-black/5 hover:text-text-strong'}`}>
                 <Mic size={16} />
               </button>
             </div>
@@ -992,7 +1006,7 @@ export default function MainContent({
             <button
               type="button"
               onClick={() => void (isStreaming ? handleSteer() : handleSend(input))}
-              disabled={!input.trim() || isRecording || isSteering || (isStreaming ? !user || !activeStreamRef.current?.turnId : !user && !guestStatus?.available)}
+              disabled={!input.trim() || isRecording || (recorder.pending && !isStreaming) || isSteering || (isStreaming ? !user || !activeStreamRef.current?.turnId : !user && !guestStatus?.available)}
               title={isStreaming ? t('引导当前执行', 'Steer current run') : t('发送', 'Send')}
               aria-label={isStreaming ? t('引导当前执行', 'Steer current run') : t('发送', 'Send')}
               className="composer-submit flex h-8 w-8 cursor-pointer items-center justify-center rounded-md bg-brand-100 text-brand-700 transition-colors hover:bg-brand-200 disabled:opacity-50"
@@ -1004,7 +1018,7 @@ export default function MainContent({
         </div>
       </div>
 
-      {confirmRequest && (
+      {confirmRequest && confirmRequest.sessionId === sessionId && (
         <ConfirmModal
           toolName={confirmRequest.toolName}
           toolArgs={confirmRequest.toolArgs}
@@ -1021,6 +1035,9 @@ export default function MainContent({
               return
             }
             setConfirmRequest(null)
+            setPendingInput(result.input_request ? { sessionId: result.session_id || confirmRequest.sessionId, request: result.input_request } : null)
+            if (activeStreamRef.current?.sessionId === confirmRequest.sessionId) activeStreamRef.current.outcome = 'completed'
+            speakReply(result.response, result.status)
             void getSession(confirmRequest.sessionId).then(async (response) => {
               if (!response.ok) return
               const data = await response.json()
@@ -1034,6 +1051,7 @@ export default function MainContent({
                 conversationTurnId: message.conversation_turn_id || undefined,
                 reasoningSteps: normalizeReasoningSteps(message.reasoning_steps),
                 runStatus: message.run_status,
+                executionOutcome: message.execution_outcome,
                 error: message.error,
                 steeringStatus: message.steering_status,
               })))

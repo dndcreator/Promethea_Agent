@@ -2,11 +2,29 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, Optional
-from gateway.goal_gaps import GoalGapView
+from gateway.goal_gaps import GoalGapView, GoalGapState, gap_outcome
+
+
+def public_pending_confirmation(pending: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(pending, dict) or not pending.get("tool_call_id") or not pending.get("tool_name") or not isinstance(pending.get("args", {}), dict):
+        return None
+    from .public_contracts import ToolCall
+    return ToolCall(tool_call_id=str(pending["tool_call_id"]), tool_name=str(pending["tool_name"]),
+                    arguments=dict(pending.get("args") or {}), status="needs_confirmation").model_dump()
+
+
+def public_pending_input(checkpoint: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    from .public_contracts import InputRequest
+
+    pending = (checkpoint or {}).get("pending_input")
+    if not pending:
+        return None
+    return InputRequest.model_validate({key: pending[key] for key in ("request_id", "content", "input_kind")}).model_dump()
 
 
 def public_task_run(run: Dict[str, Any]) -> Dict[str, Any]:
     attempts = run.get("attempts") if isinstance(run.get("attempts"), list) else []
+    metadata = run.get("metadata") or {}
     return {
         "run_id": str(run.get("run_id") or ""),
         "run_type": str(run.get("run_type") or "workflow"),
@@ -17,12 +35,17 @@ def public_task_run(run: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": run.get("started_at"),
         "updated_at": run.get("updated_at"),
         "ended_at": run.get("ended_at"),
+        "input_request": metadata.get("input_request") if run.get("status") == "waiting_user" else None,
+        "output": metadata.get("output") if run.get("run_type") == "conversation_task" else None,
+        "pending_confirmation": public_pending_confirmation(metadata.get("pending_action"))
+        if run.get("run_type") == "conversation_task" and run.get("status") == "waiting_human" else None,
     }
 
 
 def public_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not isinstance(task, dict):
         return None
+    progress = GoalGapState.model_validate(task.get("goal_gaps") or {})
     return {
         "task_id": str(task.get("task_id") or ""),
         "title": str(task.get("title") or "Untitled task"),
@@ -36,6 +59,7 @@ def public_task(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         "updated_at": task.get("updated_at"),
         "completed_at": task.get("completed_at"),
         "goal_gaps": GoalGapView.model_validate(task["goal_gaps"]).model_dump() if task.get("goal_gaps") else None,
+        "goal_progress": {"revision": progress.revision, **gap_outcome(progress)},
     }
 
 

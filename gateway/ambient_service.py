@@ -23,6 +23,9 @@ from .task_service import TaskExecutionConflict
 
 RUN_TYPE = "ambient"
 ACTIVE = {"pending", "running", "paused", "waiting_human", "waiting_user"}
+OBSERVED_EVENTS = {EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED,
+                   EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED,
+                   EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED}
 
 
 class AmbientService:
@@ -39,7 +42,7 @@ class AmbientService:
         if self.event_log:
             self.event_log.ensure_consumer("ambient.v1", start_at_tail=True)
         if emitter:
-            for event in (EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED, EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED):
+            for event in OBSERVED_EVENTS:
                 emitter.on(event, self._observe)
 
     def _config(self, user):
@@ -60,6 +63,8 @@ class AmbientService:
         if session:
             self._session(user, session)
         scene = self.store.get(user)
+        if scene.event_cursor is None and self.event_log is not None:
+            scene.event_cursor = max(0, self.event_log.next_seq - 1)
         if settings.enabled and not scene.session_id:
             manager = self.conversation.message_manager
             recent = manager.list_sessions(user_id=user, limit=1)
@@ -129,7 +134,7 @@ class AmbientService:
         status = "disabled" if not self._enabled(scene) else (task or {}).get("status", "idle")
         if self._enabled(scene) and pending and run[0].get("status") == "waiting_human":
             status = "waiting_confirmation"
-        elif status == "waiting_user":
+        elif status == "waiting_user" and run[0].get("status") != "waiting_user":
             status = "idle"
         usage = self.store.usage.get(user, {})
         cognition = self.self_model.state.get(user)
@@ -183,7 +188,7 @@ class AmbientService:
             cursor = self.event_log.get_consumer_cursor("ambient.v1")
             for row in self.event_log.query(after_seq=cursor, limit=200, oldest_first=True):
                 kind = EventType(row["event_type"]) if row["event_type"] in EventType._value2member_map_ else None
-                if kind in {EventType.INTERACTION_COMPLETED, EventType.MEMORY_REPLAY_COMPLETED, EventType.GOAL_GAPS_UPDATED, EventType.TASK_EXECUTION_SETTLED, EventType.ENVIRONMENT_STATE_CHANGED, EventType.SEMANTIC_UI_INTERACTED, EventType.UI_CONTEXT_CHANGED}:
+                if kind in OBSERVED_EVENTS:
                     self._observe(SimpleNamespace(payload=row.get("payload", {}), event=kind, event_id=row["event_id"], seq=row["seq"]))
                 self.event_log.commit_consumer_cursor("ambient.v1", row["seq"])
         now = time.time()
@@ -205,6 +210,8 @@ class AmbientService:
             task = self.tasks.get_task(scene.task_id, user_id=scene.user_id) if scene.task_id else None
             if task and (task["status"] in {"paused", "cancelled"} or any(run["status"] in ACTIVE for run in task["runs"])):
                 continue
+            if task and not task["objective"] and scene.settings.direction:
+                task = self.tasks.update_task(task_id=task["task_id"], user_id=scene.user_id, objective=scene.settings.direction)
             if scene.admission:
                 prior = next((row for row in (task or {}).get("runs", []) if row["run_id"] == scene.admission["run_id"]), None)
                 if prior:
@@ -229,9 +236,12 @@ class AmbientService:
                     # Recover an actor created just before a situation-store failure.
                     task = next((item for item in self.tasks.list_tasks(user_id=scene.user_id, limit=10000) if item.get("source") == RUN_TYPE and item.get("metadata", {}).get("ambient_session") == scene.session_id and item["metadata"].get("generation") == scene.generation and item["status"] != "cancelled"), None)
                     if task is None:
-                        task = self.tasks.create_task(user_id=scene.user_id, session_id=scene.session_id, title=self._session(scene.user_id, scene.session_id)["title"], source=RUN_TYPE, metadata={"ambient_session": scene.session_id, "generation": scene.generation, "continuable": True})
+                        task = self.tasks.create_task(user_id=scene.user_id, session_id=scene.session_id, title=self._session(scene.user_id, scene.session_id)["title"], objective=scene.settings.direction, source=RUN_TYPE, metadata={"ambient_session": scene.session_id, "generation": scene.generation, "continuable": True})
                     scene.task_id = task["task_id"]
-                scene.admission = {"run_id": f"ambient_{uuid4().hex}", "revision": scene.revision, "generation": scene.generation, "trigger": scene.last_trigger or {"event_type": "ambient.periodic"}}
+                events, cursor = self._pending_events(scene)
+                scene.admission = {"run_id": f"ambient_{uuid4().hex}", "revision": scene.revision, "generation": scene.generation,
+                                   "trigger": events[-1] if events else scene.last_trigger or {"event_type": "ambient.periodic"},
+                                   "events": events, "event_cursor": cursor}
                 scene.dirty = False
                 scene.next_check_at = now + config.ambient.interval_s
                 previous = deepcopy(self.store.usage)
@@ -243,6 +253,23 @@ class AmbientService:
                     raise
             # Durable admission is written first; retrying start_run is idempotent.
             self.tasks.start_run(task_id=scene.task_id, user_id=scene.user_id, run_id=scene.admission["run_id"], run_type=RUN_TYPE, session_id=scene.session_id, status="pending", metadata=scene.admission)
+
+    def _pending_events(self, scene):
+        cursor = int(scene.event_cursor or 0)
+        references = []
+        if self.event_log is None:
+            return references, cursor
+        for row in self.event_log.query(user_id=scene.user_id, after_seq=cursor, limit=200, oldest_first=True):
+            cursor = row["seq"]
+            if row["event_type"] not in {kind.value for kind in OBSERVED_EVENTS}:
+                continue
+            task = self.tasks.get_task(row.get("task_id") or "", user_id=scene.user_id)
+            if task and self.root_for(task):
+                continue
+            references.append({key: row[key] for key in ("event_id", "seq", "event_type")})
+            if len(references) >= config.ambient.event_batch_size:
+                break
+        return references, cursor
 
     def assert_execution(self):
         frame = current_ambient()
@@ -339,6 +366,8 @@ class AmbientService:
             return {"status": "cancelled", "detail": {"error": "ambient scope changed"}}
         context = self._context(task, run, token, scene)
         checkpoint = run["metadata"].get("checkpoint") or {}
+        if checkpoint and run["metadata"].get("resume_action_result"):
+            checkpoint = {**checkpoint, "resume_result": True}
         context.agent_message_ids = checkpoint.get("agent_message_ids", [])
         scope = DelegationScope(_Budget(count=int(checkpoint.get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id, observation_workspaces=self.self_model.environment.visible_workspaces(scene.user_id))
         def save(value):
@@ -349,7 +378,11 @@ class AmbientService:
             with bind_ambient(AmbientExecution(self, context, scene.generation)), bind_delegation(scope), approval_scope("ambient.activation", {}, confirmed=False):
                 try:
                     async with asyncio.timeout(config.ambient.timeout_s):
-                        result = await self.conversation.run_ambient_turn(run_context=context, situation={"initiative": scene.model_dump(exclude={"admission"}), "cognition": self.self_model.working_context(scene.user_id)}, checkpoint_sink=save, checkpoint=run["metadata"].get("checkpoint"))
+                        trigger = run["metadata"].get("trigger") or {}
+                        initiative = {**scene.model_dump(exclude={"admission"}), "last_trigger": trigger}
+                        result = await self.conversation.run_ambient_turn(run_context=context, situation={"initiative": initiative, "cognition": self.self_model.working_context(scene.user_id, trigger=trigger, triggers=run["metadata"].get("events"))}, checkpoint_sink=save, checkpoint=checkpoint or None)
+                        await self.conversation._record_action_episode(result=result, user_id=scene.user_id, session_id=scene.session_id,
+                            user_message=task["objective"], user_config=self._config(scene.user_id), runtime_context=context)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -360,12 +393,23 @@ class AmbientService:
 
     def finish(self, task, run, result):
         status = result.get("status")
-        detail = {"output": str(result.get("content") or "")[:4000], "error": result.get("error"), "usage": result.get("usage"), "agent_message_ids": result.get("agent_message_ids", [])}
+        detail = {"output": str(result.get("content") or "")[:4000], "error": result.get("error"), "usage": result.get("usage"), "agent_message_ids": result.get("agent_message_ids", []), "execution_outcome": result.get("execution_outcome")}
         if status == "needs_confirmation":
             detail["pending_action"] = result
             return {"status": "waiting_human", "detail": detail}
+        if status == "needs_input":
+            detail["input_request"] = result["input_request"]
+            return {"status": "waiting_user", "detail": detail}
         detail["pending_action"] = None
-        return {"status": "completed" if status == "success" else "failed", "detail": detail}
+        if status == "success" and not result.get("execution_outcome") and "event_cursor" in run.get("metadata", {}):
+            scene = self.store.get(task["user_id"])
+            if scene.task_id == task["task_id"] and scene.generation == run["metadata"].get("generation"):
+                scene.event_cursor = max(int(scene.event_cursor or 0), int(run["metadata"]["event_cursor"]))
+                scene.dirty = bool(self._pending_events(scene)[0])
+                if scene.dirty:
+                    scene.next_check_at = min(scene.next_check_at, time.time() + config.ambient.cooldown_s)
+                self.store.put(scene)
+        return {"status": "paused" if result.get("execution_outcome") else "completed" if status == "success" else "failed", "detail": detail}
 
     async def confirm(self, user, session, command):
         scene = self.store.get(user, session)
@@ -385,7 +429,7 @@ class AmbientService:
             scope = DelegationScope(_Budget(count=int((run["metadata"].get("checkpoint") or {}).get("delegation_spent") or 0)), agent_task_id=task["task_id"], workspace_id=scene.session_id, observation_workspaces=self.self_model.environment.visible_workspaces(user))
             user_config = deepcopy(self._config(user))
             user_config.setdefault("api", {})["max_tokens"] = min(int(user_config.get("api", {}).get("max_tokens") or config.ambient.max_tokens), config.ambient.max_tokens)
-            user_config.setdefault("action", {}).setdefault("gaps", {})["enabled"] = False
+            user_config["api"]["output_token_limit"] = min(int(user_config["api"].get("output_token_limit") or config.api.output_token_limit), config.ambient.max_tokens)
             async def execute(name, arguments):
                 return await self.conversation.capability_service.call_tool(name, arguments, run_context=context, user_config=user_config, ctx=ToolInvocationContext(session_id=scene.session_id, user_id=user, source=RUN_TYPE, metadata={"run_context": context, "user_config": user_config}))
             def save(value):
@@ -394,7 +438,10 @@ class AmbientService:
                 method = self.conversation.resume_action if command.action == "approve" else self.conversation.reject_pending_action
                 args = {"approved_call_id": command.tool_call_id} if command.action == "approve" else {}
                 async with asyncio.timeout(config.ambient.timeout_s):
-                    return await method(pending=pending, run_context=context, session_id=scene.session_id, user_id=user, user_config=user_config, tool_executor=execute, checkpoint_sink=save, **args)
+                    result = await method(pending=pending, run_context=context, session_id=scene.session_id, user_id=user, user_config=user_config, tool_executor=execute, checkpoint_sink=save, **args)
+                    await self.conversation._record_action_episode(result=result, user_id=user, session_id=scene.session_id,
+                        user_message=task["objective"], user_config=user_config, runtime_context=context)
+                    return result
 
         await self.runtime.continue_confirmation(task_id=scene.task_id, user_id=user, run_id=command.run_id, call_id=command.tool_call_id, operation=continue_action)
         return self.view(user, session)

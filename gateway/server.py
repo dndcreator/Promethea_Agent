@@ -1856,6 +1856,14 @@ class GatewayServer:
             messages = self.message_manager.get_messages(
                 params.session_id, user_id=user_id
             )
+            from .public_views import public_pending_confirmation
+            session_info["pending_confirmation"] = public_pending_confirmation(
+                self.message_manager.get_pending_confirmation(params.session_id, user_id=user_id)
+            )
+            from .public_views import public_pending_input
+            session_info["pending_input"] = public_pending_input(
+                self.message_manager.get_action_checkpoint(params.session_id, user_id=user_id)
+            )
             
             return GatewayProtocol.create_response(request.id, True, {
                 "session_id": params.session_id,

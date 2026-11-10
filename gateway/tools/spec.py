@@ -1,9 +1,17 @@
 ﻿from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints, TypeAdapter
+
+
+CapabilityIdentifier = Annotated[str, StringConstraints(min_length=1, max_length=160, pattern=r"^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$")]
+ProvidedCapabilities = Annotated[list[CapabilityIdentifier], Field(max_length=16)]
+
+
+def validate_provides(value: Any) -> list[str]:
+    return TypeAdapter(ProvidedCapabilities).validate_python(value, strict=True)
 
 
 class SideEffectLevel(str, Enum):
@@ -26,6 +34,7 @@ class ToolSpec(BaseModel):
     input_schema: Dict[str, Any] = Field(default_factory=dict)
     output_schema: Dict[str, Any] = Field(default_factory=dict)
     capability_type: str = "general"
+    provides: ProvidedCapabilities = Field(default_factory=list)
     side_effect_level: SideEffectLevel = SideEffectLevel.READ_ONLY
     permission_scope: str = "default"
     timeout_ms: int = 30000

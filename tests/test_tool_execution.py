@@ -6,6 +6,7 @@ import pytest
 
 from gateway.action.model_action import AnswerDeltaProjector, InvalidModelAction, parse_model_action
 from gateway.action.service import ActionService
+from tests.support.runtime import observation_fact
 
 
 class _Core:
@@ -22,7 +23,7 @@ class _Core:
 
 
 def _answer(messages):
-    observation = json.loads(messages[-1]["content"][0]["text"])
+    observation = observation_fact(messages)
     observation_id = observation["observation_id"]
     return {
         "content": json.dumps(
@@ -138,7 +139,8 @@ async def test_malformed_runtime_action_gets_one_protocol_retry():
 
     assert out["content"] == "I could not complete the tool call."
     retry = "\n".join(str(item.get("content") or "") for item in core.messages[1])
-    assert "valid JSON runtime action" in retry
+    assert observation_fact(core.messages[1])["error"]["code"] == "INVALID_MODEL_ACTION"
+    assert observation_fact(core.messages[1])["error"]["retryable"] is True
     assert '{"action":"tool_call","tool_name":' not in retry
 
 

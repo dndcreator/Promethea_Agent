@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "max_steps": 8,
+  "prediction": {
+    "fallback_tokens": 8192,
+    "weights": {"fields": 1, "actions": 2, "persistent_collections": 4},
+    "tiers": [{"max_units": 6, "tokens": 2048}, {"max_units": 12, "tokens": 4096}, {"max_units": null, "tokens": 8192}]
+  },
+  "policies": [
+    {"id": "fixed_large", "initial": 8192, "ceiling": 8192},
+    {"id": "predicted_fixed", "predict": true, "adaptive": false, "ceiling": 8192},
+    {"id": "predicted_adaptive", "predict": true, "adaptive": true, "ceiling": 8192}
+  ],
+  "cases": [
+    {
+      "id": "unicode-scratchpad", "kind": "action", "artifact": "scratchpad.html",
+      "delivery_contract": {"fields": ["note", "count"], "actions": ["edit", "clear"], "persistent_collections": []},
+      "turns": ["请实际创建独立可运行的 scratchpad.html，不用外部资源。一个 ID 为 note 的 textarea、ID 为 count 的数值输出、ID 为 clear 的清空按钮。输入时立即更新字符数，按 Unicode 码点计数（例如 emoji 算一个），空内容为 0；清空按钮将文本和计数归零。不需要持久化。"],
+      "expect": {"required_tools": ["workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "textarea#note", "count": 1}, {"selector": "#count", "number": 0}, {"selector": "button#clear", "count": 1}]},
+        {"id": "live-edit", "actions": [{"fill": {"#note": "hello"}}], "assertions": [{"selector": "#count", "number": 5}]},
+        {"id": "unicode-count", "actions": [{"fill": {"#note": "中文🙂"}}], "assertions": [{"selector": "#count", "number": 3}]},
+        {"id": "clear", "actions": [{"fill": {"#note": "草稿"}}, {"click": "#clear"}], "assertions": [{"selector": "#note", "text": ""}, {"selector": "#count", "number": 0}]}
+      ]
+    },
+    {
+      "id": "bill-splitter", "kind": "action", "artifact": "split.html",
+      "delivery_contract": {"fields": ["amount", "people", "tip", "grand", "share"], "actions": ["calculate"], "persistent_collections": []},
+      "turns": ["实际创建独立分账页面 split.html，全部 JS/CSS 内联且不用外部资源。数字输入 amount（账单）、people（人数）、tip（百分比），calculate 按钮，grand 和 share 两个输出。grand=amount*(1+tip/100)，share=grand/people，均保留两位小数且不带单位。人数必须为正整数，账单不能为负，小费在 0 到 100，任何输入为空或非法时两个输出均为 Invalid。零账单有效。"],
+      "expect": {"required_tools": ["workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "#amount", "count": 1}, {"selector": "#people", "count": 1}, {"selector": "#tip", "count": 1}, {"selector": "#calculate", "count": 1}, {"selector": "#grand", "count": 1}, {"selector": "#share", "count": 1}]},
+        {"id": "normal", "actions": [{"fill": {"#amount": "80", "#people": "3", "#tip": "12.5"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "90.00"}, {"selector": "#share", "text": "30.00"}]},
+        {"id": "rounding", "actions": [{"fill": {"#amount": "10", "#people": "3", "#tip": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#share", "text": "3.33"}]},
+        {"id": "zero", "actions": [{"fill": {"#amount": "0", "#people": "2", "#tip": "100"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "0.00"}, {"selector": "#share", "text": "0.00"}]},
+        {"id": "fractional-people", "actions": [{"fill": {"#amount": "10", "#people": "1.5", "#tip": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "Invalid"}, {"selector": "#share", "text": "Invalid"}]},
+        {"id": "empty", "actions": [{"fill": {"#amount": "", "#people": "2", "#tip": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "Invalid"}, {"selector": "#share", "text": "Invalid"}]},
+        {"id": "bad-tip", "actions": [{"fill": {"#amount": "10", "#people": "2", "#tip": "101"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "Invalid"}, {"selector": "#share", "text": "Invalid"}]},
+        {"id": "no-people", "actions": [{"fill": {"#amount": "10", "#people": "0", "#tip": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "Invalid"}, {"selector": "#share", "text": "Invalid"}]},
+        {"id": "negative-amount", "actions": [{"fill": {"#amount": "-1", "#people": "2", "#tip": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#grand", "text": "Invalid"}, {"selector": "#share", "text": "Invalid"}]}
+      ]
+    },
+    {
+      "id": "persistent-inventory", "kind": "action", "artifact": "inventory.html",
+      "delivery_contract": {"fields": ["sku", "qty", "price", "filter", "count", "total"], "actions": ["add", "filter", "change_quantity", "remove"], "persistent_collections": ["items"]},
+      "turns": ["实际交付独立库存页 inventory.html，无外部资源。输入 sku、qty、price，add 按钮，filter 文本过滤框，items 列表，每行 li 含 .sku 文本、.quantity 数字输入、.unit-price 文本及 .remove 按钮。数量是非负整数，单价非负，SKU 去除首尾空格且非空，同名 SKU 不得重复；添加输入非法时 error 输出 Invalid 且列表不变。有效添加后清空 error。行内改数量立即更新总价，删除立即生效。filter 按 SKU 子串（忽略大小写）过滤，列表只渲染匹配行，但 count 仍显示全部库存条目数，total 显示全部库存数量乘单价总和，保留两位小数且不带单位。用 localStorage 持久化完整条目、数量和单价，刷新后恢复；不要求保存过滤文本。"],
+      "expect": {"required_tools": ["workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "#sku", "count": 1}, {"selector": "#qty", "count": 1}, {"selector": "#price", "count": 1}, {"selector": "#add", "count": 1}, {"selector": "#filter", "count": 1}, {"selector": "#items", "count": 1}, {"selector": "#count", "number": 0}, {"selector": "#total", "text": "0.00"}]},
+        {"id": "add-and-reload", "actions": [{"fill": {"#sku": "苹果", "#qty": "2", "#price": "3.5"}}, {"click": "#add"}, {"reload": true}], "assertions": [{"selector": "#items li", "count": 1}, {"selector": "#items .sku", "text": "苹果"}, {"selector": "#items .quantity", "number": 2}, {"selector": "#items .unit-price", "number": 3.5}, {"selector": "#total", "text": "7.00"}]},
+        {"id": "edit-and-reload", "actions": [{"fill": {"#sku": "A", "#qty": "2", "#price": "3.5"}}, {"click": "#add"}, {"fill": {"#items .quantity": "5"}}, {"reload": true}], "assertions": [{"selector": "#items .quantity", "number": 5}, {"selector": "#total", "text": "17.50"}]},
+        {"id": "remove-and-reload", "actions": [{"fill": {"#sku": "A", "#qty": "2", "#price": "3.5"}}, {"click": "#add"}, {"click": "#items .remove"}, {"reload": true}], "assertions": [{"selector": "#items li", "count": 0}, {"selector": "#count", "number": 0}, {"selector": "#total", "text": "0.00"}]},
+        {"id": "duplicate", "actions": [{"fill": {"#sku": "A", "#qty": "2", "#price": "3.5"}}, {"click": "#add"}, {"fill": {"#sku": " A ", "#qty": "1", "#price": "1"}}, {"click": "#add"}], "assertions": [{"selector": "#items li", "count": 1}, {"selector": "#error", "text": "Invalid"}, {"selector": "#total", "text": "7.00"}]},
+        {"id": "filter-keeps-global-totals", "actions": [{"fill": {"#sku": "Apple", "#qty": "2", "#price": "3.5"}}, {"click": "#add"}, {"fill": {"#sku": "Banana", "#qty": "3", "#price": "2"}}, {"click": "#add"}, {"fill": {"#filter": "app"}}], "assertions": [{"selector": "#items li", "count": 1}, {"selector": "#items .sku", "text": "Apple"}, {"selector": "#count", "number": 2}, {"selector": "#total", "text": "13.00"}]},
+        {"id": "zero-quantity", "actions": [{"fill": {"#sku": "A", "#qty": "0", "#price": "3.5"}}, {"click": "#add"}], "assertions": [{"selector": "#items li", "count": 1}, {"selector": "#total", "text": "0.00"}]},
+        {"id": "negative-price", "actions": [{"fill": {"#sku": "A", "#qty": "2", "#price": "-1"}}, {"click": "#add"}], "assertions": [{"selector": "#items li", "count": 0}, {"selector": "#error", "text": "Invalid"}]},
+        {"id": "fractional-quantity", "actions": [{"fill": {"#sku": "A", "#qty": "1.5", "#price": "1"}}, {"click": "#add"}], "assertions": [{"selector": "#items li", "count": 0}, {"selector": "#error", "text": "Invalid"}]},
+        {"id": "blank-sku", "actions": [{"fill": {"#sku": " ", "#qty": "2", "#price": "1"}}, {"click": "#add"}], "assertions": [{"selector": "#items li", "count": 0}, {"selector": "#error", "text": "Invalid"}]}
+      ]
+    }
+  ]
+}

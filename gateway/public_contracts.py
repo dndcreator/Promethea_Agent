@@ -181,8 +181,59 @@ class RunRequest(PublicContract):
     requested_mode: Optional[str] = None
     requested_skill: Optional[str] = None
     requested_workflow: Optional[str] = None
+    reply_to_input: Optional[str] = Field(default=None, min_length=1, max_length=200)
     attachments: List[Attachment] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceTTSRequest(PublicContract):
+    text: str = Field(min_length=1, max_length=4096)
+    provider: Optional[str] = None
+    voice: Optional[str] = Field(default=None, max_length=256)
+    format: Optional[Literal["mp3", "wav", "opus", "aac", "flac", "pcm"]] = None
+    speed: Optional[float] = Field(default=None, ge=0.25, le=4)
+    stability: Optional[float] = Field(default=None, ge=0, le=1)
+    similarity_boost: Optional[float] = Field(default=None, ge=0, le=1)
+    style: Optional[float] = Field(default=None, ge=0, le=1)
+    use_speaker_boost: Optional[bool] = None
+
+
+class VoiceSTTResult(PublicContract):
+    text: str
+    language: Optional[str] = None
+    duration_seconds: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+
+
+class VoiceEndpointStatus(PublicContract):
+    provider: str
+    model: str
+    base_url: str
+    voice: str = ""
+    format: str = "mp3"
+    speed: float = 1
+    configured: bool
+    api_key_configured: bool
+    reason: Optional[str] = None
+
+
+class VoiceCapabilities(PublicContract):
+    stt: VoiceEndpointStatus
+    tts: VoiceEndpointStatus
+    speak_replies: bool = False
+
+
+class VoiceDiscoveryRequest(PublicContract):
+    kind: Literal["stt", "tts"]
+
+
+class VoiceModelList(PublicContract):
+    models: List[str]
+
+
+class VoiceTranscription(PublicContract):
+    status: str = "success"
+    user_id: Optional[str] = None
+    stt: VoiceSTTResult
 
 
 class ToolCall(PublicContract):
@@ -202,6 +253,25 @@ class ToolResult(PublicContract):
     error: Optional[Error] = None
 
 
+class RunOutcome(PublicContract):
+    """Turn termination is not proof that the user's goal was delivered."""
+
+    stop_reason: Literal["budget_exhausted", "recovery_exhausted"]
+    goal_status: Literal["unverified"] = "unverified"
+    response_source: Literal["model", "runtime"] = "model"
+
+
+class InputRequest(PublicContract):
+    request_id: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=4000)
+    input_kind: Literal["acknowledgement", "text"] = "acknowledgement"
+
+
+class InputReply(PublicContract):
+    request_id: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=16000)
+
+
 class RunResponse(PublicContract):
     response: str = ""
     session_id: Optional[str] = None
@@ -214,6 +284,8 @@ class RunResponse(PublicContract):
     args: Optional[Dict[str, Any]] = None
     memory_write_summary: Optional[Dict[str, Any]] = None
     error: Optional[Error] = None
+    execution_outcome: Optional[RunOutcome] = None
+    input_request: Optional[InputRequest] = None
 
 
 class Session(PublicContract):
@@ -223,6 +295,8 @@ class Session(PublicContract):
     last_activity: Optional[float] = None
     message_count: int = 0
     pinned: bool = False
+    pending_confirmation: Optional[ToolCall] = None
+    pending_input: Optional[InputRequest] = None
 
 
 class Project(PublicContract):
@@ -289,6 +363,19 @@ class TaskRun(PublicContract):
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
     ended_at: Optional[str] = None
+    input_request: Optional[InputRequest] = None
+    output: Optional[str] = None
+    pending_confirmation: Optional[ToolCall] = None
+
+
+class GoalProgress(PublicContract):
+    revision: int = 0
+    tracked: int = 0
+    open: int = 0
+    blocked: int = 0
+    resolved: int = 0
+    checks_passed: int = 0
+    goal_verification: Literal["unknown"] = "unknown"
 
 
 class Task(PublicContract):
@@ -304,10 +391,21 @@ class Task(PublicContract):
     updated_at: Optional[str] = None
     completed_at: Optional[str] = None
     goal_gaps: Optional[GoalGapView] = None
+    goal_progress: Optional[GoalProgress] = None
 
 
 class TaskControlRequest(PublicContract):
     expected_revision: Optional[int] = Field(default=None, ge=1)
+
+
+class TaskResumeRequest(TaskControlRequest):
+    input_reply: Optional[InputReply] = None
+
+
+class TaskConfirmationRequest(PublicContract):
+    run_id: str
+    tool_call_id: str
+    action: Literal["approve", "reject"]
 
 
 class TaskStartRunRequest(TaskControlRequest):
@@ -686,6 +784,13 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         GoalGapView,
         GapDelta,
         RunRequest,
+        VoiceTTSRequest,
+        VoiceSTTResult,
+        VoiceEndpointStatus,
+        VoiceCapabilities,
+        VoiceDiscoveryRequest,
+        VoiceModelList,
+        VoiceTranscription,
         RunResponse,
         Session,
         Project,
@@ -698,8 +803,10 @@ PUBLIC_CONTRACT_MODELS: Dict[str, Type[BaseModel]] = {
         TaskRun,
         Task,
         TaskControlRequest,
+        TaskResumeRequest,
         TaskStartRunRequest,
         TaskCancelRequest,
+        TaskConfirmationRequest,
         TaskResponse,
         TaskListResponse,
         TaskRunResponse,

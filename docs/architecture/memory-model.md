@@ -109,6 +109,13 @@ artifact. Treat `memory/raw_log.jsonl` and `memory/raw_log.state.json` as runtim
 memory state. Cleanup scripts and test teardown must not remove them; tests that need
 disposable raw-log data should redirect the raw-log paths into their own temp directory.
 
+During action-context reconstruction, Runtime can read a bounded view of the
+unreplayed L0 backlog for the current owner and session. This is advisory source
+data, not indexed memory or proof of task state; reads do not advance the replay
+cursor. Structured long-term recall uses the existing governed recall pipeline
+and is projected separately from the L0 backlog and task evidence. Procedural
+experience still uses capability-intent matching and remains advisory.
+
 ## Cognition and Self Model
 
 Cognition is not a fourth memory layer. The memory pipeline stores governed records and

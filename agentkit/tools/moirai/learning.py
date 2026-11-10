@@ -100,7 +100,7 @@ class MoiraiLearning:
 
         self._workers[user_id] = asyncio.create_task(run(), name="moirai-consolidation")
 
-    def record(self, *, user_id: str, result: dict[str, Any], goal: str) -> bool:
+    def record(self, *, user_id: str, result: dict[str, Any], goal: str, execution_context: dict[str, Any] | None = None) -> bool:
         if not user_id or result.get("status") == "needs_confirmation":
             return False
         path = result.get("execution_path") or []
@@ -143,6 +143,8 @@ class MoiraiLearning:
                    "goal_gaps": [{**{key: item.get(key) for key in ("id", "kind", "state", "support", "evidence_refs")},
                                   "requirement": str(item.get("requirement") or "")[:160]}
                                  for item in (result.get("goal_gaps") or {}).get("gaps", [])]}
+        if execution_context:
+            episode["execution_context"] = {key: execution_context[key] for key in ("origin", "task_id", "task_run_id") if execution_context.get(key)}
         with self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             inserted = db.execute("INSERT OR IGNORE INTO episodes VALUES (?,?,?,?)", (user_id, episode_id, json.dumps(episode, ensure_ascii=False), self._next_timestamp(db, user_id))).rowcount

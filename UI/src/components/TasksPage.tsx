@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { ArrowUpRight, CheckCircle2, ChevronRight, CircleDot, ListTodo, MessageSquare, Pause, Play, RefreshCw, Square } from 'lucide-react'
-import { cancelTask, listSessions, listTasks, pauseTask, resumeTask } from '../services/api'
+import { cancelTask, confirmTask, listSessions, listTasks, pauseTask, resumeTask } from '../services/api'
 import type { Session, Task } from '../services/api'
 import { useLanguage } from '../store/LanguageContext'
 import { taskStatusLabel } from '../utils/task-presentation'
 import { useEnvironmentObservation } from '../hooks/useEnvironmentObservation'
+import MessageContent from './MessageContent'
 
 type Props = { onObserve: (task: Task, runId?: string) => void; onOpenSession: (id: string) => void }
 const TASK_STATUSES = ['open', 'running', 'paused', 'waiting_user', 'completed', 'failed', 'cancelled']
@@ -21,7 +22,10 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
   const [controlError, setControlError] = useState('')
   const [busy, setBusy] = useState(false)
   const [revision, setRevision] = useState(0)
+  const [reply, setReply] = useState('')
   const selected = tasks.find((task) => task.task_id === selectedId)
+  const pendingRun = selected?.runs?.find((run) => run.pending_confirmation || run.input_request)
+  const output = selected?.runs?.slice().reverse().find((run) => run.output)?.output
   const observe = useEnvironmentObservation('tasks', selected ? [{ kind: 'task', id: selected.task_id }] : [])
   const label = (value: string) => taskStatusLabel(value, value, t)
 
@@ -50,23 +54,25 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
     return () => controller.abort()
   }, [])
 
-  const control = async (action: 'pause' | 'resume' | 'cancel') => {
-    if (!selected || busy) return
-    if (action === 'cancel' && !window.confirm(t('停止此任务？', 'Stop this task?'))) return
+  const update = async (operation: () => Promise<Task>) => {
+    if (busy) return
     setBusy(true)
     setControlError('')
     try {
-      const task = action === 'pause'
-        ? await pauseTask(selected.task_id, selected.revision)
-        : action === 'resume'
-          ? await resumeTask(selected.task_id, selected.revision)
-          : await cancelTask(selected.task_id, 'user_cancelled', selected.revision)
+      const task = await operation()
       setTasks((rows) => rows.map((row) => row.task_id === task.task_id && row.revision <= task.revision ? task : row))
       setRevision((value) => value + 1)
     } catch (cause) {
       setControlError(cause instanceof Error ? cause.message : String(cause))
       setRevision((value) => value + 1)
     } finally { setBusy(false) }
+  }
+  const control = async (action: 'pause' | 'resume' | 'cancel') => {
+    if (!selected) return
+    if (action === 'cancel' && !window.confirm(t('停止此任务？', 'Stop this task?'))) return
+    await update(() => action === 'pause' ? pauseTask(selected.task_id, selected.revision)
+      : action === 'resume' ? resumeTask(selected.task_id, selected.revision)
+        : cancelTask(selected.task_id, 'user_cancelled', selected.revision))
   }
   const visible = tasks.filter((task) => (status === 'all' || task.status === status)
     && `${task.title} ${task.objective || ''}`.toLocaleLowerCase().includes(query.toLocaleLowerCase()))
@@ -96,7 +102,7 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
       <div className="task-list">
         {visible.map((task) => <button type="button" key={task.task_id}
           className={`task-row ${selectedId === task.task_id ? 'is-selected' : ''}`}
-          onClick={() => { setSelectedId(task.task_id); setControlError('') }}>
+          onClick={() => { setSelectedId(task.task_id); setControlError(''); setReply('') }}>
           {task.status === 'completed' ? <CheckCircle2 size={17} /> : <CircleDot size={17} />}
           <span><strong>{task.title}</strong><small>{label(task.status)} · {date(task.updated_at)}</small></span>
         </button>)}
@@ -111,6 +117,45 @@ export default function TasksPage({ onObserve, onOpenSession }: Props) {
         {selected ? <>
           <h2>{selected.title}</h2>
           {selected.objective && <p className="task-objective">{selected.objective}</p>}
+          {output && !pendingRun && <section>
+            <h3>{t('结果', 'Result')}</h3>
+            <div className="whitespace-pre-wrap break-words text-sm"><MessageContent content={output} followups={[]} /></div>
+          </section>}
+          {pendingRun?.pending_confirmation && <section>
+            <h3>{t('等待批准', 'Awaiting approval')}</h3>
+            <div className="break-words text-sm">{pendingRun.pending_confirmation.tool_name}</div>
+            <pre className="whitespace-pre-wrap break-all text-xs">{JSON.stringify(pendingRun.pending_confirmation.arguments, null, 2)}</pre>
+            <div className="task-actions">{(['reject', 'approve'] as const).map((action) => <button type="button" key={action}
+              className={action === 'approve' ? 'primary-button' : 'secondary-button'} disabled={busy}
+              onClick={() => void update(() => confirmTask(selected.task_id, pendingRun.run_id, pendingRun.pending_confirmation!.tool_call_id, action))}>
+              {action === 'approve' ? t('批准', 'Approve') : t('拒绝', 'Reject')}
+            </button>)}</div>
+          </section>}
+          {pendingRun?.input_request && <section>
+            <h3>{t('等待回复', 'Awaiting reply')}</h3>
+            <p className="break-words text-sm">{pendingRun.input_request.content}</p>
+            {pendingRun.input_request.input_kind === 'text' && <textarea value={reply} maxLength={16000}
+              aria-label={t('回复任务', 'Reply to task')} onChange={(event) => setReply(event.target.value)} />}
+            <button type="button" className="primary-button" disabled={busy || (pendingRun.input_request.input_kind === 'text' && !reply.trim())}
+              onClick={() => void update(() => resumeTask(selected.task_id, selected.revision, pendingRun.input_request?.input_kind === 'text'
+                ? { request_id: pendingRun.input_request.request_id, content: reply.trim() } : undefined))}>
+              {pendingRun.input_request.input_kind === 'text' ? t('发送回复', 'Send reply') : t('继续', 'Resume')}
+            </button>
+          </section>}
+          {selected.goal_progress && <section aria-label={t('目标进度', 'Goal progress')}>
+            <h3>{t('目标进度', 'Goal progress')}</h3>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-muted">
+              <span>{t('已验证', 'Verified')} {selected.goal_progress.checks_passed ?? 0} / {selected.goal_progress.tracked ?? 0}</span>
+              <span>{t('待完成', 'Open')} {selected.goal_progress.open ?? 0}</span>
+              <span>{t('受阻', 'Blocked')} {selected.goal_progress.blocked ?? 0}</span>
+            </div>
+            <ul className="mt-2 space-y-2 text-sm">
+              {(selected.goal_gaps?.gaps || []).map((gap) => <li key={gap.id} className="flex items-start gap-2">
+                {gap.support === 'checked' && gap.state === 'resolved' ? <CheckCircle2 size={15} className="mt-0.5 shrink-0" /> : <CircleDot size={15} className="mt-0.5 shrink-0" />}
+                <span className="min-w-0 break-words">{gap.requirement}<small className="ml-2 text-text-muted">{gap.state === 'blocked' ? t('受阻', 'Blocked') : gap.state === 'resolved' && gap.support === 'checked' ? t('已验证', 'Verified') : t('未验证', 'Unverified')}</small></span>
+              </li>)}
+            </ul>
+          </section>}
           <div className="task-actions">
             <button type="button" className="primary-button" onClick={() => onObserve(selected)}>
               <ArrowUpRight size={14} />{t('在工作台观察', 'Observe in workbench')}

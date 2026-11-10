@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from .events import EventEmitter
+from .model_language import response_language_context, with_response_language
 from .protocol import EventType
 from .reasoning_budget import ReasoningBudgetLedger
 from .reasoning_debug import ReasoningDebugSnapshotWriter
@@ -632,6 +634,12 @@ class ReasoningService:
         ):
             return {"used_reasoning": False}
 
+        user_config = deepcopy(user_config or {})
+        user_config["_runtime_call"] = {
+            **(user_config.get("_runtime_call") or {}),
+            "purpose": "reasoning",
+            "response_language": response_language_context(user_message, run_context),
+        }
         if force_reasoning:
             gate = {
                 "needs_reasoning": True,
@@ -2611,6 +2619,7 @@ class ReasoningService:
         user_config: Optional[Dict[str, Any]],
         user_id: Optional[str],
     ) -> str:
+        messages = with_response_language(messages, ((user_config or {}).get("_runtime_call") or {}).get("response_language"))
         try:
             response = await self.conversation_core.call_llm(
                 messages,

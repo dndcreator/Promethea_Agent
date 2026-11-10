@@ -2,6 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import type { ReactNode } from 'react';
 import { authFetch, getAuthToken, setAuthToken, clearAuthToken } from '../services/api';
 import { useLanguage } from './LanguageContext';
+import { forgetAccount, knownAccounts, rememberAccount } from '../services/accountHistory';
+import type { KnownAccount } from '../services/accountHistory';
 
 interface UserProfile {
   username: string;
@@ -17,6 +19,8 @@ interface AuthContextType {
   login: (token: string, profile: UserProfile, options?: { remember?: boolean }) => void;
   logout: () => Promise<void>;
   verifySession: () => Promise<boolean>;
+  accounts: KnownAccount[];
+  forgetAccount: (userId: string) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -26,6 +30,7 @@ const PASSIVE_RECHECK_INTERVAL_MS = 5 * 60 * 1000;
 export function AuthProvider({ children }: { children: ReactNode }) {
   const { t } = useLanguage();
   const [user, setUser] = useState<UserProfile | null>(null);
+  const [accounts, setAccounts] = useState(() => knownAccounts(localStorage, sessionStorage));
   const [loading, setLoading] = useState(() => Boolean(getAuthToken()));
   const [checking, setChecking] = useState(false);
   const [notice, setNotice] = useState<'' | 'expired' | 'unavailable'>('');
@@ -59,6 +64,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const data = await res.json();
         if (!isCurrent()) return false;
         setUser(data);
+        setAccounts(rememberAccount(localStorage, sessionStorage, data, Boolean(localStorage.getItem('auth_token'))));
         setNotice('');
         lastVerifiedAtRef.current = Date.now();
         return true;
@@ -123,6 +129,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     invalidateProfile();
     setAuthToken(token, options.remember ?? true);
     setUser(profile);
+    setAccounts(rememberAccount(localStorage, sessionStorage, profile, options.remember ?? true));
     setNotice('');
     lastVerifiedAtRef.current = Date.now();
   };
@@ -148,7 +155,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       : '';
 
   return (
-    <AuthContext.Provider value={{ user, loading, checking, authNotice, login, logout, verifySession: () => fetchProfile({ showChecking: true }) }}>
+    <AuthContext.Provider value={{ user, loading, checking, authNotice, login, logout, accounts, forgetAccount: (id) => setAccounts(forgetAccount(localStorage, sessionStorage, id)), verifySession: () => fetchProfile({ showChecking: true }) }}>
       {children}
     </AuthContext.Provider>
   );

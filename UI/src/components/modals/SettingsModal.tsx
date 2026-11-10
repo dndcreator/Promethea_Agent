@@ -1,6 +1,6 @@
 import { cloneElement, useEffect, useId, useState } from 'react'
 import type { FormEvent, ReactElement } from 'react'
-import { deleteCurrentUserAccount, getConfig, getRuntimeSecrets, readApiResponse, updateConfig, updateRuntimeSecrets } from '../../services/api'
+import { deleteCurrentUserAccount, getAuthToken, getConfig, getRuntimeSecrets, readApiResponse, updateConfig, updateRuntimeSecrets } from '../../services/api'
 import { useLanguage } from '../../store/LanguageContext'
 import { useAuth } from '../../store/AuthContext'
 import EnterpriseBrainPanel from './settings/EnterpriseBrainPanel'
@@ -10,11 +10,12 @@ import PersonalAccountsPanel from './settings/PersonalAccountsPanel'
 import ChannelAccountsPanel from './settings/ChannelAccountsPanel'
 import SoulReadOnlyPanel from './settings/SoulReadOnlyPanel'
 import MemoryEmbeddingPanel from './settings/MemoryEmbeddingPanel'
+import VoicePanel from './settings/VoicePanel'
 import AvatarSettingsPanel from '../avatar/AvatarSettingsPanel'
 import FeatureSurface from '../FeatureSurface'
-import { X } from 'lucide-react'
+import { ArrowRightLeft, X } from 'lucide-react'
 
-export default function SettingsModal({ onClose, embedded = false, onWorkspaceRestored }: { onClose: () => void; embedded?: boolean; onWorkspaceRestored?: () => void }) {
+export default function SettingsModal({ onClose, embedded = false, onWorkspaceRestored, onSwitchAccount }: { onClose: () => void; embedded?: boolean; onWorkspaceRestored?: () => void; onSwitchAccount?: () => void }) {
   const [config, setConfig] = useState<any>({})
   const [loading, setLoading] = useState(true)
   const [saveNotice, setSaveNotice] = useState('')
@@ -28,7 +29,7 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
   const [deleteConfirm, setDeleteConfirm] = useState('')
   const [accountBusy, setAccountBusy] = useState(false)
   const { t } = useLanguage()
-  const { user, logout, verifySession } = useAuth()
+  const { user, logout, verifySession, forgetAccount } = useAuth()
   const orgBrainEnabled = Boolean(config?.org_brain?.enabled)
 
   useEffect(() => {
@@ -85,6 +86,8 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
       setSaveNotice(t('请输入当前用户名以确认注销账户。', 'Enter the current username to confirm account deletion.'))
       return
     }
+    const deletingUserId = user.user_id
+    const deletingToken = getAuthToken()
     setAccountBusy(true); setSaveError(''); setSaveNotice('')
     try {
       const res = await deleteCurrentUserAccount()
@@ -92,6 +95,8 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
         const data = await res.json().catch(() => ({}))
         throw new Error(String(data.detail || data.message || `HTTP ${res.status}`))
       }
+      forgetAccount(deletingUserId)
+      if (getAuthToken() !== deletingToken) return
       await logout()
       onClose()
     } catch (error) {
@@ -146,6 +151,7 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
                       {user?.user_id ? `${t('用户 ID', 'User ID')}: ${user.user_id}` : t('未登录', 'Not signed in')}
                     </div>
                   </div>
+                  {onSwitchAccount && <button type="button" onClick={onSwitchAccount} disabled={accountBusy} className="icon-button" title={t('切换账户', 'Switch account')} aria-label={t('切换账户', 'Switch account')}><ArrowRightLeft size={16} /></button>}
                   {user && (
                     <button
                       type="button"
@@ -379,6 +385,7 @@ export default function SettingsModal({ onClose, embedded = false, onWorkspaceRe
             </section>
 
             <MemoryEmbeddingPanel value={config?.memory?.embedding || {}} endpoint={secrets?.memory?.embedding_base_url || config?.memory?.embedding?.base_url || ''} onChange={(embedding) => setConfig({ ...config, memory: { ...config.memory, embedding } })} />
+            <VoicePanel />
             <details className="rounded-xl border border-black/5 bg-white/70 p-4">
               <summary className="cursor-pointer text-sm font-semibold text-text-strong">
                 {t('企业大脑', 'Enterprise Brain')}

@@ -3,7 +3,32 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import math
+import re
 import time
+
+
+def journal_exposure(path):
+    pending, settled = {}, set()
+    if not path.exists():
+        return {"unresolved_requests": 0, "unknown_reserve_usd": 0}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        record = json.loads(line)
+        key = record["local_id"]
+        if record["state"] == "pending":
+            if key in pending:
+                raise ValueError("duplicate request admission in journal")
+            pending[key] = record
+        elif record["state"] == "settled":
+            if key not in pending or not record["receipt"].get("usage"):
+                raise ValueError("settlement has no admission or usage")
+            settled.add(key)
+        elif record["state"] == "unresolved":
+            if key not in pending:
+                raise ValueError("unresolved request has no admission")
+        else:
+            raise ValueError("unknown journal state")
+    unresolved = [value for key, value in pending.items() if key not in settled]
+    return {"unresolved_requests": len(unresolved), "unknown_reserve_usd": sum(row["reserved_cost_usd"] for row in unresolved)}
 
 
 class BudgetExceeded(RuntimeError):
@@ -26,15 +51,40 @@ class Budget:
     usage_known: bool = True
     started: float = field(default_factory=time.monotonic)
 
-    def admit(self, messages, output_tokens, rates=None):
+    @staticmethod
+    def reservation(messages, output_tokens, rates=None, *, image_token_limit=None):
         # A deliberately conservative text reserve; not a provider billing quote.
-        reserve = len(json.dumps(messages, ensure_ascii=False).encode()) + output_tokens + 512
+        size = len(json.dumps(messages, ensure_ascii=False, allow_nan=False).encode())
+        inline_bytes = image_tokens = 0
+        if image_token_limit is not None and isinstance(messages, dict):
+            for message in messages.get("messages") or []:
+                if not isinstance(message, dict) or message.get("role") not in {"user", "tool"} or not isinstance(message.get("content"), list):
+                    continue
+                for part in message["content"]:
+                    image = part.get("image_url") if isinstance(part, dict) and part.get("type") == "image_url" else None
+                    url = image.get("url") if isinstance(image, dict) else None
+                    if not isinstance(url, str):
+                        continue
+                    header, _, payload = url.partition(",")
+                    if header in {"data:image/jpeg;base64", "data:image/png;base64", "data:image/webp;base64", "data:image/gif;base64"} and len(payload) > image_token_limit and len(payload) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", payload):
+                        inline_bytes += len(payload)
+                        image_tokens += image_token_limit
+        input_reserve = size - inline_bytes + image_tokens + 512
+        reserve = input_reserve + output_tokens
+        return {"input_bytes": size, "reserved_tokens": reserve,
+                **({"inline_image_base64_bytes": inline_bytes, "reserved_image_tokens": image_tokens} if inline_bytes else {}),
+                "reserved_cost_usd": (input_reserve * rates[0] + output_tokens * rates[1]) / 1_000_000 if rates is not None else None}
+
+    def admit(self, messages, output_tokens, rates=None, *, image_token_limit=None):
+        reservation = self.reservation(messages, output_tokens, rates, image_token_limit=image_token_limit)
+        reserve = reservation["reserved_tokens"]
         if not self.usage_known or self.calls >= self.max_calls or self.tokens + reserve > self.max_tokens or self.remaining() <= 0:
             raise BudgetExceeded("call/token/deadline budget exhausted or provider usage unavailable")
         if self.max_cost_usd is not None:
-            if rates is None or self.cost_usd + (reserve * rates[0] + output_tokens * rates[1]) / 1_000_000 > self.max_cost_usd:
+            if rates is None or self.cost_usd + reservation["reserved_cost_usd"] > self.max_cost_usd:
                 raise BudgetExceeded("currency budget unavailable or insufficient")
         self.calls += 1  # failures consume admission too; no hidden retries
+        return reservation
 
     def remaining(self):
         return max(0.0, self.seconds - (time.monotonic() - self.started))
@@ -66,6 +116,11 @@ def hard_checks(case, evidence):
     for path, content in expected.get("artifacts", {}).items():
         if evidence.get("artifacts", {}).get(path) != content:
             errors.append("artifact_mismatch:" + path)
+    for path in expected.get("absent_artifacts", []):
+        if path not in evidence.get("artifacts", {}):
+            errors.append("artifact_absence_unverified:" + path)
+        elif evidence["artifacts"][path] is not None:
+            errors.append("unexpected_artifact:" + path)
     for text in expected.get("answer_contains", []):
         if text not in evidence.get("answer", ""):
             errors.append("answer_missing:" + text)
@@ -174,10 +229,20 @@ def summarize(rows):
 
 
 def compare_behavior(before, after):
-    keys = ("mode", "corpus_hash", "rubric_hash", "case_ids", "repeat")
+    keys = ("mode", "corpus_hash", "rubric_hash", "calibration_hash", "judge", "case_ids", "repeat")
     if any(before.get(key) != after.get(key) for key in keys):
         raise ValueError("Incompatible corpus/rubric/case selection/repetition; cannot claim improvement")
     if any(report.get("completed_trials") != report.get("planned_trials") or report.get("stop_reason") for report in (before, after)):
         raise ValueError("Incomplete or budget-stopped runs cannot establish comparable quality")
-    return {group: {"before": before["groups"].get(group), "after": after["groups"].get(group)}
-            for group in before["groups"].keys() | after["groups"].keys()}
+    result = {group: {"before": before["groups"].get(group), "after": after["groups"].get(group)}
+              for group in before["groups"].keys() | after["groups"].keys()}
+    def case_rates(report):
+        scores = {}
+        for row in report.get("rows", []):
+            scores.setdefault(row["case_id"], []).append(bool(row.get("hard_pass") and not row.get("evaluation_error") and row.get("judge_expectation_met") is not False))
+        return {case: sum(values) / len(values) for case, values in scores.items()}
+    old, new = case_rates(before), case_rates(after)
+    result["_cases"] = {case: {"before": old.get(case), "after": new.get(case), "direction": "improved" if new[case] > old[case] else "regressed" if new[case] < old[case] else "unchanged"}
+                        for case in old.keys() & new.keys()}
+    result["_metrics"] = {key: {"before": before.get(key), "after": after.get(key)} for key in ("agent", "model_api_calls", "known_tokens", "estimated_cost_usd")}
+    return result

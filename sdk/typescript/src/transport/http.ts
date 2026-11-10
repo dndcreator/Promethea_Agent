@@ -50,7 +50,7 @@ export class HttpTransport {
 
   async json<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers)
-    if (init.body !== undefined && !headers.has('Content-Type')) {
+    if (init.body !== undefined && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json')
     }
     const response = await this.send(path, { ...init, headers })

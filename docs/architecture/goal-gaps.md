@@ -115,6 +115,8 @@ existing lifecycle behavior. Explicit user completion remains available.
 Invalid gap deltas do not discard a valid tool action or assistant answer. The
 rejection becomes bounded feedback on the next ordinary model step, without a
 dedicated retry. Persistence or execution-fencing failures still fail closed.
+This does not bypass recovery admission: when a recovery decision is required,
+an invalid delta cannot grant permission to execute the proposed tool batch.
 
 The model projection also derives a bounded `recent_obstacles` list from the
 existing committed Observations, including capability and action-validation
@@ -139,28 +141,71 @@ invent semantic goals or treat a failed observation as successful evidence.
 - Moirai receives compact gap outcomes, not another world graph or full set of
   monitoring frames. Learning still runs through its existing idle distillation.
 
-Repeated action/result fingerprints without intervening checked resolution
-produce a recovery constraint in the next normal model request. Pending approval
-and waiting time are excluded. The model can change methods, seek clarification,
-or report a block; this mechanism never retries tools by itself or changes their
-permissions. Batch/concurrent execution remains intact.
+The Runtime monitors repeated action/results, repeated structured error families
+even with changing arguments, and failures declared non-retryable. It does not
+parse website names or natural-language error text. Monitoring remains active
+without declared gaps and when all gaps are blocked. Approval, protocol-validation,
+model-output and control-rejection receipts do not masquerade as executed steps.
+An evidence-backed blocked update for a focused gap also requests reassessment.
 
-This conservative monitor does not reliably detect semantic drift when every
-irrelevant result looks different, nor guarantee that the model obeys a recovery
-constraint. Semantic gap creation/reopening and adoption remain model-dependent.
-Those are explicit tradeoffs for avoiding another inference pipeline. Token
-budgets limit the added context, but end-to-end task token use can still grow if
-the model chooses more actions; comparative A/B evaluation remains necessary.
+### Controlled Recovery
+
+ActionService enters `reassessing` for the next ordinary model decision. Final
+answers, `await_user` and capability inspection/resolution remain available. A
+tool proposal requires a recovery decision inside the existing delta:
+
+```json
+{
+  "revision": 7,
+  "recovery": {
+    "strategy": "replan",
+    "reason": "Inspect another source before retrying the failed operation",
+    "evidence_refs": ["obs_current_obstacle"],
+    "repair_refs": []
+  }
+}
+```
+
+Strategies are `investigate`, `replan` and `retry`. Runtime validates the revision,
+current obstacle reference and the concrete proposed batch before authorization
+or dispatch. Merely changing the reason text cannot replay a known non-retryable
+failed call. That requires `retry`, a newer successful observation in `repair_refs`
+and at most one granted retry for the failed call. Repeating a failed call twice
+within one batch is refused. One ordinary transient failure can retry once
+without a separate recovery decision. No call in a rejected batch is executed.
+
+An admitted decision starts one trial. New successful evidence returns control
+to normal execution, but is not verified goal progress; only checked resolution
+has that meaning. Repeated/failed trials and rejected proposals are bounded by
+`max_recovery_attempts`. At the bound, execution stops and the existing final
+model call supplies a progress report or durable human-input wait, not another
+tool action. Recovery does not bypass policy, approval, Task leases or cancellation.
+The model still judges whether a different method and its repair evidence are
+semantically relevant; Runtime verifies receipts and ordering, not that judgment.
+
+Session/Task checkpoints retain this control state with their Observations through
+approval, restart and human waits. A human reply opens another bounded decision
+slice but does not count as a successful repair or authorize a tool. Independent
+Task runs keep the durable goal requirements while starting fresh execution
+monitoring; old loop-local observation references must not deadlock a new run.
+The old facts remain in Runtime's event history. Renaming a gap or claiming
+inferred resolution within a run does not clear failed-call guards.
+
+This deterministic guard does not detect all semantic drift when every irrelevant
+result is novel. Semantic gap interpretation remains model work. No dedicated
+reflection call is added, although corrective decisions and their context can
+increase total model use. Comparative live A/B evaluation remains necessary.
 
 ## Configuration And Tests
 
 Use existing JSON/env configuration, under `action.gaps` or `ACTION__GAPS__...`.
-`enabled`, `max_gaps`, `max_updates`, `window`, and `context_chars` are configurable.
+`enabled`, `max_gaps`, `max_updates`, `window`, `context_chars`, and
+`max_recovery_attempts` are configurable.
 Capacity settings must leave room for all outstanding identities. Disabling new
 updates does not erase already-persisted task requirements.
 
 ```bash
-python -m pytest -q tests/test_goal_gaps.py tests/test_action_service.py tests/test_task_service.py tests/test_moirai_learning.py
+python -m pytest -q tests/test_goal_gaps.py tests/test_action_progress_control.py tests/test_action_service.py tests/test_task_service.py tests/test_moirai_learning.py
 python scripts/generate_public_contracts.py --check
 ```
 

@@ -259,6 +259,8 @@ class BackgroundAgents:
             agent_task_id=task["task_id"], workspace_id=descriptor["workspace_id"],
         )
         checkpoint = run["metadata"].get("checkpoint")
+        if checkpoint and run["metadata"].get("resume_action_result"):
+            checkpoint = {**checkpoint, "resume_result": True}
         if checkpoint:
             scope.budget.count = int(checkpoint.get("delegation_spent") or 0)
             context.agent_message_ids = checkpoint.get("agent_message_ids", [])
@@ -285,8 +287,8 @@ class BackgroundAgents:
             except TimeoutError:
                 return {"status": "failed", "detail": {"error": "child deadline exceeded"}}
         return {
-            "status": "completed" if result.get("status") == "success" else "failed",
-            "detail": {"output": str(result.get("content") or "")[:limits["result_chars"]], "result_summary": str(result.get("content") or "")[:600], "usage": result.get("usage"), "error": result.get("error"), "agent_message_ids": result.get("agent_message_ids", [])},
+            "status": "waiting_user" if result.get("status") == "needs_input" else "paused" if result.get("execution_outcome") else "completed" if result.get("status") == "success" else "failed",
+            "detail": {"output": str(result.get("content") or "")[:limits["result_chars"]], "result_summary": str(result.get("content") or "")[:600], "usage": result.get("usage"), "error": result.get("error"), "agent_message_ids": result.get("agent_message_ids", []), "execution_outcome": result.get("execution_outcome"), "input_request": result.get("input_request")},
         }
 
     async def _run_parent_followup(self, task, run, token):
@@ -311,6 +313,8 @@ class BackgroundAgents:
                 tool_policy=deepcopy(descriptor["tool_policy"]),
             )
             checkpoint = run["metadata"].get("checkpoint")
+            if checkpoint and run["metadata"].get("resume_action_result"):
+                checkpoint = {**checkpoint, "resume_result": True}
             if checkpoint:
                 context.agent_message_ids = checkpoint.get("agent_message_ids", [])
             # A notification is not a new grant of external-write authority.
@@ -328,6 +332,8 @@ class BackgroundAgents:
                         result = await self.conversation.run_agent_followup(
                             run_context=context, checkpoint=checkpoint, checkpoint_sink=save,
                         )
+                if result.get("status") == "needs_input":
+                    return {"status": "waiting_user", "detail": {"input_request": result["input_request"], "output": result["content"]}}
                 if result.get("status") != "success":
                     manager.abort_turn(session, run["run_id"], user_id=user, error=result.get("error"))
                     return {"status": "failed", "detail": {"error": result.get("error") or "parent continuation did not complete"}}
@@ -339,7 +345,7 @@ class BackgroundAgents:
                         manager.discard_runtime_turn(session, run["run_id"], user_id=user, agent_message_ids=ids)
                         return {"status": "completed", "detail": {"agent_message_ids": ids, "delivery_status": "already_communicated"}}
                     return {"status": "pending", "detail": {"delivery_retry_at": time.time() + admission["retry_after_s"]}}
-                if not manager.commit_turn(session, run["run_id"], result.get("content", ""), user_id=user, reasoning_steps=result.get("reasoning_steps"), agent_message_ids=ids):
+                if not manager.commit_turn(session, run["run_id"], result.get("content", ""), user_id=user, reasoning_steps=result.get("reasoning_steps"), agent_message_ids=ids, execution_outcome=result.get("execution_outcome")):
                     raise RuntimeError("could not commit parent continuation")
                 await self.messages.record_communication(user_id=user, session_id=session, kind="background_result", content=result.get("content", ""), delivery_id=run["run_id"])
             except asyncio.CancelledError:
@@ -352,4 +358,4 @@ class BackgroundAgents:
                 from .protocol import EventType
 
                 await self.conversation.event_emitter.emit(EventType.CONVERSATION_COMPLETE, {"session_id": session, "user_id": user, "response": result.get("content", ""), "conversation_turn_id": run["run_id"], "source": "agent_inbox", "status": "success"})
-            return {"status": "completed", "detail": {"output": result.get("content", ""), "agent_message_ids": ids, "usage": result.get("usage")}}
+            return {"status": "paused" if result.get("execution_outcome") else "completed", "detail": {"output": result.get("content", ""), "agent_message_ids": ids, "usage": result.get("usage"), "execution_outcome": result.get("execution_outcome")}}

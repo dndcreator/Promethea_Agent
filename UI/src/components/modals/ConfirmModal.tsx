@@ -37,7 +37,7 @@ export default function ConfirmModal({ toolName, toolArgs, sessionId, toolCallId
 
   return (
     <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[9999] flex items-center justify-center p-8">
-      <div className="bg-white rounded-2xl shadow-xl w-[500px] overflow-hidden">
+      <div role="dialog" aria-modal="true" aria-label={t('敏感操作确认', 'Sensitive Action Confirmation')} className="bg-white rounded-2xl shadow-xl w-[500px] overflow-hidden">
         <div className="px-6 py-4 border-b border-black/5 bg-red-50/50">
           <h2 className="text-lg font-bold text-red-600">{t('敏感操作确认', 'Sensitive Action Confirmation')}</h2>
         </div>

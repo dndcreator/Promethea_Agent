@@ -58,6 +58,22 @@ def test_budget_consumes_failed_admissions_and_stops_unknown_usage():
         priced.admit([], 100, rates=(1, 1))
 
 
+def test_currency_reservation_prices_input_and_output_once_without_lowering_token_guard():
+    request = {"messages": [{"role": "user", "content": "x" * 100000}], "max_tokens": 8192}
+    size = len(json.dumps(request, ensure_ascii=False, allow_nan=False).encode())
+    reserved = Budget.reservation(request, 8192, rates=(0.3, 1.2))
+    expected_cost = ((size + 512) * 0.3 + 8192 * 1.2) / 1_000_000
+    assert reserved["reserved_tokens"] == size + 512 + 8192
+    assert reserved["reserved_cost_usd"] == pytest.approx(expected_cost)
+    budget = Budget(max_tokens=200000, max_cost_usd=0.05, cost_usd=0.0075552)
+    budget.admit(request, 8192, rates=(0.3, 1.2))
+    assert budget.calls == 1 and budget.cost_usd == 0.0075552
+    with pytest.raises(BudgetExceeded):
+        Budget(max_tokens=200000, max_cost_usd=expected_cost - 0.0000001).admit(request, 8192, rates=(0.3, 1.2))
+    with pytest.raises(BudgetExceeded):
+        Budget(max_tokens=reserved["reserved_tokens"] - 1).admit(request, 8192)
+
+
 def test_real_artifact_failure_cannot_be_overruled_by_success_message_or_judge():
     case = {"kind": "action", "expect": {"required_tools": ["workspace.write_file"], "artifacts": {"result.txt": "NET=32"}}}
     claimed = {"status": "success", "answer": "Done!", "tools": ["workspace.write_file"], "artifacts": {}}
@@ -148,6 +164,10 @@ def test_comparison_refuses_changed_or_incomplete_runs_and_reports_uncertainty()
     changed["completed_trials"] = 2
     with pytest.raises(ValueError, match="Incomplete"):
         compare_behavior(before, changed)
+    before["rows"] = [{"case_id": "c", "hard_pass": False}]
+    after = deepcopy(before)
+    after["rows"][0]["hard_pass"] = True
+    assert compare_behavior(before, after)["_cases"]["c"]["direction"] == "improved"
     result = summarize([{"group": "action", "hard_pass": True}, {"group": "action", "hard_pass": False}])["action"]
     assert result["hard_pass_rate"] == 0.5
     assert result["wilson95"][0] < 0.5 < result["wilson95"][1]

@@ -53,6 +53,7 @@ class ManifestTool:
         self.side_effect_level = str(command.get("sideEffectLevel") or "privileged_host_action")
         self.side_effect_selector = dict(command.get("sideEffectSelector") or {})
         self.requires_capability = str(command.get("requiresCapability") or "").strip()
+        self.provides = command.get("provides", [])
         self.requires_config = command.get("requiresConfig")
         self.owner_user_id = str(
             command.get("ownerUserId")

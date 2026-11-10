@@ -20,6 +20,7 @@ from .protocol import EventType
 from .runtime_hooks import RuntimeHookManager, get_runtime_hook_manager
 from .temporal import resolve_context_timezone_name
 from .tools import SideEffectLevel, ToolPolicy, ToolPolicyDecision, ToolRegistry
+from .tools.registry import ToolNotFoundError
 from .tools.presentation import project_tool_call, project_tool_result
 from .tools.projection import project_capability_snapshot, resolve_capability_candidates
 
@@ -33,6 +34,9 @@ class ToolInvocationContext:
 
 
 class ToolPolicyViolationError(RuntimeError):
+    code = "TOOL_POLICY_DENIED"
+    category = "policy"
+    retryable = False
     def __init__(self, message: str, decision: Optional[ToolPolicyDecision] = None):
         super().__init__(message)
         self.decision = decision
@@ -57,6 +61,7 @@ class ToolCapabilityUnavailableError(RuntimeError):
     def __init__(self, capability: str, reason: str):
         self.capability = capability
         self.reason = reason
+        self.details = {"dependency": capability, "reason": reason}
         super().__init__(f"Capability '{capability}' is unavailable: {reason}")
 
 
@@ -176,6 +181,11 @@ class CapabilityService:
             ctx=ctx,
             user_config=user_config if isinstance(user_config, dict) else None,
         )
+
+    def validate_observation_source(self, name, params):
+        spec = self.tool_registry.resolve(tool_name=name, params=params)
+        if not spec.enabled or spec.side_effect_level != SideEffectLevel.READ_ONLY or spec.metadata.get("observation_source") is not True:
+            raise PermissionError("background observation requires an explicitly declared read-only source")
 
     def set_capability_provider(self, provider: Optional[Callable[[], Dict[str, Any]]]) -> None:
         self.capability_provider = provider
@@ -306,13 +316,11 @@ class CapabilityService:
             tool_name=tool_name,
             params=params,
         )
-        spec = self.tool_registry.resolve_for_call(tool_name=canonical_name, params=canonical_params)
-        decision = self.tool_policy.evaluate(
-            spec=spec,
-            run_context=run_context,
-            user_config=user_config,
+        auth = self._preflight_tool_call(
+            tool_name=canonical_name, params=canonical_params, run_context=run_context,
+            user_id=str(getattr(run_context, "user_id", "") or ""), user_config=user_config,
         )
-        return bool(decision.requires_confirmation)
+        return bool(auth["decision"].requires_confirmation)
 
     def _sync_registry_from_mcp(self) -> None:
         try:
@@ -500,9 +508,9 @@ class CapabilityService:
                 owner_ready = not owner_user_id or bool(user_id and owner_user_id == user_id)
                 if owner_user_id and not owner_ready:
                     continue
-                callable_now = bool(policy_allowed and dependency_ready and config_ready and owner_ready)
+                callable_now = bool(spec.enabled and policy_allowed and dependency_ready and config_ready and owner_ready)
                 callable_reason = "callable" if callable_now else (
-                    "owner_mismatch" if not owner_ready else (config_reason or dependency_reason or policy_reason or "not_callable")
+                    "disabled" if not spec.enabled else "owner_mismatch" if not owner_ready else (config_reason or dependency_reason or policy_reason or "not_callable")
                 )
                 requires_confirmation = spec.side_effect_level in {
                     SideEffectLevel.EXTERNAL_WRITE,
@@ -521,11 +529,13 @@ class CapabilityService:
                         "config_ready": config_ready,
                         "owner_ready": owner_ready,
                         "required_capability": required_capability or None,
+                        "provides": list(spec.provides),
                         "capability_details": capability_details,
                         "requires_confirmation": requires_confirmation,
                         "input_schema": dict(spec.input_schema or {}),
                         "output_schema": dict(spec.output_schema or {}),
                         "schema_status": "declared" if spec.input_schema else "missing",
+                        **({"observation_source": True} if spec.metadata.get("observation_source") is True and spec.side_effect_level == SideEffectLevel.READ_ONLY else {}),
                         "capability_type": spec.capability_type,
                         "side_effect_level": str(spec.side_effect_level.value),
                         "side_effect_selector": dict(spec.metadata.get("side_effect_selector") or {}),
@@ -559,9 +569,9 @@ class CapabilityService:
                 owner_ready = not owner_user_id or bool(user_id and owner_user_id == user_id)
                 if owner_user_id and not owner_ready:
                     continue
-                callable_now = bool(policy_allowed and dependency_ready and config_ready and owner_ready)
+                callable_now = bool(spec.enabled and policy_allowed and dependency_ready and config_ready and owner_ready)
                 callable_reason = "callable" if callable_now else (
-                    "owner_mismatch" if not owner_ready else (config_reason or dependency_reason or policy_reason or "not_callable")
+                    "disabled" if not spec.enabled else "owner_mismatch" if not owner_ready else (config_reason or dependency_reason or policy_reason or "not_callable")
                 )
                 requires_confirmation = spec.side_effect_level in {
                     SideEffectLevel.EXTERNAL_WRITE,
@@ -580,11 +590,13 @@ class CapabilityService:
                         "config_ready": config_ready,
                         "owner_ready": owner_ready,
                         "required_capability": required_capability or None,
+                        "provides": list(spec.provides),
                         "capability_details": capability_details,
                         "requires_confirmation": requires_confirmation,
                         "input_schema": dict(spec.input_schema or {}),
                         "output_schema": dict(spec.output_schema or {}),
                         "schema_status": "declared" if spec.input_schema else "missing",
+                        **({"observation_source": True} if spec.metadata.get("observation_source") is True and spec.side_effect_level == SideEffectLevel.READ_ONLY else {}),
                         "capability_type": spec.capability_type,
                         "side_effect_level": str(spec.side_effect_level.value),
                         "side_effect_selector": dict(spec.metadata.get("side_effect_selector") or {}),
@@ -675,7 +687,15 @@ class CapabilityService:
         items: List[Dict[str, Any]] = []
         for name in requested:
             normalized, params = self.tool_registry.normalize_call(tool_name=name, params={})
-            spec = self.tool_registry.resolve_for_call(tool_name=normalized, params=params)
+            try:
+                spec = self.tool_registry.resolve_for_call(tool_name=normalized, params=params)
+            except ToolNotFoundError:
+                items.append({"name": name, "registered": False, "callable_now": False,
+                              "callable_reason": "not_registered", "requires_confirmation": False,
+                              "input_schema": {}, "output_schema": {}, "schema_status": "missing",
+                              "description": "", "provides": [], "required_capability": None,
+                              "side_effect_level": None, "side_effect_selector": {}, "confirmation_depends_on_arguments": False})
+                continue
             decision = self.tool_policy.evaluate(spec=spec, run_context=run_context, user_config=user_config)
             registered = spec.full_name in {item.full_name for item in self.tool_registry.list_specs()}
             owner = str(spec.metadata.get("owner_user_id") or "")
@@ -692,9 +712,14 @@ class CapabilityService:
                     "callable_now": callable_now,
                     "callable_reason": "callable" if callable_now else ("not_registered" if not registered else "disabled" if not spec.enabled else config_reason or dependency_reason or decision.reason),
                     "required_capability": required if registered else None,
+                    "provides": list(spec.provides) if registered else [],
                     "description": spec.description if registered else "",
                     "input_schema": dict(spec.input_schema or {}) if registered else {},
                     "output_schema": dict(spec.output_schema or {}) if registered else {},
+                    "side_effect_level": spec.side_effect_level.value if registered else None,
+                    "side_effect_selector": dict(spec.metadata.get("side_effect_selector") or {}) if registered else {},
+                    "requires_confirmation": bool(decision.requires_confirmation) if registered else False,
+                    "confirmation_depends_on_arguments": bool(spec.metadata.get("side_effect_selector")) if registered else False,
                     "schema_status": "declared" if registered and spec.input_schema else "missing",
                 }
             )
@@ -847,54 +872,40 @@ class CapabilityService:
             connection_id=connection_id,
         )
         self._sync_registry_from_mcp()
-        spec = self.tool_registry.resolve_for_call(tool_name=tool_name, params=params)
-
-        if spec.source.value == "mcp" and self._mcp_registry_error is not None:
-            error = ToolCapabilityUnavailableError(spec.full_name, "mcp_registry_refresh_failed")
+        try:
+            return self._preflight_tool_call(
+                tool_name=tool_name, params=params, run_context=run_context,
+                user_id=str(context_fields.get("user_id") or ""), user_config=user_config,
+            )
+        except Exception as error:
             await self._emit_event(EventType.TOOL_CALL_ERROR, {
                 "request_id": request_id, "connection_id": connection_id, **context_fields,
-                "tool_type": "mcp", "tool_name": spec.full_name,
-                "ok": False, "status": "blocked", "error": str(error),
+                "tool_name": tool_name, "ok": False, "status": "blocked", "error": str(error),
                 "error_detail": error_from_exception(error).as_dict(),
             })
-            raise error
+            raise
 
+    def _preflight_tool_call(self, *, tool_name, params, run_context, user_id, user_config):
+        """Shared admission checks precede approval and run again before dispatch."""
+        spec = self.tool_registry.resolve_for_call(tool_name=tool_name, params=params)
+        if not spec.enabled:
+            raise ToolCapabilityUnavailableError(spec.full_name, "disabled")
+        if spec.source.value == "mcp" and self._mcp_registry_error is not None:
+            raise ToolCapabilityUnavailableError(spec.full_name, "mcp_registry_refresh_failed")
         owner_user_id = str(spec.metadata.get("owner_user_id") or "").strip()
-        requester_user_id = str(context_fields.get("user_id") or "").strip()
-        if owner_user_id and requester_user_id != owner_user_id:
+        if owner_user_id and user_id != owner_user_id:
             raise ToolPolicyViolationError("tool is private to another user")
-
-        config_ready, config_reason = self._tool_config_readiness(spec, user_config, requester_user_id)
+        config_ready, config_reason = self._tool_config_readiness(spec, user_config, user_id)
         if not config_ready:
-            await self._emit_event(
-                EventType.TOOL_CALL_ERROR,
-                {
-                    "request_id": request_id,
-                    "connection_id": connection_id,
-                    **context_fields,
-                    "tool_type": str(spec.source.value),
-                    "tool_name": spec.full_name,
-                    "error": config_reason,
-                    "status": "blocked",
-                    "ok": False,
-                },
-            )
             raise ToolPolicyViolationError(config_reason)
-
+        required = str(spec.metadata.get("requires_capability") or "").strip()
+        if required and callable(self.capability_provider):
+            ready, reason, _ = self._capability_readiness(required)
+            if not ready:
+                raise ToolCapabilityUnavailableError(required, reason)
         decision = self.tool_policy.evaluate(spec=spec, run_context=run_context, user_config=user_config)
         if not decision.allowed:
-            payload = {
-                "request_id": request_id,
-                "connection_id": connection_id,
-                **context_fields,
-                "tool_type": str(spec.source.value),
-                "tool_name": spec.full_name,
-                "error": decision.reason,
-                "policy": decision.effective or {},
-            }
-            await self._emit_event(EventType.TOOL_CALL_ERROR, payload)
             raise ToolPolicyViolationError(decision.reason, decision=decision)
-
         return {"spec": spec, "decision": decision}
 
     def _tool_config_readiness(self, spec: Any, user_config: Optional[Dict[str, Any]], user_id: str) -> tuple[bool, str]:
@@ -929,52 +940,6 @@ class CapabilityService:
         if current != expected:
             return False, f"required config is not enabled: {path}"
         return True, ""
-
-    async def _assert_capability_ready(
-        self,
-        *,
-        tool_name: str,
-        params: Dict[str, Any],
-        context_fields: Dict[str, Any],
-        request_id: Optional[str],
-        connection_id: Optional[str],
-    ) -> None:
-        # Standalone callers historically have no host capability provider.
-        # The real Gateway always injects one and therefore fails closed.
-        if not callable(self.capability_provider):
-            return
-        spec = self.tool_registry.resolve_for_call(tool_name=tool_name, params=params)
-        service_name = str(spec.service_name or params.get("service_name") or tool_name)
-        actual_tool_name = str(spec.tool_name)
-        capability = str(spec.metadata.get("requires_capability") or "").strip()
-        if not capability:
-            return
-        ready, reason, _ = self._capability_readiness(capability)
-        if ready:
-            return
-        error = ToolCapabilityUnavailableError(capability, reason)
-        await self._emit_event(
-            EventType.TOOL_CALL_ERROR,
-            {
-                "request_id": request_id,
-                "connection_id": connection_id,
-                **context_fields,
-                "tool_type": str(spec.source.value),
-                "service_name": service_name,
-                "tool_name": actual_tool_name,
-                "status": "failed",
-                "ok": False,
-                "error": str(error),
-                "error_detail": {
-                    "code": error.code,
-                    "message": str(error),
-                    "category": error.category,
-                    "retryable": error.retryable,
-                    "dependency": capability,
-                },
-            },
-        )
-        raise error
 
     async def _emit_tool_outcome(
         self,
@@ -1078,13 +1043,6 @@ class CapabilityService:
             str(context_fields.get("timezone") or ""),
         )
         context_fields.setdefault("tool_call_id", f"tool_exec_{uuid4().hex}")
-        await self._assert_capability_ready(
-            tool_name=tool_name,
-            params=params,
-            context_fields=context_fields,
-            request_id=request_id,
-            connection_id=connection_id,
-        )
         auth = await self._authorize_tool_call(
             tool_name=tool_name,
             params=params,
@@ -1148,8 +1106,14 @@ class CapabilityService:
                 approved = await require_confirmation()
                 if approved and not consume_approved_call(approval_name, approval_params):
                     raise ToolConfirmationRequiredError(spec.full_name, decision)
+                invocation_ctx = ToolInvocationContext(
+                    session_id=context_fields.get("session_id"), user_id=context_fields.get("user_id"),
+                    source=context_fields.get("source"),
+                    metadata={**(ctx.metadata or {} if ctx else {}),
+                              "run_context": run_context, "user_config": user_config},
+                )
                 with self._workspace_scope(params, context_fields), bind_invocation_context(context_fields), approval_scope(tool_name, params, confirmed=approved, dispatch=False):
-                    result = await local_tool.invoke(params, ctx)
+                    result = await local_tool.invoke(params, invocation_ctx)
                 result_summary, result_metadata = self._project_local_result(local_tool, result)
                 result_presentation = project_tool_result(
                     local_tool,

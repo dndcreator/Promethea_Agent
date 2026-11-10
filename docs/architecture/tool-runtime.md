@@ -259,6 +259,36 @@ CapabilitySnapshot, then the main model proposes the next canonical action.
 - pause at `waiting_confirmation` and resume the same ActionRun after approval
 - preserve batch execution, cancellation, budgets, and terminal status
 
+Capability inspection/resolution and ordinary tool calls use the same typed
+execution batch and scheduler. Native responses may propose independent
+inspection, resolution and tool operations together; every operation retains
+its own call ID and committed Observation. Prompt JSON can express a query as
+an `action: capability_inspect` or `action: capability_request` item in the
+existing `tool_calls.calls` array. Answer/wait actions cannot share an execution
+batch. A call requiring a query result belongs in the next model step, not an
+intra-batch guessed reference.
+
+Registry lookup is read-only: an unknown name cannot synthesize/register a
+high-risk placeholder. Inspection reports it as not registered; execution and
+confirmation preflight return typed admission errors. CapabilityService shares
+registration, enabled/configuration/dependency, ownership and policy checks
+between approval decisions and dispatch. Every ordinary call in a batch is
+preflighted before any approval wait; a failing call gets its specific error,
+while the other unexecuted calls receive `BATCH_NOT_EXECUTED`. Approval resumption
+rechecks current availability, and approved IDs do not resurrect removed tools.
+`requires_confirmation` is an admission query and may raise a typed error; it
+is not a context-free risk-label lookup. Hosts pass the current user RunContext
+and effective configuration. Use `inspect_capabilities` for declared risk and
+readiness display without proposing an execution or approval.
+
+Only typed query operations reach the Runtime callbacks. A tool named like a
+query still passes normal tool authorization. All tool approvals are resolved
+before dispatch; rejection or unavailable authorization executes none of the
+batch. Queries do not grant diagnostic exemptions to accompanying execution
+during Goal Gap recovery. Ordinary concurrency-safe tools retain parallel
+scheduling; query callbacks are conservative scheduling barriers. Checkpoints
+retain operation kinds and IDs, and interrupted effects are not blindly replayed.
+
 The model decides what to propose. Runtime owns whether a tool exists, whether
 it is callable, whether confirmation is required, what executed, and what
 result was observed. The deleted historical tool-call loop no longer maintains
@@ -270,14 +300,21 @@ prompts and does not accept a precomputed provider response. Provider failures
 therefore enter the Action state machine as Runtime failures rather than being
 retried as malformed model actions.
 
-CapabilitySnapshot is a projection, not another registry. It contains a compact
-index of the complete current catalog and selected full schemas within a prompt
-budget. When the model knows the evidence or effect it needs but not the correct
+CapabilitySnapshot is a projection, not another registry. Runtime retains the
+complete current catalog; the model receives a bounded directory of identifiers,
+availability and offered-capability groups, not per-tool diagnostic records.
+Schemas preload only for explicitly preferred callable tools. Otherwise the
+model obtains definitions on demand. The same character bound applies to prompt
+assembly and per-step refresh; refresh cannot restore an unbounded catalog after
+compaction. When the model knows the evidence or effect it needs but not the correct
 binding, `capability_request` asks `CapabilityService` to resolve
 manifest-declared capability identifiers against current availability, policy,
 side-effect limits, and learned successful-path preferences. The returned
 candidates are an Observation; they do not bypass normal tool validation.
-`capability_inspect` resolves omitted schemas from the same registry. Native
+`capability_inspect` resolves omitted schemas and effect/confirmation information
+from the same registry. Wildcard `capability_request` discovery returns complete
+owner-scoped directory data through existing bounded Observations and paging;
+it does not authorize any operation or assess task feasibility. Native
 tools declare their input schema and required Runtime capability beside the
 implementation.
 

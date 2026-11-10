@@ -369,17 +369,6 @@ class GatewayIntegration:
             message_manager=message_manager,
             workflow_engine=self.gateway_server.workflow_engine,
         )
-        from gateway.http.routes.files import user_file_store
-
-        def read_file_context(user_id, resource):
-            row = user_file_store.get_file(user_id=user_id, file_id=resource.id)
-            if row is None:
-                raise KeyError("file not found")
-            return {"status": "available", "title": str(row.get("filename") or "")[:160],
-                    "version": str(row.get("uploaded_at") or ""),
-                    **{key: row.get(key) for key in ("bytes", "content_type", "modality", "text_extraction_status")}}
-
-        self.gateway_server.self_model_service.environment_sources.register("file", read_file_context)
         self.gateway_server.self_evolve_module = SelfEvolveModule(
             config_service=self.gateway_server.config_service,
             self_model_service=self.gateway_server.self_model_service,
@@ -431,6 +420,11 @@ class GatewayIntegration:
             self_model_service=self.gateway_server.self_model_service,
         )
         from gateway.background_agents import BackgroundAgents
+        from gateway.conversation_tasks import ConversationTasks
+
+        self.gateway_server.conversation_service.conversation_tasks = ConversationTasks(
+            self.gateway_server.conversation_service, self.gateway_server.task_runtime,
+        )
 
         background_agents = BackgroundAgents(
             conversation=self.gateway_server.conversation_service,
@@ -530,8 +524,9 @@ class GatewayIntegration:
             logger.info("Gateway system initialized successfully")
             return True
         except Exception as e:
-            logger.error(f"Failed to initialize gateway: {e}")
-            return False
+            logger.error("Failed to initialize gateway: {}", e)
+            await self.shutdown()
+            raise
 
     async def _init_channels(self):
         """Initialize channels from plugin runtime registry."""
@@ -657,15 +652,16 @@ async def initialize_gateway(
     """Initialize gateway singleton."""
     global _gateway_integration
     if _gateway_integration is None:
-        _gateway_integration = GatewayIntegration(config_path)
-        _gateway_integration.inject_dependencies(
+        integration = GatewayIntegration(config_path)
+        integration.inject_dependencies(
             agent_manager,
             memory_system,
             conversation_core,
             message_manager,
             mcp_manager,
         )
-        await _gateway_integration.initialize()
+        await integration.initialize()
+        _gateway_integration = integration
     return _gateway_integration
 
 

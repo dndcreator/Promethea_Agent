@@ -112,6 +112,19 @@ class TaskService:
     def assert_revision(self, *, task_id: str, user_id: str, expected_revision: Optional[int]) -> None:
         self._assert_revision(self._require(task_id, user_id), expected_revision)
 
+    def attach_session(self, *, task_id: str, user_id: str, session_id: str) -> None:
+        task = self._require(task_id, user_id)
+        if not session_id or session_id in task["session_ids"]:
+            return
+        previous = self._copy(task)
+        self._attach_session(task, session_id)
+        self._advance_revision(task)
+        try:
+            self._persist()
+        except Exception:
+            self._tasks[task_id] = previous
+            raise
+
     def list_tasks(self, *, user_id: str, status: str = "", limit: int = 100) -> List[Dict[str, Any]]:
         rows = [self._copy(task) for task in self._tasks.values() if task.get("user_id") == str(user_id)]
         if status:
@@ -169,6 +182,7 @@ class TaskService:
         run = self._require_run(task, run_id)
         previous = self._copy(run["metadata"])
         run["metadata"]["checkpoint"] = self._copy(checkpoint)
+        run["metadata"].pop("resume_action_result", None)
         try:
             self._persist()
         except Exception:

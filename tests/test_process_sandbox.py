@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -142,6 +143,38 @@ def test_native_windows_runner_restricts_real_file_writes(tmp_path):
           workspace_root=workspace, shell=True, timeout=10)
     assert read_only.returncode != 0
     assert not (workspace / "read_only.txt").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ACLs and Win32 path limits")
+def test_native_windows_deep_workspace_has_bounded_owned_temp_and_starts_python(tmp_path):
+    import win32api
+    import win32security
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32security.TOKEN_QUERY)
+    if win32security.IsTokenRestricted(token):
+        pytest.skip("already-restricted runner cannot create a second restricted token")
+    workspace = tmp_path / ("deep-" + "x" * max(1, 220 - len(str(tmp_path)) - 6))
+    workspace.mkdir()
+    script = "import json,tempfile; from pathlib import Path; p=Path(tempfile.gettempdir()); f=tempfile.TemporaryFile(); print(json.dumps({'temp':str(p),'root':str(Path.cwd()),'writable':f.write(b'ok')})); f.close()"
+    result = SandboxedProcessRunner(sandbox=SandboxPolicy(command_mode="allowlist", allowed_commands=["python"])).run(
+        [sys.executable, "-c", script], cwd=workspace, workspace_root=workspace, timeout=10)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert Path(data["temp"]).resolve().is_relative_to(workspace.resolve())
+    assert len(data["temp"]) <= 260 - 14 and data["writable"] == 2
+    assert not list(workspace.glob(".tmp-*")), "the helper must clean up its per-process temporary directory"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 short-path fallback")
+def test_native_temp_path_failure_cleans_owned_directory_without_host_fallback(tmp_path, monkeypatch):
+    from agentkit.security import windows_native_sandbox as native
+    import win32api
+
+    monkeypatch.setattr(native, "_MAX_TEMP_PATH", 0)
+    monkeypatch.setattr(win32api, "GetShortPathName", lambda path: path)
+    with pytest.raises(RuntimeError, match="shorter workspace"):
+        native._prepare_temp_dir(tmp_path)
+    assert not list(tmp_path.iterdir())
 
 
 @pytest.mark.asyncio

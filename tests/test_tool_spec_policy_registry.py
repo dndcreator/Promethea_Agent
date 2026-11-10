@@ -5,6 +5,7 @@ import pytest
 from gateway.tools import ToolPolicy, ToolRegistry
 from gateway.tools.policy import ToolPolicyDecision
 from gateway.tools.spec import SideEffectLevel, ToolSource, ToolSpec
+from gateway.tools.registry import ToolNotFoundError
 
 
 class _DummyLocalTool:
@@ -25,6 +26,21 @@ def test_toolspec_create():
     )
     assert spec.full_name == "catalog.lookup"
     assert spec.side_effect_level == SideEffectLevel.READ_ONLY
+
+
+@pytest.mark.parametrize("value", ["text.echo", [""], ["with spaces"], ["x"] * 17])
+def test_provided_capability_identifiers_are_validated(value):
+    with pytest.raises(ValueError):
+        ToolSpec(tool_name="echo", provides=value)
+
+
+def test_external_mcp_metadata_uses_same_provided_capability_contract():
+    registry = ToolRegistry()
+    registry.register_mcp_services({"mcp_services": [{"name": "remote", "available_tools": [
+        {"name": "echo", "provides": ["text.echo"], "input_schema": {"type": "object"}}]}]})
+    spec = registry.resolve(tool_name="remote.echo", params={})
+    assert spec.provides == ["text.echo"]
+    assert spec.side_effect_level is SideEffectLevel.PRIVILEGED_HOST_ACTION
 
 
 def test_registry_register_and_resolve_local():
@@ -52,10 +68,11 @@ def test_mcp_refresh_rejects_native_collision_without_partial_changes():
     assert registry.resolve(tool_name="local.echo", params={}) is native
 
 
-def test_explicit_native_registration_replaces_only_inferred_placeholder():
+def test_unknown_lookup_cannot_reserve_an_identity_before_native_registration():
     registry = ToolRegistry()
-    placeholder = registry.resolve(tool_name="local.echo", params={"service_name": "local", "tool_name": "echo"})
-    assert placeholder.metadata["inferred"] is True
+    with pytest.raises(ToolNotFoundError):
+        registry.resolve(tool_name="local.echo", params={"service_name": "local", "tool_name": "echo"})
+    assert registry.list_specs() == []
     native = registry.register_local_tool(_DummyLocalTool())
     assert registry.resolve(tool_name="local.echo", params={}) is native
     assert native.source is ToolSource.LOCAL
@@ -216,12 +233,10 @@ def test_manifest_side_effect_selector_resolves_per_action():
 
 def test_undeclared_tool_risk_fails_closed_without_name_heuristics():
     registry = ToolRegistry()
-    spec = registry.resolve(
-        tool_name="unknown.harmless_sounding_name",
-        params={"service_name": "unknown", "tool_name": "harmless_sounding_name"},
-    )
-    assert spec.side_effect_level == SideEffectLevel.PRIVILEGED_HOST_ACTION
-    assert spec.metadata["risk_metadata_missing"] is True
+    with pytest.raises(ToolNotFoundError):
+        registry.resolve(tool_name="unknown.harmless_sounding_name",
+                         params={"service_name": "unknown", "tool_name": "harmless_sounding_name"})
+    assert registry.list_specs() == []
 
 
 def test_registry_normalizes_swapped_mcp_tool_call():

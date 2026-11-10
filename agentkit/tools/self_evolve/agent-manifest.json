@@ -12,10 +12,11 @@
     "invocation_commands": [
       {
         "command": "evolve_create_task",
+        "provides": ["software.tools.create"],
         "presentation": {"title": "Prepare application", "title_i18n": {"zh": "准备应用", "en": "Prepare application"}, "subject_arg": "goal"},
         "sideEffectLevel": "workspace_write",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
-        "description": "Create an isolated tool package with commands and test_args (optionally expected_result), or a canvas application with canvas={entrypoint, tests:[{action,selector,value}]}. For forms, checklists, tables and calculators, inspect evolve_get_canvas_schema then use evolve_compose_canvas to compose trusted components without writing code. Custom HTML/JS/CSS remains available for other applications. Core files are never editable.",
+        "description": "Create an isolated tool package with commands and test_args (optionally expected_result, inputSchema, outputSchema and provides capability identifiers), or a canvas application with canvas={entrypoint, tests:[{action,selector,value}]}. For forms, checklists, tables and calculators, inspect evolve_get_canvas_schema then use evolve_compose_canvas to compose trusted components without writing code. Custom HTML/JS/CSS remains available for other applications. Core files are never editable.",
         "example": "evolve_create_task(goal='add a formatter', capability_id='text_formatter', version='1.0.0', description='Format text', commands=[{'command':'format_text','description':'Format text','test_args':{'text':'hello'}}])"
       },
       {
@@ -50,6 +51,7 @@
       },
       {
         "command": "evolve_collect_context",
+        "provides": ["software.tools.inspect"],
         "presentation": {"title": "Read application context", "title_i18n": {"zh": "读取应用上下文", "en": "Read application context"}},
         "sideEffectLevel": "read_only",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -58,6 +60,7 @@
       },
       {
         "command": "evolve_write_file",
+        "provides": ["software.tools.edit"],
         "presentation": {"title": "Write file", "title_i18n": {"zh": "编写文件", "en": "Write file"}, "subject_arg": "path"},
         "sideEffectLevel": "workspace_write",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -66,6 +69,7 @@
       },
       {
         "command": "evolve_validate",
+        "provides": ["software.tools.validate"],
         "presentation": {"title": "Test application", "title_i18n": {"zh": "测试应用", "en": "Test application"}},
         "sideEffectLevel": "privileged_host_action",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -81,6 +85,7 @@
       },
       {
         "command": "evolve_read_file",
+        "provides": ["software.tools.inspect"],
         "presentation": {"title": "Read file", "title_i18n": {"zh": "读取文件", "en": "Read file"}, "subject_arg": "path"},
         "sideEffectLevel": "read_only",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -102,6 +107,7 @@
       },
       {
         "command": "evolve_patch_file",
+        "provides": ["software.tools.edit"],
         "presentation": {"title": "Edit file", "title_i18n": {"zh": "修改文件", "en": "Edit file"}, "subject_arg": "path"},
         "sideEffectLevel": "workspace_write",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -116,6 +122,7 @@
       },
       {
         "command": "evolve_run_check",
+        "provides": ["software.tools.check"],
         "presentation": {"title": "Run checks", "title_i18n": {"zh": "运行检查", "en": "Run checks"}},
         "sideEffectLevel": "privileged_host_action",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },
@@ -130,6 +137,7 @@
       },
       {
         "command": "evolve_publish",
+        "provides": ["software.tools.publish"],
         "presentation": {"title": "Publish capability", "title_i18n": {"zh": "发布能力", "en": "Publish capability"}},
         "sideEffectLevel": "privileged_host_action",
         "requiresConfig": { "path": "self_evolve.enabled", "equals": true },

@@ -7,14 +7,32 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
-from openai import AsyncOpenAI, OpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, OpenAI
 
 from config import config
 from gateway.multimodal_service import ModelEndpoint, multimodal_service
 from gateway.user_secrets import resolve_llm_runtime_settings, resolve_multimodal_runtime_settings
+from gateway.model_protocol import NativeStream, request_fields, response_fields
 
 
-def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None, *, cost_estimate=None) -> None:
+def _request_failure(exc: Exception, usage=None) -> dict:
+    body = getattr(exc, "body", None)
+    detail = body.get("error", body) if isinstance(body, dict) else {}
+    provider_code = detail.get("code") if isinstance(detail, dict) else None
+    status = exc.status_code if isinstance(exc, APIStatusError) else None
+    if status == 403 and provider_code == "EVALUATION_ADMISSION_CLOSED":
+        code, message = "MODEL_ADMISSION_CLOSED", "Model requests are no longer admitted."
+    elif isinstance(exc, APIConnectionError) or status in {408, 500, 502, 503, 504} or (
+        status == 429 and provider_code in {"rate_limit_exceeded", "rate_limit_error"}
+    ):
+        code, message = "MODEL_TRANSPORT_TRANSIENT", "The model request was temporarily interrupted."
+    else:
+        code, message = "MODEL_REQUEST_FAILED", "The model provider request failed."
+    return {"status": "error", "code": code, "error": message, "provider_status": status,
+            "usage": usage or {"usage_complete": False}}
+
+
+def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None, *, cost_estimate=None, purpose="unspecified", failed=False) -> None:
     """Best-effort runtime metrics hook; never let observability break chat."""
     try:
         from gateway.http.metrics import get_metrics_collector
@@ -25,6 +43,8 @@ def _record_llm_metrics(duration: float, usage: Optional[Dict[str, Any]] = None,
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             cost_estimate=cost_estimate,
+            usage=usage, purpose=purpose,
+            failed=failed,
         )
     except Exception as exc:
         logger.debug("failed to record LLM metrics: {}", exc)
@@ -41,6 +61,12 @@ def _usage_cache_fields(raw):
         if cached is not None:
             result["prompt_tokens_details"] = {"cached_tokens": cached}
     return result
+
+
+def _protocol_failure(exc):
+    return {"status": "error", "code": "MODEL_PROTOCOL_HISTORY", "error": str(exc), "content": "",
+            "request_sent": False, "model_attempts": 0,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
 
 async def _model_quote(endpoint, modalities):
@@ -125,7 +151,7 @@ class PrometheaConversation:
             runtime.get("base_url", ""),
             runtime.get("model", ""),
             runtime.get("temperature", config.api.temperature),
-            runtime.get("max_tokens", config.api.max_tokens),
+            min(int(runtime.get("max_tokens", config.api.max_tokens)), int(runtime.get("output_token_limit", config.api.output_token_limit))),
             runtime.get("failover_models", []),
         )
 
@@ -200,6 +226,7 @@ class PrometheaConversation:
             }
 
         allow_multimodal_fallback = False
+        failure = {}
         attempts = 0
         for endpoint, route_messages in routes:
             if endpoint.source in {"multimodal", "text_fallback"} and not allow_multimodal_fallback:
@@ -209,25 +236,38 @@ class PrometheaConversation:
                 errors.append(f"{endpoint.model}: cached unsupported modality")
                 continue
             attempts += 1
+            request_started = metrics_recorded = False
             try:
                 client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
+                runtime = (user_config or {}).get("_runtime_call") or {}
+                if runtime and isinstance(client, AsyncOpenAI):
+                    client = client.with_options(max_retries=0)
+                try:
+                    wire_request = request_fields(route_messages, runtime)
+                except ValueError as exc:
+                    return _protocol_failure(exc)
                 price_quote = await _model_quote(endpoint, modalities)
                 started = time.perf_counter()
+                request_started = True
                 resp = await client.chat.completions.create(
                     model=endpoint.model,
-                    messages=route_messages,
+                    **wire_request,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     stream=False,
                 )
 
                 content = ""
+                native_fields = {}
                 finish_reason = None
                 if resp.choices and len(resp.choices) > 0:
                     finish_reason = getattr(resp.choices[0], "finish_reason", None)
                     message = getattr(resp.choices[0], "message", None)
                     if message:
                         content = getattr(message, "content", "") or ""
+                        if runtime.get("protocol") == "native":
+                            native_fields = response_fields(message, final=runtime.get("purpose") == "final_response")
+                            content = native_fields["content"]
 
                 usage = {
                     "prompt_tokens": getattr(resp.usage, "prompt_tokens", 0)
@@ -238,10 +278,14 @@ class PrometheaConversation:
                     else 0,
                 }
                 usage.update(_usage_cache_fields(getattr(resp, "usage", None)))
-                from gateway.model_pricing import estimate
                 reported = getattr(resp, "usage", None)
+                if any(type(getattr(reported, key, None)) is not int for key in ("prompt_tokens", "completion_tokens")):
+                    usage["usage_complete"] = False
+                from gateway.model_pricing import estimate
                 cost_estimate = estimate(price_quote, {**usage, "prompt_tokens": getattr(reported, "prompt_tokens", None), "completion_tokens": getattr(reported, "completion_tokens", None)})
-                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate)
+                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate,
+                                    purpose=((user_config or {}).get("_runtime_call") or {}).get("purpose", "unspecified"))
+                metrics_recorded = True
 
                 code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content.strip() else None
                 result = {
@@ -257,6 +301,8 @@ class PrometheaConversation:
                     "model_attempts": attempts,
                     "usage": usage,
                     "cost_estimate": cost_estimate,
+                    **native_fields,
+                    **({"wire_request": wire_request} if runtime.get("protocol") == "native" else {}),
                 }
 
                 try:
@@ -285,7 +331,13 @@ class PrometheaConversation:
                     )
                 return result
             except Exception as e:
+                if request_started and not metrics_recorded:
+                    _record_llm_metrics(time.perf_counter() - started, None, failed=True,
+                                        purpose=((user_config or {}).get("_runtime_call") or {}).get("purpose", "unspecified"))
                 err = str(e)
+                failure = _request_failure(e)
+                if failure["code"] == "MODEL_ADMISSION_CLOSED":
+                    break
                 errors.append(f"{endpoint.model}: {err}")
                 if endpoint.source == "main" and modalities and multimodal_service.is_unsupported_modality_error(e):
                     multimodal_service.mark_unsupported(endpoint, modalities)
@@ -297,9 +349,10 @@ class PrometheaConversation:
         return {
             "content": f"API call failed: {error_message}",
             "status": "error",
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "usage_complete": False},
             "model_used": None,
             "model_attempts": attempts,
+            **failure,
         }
 
     async def call_llm_stream(
@@ -337,6 +390,7 @@ class PrometheaConversation:
             return
 
         allow_multimodal_fallback = False
+        failure = {}
         attempts = 0
         for endpoint, route_messages in routes:
             if endpoint.source in {"multimodal", "text_fallback"} and not allow_multimodal_fallback:
@@ -347,14 +401,27 @@ class PrometheaConversation:
                 continue
             attempts += 1
             emitted_stream_content = False
+            request_started = metrics_recorded = False
             try:
                 client = self._resolve_async_client(user_config, endpoint.api_key, endpoint.base_url)
+                runtime = (user_config or {}).get("_runtime_call") or {}
+                if runtime and isinstance(client, AsyncOpenAI):
+                    client = client.with_options(max_retries=0)
+                try:
+                    wire_request = request_fields(route_messages, runtime)
+                except ValueError as exc:
+                    if result_sink is not None:
+                        await result_sink(_protocol_failure(exc))
+                    yield "[error] MODEL_PROTOCOL_HISTORY"
+                    return
                 price_quote = await _model_quote(endpoint, modalities)
+                native_stream = NativeStream() if runtime.get("protocol") == "native" else None
                 started = time.perf_counter()
+                request_started = True
                 try:
                     stream = await client.chat.completions.create(
                         model=endpoint.model,
-                        messages=route_messages,
+                        **wire_request,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=True,
@@ -364,9 +431,12 @@ class PrometheaConversation:
                     message = str(stream_exc).lower()
                     if "stream_options" not in message and "include_usage" not in message:
                         raise
+                    _record_llm_metrics(time.perf_counter() - started, None, failed=True,
+                                        purpose=((user_config or {}).get("_runtime_call") or {}).get("purpose", "unspecified"))
+                    started = time.perf_counter()
                     stream = await client.chat.completions.create(
                         model=endpoint.model,
-                        messages=route_messages,
+                        **wire_request,
                         temperature=temperature,
                         max_tokens=max_tokens,
                         stream=True,
@@ -398,6 +468,10 @@ class PrometheaConversation:
                         }
                         usage.update(_usage_cache_fields(chunk_usage))
                     delta = chunk.choices[0].delta if chunk.choices else None
+                    if native_stream is not None and delta is not None:
+                        native_stream.feed(delta)
+                        if getattr(delta, "tool_calls", None):
+                            emitted_stream_content = True
                     reasoning_delta = getattr(delta, "reasoning_content", None) if delta is not None else None
                     reasoning_chars += len(str(reasoning_delta or ""))
                     if reasoning_delta and reasoning_sink is not None:
@@ -411,32 +485,52 @@ class PrometheaConversation:
                         if not first_token_recorded:
                             _record_llm_first_token_metrics(time.perf_counter() - started)
                             first_token_recorded = True
-                        yield delta.content
+                        if native_stream is None:
+                            yield delta.content
+                native_fields = response_fields(native_stream.message(), final=runtime.get("purpose") == "final_response") if native_stream is not None else {}
                 from gateway.model_pricing import estimate
+                if not usage_reported:
+                    usage["usage_complete"] = False
                 cost_estimate = estimate(price_quote, usage) if usage_reported else None
-                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate)
-                code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not content_chars else None
+                _record_llm_metrics(time.perf_counter() - started, usage, cost_estimate=cost_estimate,
+                                    purpose=((user_config or {}).get("_runtime_call") or {}).get("purpose", "unspecified"))
+                metrics_recorded = True
+                has_output = content_chars or native_stream is not None and native_stream.calls
+                code = "MODEL_OUTPUT_LIMIT" if finish_reason == "length" else "MODEL_EMPTY_RESPONSE" if not has_output else None
+                if runtime and not finish_reason:
+                    code = "MODEL_TRANSPORT_TRANSIENT"
                 result = {
                     "status": "error" if code else "success", "code": code,
                     "finish_reason": finish_reason, "request_id": provider_request_id,
                     "model_used": endpoint.model, "usage": usage, "max_tokens": max_tokens,
                     "content_chars": content_chars, "reasoning_chars": reasoning_chars,
                     "cost_estimate": cost_estimate,
+                    **native_fields,
+                    **({"wire_request": wire_request} if native_stream is not None else {}),
                 }
                 if result_sink is not None:
                     await result_sink(result)
                 if code:
                     yield f"[error] {code}"
+                elif native_stream is not None:
+                    yield native_fields["content"]
                 return
             except Exception as e:
+                if request_started and not metrics_recorded:
+                    _record_llm_metrics(time.perf_counter() - started, None, failed=True,
+                                        purpose=((user_config or {}).get("_runtime_call") or {}).get("purpose", "unspecified"))
                 err = str(e)
+                failure = _request_failure(e, usage if emitted_stream_content and usage_reported else None)
+                if failure["code"] == "MODEL_ADMISSION_CLOSED":
+                    break
                 errors.append(f"{endpoint.model}: {err}")
                 if emitted_stream_content:
+                    if failure["code"] == "MODEL_REQUEST_FAILED":
+                        failure["code"] = "MODEL_STREAM_INTERRUPTED"
                     if result_sink is not None:
-                        await result_sink({"status": "error", "code": "MODEL_STREAM_INTERRUPTED", "error": err,
-                                           "model_used": endpoint.model, "usage": usage, "max_tokens": max_tokens,
+                        await result_sink({**failure, "model_used": endpoint.model, "max_tokens": max_tokens,
                                            "request_id": provider_request_id, "finish_reason": finish_reason})
-                    yield f"[error] {err}"
+                    yield f"[error] {failure['error'] if runtime else err}"
                     return
                 if endpoint.source == "main" and modalities and multimodal_service.is_unsupported_modality_error(e):
                     multimodal_service.mark_unsupported(endpoint, modalities)
@@ -445,7 +539,9 @@ class PrometheaConversation:
 
         error_message = "; ".join(errors) if errors else "unknown error"
         logger.error("LLM streaming call failed on all models: {}", error_message)
-        yield f"[error] {error_message}"
+        if result_sink is not None and failure:
+            await result_sink(failure)
+        yield f"[error] {failure.get('error', error_message)}"
 
 
 

@@ -43,7 +43,7 @@ class GeneratedCapabilityService:
         self._runtime_root = (
             Path(runtime_root).resolve()
             if runtime_root is not None
-            else self._find_project_root() / ".runtime" / "generated-capabilities" / self.name
+            else self._find_project_root() / ".runtime" / "generated-capabilities"
         )
 
     def _find_project_root(self) -> Path:

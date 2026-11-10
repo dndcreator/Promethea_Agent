@@ -67,8 +67,17 @@ async def test_registry_readiness_inspection_and_execution_agree(accounts):
         assert search["callable_now"] is expected
         assert search["requires_confirmation"] is False
         assert service.inspect_capabilities(["mail.search"], run_context=scope)["items"][0]["callable_now"] is expected
-    assert service.requires_confirmation("mail.send", {}) is True
-    assert service.requires_confirmation("calendar.create", {}) is True
+    scope = SimpleNamespace(user_id="alice")
+    assert service.requires_confirmation("mail.send", {}, run_context=scope) is True
+    assert service.inspect_capabilities(["calendar.create"], run_context=scope)["items"][0]["requires_confirmation"] is True
+    import importlib.util
+    if importlib.util.find_spec("caldav") is None:
+        with pytest.raises(ToolPolicyViolationError, match="CalDAV dependency is missing"):
+            service.requires_confirmation("calendar.create", {}, run_context=scope)
+    else:
+        assert service.requires_confirmation("calendar.create", {}, run_context=scope) is True
+    with pytest.raises(ToolPolicyViolationError, match="not configured"):
+        service.requires_confirmation("mail.search", {}, run_context=SimpleNamespace(user_id="bob"))
     with pytest.raises(ToolPolicyViolationError, match="not configured"):
         await service.call_tool("mail.search", {}, ctx=ToolInvocationContext(user_id="bob"))
 

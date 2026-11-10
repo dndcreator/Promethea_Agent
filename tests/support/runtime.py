@@ -29,12 +29,33 @@ class ScriptedModel:
         action = next(self.actions)
         if callable(action):
             action = action(messages)
-        return {"status": "success", "content": json.dumps(action), "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+        if isinstance(action, BaseException):
+            raise action
+        if isinstance(action, dict) and "status" in action and "action" not in action:
+            return action
+        return {"status": "success", "content": action if isinstance(action, str) else json.dumps(action), "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 
     async def call_llm_stream(self, messages, **kwargs):
         response = await self.call_llm(messages, **kwargs)
+        if kwargs.get("result_sink"):
+            await kwargs["result_sink"](response)
         for start in range(0, len(response["content"]), 16):
             yield response["content"][start:start + 16]
+
+
+def observation_fact(messages):
+    for message in reversed(messages):
+        if isinstance(message.get("content"), list):
+            for block in message["content"]:
+                if block.get("type") == "text":
+                    fact = json.loads(block["text"])
+                    if isinstance(fact, dict) and "observation_id" in fact:
+                        return fact
+    raise AssertionError("No Runtime observation was provided")
+
+
+def goal_context(messages):
+    return json.loads(next(row["content"] for row in messages if row.get("name") == "promethea_goals").split("\n", 1)[1])
 
 
 def finish_from_observation(messages):

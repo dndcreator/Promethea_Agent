@@ -13,20 +13,21 @@
     "tests/test_reasoning_node_state_machine.py"
   ],
   "critical": [
-    "tests/test_action_service.py", "tests/test_action_recovery.py",
-    "tests/test_action_steering.py", "tests/test_capability_confirmation.py",
-    "tests/test_capability_projection.py", "tests/test_task_service.py",
+    "tests/test_action_service.py", "tests/test_action_recovery.py", "tests/test_action_protocol.py", "tests/test_native_protocol.py", "tests/test_model_protocol.py", "tests/test_budget_independent.py", "tests/test_call_budget.py", "tests/test_request_journal.py", "tests/test_action_completion.py", "tests/test_runtime_efficiency.py",
+    "tests/test_action_steering.py", "tests/test_action_user_input.py", "tests/test_action_progress_control.py", "tests/test_protected_credentials.py", "tests/test_budget_four_categories.py", "tests/test_capability_confirmation.py",
+    "tests/test_capability_projection.py", "tests/test_tool_admission.py", "tests/test_task_service.py",
     "tests/test_background_agents.py", "tests/test_memory_write_gate.py",
     "tests/test_memory_semantic_recall.py", "tests/test_environment_collaboration.py",
-    "tests/test_ambient_service.py", "tests/test_message_manager_turns.py",
-    "tests/integration/test_runtime_journeys.py"
+    "tests/test_ambient_service.py", "tests/test_continuous_observation.py", "tests/test_github_observation_tool.py", "tests/test_message_manager_turns.py",
+    "tests/integration/test_runtime_journeys.py", "tests/integration/test_agent_business_tasks.py", "tests/test_ci_runner.py",
+    "tests/system/test_production_startup.py", "tests/system/test_capability_acquisition.py"
   ],
   "contracts": [
     "tests/test_protocol_surface_contracts.py", "tests/test_http_contract_registry.py",
     "tests/test_generated_public_contracts.py", "tests/test_config_protocol.py",
     "tests/test_gateway_tools_list_contract.py", "tests/test_gateway_ws_error_model.py"
   ],
-  "smoke": ["tests/integration/test_runtime_journeys.py", "tests/test_mvp_business_smoke.py"],
+  "smoke": ["tests/system/test_production_startup.py", "tests/integration/test_runtime_journeys.py", "tests/test_mvp_business_smoke.py"],
   "core": ["tests/test_action_service.py", "tests/test_task_service.py", "tests/test_capability_service.py", "tests/test_workflow_engine_mvp.py"],
-  "business": ["tests/integration/test_runtime_journeys.py", "tests/test_business_journeys.py", "tests/test_workflow_gateway_journeys.py", "tests/test_gap_business_journey.py"]
+  "business": ["tests/integration/test_runtime_journeys.py", "tests/integration/test_agent_business_tasks.py", "tests/test_business_journeys.py", "tests/test_workflow_gateway_journeys.py", "tests/test_gap_business_journey.py"]
 }

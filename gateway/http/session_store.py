@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, TYPE_CHECKING
 from loguru import logger
+from utils.persistence import rename_with_retry
 
 if TYPE_CHECKING:
     from .message_manager import Session
@@ -61,7 +62,7 @@ class SessionStorage:
                 f.flush()
                 os.fsync(f.fileno())
             
-            os.replace(temp_path, target_path)
+            rename_with_retry(temp_path, target_path, replace=True)
         except Exception:
             try:
                 os.unlink(temp_path)

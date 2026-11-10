@@ -6,7 +6,7 @@ import pytest
 from gateway.protocol import RequestType
 from gateway.capability_service import ToolInvocationContext
 from gateway.tools.spec import SideEffectLevel
-from tests.support.runtime import ScriptedModel, finish_from_observation, runtime_at
+from tests.support.runtime import ScriptedModel, finish_from_observation, runtime_at, observation_fact
 
 
 def write_action(path="reports/result.md", content="Revenue: 41\nCost: 9\nNet: 32\n"):
@@ -15,7 +15,14 @@ def write_action(path="reports/result.md", content="Revenue: 41\nCost: 9\nNet: 3
 
 @pytest.mark.asyncio
 async def test_actual_artifact_readback_history_and_restart(tmp_path):
-    model = ScriptedModel([write_action(), {"action": "tool_call", "tool_name": "workspace.read_file", "args": {"path": "reports/result.md"}}, finish_from_observation])
+    def write_with_definition(messages):
+        definition = observation_fact(messages)["result"]["items"][0]
+        assert definition["name"] == "workspace.write_file"
+        assert {"path", "content"} <= set(definition["input_schema"]["properties"])
+        return write_action()
+
+    model = ScriptedModel([{"action": "capability_inspect", "capability_names": ["workspace.write_file"]},
+        write_with_definition, {"action": "tool_call", "tool_name": "workspace.read_file", "args": {"path": "reports/result.md"}}, finish_from_observation])
     host = runtime_at(tmp_path, model)
     response = await host.handle_http_request(method=RequestType.CHAT, params={"message": "Write and verify the supplied report", "session_id": "report"}, user_id="alice")
     assert response.ok, response.error
@@ -27,7 +34,8 @@ async def test_actual_artifact_readback_history_and_restart(tmp_path):
     assert "32" in response.payload["response"]
     history = host.message_manager.get_messages("report", user_id="alice")
     assert history[-1]["content"] == response.payload["response"]
-    assert "workspace.write_file" in json.dumps(model.calls[0]) and "input_schema" in json.dumps(model.calls[0])
+    assert "workspace.write_file" in json.dumps(model.calls[0]) and "input_schema" not in json.dumps(model.calls[0])
+    assert "input_schema" in json.dumps(model.calls[1])
     restored = runtime_at(tmp_path, ScriptedModel([]))
     assert restored.message_manager.get_messages("report", user_id="alice") == history
     assert restored.message_manager.get_messages("report", user_id="bob") == []

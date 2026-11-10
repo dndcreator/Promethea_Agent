@@ -15,6 +15,29 @@ Promethea backend is the canonical runtime.
 - CLI is a client.
 - Third-party apps/agents should also be clients.
 
+### Turn Completion And Goal Progress
+
+A chat `status: success` means the turn produced a committed response, not that
+the user's entire goal was delivered. A budget-stopped turn additionally returns
+`execution_outcome: {stop_reason: "budget_exhausted" | "recovery_exhausted", goal_status: "unverified",
+response_source: "model" | "runtime"}` through HTTP, SSE `done` and Gateway
+responses. The same field is retained on the saved message. Model progress
+reports remain assistant messages; the deterministic last-resort Runtime notice
+is a `status` message, not an assistant answer. It is excluded from model-success
+template recording and assistant memory input. No tool proposal from final
+completion can execute.
+
+Task goal progress belongs to the persisted Task `goal_gaps`, independently of
+individual run completion. Public `Task.goal_progress` is a projection of that
+state: revision, tracked/open/blocked/resolved counts, checked requirements and
+`goal_verification: "unknown"`. These counts are not a global completion
+percentage. Task and checkpoint export/import preserve the source state; no
+second progress store is maintained. Budget-stopped background runs pause.
+Explicit resume opens another bounded action slice using committed observations
+and current goal gaps; merely restarting the process replays the saved result
+without automatically granting more execution. Unknown in-flight tool outcomes
+still require inspection rather than automatic side-effect replay.
+
 If your integration reads this page, your main objective is contract stability.
 
 ## Integration Path (Recommended)
@@ -50,10 +73,11 @@ See [operational boundaries](channels/README.md).
 - `POST /api/chat/{session_id}/steer`
 - `POST /api/followup`
 
-Chat requests may include an owned `task_id` to bind the run to durable Task
-goal state. This applies to HTTP, SSE and the TypeScript SDK; omission keeps
-ordinary conversation behavior. Task read models expose `goal_gaps` without
-internal monitoring frames or execution tokens.
+Chat requests may include an owned `task_id` to bind a turn to existing goal
+state. For ordinary chat, the model can hand off resumable work to TaskRuntime
+through the registered task tools, with no separate request from the client.
+An owned task can be resumed from another conversation without moving its
+workspace. Task read models do not expose checkpoints or execution tokens.
 
 Streaming `text` events contain `content` and an optional `operation`:
 `delta` (the legacy default) appends, while `replace` replaces the current draft,
@@ -136,12 +160,17 @@ Tool execution is mediated by `CapabilityService` rather than a public `POST /ap
 - `POST /api/tasks/{task_id}/runs`
 - `POST /api/tasks/{task_id}/pause`
 - `POST /api/tasks/{task_id}/resume`
+- `POST /api/tasks/{task_id}/confirm`
 - `POST /api/tasks/{task_id}/cancel`
 - `GET /api/workbench/snapshot`
 - `GET /api/workbench/stream`
 
 Tasks own durable work independently of conversations. Workbench exposes the
 read model and resumable event stream; clients do not own task lifecycle state.
+Conversation tasks expose output and, when waiting for a tool decision, a
+projected `pending_confirmation`. Confirm with the exact `run_id`,
+`tool_call_id`, and `action` (`approve` or `reject`). A normal resume does
+not approve a pending call.
 
 ### Canvas Environments
 
@@ -181,13 +210,22 @@ Uploaded files are persisted per user. Text-like files are extracted for search 
 
 ### Voice
 
-Voice routes are experimental/provider-dependent in the current preview. They are listed for contract discovery, but voice input is not a supported release feature. A DeepSeek-only chat configuration does not provide STT/audio transcription; `/api/voice/stt` and `/api/voice/ptt` require an OpenAI-compatible audio transcription provider.
+Authenticated, user-scoped speech I/O. STT and TTS can use separate online or already-deployed local services. A DeepSeek-only chat configuration does not supply audio capabilities. See [Speech configuration](configuration.md#speech-io).
 
-- `GET /api/voice/capabilities`
-- `POST /api/voice/stt`
-- `POST /api/voice/tts`
-- `POST /api/voice/turn`
-- `POST /api/voice/ptt`
+- `GET /api/voice/status`: generated `VoiceCapabilities`; redacted configuration only, no provider request or health assertion.
+- `POST /api/voice/models`: `{"kind":"stt"}` or `{"kind":"tts"}`; explicit provider discovery, returns `{"models":[...]}`. A listed ID does not guarantee audio support.
+- `POST /api/voice/stt`: multipart `audio`; maximum 24 MiB; returns `{"status":"success","stt":{"text":"...","language":null,"duration_seconds":null}}`.
+- `POST /api/voice/tts`: `VoiceTTSRequest` with `text` (1-4096 characters), optional `voice`, `format`, `speed` and ElevenLabs controls; returns audio bytes with truthful MIME and `Cache-Control: no-store`. Provider overrides cannot select an unconfigured provider.
+- `GET /api/voice/capabilities`: legacy discovery envelope retained.
+- `POST /api/voice/turn`: legacy text-turn wrapper around ordinary Gateway Chat.
+- `POST /api/voice/ptt`: legacy multipart transcription/chat/synthesis composition. Pending confirmation is not spoken as a completed answer; synthesis failure is separate from the completed text turn. New UI clients use STT followed by ordinary SSE Chat and optional TTS instead.
+
+Provider calls have a 90-second timeout (10-second connect), bounded responses,
+and do not follow redirects. Provider failures expose safe `detail.code` values
+such as `VOICE_PROVIDER_AUTH_FAILED`, `VOICE_PROVIDER_TIMEOUT`, and
+`VOICE_PROVIDER_UNAVAILABLE`, not provider error bodies or credentials. Local
+compatible endpoints remain reachable by design; only authenticated users may
+configure them. Promethea does not infer audio support from model names.
 
 ### Ops and Discovery
 

@@ -1,3 +1,5 @@
+import type { RunOutcome } from '../../generated/public-contracts'
+
 export interface MessageData {
   id: string
   role: 'user' | 'agent' | 'assistant' | 'tool' | 'status'
@@ -8,6 +10,7 @@ export interface MessageData {
   conversationTurnId?: string
   reasoningSteps?: ReasoningStep[]
   runStatus?: string
+  executionOutcome?: RunOutcome
   error?: Record<string, unknown>
   steeringStatus?: 'queued' | 'applied' | 'not_applied'
 }

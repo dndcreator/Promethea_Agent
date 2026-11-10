@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import tempfile
+from utils.persistence import rename_with_retry
 from collections import deque
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -86,11 +88,19 @@ class RuntimeEventLog:
         payload: Dict[str, Any],
         seq: Optional[int] = None,
         durable: bool = True,
+        idempotency_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         with self._lock:
-            event_seq = self._claim_seq(seq)
             body = dict(payload or {})
             stored_body = _redact(body)
+            if idempotency_key:
+                for path in self._ordered_paths():
+                    for previous in self._iter_file(path):
+                        if previous.get("idempotency_key") == idempotency_key and previous.get("user_id") == body.get("user_id"):
+                            if previous["event_type"] != str(event_type) or previous["payload"] != stored_body:
+                                raise ValueError("Runtime event idempotency key reused for different facts")
+                            return previous
+            event_seq = self._claim_seq(seq)
             event = {
                 "event_id": f"evt_{uuid4().hex}",
                 "event_type": str(event_type),
@@ -114,6 +124,8 @@ class RuntimeEventLog:
                 "source": body.get("source_module") or body.get("source") or "gateway",
                 "payload": stored_body,
             }
+            if idempotency_key:
+                event["idempotency_key"] = idempotency_key
             encoded = json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
             self.storage_path.parent.mkdir(parents=True, exist_ok=True)
             self._rotate_if_needed(len(encoded.encode("utf-8")))
@@ -132,6 +144,7 @@ class RuntimeEventLog:
         task_id: Optional[str] = None,
         event_type: Optional[str] = None,
         observation_id: Optional[str] = None,
+        event_id: Optional[str] = None,
         after_seq: int = 0,
         limit: int = 200,
         oldest_first: bool = False,
@@ -153,6 +166,8 @@ class RuntimeEventLog:
                         continue
                     if observation_id and row.get("observation_id") != observation_id:
                         continue
+                    if event_id and row.get("event_id") != event_id:
+                        continue
                     rows.append(row)
                     if oldest_first and len(rows) >= resolved_limit:
                         return list(rows)
@@ -169,7 +184,11 @@ class RuntimeEventLog:
         with self._lock:
             if name not in self._consumer_cursors:
                 self._consumer_cursors[name] = self._next_seq - 1 if start_at_tail else 0
-                self._persist_consumer_cursors()
+                try:
+                    self._persist_consumer_cursors()
+                except Exception:
+                    self._consumer_cursors.pop(name, None)
+                    raise
             return int(self._consumer_cursors[name])
 
     def commit_consumer_cursor(self, consumer: str, seq: int) -> int:
@@ -179,8 +198,18 @@ class RuntimeEventLog:
         with self._lock:
             current = int(self._consumer_cursors.get(name) or 0)
             committed = max(current, int(seq or 0))
+            if name in self._consumer_cursors and committed == current:
+                return current
+            previous = self._consumer_cursors.get(name)
             self._consumer_cursors[name] = committed
-            self._persist_consumer_cursors()
+            try:
+                self._persist_consumer_cursors()
+            except Exception:
+                if previous is None:
+                    self._consumer_cursors.pop(name, None)
+                else:
+                    self._consumer_cursors[name] = previous
+                raise
             return committed
 
     @property
@@ -250,9 +279,13 @@ class RuntimeEventLog:
 
     def _persist_consumer_cursors(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
-        temp.write_text(
-            json.dumps({"version": 1, "consumer_cursors": self._consumer_cursors}, indent=2),
-            encoding="utf-8",
-        )
-        os.replace(temp, self.state_path)
+        fd, temp = tempfile.mkstemp(dir=self.state_path.parent, prefix=self.state_path.name + ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump({"version": 1, "consumer_cursors": self._consumer_cursors}, stream, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            rename_with_retry(temp, self.state_path, replace=True)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)

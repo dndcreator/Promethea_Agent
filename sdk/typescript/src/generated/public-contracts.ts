@@ -288,6 +288,13 @@ export interface GapChange {
   evidence_refs?: Array<string>
 }
 
+export interface GapRecoveryDecision {
+  strategy: "investigate" | "replan" | "retry"
+  reason: string
+  evidence_refs: Array<string>
+  repair_refs?: Array<string>
+}
+
 export interface GapSpec {
   id: string
   kind: "epistemic" | "achievement"
@@ -300,6 +307,7 @@ export interface GapDelta {
   create?: Array<GapSpec>
   updates?: Array<GapChange>
   focus?: Array<string> | null
+  recovery?: GapRecoveryDecision | null
 }
 
 export interface RunRequest {
@@ -310,8 +318,71 @@ export interface RunRequest {
   requested_mode?: string | null
   requested_skill?: string | null
   requested_workflow?: string | null
+  reply_to_input?: string | null
   attachments?: Array<Attachment>
   metadata?: Record<string, unknown>
+}
+
+export interface VoiceTTSRequest {
+  text: string
+  provider?: string | null
+  voice?: string | null
+  format?: "mp3" | "wav" | "opus" | "aac" | "flac" | "pcm" | null
+  speed?: number | null
+  stability?: number | null
+  similarity_boost?: number | null
+  style?: number | null
+  use_speaker_boost?: boolean | null
+}
+
+export interface VoiceSTTResult {
+  text: string
+  language?: string | null
+  duration_seconds?: number | null
+}
+
+export interface VoiceEndpointStatus {
+  provider: string
+  model: string
+  base_url: string
+  voice?: string
+  format?: string
+  speed?: number
+  configured: boolean
+  api_key_configured: boolean
+  reason?: string | null
+}
+
+export interface VoiceCapabilities {
+  stt: VoiceEndpointStatus
+  tts: VoiceEndpointStatus
+  speak_replies?: boolean
+}
+
+export interface VoiceDiscoveryRequest {
+  kind: "stt" | "tts"
+}
+
+export interface VoiceModelList {
+  models: Array<string>
+}
+
+export interface VoiceTranscription {
+  status?: string
+  user_id?: string | null
+  stt: VoiceSTTResult
+}
+
+export interface InputRequest {
+  request_id: string
+  content: string
+  input_kind?: "acknowledgement" | "text"
+}
+
+export interface RunOutcome {
+  stop_reason: "budget_exhausted" | "recovery_exhausted"
+  goal_status?: string
+  response_source?: "model" | "runtime"
 }
 
 export interface RunResponse {
@@ -326,6 +397,15 @@ export interface RunResponse {
   args?: Record<string, unknown> | null
   memory_write_summary?: Record<string, unknown> | null
   error?: Error | null
+  execution_outcome?: RunOutcome | null
+  input_request?: InputRequest | null
+}
+
+export interface ToolCall {
+  tool_call_id: string
+  tool_name: string
+  arguments?: Record<string, unknown>
+  status?: "pending" | "needs_confirmation" | "running" | "completed" | "failed"
 }
 
 export interface Session {
@@ -335,6 +415,8 @@ export interface Session {
   last_activity?: number | null
   message_count?: number
   pinned?: boolean
+  pending_confirmation?: ToolCall | null
+  pending_input?: InputRequest | null
 }
 
 export interface Project {
@@ -371,13 +453,6 @@ export interface Event {
   payload?: Record<string, unknown>
 }
 
-export interface ToolCall {
-  tool_call_id: string
-  tool_name: string
-  arguments?: Record<string, unknown>
-  status?: "pending" | "needs_confirmation" | "running" | "completed" | "failed"
-}
-
 export interface ToolResult {
   tool_call_id: string
   tool_name: string
@@ -396,6 +471,19 @@ export interface TaskRun {
   started_at?: string | null
   updated_at?: string | null
   ended_at?: string | null
+  input_request?: InputRequest | null
+  output?: string | null
+  pending_confirmation?: ToolCall | null
+}
+
+export interface GoalProgress {
+  revision?: number
+  tracked?: number
+  open?: number
+  blocked?: number
+  resolved?: number
+  checks_passed?: number
+  goal_verification?: string
 }
 
 export interface Task {
@@ -411,10 +499,21 @@ export interface Task {
   updated_at?: string | null
   completed_at?: string | null
   goal_gaps?: GoalGapView | null
+  goal_progress?: GoalProgress | null
 }
 
 export interface TaskControlRequest {
   expected_revision?: number | null
+}
+
+export interface InputReply {
+  request_id: string
+  content: string
+}
+
+export interface TaskResumeRequest {
+  expected_revision?: number | null
+  input_reply?: InputReply | null
 }
 
 export interface TaskStartRunRequest {
@@ -427,6 +526,12 @@ export interface TaskStartRunRequest {
 export interface TaskCancelRequest {
   expected_revision?: number | null
   reason?: string
+}
+
+export interface TaskConfirmationRequest {
+  run_id: string
+  tool_call_id: string
+  action: "approve" | "reject"
 }
 
 export interface TaskResponse {

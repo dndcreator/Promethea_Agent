@@ -59,6 +59,10 @@ export const listChannelAccounts = (signal?: AbortSignal) => sdkCall((client) =>
 export const pairChannelAccount = (command: ChannelPairingRequest, signal?: AbortSignal) => sdkCall((client) => client.channels.pair(command, signal))
 export const unbindChannelAccount = (channel: string, signal?: AbortSignal) => sdkCall((client) => client.channels.unbind(channel, signal))
 export const getMemoryEmbedding = (signal?: AbortSignal) => sdkCall((client) => client.memory.embeddingStatus(signal))
+export const getVoiceStatus = (signal?: AbortSignal) => sdkCall((client) => client.voice.status(signal))
+export const getVoiceModels = (kind: 'stt' | 'tts', signal?: AbortSignal) => sdkCall((client) => client.voice.models({ kind }, signal))
+export const synthesizeSpeech = (text: string, signal?: AbortSignal) => sdkCall((client) => client.voice.synthesize({ text }, signal))
+export const transcribeSpeech = (audio: Blob, filename: string, signal?: AbortSignal) => sdkCall((client) => client.voice.transcribe(audio, filename, signal))
 export const controlMemoryEmbedding = (command: MemoryEmbeddingCommand, signal?: AbortSignal) => sdkCall((client) => client.memory.controlEmbedding(command, signal))
 export const steerChat = (sessionId: string, command: RunSteerRequest, signal?: AbortSignal) => sdkCall((client) => client.runs.steer(sessionId, command, signal))
 
@@ -455,8 +459,12 @@ export function getTask(taskId: string, signal?: AbortSignal): Promise<Task> {
   return sdkCall((client) => client.tasks.get(taskId, signal))
 }
 
-export function resumeTask(taskId: string, expectedRevision?: number): Promise<Task> {
-  return sdkCall((client) => client.tasks.resume(taskId, { expected_revision: expectedRevision }))
+export function resumeTask(taskId: string, expectedRevision?: number, inputReply?: { request_id: string; content: string }): Promise<Task> {
+  return sdkCall((client) => client.tasks.resume(taskId, { expected_revision: expectedRevision, input_reply: inputReply }))
+}
+
+export function confirmTask(taskId: string, runId: string, callId: string, action: 'approve' | 'reject'): Promise<Task> {
+  return sdkCall((client) => client.tasks.confirm(taskId, { run_id: runId, tool_call_id: callId, action }))
 }
 
 export function cancelTask(taskId: string, reason = 'user_cancelled', expectedRevision?: number): Promise<Task> {
@@ -622,6 +630,7 @@ export async function streamChat(
   onError: (error: Error) => void,
   signal?: AbortSignal,
   multiAgent = false,
+  inputRequestId?: string,
 ): Promise<void> {
   const token = getAuthToken()
   try {
@@ -630,6 +639,7 @@ export async function streamChat(
       session_id: sessionId,
       stream: true,
       attachments,
+      reply_to_input: inputRequestId,
       metadata: {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         ui_language: document.documentElement.lang || navigator.language,

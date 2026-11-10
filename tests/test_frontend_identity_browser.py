@@ -61,6 +61,9 @@ async def test_sensitive_configuration_http_failure_keeps_draft_and_shows_failur
                     await route.fulfill(status=500, json={"error": "save failed"})
                 elif "/api/channels" in route.request.url:
                     await route.fulfill(json=[])
+                elif "/api/voice/status" in route.request.url:
+                    endpoint = {"provider": "disabled", "model": "", "base_url": "", "configured": False, "api_key_configured": False}
+                    await route.fulfill(json={"stt": endpoint, "tts": endpoint, "speak_replies": False})
                 else:
                     await route.fulfill(json={"config": {}, "secrets": {}})
 

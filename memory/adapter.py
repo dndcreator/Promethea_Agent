@@ -305,6 +305,32 @@ class MemoryAdapter:
             logger.error(f"Raw log append failed: {e}")
             return False
 
+    def pending_replay_context(self, *, user_id: str, session_id: str) -> list[dict]:
+        """Read a small owner-scoped view of the replay backlog, without moving the cursor."""
+        if not user_id or not session_id or not getattr(self, "_raw_log_enabled", False):
+            return []
+        offset = max(0, int(self._raw_log_state.get("last_offset", 0)))
+        records = []
+        try:
+            with open(self._raw_log_path, "r", encoding="utf-8") as stream:
+                stream.seek(offset)
+                for _ in range(32):
+                    line = stream.readline(16385)
+                    if not line or not line.endswith("\n") or len(line) > 16384:
+                        break
+                    try:
+                        row = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(row, dict) or row.get("user_id") != user_id or row.get("session_id") != session_id:
+                        continue
+                    if row.get("entry_id") and row.get("content") and row.get("role") in {"user", "assistant"}:
+                        records.append({"entry_id": str(row["entry_id"])[:100], "role": row["role"],
+                                        "excerpt": str(row["content"])[:400]})
+        except (OSError, UnicodeError):
+            return []
+        return records[-2:]
+
     def _read_next_raw_log_event(self, start_offset: int):
         with open(self._raw_log_path, "r", encoding="utf-8") as f:
             f.seek(max(0, int(start_offset)))

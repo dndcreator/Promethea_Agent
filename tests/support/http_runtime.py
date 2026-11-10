@@ -11,7 +11,7 @@ from gateway import user_secrets
 from tests.support.runtime import runtime_at
 
 
-def app_at(root, model, overrides):
+def app_at(root, model, overrides, *, durable_chat=False):
     host = runtime_at(root, model)
     identities = IdentityStore(root / "identities.sqlite3")
     if identities.get_by_id("alice") is None:
@@ -30,4 +30,17 @@ def app_at(root, model, overrides):
     app = FastAPI()
     for router in (auth.router, chat.router, sessions.router):
         app.include_router(router, prefix="/api")
+    if durable_chat:
+        from agentkit.tools.standard.task_tools import TaskListTool, TaskResumeTool, TaskStartTool
+        from gateway.conversation_tasks import ConversationTasks
+        from gateway.http.routes import task
+        from gateway.task_runtime import TaskRuntime
+
+        host.task_runtime = TaskRuntime(task_service=host.task_service, workflow_engine=host.workflow_engine)
+        driver = ConversationTasks(host.conversation_service, host.task_runtime)
+        host.conversation_service.conversation_tasks = driver
+        for tool in (TaskListTool, TaskResumeTool, TaskStartTool):
+            host.capability_service.register_tool(tool(driver))
+        overrides.setattr(task, "get_gateway_server", lambda: host)
+        app.include_router(task.router, prefix="/api")
     return app, host

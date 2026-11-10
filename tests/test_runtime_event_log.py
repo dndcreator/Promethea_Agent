@@ -10,6 +10,43 @@ from gateway.protocol import EventType
 from gateway.runtime_event_log import RuntimeEventLog
 
 
+def test_cursor_persistence_failure_rolls_back_and_retries_only_windows_rename(tmp_path, monkeypatch):
+    import gateway.runtime_event_log as module
+    log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
+    log.ensure_consumer("test", start_at_tail=False)
+    original = module.os.replace
+    attempts = []
+    waits = []
+
+    class SharingViolation(PermissionError):
+        winerror = 32
+
+    def transient(source, target):
+        attempts.append(source)
+        if len(attempts) < 3:
+            raise SharingViolation("temporary sharing violation")
+        return original(source, target)
+
+    monkeypatch.setattr(module.os, "replace", transient)
+    monkeypatch.setattr("utils.persistence.sleep", waits.append)
+    assert log.commit_consumer_cursor("test", 7) == 7
+    assert waits == [.02, .08] and len(attempts) == 3
+    assert RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl")).get_consumer_cursor("test") == 7
+
+    def denied(*args):
+        raise PermissionError("persistent access denial")
+
+    monkeypatch.setattr(module.os, "replace", denied)
+    with pytest.raises(PermissionError):
+        log.commit_consumer_cursor("test", 8)
+    assert log.get_consumer_cursor("test") == 7
+    assert RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl")).get_consumer_cursor("test") == 7
+    assert not list(tmp_path.glob("events.jsonl.state.json.*"))
+    with pytest.raises(PermissionError):
+        log.ensure_consumer("new", start_at_tail=False)
+    assert "new" not in log._consumer_cursors
+
+
 def test_runtime_event_log_persists_before_delivery(tmp_path: Path):
     log = RuntimeEventLog(storage_path=str(tmp_path / "events.jsonl"))
     emitter = EventEmitter(event_log=log)

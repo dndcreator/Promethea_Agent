@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import uuid
 
 from gateway.public_contracts import Error as PublicError
+from gateway.public_contracts import RunRequest, RunOutcome, InputRequest
 
 
 def _utc_now() -> datetime:
@@ -307,10 +308,8 @@ class FollowupParams(BaseModel):
     end_offset: int = 0
 
 
-class ChatParams(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    stream: bool = False
+class ChatParams(RunRequest):
+    """Both Gateway transports consume the canonical public run request."""
 
 
 class ChatConfirmParams(BaseModel):
@@ -486,6 +485,8 @@ class GatewayResponse(BaseModel):
     status: str = "success"
     error: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
+    execution_outcome: Optional[RunOutcome] = None
+    input_request: Optional[InputRequest] = None
 
     def to_payload(self) -> Dict[str, Any]:
         payload = {
@@ -505,6 +506,10 @@ class GatewayResponse(BaseModel):
             # Backward-compatible fields used by existing callers.
             "response": self.response_text,
         }
+        if self.execution_outcome is not None:
+            payload["execution_outcome"] = self.execution_outcome.model_dump()
+        if self.input_request is not None:
+            payload["input_request"] = self.input_request.model_dump()
         return payload
 
 

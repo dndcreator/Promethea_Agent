@@ -222,7 +222,9 @@ async def test_steer_during_tool_preserves_observation_and_requires_fresh_approv
     assert result["status"] == "needs_confirmation"
     assert result["tool_name"] == "write"
     assert result["observations"][0]["ok"] is True
-    assert core.calls[1][-1] == {"role": "user", "content": "change direction"}
+    user_instructions = [row for row in core.calls[1] if row.get("role") == "user" and not row.get("name")
+                         and isinstance(row.get("content"), str)]
+    assert user_instructions[-1] == {"role": "user", "content": "change direction"}
     assert result["applied_steering_ids"] == ["m1"]
 
 

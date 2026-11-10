@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "max_steps": 8,
+  "policies": [
+    {"id": "fixed_small", "initial": 2000, "ceiling": 2000},
+    {"id": "fixed_large", "initial": 8192, "ceiling": 8192},
+    {"id": "adaptive", "initial": 2000, "ceiling": 8192}
+  ],
+  "cases": [
+    {
+      "id": "repair-calculator", "kind": "action", "artifact": "calculator.html",
+      "files": {"calculator.html": "<!doctype html><meta charset=utf-8><input id=a type=number><input id=b type=number><button id=calculate>Add</button><output id=result></output><script>calculate.onclick=()=>result.textContent=a.value+b.value</script>"},
+      "turns": ["修复工作区 calculator.html 的加法计算器。先读取现有文件，保留 a、b 两个数字输入、calculate 按钮和 result 输出的 ID。要求相加而非拼接，支持负数、小数、零；两个输入中任一个为空时显示 Invalid，而不是默认为零。必须交付能运行的独立 HTML，不使用任何外部资源。"],
+      "expect": {"required_tools": ["workspace.read_file", "workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "#a", "count": 1}, {"selector": "#b", "count": 1}, {"selector": "#calculate", "count": 1}, {"selector": "#result", "count": 1}]},
+        {"id": "integer-sum", "actions": [{"fill": {"#a": "17", "#b": "24"}}, {"click": "#calculate"}], "assertions": [{"selector": "#result", "number": 41}]},
+        {"id": "negative-decimal", "actions": [{"fill": {"#a": "-2.5", "#b": "1.25"}}, {"click": "#calculate"}], "assertions": [{"selector": "#result", "number": -1.25}]},
+        {"id": "zero", "actions": [{"fill": {"#a": "0", "#b": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#result", "number": 0}]},
+        {"id": "empty-input", "actions": [{"fill": {"#a": "", "#b": "4"}}, {"click": "#calculate"}], "assertions": [{"selector": "#result", "text": "Invalid"}]}
+      ]
+    },
+    {
+      "id": "quotation-ui", "kind": "action", "artifact": "quotation.html",
+      "turns": ["创建独立的报价计算页面 quotation.html，只用内联 JS/CSS，不用外部资源。数字输入 ID 为 quantity、price、discount、tax，discount 和 tax 单位为百分比，按钮 ID 为 calculate，数值输出 ID 为 total。计算 quantity * price * (1-discount/100) * (1+tax/100)，结果四舍五入保留两位小数，不加货币前缀。数量允许零，但不允许负数；单价、税率不能为负；折扣范围 0 到 100；任何输入为空或非法时输出 Invalid。请实际创建完整可运行的页面。"],
+      "expect": {"required_tools": ["workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "#quantity", "count": 1}, {"selector": "#price", "count": 1}, {"selector": "#discount", "count": 1}, {"selector": "#tax", "count": 1}, {"selector": "#calculate", "count": 1}]},
+        {"id": "discount-and-tax", "actions": [{"fill": {"#quantity": "3", "#price": "19.95", "#discount": "10", "#tax": "8"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "58.17"}]},
+        {"id": "zero-quantity", "actions": [{"fill": {"#quantity": "0", "#price": "20", "#discount": "0", "#tax": "10"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "0.00"}]},
+        {"id": "invalid-discount", "actions": [{"fill": {"#quantity": "1", "#price": "20", "#discount": "101", "#tax": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "Invalid"}]},
+        {"id": "negative-quantity", "actions": [{"fill": {"#quantity": "-1", "#price": "20", "#discount": "0", "#tax": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "Invalid"}]},
+        {"id": "empty-price", "actions": [{"fill": {"#quantity": "1", "#price": "", "#discount": "0", "#tax": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "Invalid"}]},
+        {"id": "negative-price", "actions": [{"fill": {"#quantity": "1", "#price": "-3", "#discount": "0", "#tax": "0"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "Invalid"}]},
+        {"id": "negative-tax", "actions": [{"fill": {"#quantity": "1", "#price": "3", "#discount": "0", "#tax": "-1"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "Invalid"}]},
+        {"id": "full-discount", "actions": [{"fill": {"#quantity": "2", "#price": "3", "#discount": "100", "#tax": "10"}}, {"click": "#calculate"}], "assertions": [{"selector": "#total", "text": "0.00"}]}
+      ]
+    },
+    {
+      "id": "persistent-todo", "kind": "action", "artifact": "tasks.html",
+      "turns": ["创建独立待办页面 tasks.html，不使用外部资源。输入框 ID new-task，添加按钮 ID add-task，任务列表 ID tasks。每个任务为一个 li，包含一个 .task-title 文本元素、一个 checkbox 和一个删除按钮。用户能添加中文任务、勾选完成、删除任务。用 localStorage 保存列表和完成状态，刷新后保持；空白任务不能添加。请交付实际完整代码，不要只描述实现。"],
+      "expect": {"required_tools": ["workspace.write_file"]},
+      "checks": [
+        {"id": "interface", "assertions": [{"selector": "#new-task", "count": 1}, {"selector": "#add-task", "count": 1}, {"selector": "#tasks", "count": 1}]},
+        {"id": "add-and-reload", "actions": [{"fill": {"#new-task": "核对报价"}}, {"click": "#add-task"}, {"reload": true}], "assertions": [{"selector": "#tasks li", "count": 1}, {"selector": "#tasks .task-title", "text": "核对报价"}]},
+        {"id": "completion-and-reload", "actions": [{"fill": {"#new-task": "核对报价"}}, {"click": "#add-task"}, {"check": "#tasks input[type=checkbox]"}, {"reload": true}], "assertions": [{"selector": "#tasks input[type=checkbox]", "checked": true}]},
+        {"id": "delete-and-reload", "actions": [{"fill": {"#new-task": "核对报价"}}, {"click": "#add-task"}, {"click": "#tasks li button"}, {"reload": true}], "assertions": [{"selector": "#tasks li", "count": 0}]},
+        {"id": "reject-blank", "actions": [{"fill": {"#new-task": "   "}}, {"click": "#add-task"}], "assertions": [{"selector": "#tasks li", "count": 0}]}
+      ]
+    }
+  ]
+}

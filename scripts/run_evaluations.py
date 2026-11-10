@@ -119,7 +119,7 @@ def validate_assets(corpus, rubric):
     if len(ids) != len(set(ids)) or not ids:
         raise ValueError("Behavior case IDs must be nonempty and unique")
     for case in corpus["cases"]:
-        if case["kind"] not in {"action", "classification", "retrieval", "ambient", "situation"} or case["category"] not in {"positive", "negative", "boundary", "historical_failure"}:
+        if case["kind"] not in {"action", "classification", "retrieval", "ambient", "situation", "delegation"} or case["category"] not in {"positive", "negative", "boundary", "historical_failure"}:
             raise ValueError("Unsupported case kind/category")
         if not set(case.get("rubric", [])).issubset(rubric["dimensions"]):
             raise ValueError("Unknown rubric dimension")

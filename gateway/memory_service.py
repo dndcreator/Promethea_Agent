@@ -371,8 +371,9 @@ class MemoryService:
         candidates: List[Dict[str, Any]],
         interaction_context: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
+        from functools import partial
         return await verify_candidates(
-            self._call_memory_classifier_llm,
+            partial(self._call_memory_classifier_llm, purpose="memory_verify"),
             user_id=user_id,
             user_input=user_input,
             assistant_output=assistant_output,
@@ -463,6 +464,7 @@ class MemoryService:
         user_id: str,
         prompt: str,
         query: str,
+        *, purpose: str = "memory_extract",
     ) -> Optional[str]:
         api = self._resolve_memory_api_for_user(user_id)
         model = api.get("model", "").strip()
@@ -480,6 +482,7 @@ class MemoryService:
                         {"role": "user", "content": query},
                     ],
                     user_config={
+                        "_runtime_call": {"purpose": purpose},
                         "api": {
                             "api_key": api_key,
                             "base_url": base_url,
@@ -499,7 +502,10 @@ class MemoryService:
             from openai import OpenAI
 
             def _sync_call() -> str:
+                import time
+                from conversation_core import _record_llm_metrics, _usage_cache_fields
                 client = OpenAI(api_key=api_key, base_url=base_url)
+                started = time.perf_counter()
                 resp = client.chat.completions.create(
                     model=model,
                     messages=[
@@ -509,6 +515,10 @@ class MemoryService:
                     temperature=0.2,
                     max_tokens=500,
                 )
+                raw_usage = getattr(resp, "usage", None)
+                usage = {"prompt_tokens": getattr(raw_usage, "prompt_tokens", 0), "completion_tokens": getattr(raw_usage, "completion_tokens", 0),
+                         **_usage_cache_fields(raw_usage)}
+                _record_llm_metrics(time.perf_counter() - started, usage, purpose=purpose)
                 return (resp.choices[0].message.content or "").strip()
 
             return await asyncio.to_thread(_sync_call)
@@ -2700,6 +2710,25 @@ class MemoryService:
             await self.event_emitter.emit(EventType.MEMORY_RECALLED, payload)
 
         return result
+    async def reconstruct_context(self, *, goal: str, user_id: str, session_id: str) -> Dict[str, Any]:
+        if not self.enabled or not self.memory_adapter or not user_id or not session_id or not goal.strip():
+            return {}
+        pending = getattr(self.memory_adapter, "pending_replay_context", None)
+        backlog = await asyncio.to_thread(pending, user_id=user_id, session_id=session_id) if callable(pending) else []
+        recall_id = f"rebuild_{time.time_ns()}"
+        try:
+            recall = await asyncio.wait_for(self.recall_memory(MemoryRecallRequest(
+                request_id=recall_id, trace_id=recall_id, user_id=user_id, session_id=session_id,
+                query_text=goal[:1600], mode="deep", top_k=4,
+            )), timeout=2)
+        except Exception as exc:
+            logger.debug("Long-term context reconstruction recall unavailable: {}", type(exc).__name__)
+            return {"recalled_memory": [], "l0_pending_replay": backlog}
+        records = [{"id": row.memory_id, "layer": row.source_layer, "excerpt": row.content[:480],
+                    "stale": row.staleness_flag, "conflict": row.conflict_flag}
+                   for row in recall.memory_records if row.source_layer != "recent" and row.relevance_score > 0]
+        return {"recalled_memory": records[:3], "l0_pending_replay": backlog}
+
     async def get_context(
         self,
         query: str,

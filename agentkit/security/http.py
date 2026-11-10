@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
 import aiohttp
@@ -16,6 +16,7 @@ class HttpDocument:
     content_type: str
     charset: str | None
     body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
 
 class _BlockedAddress(PermissionError):
@@ -42,7 +43,7 @@ class _Resolver(aiohttp.abc.AbstractResolver):
 
 async def request_document(url, *, policy, method="GET", headers=None, body=None,
                            timeout_s=20, max_bytes=4_000_000, service_url=None,
-                           same_origin=False):
+                           same_origin=False, follow_redirects=True):
     def origin(value):
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username is not None or parsed.password is not None:
@@ -66,7 +67,7 @@ async def request_document(url, *, policy, method="GET", headers=None, body=None
                 async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=timeout_s),
                                                  cookie_jar=aiohttp.DummyCookieJar(), trust_env=False) as session:
                     async with session.request(method, url, headers=headers, json=body, allow_redirects=False) as response:
-                        if response.status in {301, 302, 303, 307, 308} and response.headers.get("Location"):
+                        if follow_redirects and response.status in {301, 302, 303, 307, 308} and response.headers.get("Location"):
                             if hop == 5:
                                 raise ValueError("too many HTTP redirects")
                             url = urljoin(str(response.url), response.headers["Location"])
@@ -79,7 +80,7 @@ async def request_document(url, *, policy, method="GET", headers=None, body=None
                             if size > max_bytes:
                                 raise ValueError("HTTP response exceeds byte limit")
                             chunks.append(chunk)
-                        return HttpDocument(str(response.url), response.status, response.headers.get("Content-Type", ""), response.charset, b"".join(chunks))
+                        return HttpDocument(str(response.url), response.status, response.headers.get("Content-Type", ""), response.charset, b"".join(chunks), dict(response.headers))
             except aiohttp.ClientConnectorError as exc:
                 if isinstance(exc.os_error, _BlockedAddress):
                     raise PermissionError("sandbox blocked a private or reserved DNS address") from exc

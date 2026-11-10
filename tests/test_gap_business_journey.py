@@ -14,6 +14,7 @@ from gateway.http.session_store import SessionStorage
 from gateway.server_runtime_utils import build_run_context
 from gateway.task_service import TaskService
 from core import services as core_services
+from tests.support.runtime import observation_fact, goal_context
 
 
 class Model:
@@ -27,9 +28,8 @@ class Model:
                 "revision": 0, "create": [{"id": "export", "kind": "achievement", "requirement": "Export is valid",
                                           "check": {"tool_name": "export.validate", "pointer": "/valid", "expected": True}}]}}
         elif len(self.calls) == 2:
-            observation = json.loads(messages[-1]["content"][0]["text"])
-            system = next(item["content"] for item in messages if item["role"] == "system")
-            revision = json.loads(system.split("\n")[-1])["revision"]
+            observation = observation_fact(messages)
+            revision = goal_context(messages)["revision"]
             action = {"action": "answer", "content": "Export validated", "gap_update": {
                 "revision": revision, "updates": [{"id": "export", "state": "resolved", "evidence_refs": [observation["observation_id"]]}]}}
         else:

@@ -42,11 +42,19 @@ class GapChange(GapContract):
     evidence_refs: list[str] = Field(default_factory=list, max_length=8)
 
 
+class GapRecoveryDecision(GapContract):
+    strategy: Literal["investigate", "replan", "retry"]
+    reason: str = Field(min_length=1, max_length=400)
+    evidence_refs: list[str] = Field(min_length=1, max_length=4)
+    repair_refs: list[str] = Field(default_factory=list, max_length=4)
+
+
 class GapDelta(GapContract):
     revision: StrictInt = Field(ge=0)
     create: list[GapSpec] = Field(default_factory=list, max_length=8)
     updates: list[GapChange] = Field(default_factory=list, max_length=8)
     focus: list[str] | None = Field(default=None, max_length=4)
+    recovery: GapRecoveryDecision | None = None
 
 
 class GoalGap(GapSpec):
@@ -59,6 +67,27 @@ class GoalGap(GapSpec):
 class GapFrame(GapContract):
     signature: str
     progress: bool = False
+    outcome: str = ""
+    failures: list[str] = Field(default_factory=list, max_length=16)
+
+
+class GapFailedCall(GapContract):
+    signature: str
+    observation_id: str
+    retryable: bool = False
+    count: int = 1
+    retries: int = 0
+
+
+class GapRecoveryState(GapContract):
+    mode: Literal["execute", "reassess", "trial"] = "execute"
+    reason: str = ""
+    evidence_refs: list[str] = Field(default_factory=list, max_length=4)
+    failed_calls: list[GapFailedCall] = Field(default_factory=list, max_length=32)
+    decision: GapRecoveryDecision | None = None
+    proposal: str = ""
+    rejections: int = 0
+    failed_trials: int = 0
 
 
 class GapBarrier(GapContract):
@@ -73,6 +102,7 @@ class GoalGapState(GapContract):
     focus: list[str] = Field(default_factory=list, max_length=4)
     recent: list[GapFrame] = Field(default_factory=list, max_length=16)
     barriers: dict[str, GapBarrier] = Field(default_factory=dict, max_length=32)
+    recovery: GapRecoveryState = Field(default_factory=GapRecoveryState)
 
     @model_validator(mode="after")
     def valid_identity(self):
@@ -178,6 +208,21 @@ def apply_gap_delta(state: GoalGapState, raw: dict, observations: list[dict], *,
     progress = any(gap.id in previous and gap.state == "resolved" and gap.support == "checked" and previous[gap.id].state != "resolved" for gap in result.gaps)
     if progress and result.recent:
         result.recent[-1].progress = True
+    if progress:
+        result.recovery = GapRecoveryState()
+    blocked_refs = [ref for update in delta.updates if update.state == "blocked"
+                    and (not result.focus or update.id in result.focus) for ref in update.evidence_refs]
+    if blocked_refs and not progress:
+        _reassess(result, "declared_blocker", blocked_refs)
+    if delta.recovery is not None and not progress:
+        refs = delta.recovery.evidence_refs + delta.recovery.repair_refs
+        if any(ref not in evidence for ref in refs):
+            raise ValueError("recovery requires supplied Runtime observation references")
+        if result.recovery.mode == "execute" and set(delta.recovery.evidence_refs).intersection(row.observation_id for row in result.recovery.failed_calls):
+            _reassess(result, "failed_path_requires_reassessment", delta.recovery.evidence_refs)
+        if result.recovery.mode != "reassess":
+            raise ValueError("no Runtime reassessment is pending")
+        result.recovery.decision = delta.recovery
     if result.model_dump() != state.model_dump():
         result.revision += 1
     return result
@@ -197,27 +242,118 @@ def gap_event_delta(previous: GoalGapState, state: GoalGapState) -> dict:
             "changes": [gap.model_dump() for gap in state.gaps if before.get(gap.id) != gap.model_dump()]}
 
 
+def call_signature(tool_name: str, args: dict) -> str:
+    return fingerprint({"tool": tool_name, "args": args})
+
+
+def _reassess(state: GoalGapState, reason: str, refs: list[str]) -> None:
+    state.recovery.mode = "reassess"
+    state.recovery.reason = reason
+    state.recovery.evidence_refs = list(dict.fromkeys(refs))[-4:]
+    state.recovery.decision = None
+    state.recovery.proposal = ""
+
+
 def observe_gap_step(state: GoalGapState, path: list[dict], observations: list[dict], *, window: int = 4) -> GoalGapState:
-    if not state.gaps or not any(gap.state == "open" for gap in state.gaps):
-        return state
-    settled = [item for item in observations if (item.get("error") or {}).get("category") != "approval"]
+    # A slice ending is not a new obstacle in the environment.
+    settled = [item for item in observations if (item.get("error") or {}).get("category") not in
+               {"approval", "validation", "model_output", "budget", "progress_control", "execution_boundary", "completion"}]
     if not settled:
         return state
     ids = {item["tool_call_id"] for item in settled}
     calls = [{"tool": item.get("tool_name"), "args": item.get("args")} for item in path if item.get("tool_call_id") in ids]
     facts = [{"tool": item.get("tool_name"), "ok": item.get("ok"),
               "result": item.get("structured_result") if item.get("structured_result") is not None else item.get("model_projection"),
-              "error": item.get("error")} for item in settled]
+              "error": {key: item["error"].get(key) for key in ("code", "category", "retryable")} if item.get("error") else None} for item in settled]
     result = state.model_copy(deep=True)
     try:
-        signature = fingerprint({"focus": sorted(result.focus), "calls": calls, "facts": facts})
+        signature = fingerprint({"calls": calls, "facts": facts})
+        outcome = fingerprint(facts)
     except (TypeError, ValueError):
         # Monitoring must not turn an unusual tool payload into a failed action.
         return state
-    # A changed result is only an anti-repetition signal, not verified goal progress.
-    result.recent = [*result.recent, GapFrame(signature=signature)][-window:]
+    if any(item.get("tool_name") == "runtime.user_input" for item in settled):
+        result.recovery.rejections = result.recovery.failed_trials = 0
+        if result.recovery.mode != "execute":
+            _reassess(result, "user_report_requires_verification", result.recovery.evidence_refs + [item["observation_id"] for item in settled])
+    failures = [fingerprint({"tool": item.get("tool_name"), "code": (item.get("error") or {}).get("code"),
+                             "category": (item.get("error") or {}).get("category")}) for item in settled if not item.get("ok")]
+    by_id = {item.get("tool_call_id"): item for item in path if item.get("executed", True)}
+    for item in settled:
+        call = by_id.get(item.get("tool_call_id"))
+        if item.get("ok") or call is None:
+            continue
+        key = call_signature(call.get("tool_name"), call.get("args") or {})
+        prior = next((row for row in result.recovery.failed_calls if row.signature == key), None)
+        if prior:
+            prior.count += 1
+            prior.observation_id = item["observation_id"]
+            prior.retryable = bool((item.get("error") or {}).get("retryable"))
+        elif len(result.recovery.failed_calls) < 32:
+            result.recovery.failed_calls.append(GapFailedCall(signature=key, observation_id=item["observation_id"],
+                retryable=bool((item.get("error") or {}).get("retryable"))))
+    trial = result.recovery.mode == "trial"
+    new_evidence = not failures and outcome not in {frame.outcome for frame in result.recent if frame.outcome}
+    if trial and new_evidence:
+        result.recovery.mode = "execute"
+        result.recovery.reason = ""
+        result.recovery.evidence_refs = []
+        result.recovery.decision = None
+        result.recovery.proposal = ""
+        result.recovery.rejections = result.recovery.failed_trials = 0
+        result.recent = []
+    # New evidence can end a recovery trial, but does not certify goal completion.
+    result.recent = [*result.recent, GapFrame(signature=signature, outcome=outcome, failures=failures[:16])][-window:]
+    recent = result.recent
+    stalled = len(recent) == window and not any(frame.progress for frame in recent) and len({frame.signature for frame in recent}) < len(recent)
+    repeated_failure = bool(failures and any(key in frame.failures for frame in recent[:-1] for key in failures))
+    if trial and not new_evidence:
+        result.recovery.failed_trials += 1
+        _reassess(result, "recovery_produced_no_new_evidence", [item["observation_id"] for item in settled if not failures or not item.get("ok")])
+    elif stalled or repeated_failure or any(not item.get("ok") and (item.get("error") or {}).get("retryable") is False for item in settled):
+        _reassess(result, "repeated_failure" if repeated_failure else "failed_precondition" if failures else "repeated_result", [item["observation_id"] for item in settled if not failures or not item.get("ok")])
     result.revision += 1
     return result
+
+
+def admit_gap_action(state: GoalGapState, calls: list[dict], observations: list[dict], *, diagnostic: bool = False) -> tuple[GoalGapState, str]:
+    """Admit one concrete recovery proposal, never grant tool authorization."""
+    result = state.model_copy(deep=True)
+    control = result.recovery
+    proposal = fingerprint(calls)
+    if control.mode == "trial" and control.proposal == proposal:
+        return state, ""  # The same owned proposal may be waiting for approval.
+    failed = {row.signature: row for row in control.failed_calls}
+    repeated = [failed[key] for call in calls if (key := call_signature(call["tool_name"], call["args"])) in failed
+                and (not failed[key].retryable or failed[key].count >= 2)]
+    if repeated and control.mode != "reassess":
+        _reassess(result, "failed_path_requires_reassessment", [row.observation_id for row in repeated])
+    error = ""
+    if control.mode == "reassess":
+        decision = control.decision
+        known = {row.get("observation_id"): index for index, row in enumerate(observations)}
+        if decision is None and diagnostic and not repeated:
+            pass
+        elif decision is None:
+            error = "Attach gap_update.recovery with a strategy, reason and current obstacle evidence before tool execution."
+        elif not set(decision.evidence_refs).intersection(control.evidence_refs):
+            error = "The recovery decision must address a current Runtime obstacle."
+        elif repeated:
+            repairs = [ref for ref in decision.repair_refs if ref in known and observations[known[ref]].get("ok") is True
+                       and observations[known[ref]].get("tool_name") != "runtime.user_input"]
+            if len({row.signature for row in repeated}) != len(repeated) or decision.strategy != "retry" or any(row.retries >= 1 or not any(known[ref] > known.get(row.observation_id, len(observations)) for ref in repairs) for row in repeated):
+                error = "This failed call cannot be replayed without a bounded retry decision and newer successful repair evidence. Choose another method, inspect capabilities, or await the user."
+        if not error:
+            control.mode = "trial"
+            control.proposal = proposal
+            for row in repeated:
+                row.retries += 1
+    if error:
+        control.rejections += 1
+        control.decision = None
+    if result.model_dump() != state.model_dump():
+        result.revision += 1
+    return result, error
 
 
 def gap_projection(state: GoalGapState, *, context_chars: int = 2400, window: int = 4, feedback: str = "", observations: list[dict] | None = None) -> dict:
@@ -232,8 +368,11 @@ def gap_projection(state: GoalGapState, *, context_chars: int = 2400, window: in
     checks = {gap.id: gap.check.model_dump() for gap in candidates if gap.check is not None}
     if checks:
         projection["focus_checks"] = checks
-    if stalled:
+    if stalled or state.recovery.mode == "reassess":
         projection["recovery"] = "Repeated execution without accepted progress. Reconsider the unresolved gap: change evidence or method, clarify, or report blocked. Keep all safety/approval constraints."
+        projection["execution_control"] = {"mode": "reassess", "reason": state.recovery.reason,
+            "evidence_refs": state.recovery.evidence_refs,
+            "required": "tool proposals need gap_update.recovery; capability inspection, answer and await_user remain available"}
     if feedback:
         projection["update_rejected"] = feedback[:200]
     obstacles = [

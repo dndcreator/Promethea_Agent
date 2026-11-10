@@ -1,11 +1,13 @@
 import MessageContent from '../MessageContent'
 import { useState } from 'react'
+import { FileSearch } from 'lucide-react'
 import AgentNotes from './AgentNotes'
 import SemanticExpressions from '../SemanticExpressions'
 import { sourceSelection } from '../../utils/message-links'
 import { useLanguage } from '../../store/LanguageContext'
 import type { WorkbenchActivity } from '../../services/api'
-import TurnProcess, { ProcessText } from './TurnProcess'
+import TurnProcess from './TurnProcess'
+import { splitLegacyThinking } from '../../utils/process-presentation'
 import type { FollowupData, MessageData, ReasoningStep, TextSelection } from './types'
 
 type MessageProps = {
@@ -24,12 +26,13 @@ type MessageProps = {
   onOpenWorkbench: () => void
   processRunning?: boolean
   runStatus?: string
+  executionOutcome?: MessageData['executionOutcome']
   error?: Record<string, unknown>
   onRetry?: () => void
   steeringStatus?: MessageData['steeringStatus']
 }
 
-export default function ChatMessage({ role, avatar, name, time, content, messageId, sessionId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, error, onRetry, steeringStatus }: MessageProps) {
+export default function ChatMessage({ role, avatar, name, time, content, messageId, sessionId, followups, onSelectText, reasoningTreeId, reasoningSteps = [], processActivities = [], onOpenWorkbench, processRunning = false, runStatus, executionOutcome, error, onRetry, steeringStatus }: MessageProps) {
   const { t } = useLanguage()
   const [selectedNote, setSelectedNote] = useState<string | null>(null)
   const [noteFocus, setNoteFocus] = useState(0)
@@ -37,6 +40,13 @@ export default function ChatMessage({ role, avatar, name, time, content, message
   const isTool = role === 'tool' || role === 'status'
 
   if (isTool) {
+    if (executionOutcome?.response_source === 'runtime') {
+      return <div className="max-w-[86%] border-l-2 border-amber-300 py-1 pl-3 text-[13px] text-text-muted">
+        <div className="mb-1 text-xs">{t('运行状态', 'Runtime status')}</div>
+        <MessageContent content={content} followups={[]} />
+        <TurnProcess treeId={reasoningTreeId} reasoningSteps={reasoningSteps} activities={processActivities} running={false} onOpenWorkbench={onOpenWorkbench} />
+      </div>
+    }
     if (runStatus) {
       const code = String(error?.code || '')
       const label = code === 'MODEL_OUTPUT_LIMIT'
@@ -48,7 +58,7 @@ export default function ChatMessage({ role, avatar, name, time, content, message
         <div className="max-w-[86%] border-l-2 border-amber-300 py-1 pl-3 text-[13px] text-text-muted">
           <div className="flex items-center gap-3"><span>{label}</span>{onRetry && <button type="button" onClick={onRetry} className="shrink-0 text-brand-700 underline">{t('重试', 'Retry')}</button>}</div>
           {(reasoningTreeId || reasoningSteps.length > 0) && <TurnProcess treeId={reasoningTreeId} reasoningSteps={reasoningSteps} activities={processActivities} running={false} onOpenWorkbench={onOpenWorkbench} />}
-          {error && <details className="mt-1 text-xs"><summary className="cursor-pointer">{t('错误详情', 'Error details')}</summary><pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words py-2">{[code, String(error.message || '')].filter(Boolean).join('\n')}</pre></details>}
+          {error && <button type="button" onClick={onOpenWorkbench} className="mt-1 flex items-center gap-1.5 text-xs text-brand-700"><FileSearch size={12} />{t('查看执行记录', 'View execution record')}</button>}
         </div>
       )
     }
@@ -61,17 +71,10 @@ export default function ChatMessage({ role, avatar, name, time, content, message
     )
   }
 
-  let displayContent = content
-  let thinkingContent = ''
-  if (typeof content === 'string' && content.includes('<thinking>')) {
-    const parts = content.split('<thinking>')
-    const rest = parts[1]
-    if (rest && rest.includes('</thinking>')) {
-      const restParts = rest.split('</thinking>')
-      thinkingContent = restParts[0]
-      displayContent = parts[0] + restParts[1]
-    }
-  }
+  const legacy = isAgent ? splitLegacyThinking(content) : { answer: content, thoughts: [] }
+  const displayContent = legacy.answer
+  const processSteps = [...reasoningSteps, ...legacy.thoughts.filter((text) => !reasoningSteps.some((step) => step.content === text))
+    .map((text, index) => ({ step_id: `legacy-${index}`, source: 'legacy', content: text }))]
 
   return (
     <div className={`chat-message flex max-w-[86%] gap-3.5 ${isAgent ? '' : 'self-start'}`}>
@@ -82,18 +85,18 @@ export default function ChatMessage({ role, avatar, name, time, content, message
         <div className="flex flex-wrap items-baseline gap-2">
           <span className="text-[13px] font-semibold text-text-strong">{name}</span>
           {time && <span className="text-[11px] text-text-muted">{time}</span>}
+          {executionOutcome && <span className="text-[11px] text-text-muted">{t('已保留进度 · 目标未验证', 'Progress retained · Goal unverified')}</span>}
           {steeringStatus && <span className="text-[11px] text-text-muted">{steeringStatus === 'applied' ? t('引导已应用', 'Guidance applied') : steeringStatus === 'not_applied' ? t('引导未应用', 'Guidance not applied') : t('引导已接收', 'Guidance received')}</span>}
         </div>
-        {isAgent && (reasoningTreeId || reasoningSteps.length > 0 || processActivities.length > 0 || processRunning) && (
+        {isAgent && (reasoningTreeId || processSteps.length > 0 || processActivities.length > 0 || processRunning) && (
           <TurnProcess
             treeId={reasoningTreeId}
-            reasoningSteps={reasoningSteps}
+            reasoningSteps={processSteps}
             activities={processActivities}
             running={processRunning}
             onOpenWorkbench={onOpenWorkbench}
           />
         )}
-        {thinkingContent && <ProcessText title={t('模型思考', 'Model reasoning')} content={thinkingContent} />}
         <div
           className="relative min-w-0 whitespace-pre-wrap text-[14px] leading-7 text-text-normal [overflow-wrap:anywhere]"
           onMouseUp={(event) => {

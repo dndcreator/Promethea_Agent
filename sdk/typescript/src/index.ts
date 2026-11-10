@@ -13,6 +13,11 @@ export { MemoryClient } from './memory.js'
 export { connectCanvasFrame, type CanvasFrameOptions } from './canvas-bridge.js'
 export type {
   AnswerUpdate,
+  RunOutcome,
+  InputRequest,
+  InputReply,
+  TaskResumeRequest,
+  GoalProgress,
   RunSteerRequest,
   RunSteerResponse,
   MemoryEmbeddingCommand,
@@ -60,6 +65,7 @@ export type {
   TaskControlRequest,
   TaskStartRunRequest,
   TaskCancelRequest,
+  TaskConfirmationRequest,
   TaskResponse,
   TaskListResponse,
   TaskRunResponse,
@@ -94,3 +100,5 @@ export type {
   GapDelta,
   GapChange,
 } from './generated/public-contracts.js'
+export { VoiceClient } from './voice.js'
+export type { VoiceCapabilities, VoiceEndpointStatus, VoiceTTSRequest, VoiceSTTResult, VoiceTranscription, VoiceDiscoveryRequest, VoiceModelList } from './generated/public-contracts.js'

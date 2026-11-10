@@ -92,6 +92,30 @@ async def test_call_llm_records_usage_metrics(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unreported_usage_is_not_a_complete_zero_and_purpose_is_preserved(monkeypatch):
+    create = _FakeCreate(SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="hello"))], usage=None))
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    recorded = []
+    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage, **kwargs: recorded.append((usage, kwargs)))
+    out = await conv.call_llm([{"role": "user", "content": "hi"}], user_config={"_runtime_call": {"purpose": "action"}})
+    assert out["usage"]["usage_complete"] is False
+    assert recorded[0][0]["usage_complete"] is False
+    assert recorded[0][1]["purpose"] == "action" and recorded[0][1]["cost_estimate"] is None
+
+
+@pytest.mark.asyncio
+async def test_failed_provider_attempt_is_metered_as_unknown_not_free(monkeypatch):
+    create = _FailingCreate(ConnectionError("offline"))
+    conv = _conversation_with_client(SimpleNamespace(chat=SimpleNamespace(completions=create)))
+    recorded = []
+    monkeypatch.setattr(conversation_core, "_record_llm_metrics", lambda duration, usage, **kwargs: recorded.append((usage, kwargs)))
+    out = await conv.call_llm([{"role": "user", "content": "hi"}], user_config={"_runtime_call": {"purpose": "action"}})
+    assert len(recorded) == 1 and recorded[0][0] is None
+    assert recorded[0][1]["failed"] and recorded[0][1]["purpose"] == "action"
+    assert out["usage"]["usage_complete"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("content,finish_reason,code", [
     ("", "stop", "MODEL_EMPTY_RESPONSE"),
     ("   ", "stop", "MODEL_EMPTY_RESPONSE"),

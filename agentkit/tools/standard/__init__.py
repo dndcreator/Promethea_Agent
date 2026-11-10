@@ -10,6 +10,7 @@ from .calendar_tools import CalendarCreateTool, CalendarDeleteTool, CalendarList
 from .command_tools import RuntimeExecCommandTool, RuntimeReadEnvTool
 from .data_tools import DataCsvToJsonTool, DataJsonToCsvTool
 from .math_tools import MathCalculateTool
+from .media_tools import VideoEditTool, VideoFrameTool, VideoInspectTool, WorkspaceImageViewTool
 from .memory_tools import (
     MemoryCreateEntryTool,
     MemoryGetContextTool,
@@ -18,10 +19,12 @@ from .memory_tools import (
     MemorySummarizeSessionTool,
 )
 from .organization_tools import OrganizationRecallTool
-from .runtime_tools import RuntimeListToolsTool, RuntimeProcessingStatsTool, RuntimeReadObservationTool, RuntimeServicesTool
+from .runtime_tools import RuntimeListObservationsTool, RuntimeListToolsTool, RuntimeProcessingStatsTool, RuntimeReadEventTool, RuntimeReadObservationTool, RuntimeServicesTool
 from .reasoning_tools import ReasoningRunTool
 from .skill_tools import SkillRunTool
+from .schedule_tools import RuntimeScheduleTool, RuntimeScheduleControlTool
 from .session_tools import SessionInfoTool, SessionListTool, SessionRecentMessagesTool
+from .task_tools import TaskListTool, TaskResumeTool, TaskStartTool
 from .text_tools import TextFindMatchesTool, TextNormalizeJsonTool, TextWordStatsTool
 from .utility_tools import UtilsHashTextTool, UtilsNowTool, UtilsUuidTool
 from .web_tools import (
@@ -112,12 +115,17 @@ def create_tools(runtime: dict[str, Any]) -> list[Any]:
             ]
         )
     if gateway_server is not None:
+        task_driver = getattr(getattr(gateway_server, "conversation_service", None), "conversation_tasks", None)
+        if task_driver is not None:
+            tools.extend(tool(task_driver) for tool in (TaskStartTool, TaskListTool, TaskResumeTool))
+        tools.extend([RuntimeReadEventTool(gateway_server=gateway_server), RuntimeScheduleTool(gateway_server), *[RuntimeScheduleControlTool(gateway_server, operation) for operation in ("list", "pause", "resume", "remove")]])
         tools.extend(
             [
                 RuntimeServicesTool(gateway_server=gateway_server),
                 RuntimeProcessingStatsTool(gateway_server=gateway_server),
                 RuntimeListToolsTool(gateway_server=gateway_server),
                 RuntimeReadObservationTool(gateway_server=gateway_server),
+                RuntimeListObservationsTool(gateway_server=gateway_server),
             ]
         )
         if getattr(gateway_server, "reasoning_service", None) is not None:
@@ -144,6 +152,7 @@ def create_tools(runtime: dict[str, Any]) -> list[Any]:
                 ]
             )
     if workspace_service is not None:
+        tools.extend(tool(workspace_service) for tool in (WorkspaceImageViewTool, VideoInspectTool, VideoFrameTool, VideoEditTool))
         tools.extend(
             [
                 RuntimeExecCommandTool(workspace_service=workspace_service),

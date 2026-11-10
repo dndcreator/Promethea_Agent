@@ -13,12 +13,29 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from ctypes import wintypes
 from pathlib import Path
-from uuid import uuid4
 
 RUNNER_FAILURE = "promethea-windows-sandbox:"
 WRITE_RESTRICTED = 0x8
+_MAX_TEMP_PATH = 260 - 14
+
+
+def _prepare_temp_dir(root: Path) -> tuple[Path, str]:
+    # Win32 temporary-file APIs retain a MAX_PATH-14 directory limit.
+    directory = Path(tempfile.mkdtemp(prefix=".tmp-", dir=root))
+    try:
+        exported = str(directory)
+        if len(exported) > _MAX_TEMP_PATH:
+            import win32api
+            exported = win32api.GetShortPathName(exported)
+        if len(exported) > _MAX_TEMP_PATH or Path(exported).resolve() != directory.resolve():
+            raise RuntimeError("sandbox temporary path exceeds the Win32 limit; use a shorter workspace path")
+        return directory, exported
+    except BaseException:
+        shutil.rmtree(directory)
+        raise
 
 
 class _SidAndAttributes(ctypes.Structure):
@@ -125,11 +142,11 @@ def _launch(argv: list[str], root: Path, cwd: Path, mode: str) -> int:
     startup.dwFlags = win32process.STARTF_USESTDHANDLES
     startup.hStdInput, startup.hStdOutput, startup.hStdError = inherited
     child = thread = None
-    temp_dir = root / ".runtime" / "sandbox-tmp" / uuid4().hex
-    temp_dir.mkdir(parents=True)
+    temp_dir = None
     environment = dict(os.environ)
-    environment["TEMP"] = environment["TMP"] = str(temp_dir)
     try:
+        temp_dir, exported_temp = _prepare_temp_dir(root)
+        environment["TEMP"] = environment["TMP"] = exported_temp
         child, thread, _, _ = win32process.CreateProcessAsUser(
             token, None, subprocess.list2cmdline(argv), None, None, True,
             win32process.CREATE_SUSPENDED, environment, str(cwd), startup,
@@ -147,7 +164,7 @@ def _launch(argv: list[str], root: Path, cwd: Path, mode: str) -> int:
         for handle in inherited:
             handle.Close()
         token.Close()
-        if temp_dir.is_relative_to(root) and temp_dir.exists():
+        if temp_dir is not None and temp_dir.is_relative_to(root) and temp_dir.exists():
             shutil.rmtree(temp_dir)
 
 

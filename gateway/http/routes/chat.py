@@ -173,6 +173,7 @@ async def chat(
                         "requested_mode": request.requested_mode,
                         "requested_skill": request.requested_skill,
                         "requested_workflow": request.requested_workflow,
+                        "reply_to_input": request.reply_to_input,
                         "task_id": request.task_id,
                         "metadata": dict(request.metadata or {}),
                         "attachments": attachments,
@@ -353,7 +354,7 @@ async def chat(
                     full_text = str(run_chat_loop_result.get("content") or "")
 
                     run_status = str(run_chat_loop_result.get("status") or "success").lower()
-                    if run_status not in {"success", "ok", "completed", "needs_confirmation"}:
+                    if run_status not in {"success", "ok", "completed", "needs_confirmation", "needs_input"}:
                         error = run_chat_loop_result.get("error")
                         message_manager.abort_turn(
                             session_id, turn_id, user_id=user_id,
@@ -403,6 +404,7 @@ async def chat(
                         reasoning_tree_id=tree_id,
                         reasoning_steps=list(run_chat_loop_result.get("reasoning_steps") or []),
                         agent_message_ids=run_chat_loop_result.get("agent_message_ids"),
+                        execution_outcome=run_chat_loop_result.get("execution_outcome"),
                     )
                     if not committed:
                         yield _sse({"type": "error", "content": "failed to commit turn"})
@@ -428,7 +430,7 @@ async def chat(
                             "user_id": user_id,
                             "channel": "web",
                             "user_input": user_text,
-                            "assistant_output": full_text,
+                            "assistant_output": "" if (run_chat_loop_result.get("execution_outcome") or {}).get("response_source") == "runtime" else full_text,
                             "interaction_context": interaction_context,
                             "attachments": attachments,
                         },
@@ -454,13 +456,16 @@ async def chat(
                         "session_id": session_id,
                         "conversation_turn_id": turn_id,
                         "content": full_text,
+                        "execution_outcome": run_chat_loop_result.get("execution_outcome"),
                     }
+                    if run_chat_loop_result.get("input_request"):
+                        done_payload.update(status="needs_input", input_request=run_chat_loop_result["input_request"])
                     if confirmation_payload:
                         done_payload.update(confirmation_payload)
                     if memory_write_summary:
                         done_payload["memory_write_summary"] = memory_write_summary
                         done_payload["memory_visibility"] = memory_write_summary
-                    if gateway_server.reasoning_service and tree_id:
+                    if gateway_server.reasoning_service and tree_id and not run_chat_loop_result.get("execution_outcome"):
                         assessment = await gateway_server.reasoning_service.assess_outcome(
                             tree_id=tree_id,
                             assistant_output=full_text,
@@ -526,6 +531,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "reply_to_input": request.reply_to_input,
                     "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                     "attachments": attachments,
@@ -545,6 +551,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "reply_to_input": request.reply_to_input,
                     "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                 }
@@ -562,6 +569,7 @@ async def chat(
                     "requested_mode": request.requested_mode,
                     "requested_skill": request.requested_skill,
                     "requested_workflow": request.requested_workflow,
+                    "reply_to_input": request.reply_to_input,
                     "task_id": request.task_id,
                     "metadata": dict(request.metadata or {}),
                     "attachments": attachments,
@@ -582,6 +590,8 @@ async def chat(
             tool_name=mapped.get("tool_name"),
             args=_normalize_tool_args(mapped.get("args")),
             memory_write_summary=_summarize_memory_visibility(mapped.get("memory_write_summary")),
+            execution_outcome=mapped.get("execution_outcome"),
+            input_request=mapped.get("input_request"),
         )
     except HTTPException:
         raise
@@ -614,6 +624,8 @@ async def confirm_tool(
             tool_name=payload.get("tool_name"),
             args=_normalize_tool_args(payload.get("args")),
             memory_write_summary=_summarize_memory_visibility(payload.get("memory_write_summary")),
+            execution_outcome=payload.get("execution_outcome"),
+            input_request=payload.get("input_request"),
         )
     except HTTPException:
         raise

@@ -3,7 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from gateway.public_contracts import (
     TaskCancelRequest,
+    TaskConfirmationRequest,
     TaskControlRequest,
+    TaskResumeRequest,
     TaskListResponse,
     TaskResponse,
     TaskRunResponse,
@@ -110,12 +112,35 @@ async def pause_task(task_id: str, payload: Optional[TaskControlRequest] = None,
 
 
 @router.post("/{task_id}/resume", response_model=TaskResponse)
-async def resume_task(task_id: str, payload: Optional[TaskControlRequest] = None, user_id: str = Depends(get_current_user_id)):
+async def resume_task(task_id: str, payload: Optional[TaskResumeRequest] = None, user_id: str = Depends(get_current_user_id)):
     try:
-        task = _runtime().resume_task(task_id=task_id, user_id=user_id, expected_revision=payload.expected_revision if payload else None)
+        reply = payload.input_reply.model_dump() if payload and payload.input_reply else None
+        if reply is None:
+            task_state = _runtime().task_service.get_task(task_id, user_id=user_id)
+            for run in (task_state or {}).get("runs", []):
+                pending = ((run.get("metadata") or {}).get("checkpoint") or {}).get("pending_input") or {}
+                if run.get("status") in {"waiting_user", "paused"} and pending.get("input_kind") == "acknowledgement":
+                    reply = {"request_id": pending["request_id"], "content": "The authenticated user requested continuation. Verify current state; this does not approve a tool or verify an external result."}
+                    break
+        task = _runtime().resume_task(task_id=task_id, user_id=user_id, expected_revision=payload.expected_revision if payload else None,
+                                      input_reply=reply)
         return {"status": "success", "task": public_task(task)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{task_id}/confirm", response_model=TaskResponse)
+async def confirm_task(task_id: str, payload: TaskConfirmationRequest, user_id: str = Depends(get_current_user_id)):
+    driver = getattr(getattr(get_gateway_server(), "conversation_service", None), "conversation_tasks", None)
+    if driver is None:
+        raise HTTPException(status_code=503, detail="Conversation task driver is unavailable")
+    try:
+        task = await driver.confirm(user_id, task_id, payload.run_id, payload.tool_call_id, payload.action)
+        return {"status": "success", "task": public_task(task)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Task not found") from None
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

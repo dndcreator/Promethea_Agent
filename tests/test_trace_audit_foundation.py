@@ -51,6 +51,22 @@ def test_audit_event_model_serialization():
     assert dumped["outcome"] == "attempted"
 
 
+def test_model_audit_preview_marks_clipping_without_changing_request():
+    from gateway.action.service import _audit_messages, _stable_hash
+
+    content = "x" * 12001
+    messages = [{"role": "system", "content": content},
+                {"role": "user", "content": [{"type": "text", "text": content}]}]
+    projected = _audit_messages(messages)
+    for preview in (projected[0], projected[1]["content"][0]):
+        assert preview["original_chars"] == 12001
+        assert preview["content_truncated"] is True
+        assert preview["content_hash"] == _stable_hash(content)
+    assert len(projected[0]["content"]) < len(content)
+    assert messages[0]["content"] == messages[1]["content"][0]["text"] == content
+    assert _audit_messages([{"role": "user", "content": "short"}])[0]["content_truncated"] is False
+
+
 @pytest.mark.asyncio
 async def test_main_path_trace_fields_completeness():
     emitter = EventEmitter()

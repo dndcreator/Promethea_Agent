@@ -340,6 +340,7 @@ def test_workbench_projects_runtime_owned_presentation_and_interactive_reference
 
     assert activity["subject"] == "Fetch page · https://example.com/article"
     assert activity["subject_i18n"]["zh"] == "读取网页 · https://example.com/article"
+    assert activity["subject_i18n"]["en"] == activity["subject"]
     assert activity["summary"] == "HTTP 200 · 1200 characters"
     assert activity["references"][0]["kind"] == "url"
     assert activity["references"][0]["target"] == "https://example.com/article"

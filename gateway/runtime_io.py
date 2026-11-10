@@ -6,6 +6,25 @@ import hashlib
 import json
 import uuid
 
+ENVIRONMENT_CONTEXT = "promethea_environment"
+GOAL_CONTEXT = "promethea_goals"
+CAPABILITY_CONTEXT = "promethea_capabilities"
+
+
+def replace_context(messages, name, content):
+    """Replace a Runtime-owned data message without touching user-authored text."""
+    result = [dict(row) for row in messages if row.get("name") != name]
+    if content:
+        result.append({"role": "user", "name": name, "content": content})
+    return result
+
+
+def _is_observation_page(value):
+    return (isinstance(value, dict) and isinstance(value.get("observation_id"), str)
+            and value.get("field") in {"result", "error"} and type(value.get("offset")) is int
+            and type(value.get("total_chars")) is int and isinstance(value.get("content"), str)
+            and "next_offset" in value and "source_truncated" in value)
+
 
 @dataclass
 class RuntimeBlock:
@@ -55,7 +74,7 @@ class ContextCompiler:
 
     @staticmethod
     def project_observations(messages: List[Dict[str, Any]], observations: List[Dict[str, Any]], *, per_result_chars: int, total_chars: int) -> List[Dict[str, Any]]:
-        known = {item["observation_id"] for item in observations}
+        known = {item["observation_id"]: item for item in observations}
         found = []
         for message_index, message in enumerate(messages):
             if message.get("role") != "user" or not isinstance(message.get("content"), list):
@@ -69,10 +88,19 @@ class ContextCompiler:
                     continue
                 if isinstance(fact, dict) and fact.get("observation_id") in known:
                     found.append((message_index, block_index, fact))
-        allowance = min(per_result_chars, max(1, total_chars // max(1, len(found))))
+        latest_message = found[-1][0] if found else -1
+        recent_count = sum(index == latest_message for index, _, _ in found)
+        recent_allowance = min(per_result_chars, total_chars // max(1, recent_count))
+        remaining = max(0, total_chars - recent_allowance * recent_count)
+        older_allowance = min(per_result_chars, remaining // max(1, len(found) - recent_count))
+        # Preserve accepted previews while they fit; reallocate only under real pressure.
+        demand = sum(min(per_result_chars, sum(len(json.dumps(fact[field], ensure_ascii=False, sort_keys=True, default=str))
+                     for field in ("result", "error") if fact.get(field) is not None)) for _, _, fact in found)
+        preserve = demand <= total_chars
         result = [dict(message, content=[dict(block) for block in message["content"]])
                   if isinstance(message.get("content"), list) else dict(message) for message in messages]
         for message_index, block_index, fact in found:
+            allowance = per_result_chars if preserve else recent_allowance if message_index == latest_message else older_allowance
             fact = dict(fact)
             for field in ("result", "error"):
                 value = fact.get(field)
@@ -81,6 +109,36 @@ class ContextCompiler:
                 encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
                 if len(encoded) <= allowance:
                     continue
+                if isinstance(value, dict) and value.get("truncated") is True and "read_more" in value:
+                    original = known[fact["observation_id"]]
+                    if field == "error":
+                        value = original.get("error")
+                    else:
+                        value = original.get("structured_result")
+                        if value is None:
+                            value = "\n".join(str(part.get("text") or "") for part in original.get("model_projection", [])
+                                              if part.get("type") == "text").strip()
+                    encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+                    if len(encoded) <= allowance:
+                        fact[field] = value
+                        continue
+                if _is_observation_page(value):
+                    # Page offsets address the retained JSON text, not a new wrapper.
+                    # Trim the visible page and advance its original cursor accordingly.
+                    page = dict(value)
+                    low, high = 0, len(value["content"])
+                    while low < high:
+                        middle = (low + high + 1) // 2
+                        page["content"] = value["content"][:middle]
+                        if len(json.dumps(page, ensure_ascii=False)) <= max(allowance, 512):
+                            low = middle
+                        else:
+                            high = middle - 1
+                    page["content"] = value["content"][:low]
+                    page["next_offset"] = value["offset"] + low if value["offset"] + low < value["total_chars"] else None
+                    page["projection_truncated"] = True
+                    fact[field] = page
+                    continue
                 reference = {"tool_name": "runtime.read_observation", "args": {
                     "observation_id": fact["observation_id"], "field": field,
                     "max_chars": min(8000, max(100, allowance // 2)),
@@ -88,11 +146,41 @@ class ContextCompiler:
                 preview = {"truncated": True, "total_chars": len(encoded),
                            "content_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
                            "preview": encoded[:allowance], "read_more": reference}
+                if isinstance(value, dict):
+                    summary = {}
+                    for key, item in value.items():
+                        if item is None or type(item) in (bool, int, float) or isinstance(item, str) and len(item) <= 160:
+                            candidate = {**summary, key: item}
+                            if len(json.dumps(candidate, ensure_ascii=False)) <= min(800, max(128, allowance // 4)):
+                                summary = candidate
+                    if summary:
+                        preview["summary"] = summary
                 if field == "error" and isinstance(value, dict):
                     preview.update({key: value[key] for key in ("code", "category", "retryable") if key in value})
                     preview["message"] = str(value.get("message") or "")[:400]
+                low, high = 0, min(len(encoded), allowance)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    preview["preview"] = encoded[:middle]
+                    if len(json.dumps(preview, ensure_ascii=False, sort_keys=True)) <= max(allowance, 512):
+                        low = middle
+                    else:
+                        high = middle - 1
+                preview["preview"] = encoded[:low]
                 fact[field] = preview
             result[message_index]["content"][block_index]["text"] = json.dumps(fact, ensure_ascii=False, sort_keys=True)
+        media_left = 2
+        for index, row in enumerate(result):
+            if not isinstance(row.get("content"), list):
+                continue
+            blocks = []
+            for block in row["content"]:
+                if block.get("_workspace_media"):
+                    if index != latest_message or media_left <= 0:
+                        continue
+                    media_left -= 1
+                blocks.append(block)
+            row["content"] = blocks
         return result
 
     def compile_user_content(

@@ -34,6 +34,8 @@ class KernelSchedulerService:
             self._cron.configure_tool_runtime(
                 executor=capability_service._execute_managed_tool,
                 confirmation_resolver=capability_service.requires_confirmation,
+                observation_validator=capability_service.validate_observation_source,
+                event_emitter=capability_service.event_emitter,
             )
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -46,6 +48,10 @@ class KernelSchedulerService:
         self._last_error: str = ""
         self._total_ticks = 0
         self._total_jobs_run = 0
+
+    @property
+    def schedules(self) -> TemporalSchedulerService:
+        return self._cron
 
     async def start(self, *, paused: bool = False) -> bool:
         if not self.enabled:

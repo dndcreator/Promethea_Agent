@@ -9,6 +9,15 @@ UI entrypoint:
 ## What you can do in the UI today
 
 - Sign up / log in with user identity isolation.
+- Open the account picker from the bottom-left avatar or sidebar account name;
+  Settings also exposes Switch account. The list contains identities successfully
+  used on this browser, not a public server user directory. Selecting one fills
+  the username; switching still requires authentication and preserves the active
+  account if sign-in fails or is cancelled. Only display ID/name metadata is
+  retained; non-remembered sign-ins keep that metadata in session storage.
+  Forgetting a list entry does not delete the server account. Manage current
+  account opens the existing Settings deletion flow, requiring the current
+  username; successful deletion also removes its local picker entry.
 - Open diagnostics before sign-in. Identity is independent of the selected memory backend; memory availability is not a condition for account existence. The login screen includes a diagnostics entry and can be dismissed without signing in.
 - Chat with streaming responses (when stream mode is enabled).
 - Send additional direction from the composer while an authenticated chat turn is running; Enter/send steers that execution, while the separate stop button cancels it. Receipts distinguish received/applied guidance; failed delivery retains input for idempotent retry. Preparation/finalization and approval waiting do not silently queue guidance for a different turn. Guests retain temporary basic chat without steering.
@@ -18,7 +27,8 @@ UI entrypoint:
 - Open individual Task runs in a run-scoped Workbench. Run inspection does not expose Task control commands; return to the whole-Task view to operate on its current state. Related conversation links use stored titles when available.
 - Chat usage is secondary toolbar information: request tokens, Runtime total tokens, and completed-request duration are separate readings; unavailable values remain unknown. Provider reasoning stays in its existing expandable process view.
 - Failed/interrupted turns retain the original request and a separate Runtime status, not a synthetic assistant answer. Empty historical sessions remain selected rather than showing the new-chat homepage. Provider output-limit errors and empty responses are distinguished; a retry is explicit.
-- Provider thoughts disclose one model step at a time with a bounded preview and scrollable full text. Workbench cards keep technical JSON behind a second disclosure while preserving resource actions. UI language is sent with chat requests; original provider text is not translated by an extra model call.
+- Chat process disclosure separates Runtime activities from reasoning. Opening the process shows localized activities; a separate reasoning fold reveals step titles, and selecting a step shows at most 600 Unicode characters with explicit previous/next controls. Closing a step resets its page. No collapsed heading previews provider text, and legacy `<thinking>` records use this same path. Code blocks and structured protocol bodies are excluded from the prose view; complete stored records remain unchanged.
+- Chat and Workbench share localized activity presentation. Missing translations use a localized state plus available resource identity, not an arbitrary English backend field. Workbench keeps technical JSON behind a second disclosure and retains resource actions. Reasoning tree reads begin only when its fold is open; periodic refresh stops on closing. New system reasoning calls receive the original request and UI language rather than infer language from English task wrappers. Existing provider prose remains original text; no extra translation/summarization model is called, and providers may ignore language instructions.
 - Upload, search, select, and attach user files. The file detail shows only the text preview/snippet returned by the backend, not a full-document editor. Search results open the exact file ID even when names are duplicated. Failed uploads retain the chosen file for retry.
 - Search across sessions and uploaded files from the global search panel.
 - Inspect workflow definitions, personal workflow runs, and recoverable runs. Pause/resume is exposed for existing runs; workflow authoring stays API/workflow-engine driven.
@@ -47,6 +57,13 @@ UI entrypoint:
 
 An icon-only rail selects feature pages. Projects and conversations occupy a separate collapsible sidebar. The central chat stays mounted while another feature is open. The right Workbench offers Work (outputs, previews, references, review) and Activity (folded execution records), and becomes an overlay on narrower screens. Canvas previews stay mounted when switching Workbench tabs. Chat and Workbench reuse one subscription for the conversation scope; an explicitly observed Task has its own scope. UI components do not infer Task completion or tool success.
 
+Material styling is owned by the existing CSS tokens: opaque reading surfaces,
+graphite navigation, silver panels, and translucent controls/overlays. Blur is
+bounded to overlays and controls rather than containers owning fixed dialogs;
+unsupported browsers keep solid backgrounds. Mobile blur is lighter, reduced
+motion disables transitions/animations, and contrast/forced-color modes retain
+visible control boundaries. Styling does not change navigation or Runtime state.
+
 Use this map when rebuilding the Web UI. Layout can change, but these function surfaces should remain reachable unless the product scope changes.
 
 | UI surface | Primary behavior | Backend interface |
@@ -68,7 +85,7 @@ Use this map when rebuilding the Web UI. Layout can change, but these function s
 | Canvas | Run generated applications, save app data, retain reusable copies, inspect runtime errors, and discard applications. | SDK over `/api/canvas/*`; restricted iframe MessageChannel |
 | Reasoning side panel | Show active reasoning tree, inspect tree details, stop or steer active reasoning. | `/api/reasoning/active`, `/api/reasoning/tree/{tree_id}`, `/api/reasoning/tree/{tree_id}/stop`, `/api/reasoning/tree/{tree_id}/steer` |
 | Agent Workbench | Follow the Task/Run projection in real time, read folded Runtime activity, and issue revision-aware pause, resume, or cancel commands. Internal events and reasoning data stay behind expandable diagnostics instead of being interpreted by React. | SDK over `GET /api/workbench/stream`, `/api/workbench/snapshot`, and `/api/tasks/{task_id}/*` |
-| Voice input | Experimental/provider-dependent only; not a supported preview UI feature. DeepSeek-only chat configuration does not provide STT/audio transcription. | `POST /api/voice/ptt` |
+| Voice interaction | Configure independent STT/TTS endpoints, list models, synthesize/play/download a sample, transcribe uploaded or recorded audio, and optionally speak completed replies. | SDK over `/api/voice/status`, `/api/voice/models`, `/api/voice/stt`, `/api/voice/tts` |
 
 ## Memory-related behavior in UI
 
@@ -84,7 +101,7 @@ Use this map when rebuilding the Web UI. Layout can change, but these function s
 - Text-like files (`txt`, `md`, `csv`, `json`, `docx`, `pdf`) are extracted to text and can be attached to the next chat turn.
 - Image files (`png`, `jpg`, `jpeg`, `webp`, `gif`) can be stored. If optional OCR dependencies are installed, extracted OCR text can be used as chat context.
 - If no text can be extracted, the UI marks the file as stored-only. During chat, the runtime can pass stored images as native image input when the active model supports vision; otherwise the prompt receives a clear unavailable-attachment note instead of inventing visual/audio details.
-- Voice remains a separate experimental push-to-talk route through `/api/voice/ptt`; it requires an audio transcription provider and is not covered by the DeepSeek-only setup path.
+- Microphone input is turn-based: record, transcribe through the configured STT provider, then send text through ordinary SSE Chat. It retains the same history, reasoning, tool approvals, cancellation and steering behavior as typed chat. The compatibility `/api/voice/ptt` API is not the UI path.
 - This keeps chat, reasoning, memory, and search compatible with attachments without pretending every backend model supports native vision or audio input.
 
 Use API health for exact runtime state:
@@ -98,7 +115,7 @@ curl "http://127.0.0.1:8000/api/health/memory"
 - Personal workspace archives contain user records: portable preferences, sessions and text-anchored follow-ups, memory and its user-visible write audit, uploaded file originals, avatar assets, workflow history, completed reasoning history, Moirai process experience, and retained static canvas apps with their app data. They exclude API keys, passwords, tokens, deployment endpoints, browser profiles, running processes, and raw service logs. Restored in-progress workflows are paused because their original process/tool state does not exist on the new device.
 
 - No full parity with all low-level API and internal debug endpoints by design.
-- Voice input is not a supported preview feature. The current route is experimental and provider-dependent.
+- Voice requires separately configured audio-capable endpoints; a chat-only model is insufficient. Browser recording needs microphone permission and localhost or HTTPS. No always-listening wake-word detector, realtime audio stream, or local model installer is provided. Provider availability and quality require testing against the selected endpoint; configuration status alone is not a health check.
 - Messaging platform settings support verified QQ/Telegram pairing and revocation;
   bot credentials and public HTTPS callbacks remain operator-owned deployment setup.
 - Some operational tasks (bulk export/migration scripts) are playbook/API driven.

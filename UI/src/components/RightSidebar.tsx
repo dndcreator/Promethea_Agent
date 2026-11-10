@@ -29,6 +29,7 @@ import {
   readApiResponse,
 } from '../services/api'
 import type { Task, WorkbenchActivity, WorkbenchReference, WorkbenchSnapshot as RuntimeWorkbenchSnapshot } from '../services/api'
+import { presentActivity } from '../utils/process-presentation'
 import { useWorkbench } from '../store/WorkbenchContext'
 import { useLanguage } from '../store/LanguageContext'
 import { openWorkbenchArtifact } from '../services/artifacts'
@@ -501,18 +502,17 @@ function normalizeActivities(activities: WorkbenchActivity[], lang: 'zh' | 'en',
   return activities.map((activity, index: number) => {
     const kind = String(activity?.kind || 'runtime').toLowerCase()
     const status = String(activity?.status || 'observed').toLowerCase()
-    const subject = compactText(localizedActivityText(activity?.subject_i18n, lang, activity?.subject), 100)
-    const summary = compactText(localizedActivityText(activity?.summary_i18n, lang, activity?.summary), 220)
+    const presentation = presentActivity(activity, lang)
     const timestampValue = activity?.updated_at || activity?.occurred_at
     const timestamp = timestampValue ? new Date(timestampValue) : new Date()
     const detail = activityDetail(activity?.detail, t)
     return {
       id: String(activity?.activity_id || activity?.event_id || activity?.seq || index),
-      title: activityTitle(kind, status, subject, t),
-      desc: summary,
+      title: compactText(presentation.title, 140),
+      desc: compactText(presentation.summary, 220),
       nodeStatus: status,
       kind,
-      kindLabel: `${activityKindLabel(kind, false, t)} · ${activityStatusLabel(status, t)}`,
+      kindLabel: `${presentation.kindLabel} · ${presentation.statusLabel}`,
       time: timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       sortTime: timestamp.getTime(),
       detail,
@@ -521,29 +521,6 @@ function normalizeActivities(activities: WorkbenchActivity[], lang: 'zh' | 'en',
       diagnostic: { event_type: activity.event_type, event_id: activity.event_id, trace_id: activity.trace_id, run_id: activity.run_id, conversation_turn_id: activity.conversation_turn_id, ...activity.detail },
     }
   })
-}
-
-function localizedActivityText(values: Record<string, string> | undefined, lang: 'zh' | 'en', fallback: unknown): string {
-  return String(values?.[lang] || fallback || '')
-}
-
-function activityTitle(
-  kind: string,
-  status: string,
-  subject: string,
-  t: (zh: string, en: string) => string,
-): string {
-  if (subject && ['tool', 'memory', 'reasoning', 'artifact', 'environment', 'workflow'].includes(kind)) {
-    return subject
-  }
-  return activityStateLabel(kind, status, t)
-}
-
-function activityStatusLabel(status: string, t: (zh: string, en: string) => string): string {
-  if (['completed', 'complete', 'finished', 'succeeded', 'success'].includes(status)) return t('完成', 'Completed')
-  if (['failed', 'error', 'interrupted'].includes(status)) return t('失败', 'Failed')
-  if (['waiting', 'waiting_user', 'waiting_human', 'paused'].includes(status)) return t('等待', 'Waiting')
-  return t('进行中', 'Running')
 }
 
 function activityDetail(detail: unknown, t: (zh: string, en: string) => string): Array<{ label: string; value: string }> {
@@ -583,24 +560,6 @@ function formatScalar(value: unknown): string {
   if (['string', 'number', 'boolean'].includes(typeof value)) return compactText(String(value), 100)
   if (Array.isArray(value)) return value.slice(0, 3).map(formatScalar).filter(Boolean).join(', ')
   return ''
-}
-
-function activityStateLabel(kind: string, status: string, t: (zh: string, en: string) => string): string {
-  const settled = ['completed', 'complete', 'finished', 'succeeded', 'success'].includes(status)
-  const failed = ['failed', 'error', 'interrupted'].includes(status)
-  const waiting = ['waiting', 'waiting_user', 'waiting_human', 'paused'].includes(status)
-  const labels: Record<string, [[string, string], [string, string], [string, string], [string, string]]> = {
-    task: [['正在处理任务', 'Working on task'], ['任务已完成', 'Task completed'], ['任务需要处理', 'Task needs attention'], ['任务正在等待', 'Task is waiting']],
-    workflow: [['正在推进工作流', 'Advancing workflow'], ['工作流步骤已完成', 'Workflow step completed'], ['工作流遇到问题', 'Workflow needs attention'], ['工作流正在等待', 'Workflow is waiting']],
-    tool: [['正在调用工具', 'Using a tool'], ['工具调用已完成', 'Tool call completed'], ['工具调用失败', 'Tool call failed'], ['工具调用正在等待', 'Tool call is waiting']],
-    memory: [['正在读取记忆', 'Reading memory'], ['记忆处理已完成', 'Memory operation completed'], ['记忆处理失败', 'Memory operation failed'], ['记忆处理正在等待', 'Memory operation is waiting']],
-    reasoning: [['正在分析', 'Reasoning'], ['分析已完成', 'Reasoning completed'], ['分析遇到问题', 'Reasoning needs attention'], ['分析正在等待', 'Reasoning is waiting']],
-    artifact: [['正在生成成果', 'Producing artifact'], ['成果已生成', 'Artifact produced'], ['成果生成失败', 'Artifact failed'], ['成果正在等待', 'Artifact is waiting']],
-    environment: [['正在准备环境', 'Preparing environment'], ['环境已就绪', 'Environment ready'], ['环境需要处理', 'Environment needs attention'], ['环境正在等待', 'Environment is waiting']],
-  }
-  const variants = labels[kind] || [['正在处理', 'Working'], ['已完成', 'Completed'], ['需要处理', 'Needs attention'], ['正在等待', 'Waiting']]
-  const label = failed ? variants[2] : waiting ? variants[3] : settled ? variants[1] : variants[0]
-  return t(label[0], label[1])
 }
 
 function activityKindLabel(kind: string | undefined, live: boolean, t: (zh: string, en: string) => string): string {

@@ -11,6 +11,7 @@ from agentkit.security.process_sandbox import SandboxedProcessRunner
 from gateway.capability_service import ToolInvocationContext
 from gateway.tools.schema import input_object, integer, text
 
+from .process_output import process_output
 from .workspace_tools import _resolve_identity, _safe_path_under_root
 
 
@@ -20,6 +21,7 @@ class CodeRunPythonTool:
         required=("code",),
     )
     tool_id = "code.run_python"
+    provides = ["software.code.execute"]
     name = "code.run_python"
     description = "Run a short Python script in the current workspace under sandbox policy."
     domain = "code"
@@ -56,16 +58,8 @@ class CodeRunPythonTool:
             )
         finally:
             script_path.unlink(missing_ok=True)
-        stdout = proc.stdout or ""
-        stderr = proc.stderr or ""
         return {
-            "ok": proc.returncode == 0,
+            **process_output(proc, max_chars=max_output_chars),
             "workspace_id": handle.workspace_id,
-            "returncode": proc.returncode,
-            "sandbox": proc.sandbox,
-            "stdout": stdout[:max_output_chars],
-            "stderr": stderr[:max_output_chars],
-            "truncated_stdout": len(stdout) > max_output_chars,
-            "truncated_stderr": len(stderr) > max_output_chars,
             "duration_ms": int((time.time() - started) * 1000),
         }

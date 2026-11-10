@@ -62,6 +62,7 @@ async def test_opt_in_working_cognition_continuity_and_silence(tmp_path):
         assert ambient.view("alice", "chat")["attention"] == ["Release readiness"]
         assert manager.get_messages("chat", user_id="alice") == []
         assert len(tasks.execution_tasks(run_type="ambient")) == 1
+        assert tasks.execution_tasks(run_type="ambient")[0]["objective"] == "Help with release"
         restored = AmbientStore(tmp_path / "ambient.json")
         assert SelfModelStateStore(conversation.self_model_service.state.path).get("alice").questions == ["Did tests finish?"]
         assert "questions" not in restored.get("alice", "chat").model_dump()

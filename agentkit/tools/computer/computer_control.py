@@ -12,9 +12,11 @@ from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
+from uuid import uuid4
 
 from loguru import logger
 
+from agentkit.mcp.tool_result import ToolExecutionResult
 from computer.base import ComputerCapability
 from agentkit.security.sandbox import get_sandbox_policy
 
@@ -66,7 +68,7 @@ class ComputerControlService:
                 return {"ok": False, "error": "capability service is not initialized"}
 
             payload = params or {}
-            logger.info(f"Executing computer action raw: {capability}.{action} params={payload}")
+            logger.info("Executing computer action: {}.{}", capability, action)
             result = await capability_service.execute_computer_action(capability, action, payload)
             return {
                 "ok": bool(result.success),
@@ -100,17 +102,64 @@ class ComputerControlService:
         capability: str,
         action: str,
         params: Dict[str, Any] | None = None,
-    ) -> str:
+        *,
+        include_image: bool = False,
+    ) -> str | ToolExecutionResult:
         """Execute a computer control action via the gateway."""
         raw = await self._execute_action_raw(capability, action, params)
         if not raw.get("ok"):
-            return f"ERROR: operation failed: {raw.get('error', 'unknown error')}"
-        output = "SUCCESS: operation completed\n"
-        if raw.get("result") is not None:
-            output += f"Result: {raw.get('result')}\n"
+            state = (raw.get("metadata") or {}).get("browser_state")
+            return f"ERROR: operation failed: {raw.get('error', 'unknown error')}" + (f"\nBrowser state: {state}" if state else "")
+        result = raw.get("result")
         screenshot = raw.get("screenshot")
+        if isinstance(result, dict) and result.get("screenshot"):
+            screenshot = result["screenshot"]
+            result = {k: v for k, v in result.items() if k != "screenshot"}
         if screenshot:
-            output += f"[Including screenshot data: {len(screenshot)} bytes]\n"
+            from computer.execution_context import current_workspace
+
+            scope = current_workspace()
+            if scope is None:
+                return "ERROR: screenshot export requires a trusted workspace"
+            target = scope.root / ".promethea" / "screenshots" / f"{uuid4().hex}.png"
+            decision = self._sandbox.check_path(str(target), intent="write", workspace_root=scope.root)
+            if not decision.allowed:
+                return f"ERROR: sandbox blocked screenshot export: {decision.reason}"
+            try:
+                from PIL import Image
+
+                visual = []
+                if len(screenshot) > 32 * 1024 * 1024:
+                    raise ValueError("screenshot exceeds the export limit")
+                image = base64.b64decode(screenshot, validate=True)
+                with Image.open(BytesIO(image)) as decoded:
+                    if decoded.format != "PNG":
+                        raise ValueError("expected a PNG screenshot")
+                    decoded.verify()
+                if include_image:
+                    from agentkit.mcp.visual_content import workspace_image_content
+
+                    with Image.open(BytesIO(image), formats=["PNG"]) as decoded:
+                        visual = workspace_image_content(decoded)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(image)
+            except (ValueError, OSError) as exc:
+                return f"ERROR: screenshot export failed: {exc}"
+            result = {**(result if isinstance(result, dict) else {}), "image_path": str(target),
+                      "image_delivery": "workspace_file", "size": len(image), "format": "png"}
+            if visual:
+                state = (raw.get("metadata") or {}).get("browser_state")
+                if state:
+                    result["browser_state"] = state
+                return ToolExecutionResult("computer_control.browser_action", True, value=result, content=visual)
+        output = "SUCCESS: operation completed\n"
+        if result is not None:
+            output += f"Result: {result}\n"
+        state = (raw.get("metadata") or {}).get("browser_state")
+        if state:
+            output += f"Browser state: {state}\n"
+        if (raw.get("metadata") or {}).get("profile_persistence") == "failed_after_action":
+            output += "Runtime: the action completed, but browser profile persistence failed; restart continuity is not guaranteed.\n"
         return output
 
     async def browser_action(
@@ -129,14 +178,21 @@ class ComputerControlService:
         download_dir: str = "",
         poll_interval_ms: int = 500,
         tab_id: str = "",
+        include_image: bool = False,
         **kwargs,
-    ) -> str:
+    ) -> str | ToolExecutionResult:
         """Browser operations with higher-level snapshot/act/download helpers."""
         normalized = (action or "").strip().lower()
         if normalized in {"goto", "navigate"} and url:
             url_decision = self._sandbox.check_url(url)
             if not url_decision.allowed:
-                return f"ERROR: sandbox blocked browser url: {url_decision.reason}"
+                hint = " Use action='preview' with a workspace-relative HTML path." if url.strip().lower().startswith("file:") else ""
+                return f"ERROR: sandbox blocked browser url: {url_decision.reason}.{hint}"
+        if normalized == "preview":
+            return await self.execute_action(ComputerCapability.BROWSER, "preview", {
+                "operation": kwargs.get("operation", "open"), "path": path, "selector": selector,
+                "text": text, "key": key, "timeout": timeout, "max_nodes": max_nodes, "query": query,
+            })
         if normalized == "snapshot":
             return await self._browser_snapshot(max_nodes=max_nodes, query=query)
         if normalized == "act":
@@ -209,62 +265,23 @@ class ComputerControlService:
         for k, v in (kwargs or {}).items():
             if v is not None and v != "":
                 params[k] = v
-        mapped_action = self._alias_browser_action(action)
+        mapped_action = self._alias_browser_action(normalized)
+        if include_image and mapped_action in {"screenshot", "record_screenshot"}:
+            return await self.execute_action(ComputerCapability.BROWSER, mapped_action, params, include_image=True)
         return await self.execute_action(ComputerCapability.BROWSER, mapped_action, params)
 
     async def _browser_snapshot(self, max_nodes: int = 120, query: str = "") -> str:
-        script = """
-        (payload) => {
-          const q = String((payload && payload.query) || '').trim().toLowerCase();
-          const maxN = Math.max(1, Number((payload && payload.max_nodes) || 120));
-          const cssPath = (el) => {
-            if (!el || el.nodeType !== 1) return '';
-            if (el.id) return `#${el.id}`;
-            const parts = [];
-            let cur = el;
-            while (cur && cur.nodeType === 1 && parts.length < 5) {
-              let p = cur.tagName.toLowerCase();
-              if (cur.className && typeof cur.className === 'string') {
-                const cls = cur.className.split(/\\s+/).filter(Boolean).slice(0,2).join('.');
-                if (cls) p += '.' + cls;
-              }
-              parts.unshift(p);
-              cur = cur.parentElement;
-            }
-            return parts.join(' > ');
-          };
-          const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[onclick],[tabindex]'));
-          const out = [];
-          for (const el of nodes) {
-            const txt = String(el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-            if (q && !txt.toLowerCase().includes(q)) continue;
-            const r = el.getBoundingClientRect();
-            if (r.width <= 0 || r.height <= 0) continue;
-            out.push({
-              tag: (el.tagName || '').toLowerCase(),
-              text: txt.slice(0, 220),
-              role: String(el.getAttribute('role') || ''),
-              href: String(el.getAttribute('href') || ''),
-              selector: cssPath(el),
-              x: Math.round(r.left + r.width/2),
-              y: Math.round(r.top + r.height/2),
-              width: Math.round(r.width),
-              height: Math.round(r.height),
-            });
-            if (out.length >= maxN) break;
-          }
-          return out;
-        }
-        """
         data = await self._execute_action_raw(
             ComputerCapability.BROWSER,
-            "evaluate",
-            {"script": script, "arg": {"query": query or "", "max_nodes": max(1, int(max_nodes))}},
+            "snapshot",
+            {"query": query or "", "max_nodes": max(1, int(max_nodes))},
         )
         if not data.get("ok"):
-            return f"ERROR: snapshot failed: {data.get('error')}"
+            state = (data.get("metadata") or {}).get("browser_state")
+            return f"ERROR: snapshot failed: {data.get('error')}" + (f"\nBrowser state: {state}" if state else "")
 
-        rows = data.get("result") or []
+        snapshot = data.get("result") or {}
+        rows = snapshot.get("nodes") or []
         self._browser_snapshot_refs.clear()
         out: List[Dict[str, Any]] = []
         for i, row in enumerate(rows, start=1):
@@ -276,7 +293,13 @@ class ComputerControlService:
             node["ref"] = ref_id
             out.append(node)
 
-        return f"SUCCESS: browser snapshot\nResult: {{'count': {len(out)}, 'nodes': {out}}}"
+        result = {"count": len(out), "nodes": out, "frames": snapshot.get("frames") or [],
+                  "frame_count": snapshot.get("frame_count", 0), "node_scope": "main_document",
+                  "credential_storage_supported": snapshot.get("credential_storage_supported", False),
+                  "protected_profile": snapshot.get("protected_profile", False),
+                  "profile_persistence": snapshot.get("profile_persistence", "ephemeral"),
+                  "browser_state": snapshot.get("browser_state")}
+        return f"SUCCESS: browser snapshot\nResult: {result}"
 
     async def _browser_act(
         self,
@@ -542,64 +565,18 @@ class ComputerControlService:
         needle: str,
         max_candidates: int = 8,
     ) -> Dict[str, Any]:
-        script = """
-            (payload) => {
-              const needle = (payload && payload.needle) ? String(payload.needle) : "";
-              const maxN = (payload && payload.maxN) ? Number(payload.maxN) : 8;
-              const q = needle.toLowerCase();
-              const nodes = Array.from(document.querySelectorAll('a,button,input,textarea,select,[role="button"],[onclick],[tabindex]'));
-              const out = [];
-              const cssPath = (el) => {
-                if (el.id) return `#${el.id}`;
-                const parts = [];
-                let cur = el;
-                while (cur && cur.nodeType === 1 && parts.length < 4) {
-                  let part = cur.tagName.toLowerCase();
-                  if (cur.className && typeof cur.className === 'string') {
-                    const c = cur.className.split(/\\s+/).filter(Boolean).slice(0,2).join('.');
-                    if (c) part += '.' + c;
-                  }
-                  parts.unshift(part);
-                  cur = cur.parentElement;
-                }
-                return parts.join(' > ');
-              };
-              for (const el of nodes) {
-                const txt = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-                if (!txt) continue;
-                const low = txt.toLowerCase();
-                if (!low.includes(q)) continue;
-                const r = el.getBoundingClientRect();
-                const exact = low === q;
-                const starts = low.startsWith(q);
-                let score = 0;
-                if (exact) score += 1.0;
-                else if (starts) score += 0.8;
-                else score += 0.6;
-                if (el.tagName.toLowerCase() === 'button' || el.getAttribute('role') === 'button') score += 0.2;
-                out.push({
-                  selector: cssPath(el),
-                  text: txt.slice(0, 180),
-                  tag: el.tagName.toLowerCase(),
-                  x: Math.round(r.left + r.width/2),
-                  y: Math.round(r.top + r.height/2),
-                  width: Math.round(r.width),
-                  height: Math.round(r.height),
-                  score,
-                });
-              }
-              out.sort((a,b)=>b.score-a.score);
-              return out.slice(0, Math.max(1, maxN || 8));
-            }
-            """
         found = await self._execute_action_raw(
             ComputerCapability.BROWSER,
-            "evaluate",
-            {"script": script, "arg": {"needle": needle, "maxN": max(1, int(max_candidates))}},
+            "snapshot",
+            {"query": needle, "max_nodes": 200},
         )
         if not found.get("ok"):
             return {"ok": False, "error": found.get("error", "browser evaluate failed"), "candidates": []}
-        return {"ok": True, "candidates": found.get("result") or []}
+        candidates = (found.get("result") or {}).get("nodes") or []
+        for row in candidates:
+            text = row.get("text", "").lower()
+            row["score"] = (1.0 if text == needle.lower() else 0.8 if text.startswith(needle.lower()) else 0.6) + (0.2 if row.get("tag") == "button" or row.get("role") == "button" else 0)
+        return {"ok": True, "candidates": sorted(candidates, key=lambda row: row["score"], reverse=True)[:max(1, int(max_candidates))]}
 
     async def _find_screen_text_candidates(
         self,

@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "cases": [
+    {"id": "artifact-3000", "kind": "action", "mode": "output", "required_output": 3000},
+    {"id": "artifact-6000", "kind": "action", "mode": "output", "required_output": 6000},
+    {"id": "output-above-ceiling", "kind": "action", "mode": "output", "required_output": 20000},
+    {"id": "repeated-invalid-action", "kind": "action", "mode": "invalid"},
+    {"id": "direct-answer", "kind": "action", "mode": "answer"},
+    {"id": "small-artifact", "kind": "action", "mode": "output", "required_output": 300},
+    {"id": "three-web-bodies", "kind": "projection", "count": 3, "body_chars": 24000},
+    {"id": "long-tool-history", "kind": "projection", "count": 12, "body_chars": 12000},
+    {"id": "mixed-small-and-large", "kind": "projection", "count": 6, "body_chars": 6000},
+    {"id": "large-error-evidence", "kind": "projection", "count": 4, "body_chars": 12000, "error": true}
+  ]
+}

@@ -1,7 +1,6 @@
 """Startup script for gateway-first service plus the Vite Web UI."""
 
 import os
-import json
 import shutil
 import socket
 import subprocess
@@ -26,6 +25,19 @@ GATEWAY_PORT = 8000
 UI_PORT = 5173
 GATEWAY_URL = f"http://{GATEWAY_HOST}:{GATEWAY_PORT}"
 UI_DEV_URL = f"http://{UI_HOST}:{UI_PORT}"
+
+
+class GatewayHTTPServer(uvicorn.Server):
+    def __init__(self, config):
+        super().__init__(config)
+        self.startup_complete = threading.Event()
+
+    async def startup(self, sockets=None):
+        try:
+            await super().startup(sockets=sockets)
+        finally:
+            # Notify after lifespan AND listener startup, including failed startup.
+            self.startup_complete.set()
 
 
 def _port_is_available(host: str, port: int) -> bool:
@@ -154,6 +166,7 @@ def _wait_for_http(
 ) -> bool:
     deadline = time.monotonic() + timeout_s
     last_error = None
+    delay = 0.25
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             logger.error(f"Process exited before {url} became ready (exit={process.returncode})")
@@ -164,14 +177,14 @@ def _wait_for_http(
                     return True
         except Exception as exc:
             last_error = exc
-            time.sleep(0.2)
+            time.sleep(min(delay, max(0, deadline - time.monotonic())))
+            delay = min(1.0, delay * 2)
     logger.warning(f"Timed out waiting for {url}: {last_error}")
     return False
 
 
-def _open_browser_when_ready(ui_process: subprocess.Popen | None, logger) -> None:
-    health_url = f"{GATEWAY_URL}/health"
-    if not _wait_for_gateway(health_url, timeout_s=180, logger=logger):
+def _open_browser_when_ready(ui_process: subprocess.Popen | None, server: GatewayHTTPServer, logger) -> None:
+    if not _wait_for_gateway(server, timeout_s=180, logger=logger):
         logger.error("Gateway did not become ready; browser was not opened")
         return
 
@@ -190,25 +203,18 @@ def _open_browser_when_ready(ui_process: subprocess.Popen | None, logger) -> Non
         logger.warning(f"Failed to open browser automatically: {exc}")
 
 
-def _wait_for_gateway(url: str, timeout_s: float, logger) -> bool:
-    deadline = time.monotonic() + timeout_s
-    last_error = None
-    while time.monotonic() < deadline:
-        try:
-            with urllib.request.urlopen(url, timeout=0.5) as response:
-                payload = json.load(response)
-            if (
-                isinstance(payload, dict)
-                and payload.get("gateway_ready") is True
-                and payload.get("agent_ready") is True
-                and payload.get("startup_status") in {"healthy", "degraded"}
-            ):
-                return True
-            last_error = RuntimeError("health response did not identify a ready Promethea Gateway")
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.2)
-    logger.warning(f"Timed out waiting for {url}: {last_error}")
+def _wait_for_gateway(server: GatewayHTTPServer, timeout_s: float, logger) -> bool:
+    from gateway.http import state
+    from gateway.app import get_health_status
+
+    if not server.startup_complete.wait(timeout_s):
+        logger.error("Gateway startup did not finish within {} seconds", timeout_s)
+        return False
+    payload = get_health_status()
+    if server.started and payload["gateway_ready"] and payload["agent_ready"] and payload["startup_status"] in {"healthy", "degraded"}:
+        return True
+    failed = [row["name"] for row in state.startup_report.get("components", []) if row.get("status") == "failed"]
+    logger.error("Gateway startup failed (components={}); see startup error above", ", ".join(failed) or "unknown")
     return False
 
 
@@ -271,21 +277,22 @@ if __name__ == "__main__":
         _stop_process(ui_process, logger)
         sys.exit(1)
 
+    server = GatewayHTTPServer(uvicorn.Config(
+        "gateway.app:app", host="0.0.0.0", port=GATEWAY_PORT,
+        reload=False, log_level="info",
+    ))
     readiness_thread = threading.Thread(
         target=_open_browser_when_ready,
-        args=(ui_process, logger),
+        args=(ui_process, server, logger),
         name="promethea-readiness",
         daemon=True,
     )
     readiness_thread.start()
 
     try:
-        uvicorn.run(
-            "gateway.app:app",
-            host="0.0.0.0",
-            port=GATEWAY_PORT,
-            reload=False,
-            log_level="info",
-        )
+        server.run()
+        if not server.started:
+            sys.exit(1)
     finally:
+        readiness_thread.join(timeout=1)
         _stop_process(ui_process, logger)

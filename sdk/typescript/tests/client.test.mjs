@@ -67,6 +67,23 @@ test('runs preserve explicit task scope without changing the HTTP endpoint', asy
   assert.deepEqual(bodies.map(body => [body.task_id, body.stream]), [['task-owned', false], ['task-owned', true]])
 })
 
+test('human input uses generated request fields without granting an approval', async () => {
+  const bodies = []
+  const pending = { request_id: 'input-current', content: 'Please verify the page', input_kind: 'acknowledgement' }
+  const client = new PrometheaClient({ baseUrl: 'http://localhost:8000', fetch: async (_url, init) => {
+    bodies.push(JSON.parse(init.body))
+    return jsonResponse({ response: pending.content, status: 'needs_input', input_request: pending })
+  } })
+  const result = await client.runs.run({ message: 'start' })
+  assert.deepEqual(result.input_request, pending)
+  await client.runs.run({ message: 'Done', session_id: 'owned', reply_to_input: result.input_request.request_id })
+  assert.equal(bodies[1].reply_to_input, 'input-current')
+  assert.equal(bodies[1].message, 'Done')
+  assert.equal('approved' in bodies[1], false)
+  await client.tasks.resume('task', { input_reply: { request_id: 'input-current', content: 'More details' } })
+  assert.deepEqual(bodies[2], { input_reply: { request_id: 'input-current', content: 'More details' } })
+})
+
 test('files.upload returns an attachment-ready generated UserFile', async () => {
   const calls = []
   const client = new PrometheaClient({
@@ -422,6 +439,10 @@ test('task controls serialize revision and return the public task', async () => 
   assert.equal(task.status, 'paused')
   assert.equal(calls[0].url, 'http://localhost:8000/api/tasks/task%2Fa/pause')
   assert.deepEqual(JSON.parse(calls[0].init.body), { expected_revision: 3 })
+  const approval = { run_id: 'run-1', tool_call_id: 'call-1', action: 'reject' }
+  await client.tasks.confirm('task/a', approval)
+  assert.equal(calls[1].url, 'http://localhost:8000/api/tasks/task%2Fa/confirm')
+  assert.deepEqual(JSON.parse(calls[1].init.body), approval)
 })
 
 

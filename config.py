@@ -3,7 +3,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -26,6 +26,7 @@ class SystemConfig(BaseSettings):
     timezone: str = Field(default="auto")
     session_ttl_hours: int = Field(default=0, ge=0)
     browser_channel: str = ""
+    browser_headless: bool = False
     browser_auto_install: bool = True
     browser_install_timeout_s: float = Field(default=120, ge=5, le=600)
     browser_install_retry_delay_s: float = Field(default=60, ge=0, le=3600)
@@ -45,11 +46,13 @@ class APIConfig(BaseSettings):
     base_url: str = Field(default="")
     model: str = Field(default="")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=2000, ge=1, le=8192)
+    max_tokens: int = Field(default=2000, ge=1)
+    output_token_limit: int = Field(default=8192, ge=1)
     max_history_rounds: int = Field(default=10, ge=1, le=100)
     timeout: Optional[int] = Field(default=None, ge=1, le=300)
     retry_count: Optional[int] = Field(default=None, ge=0, le=10)
     failover_models: list[str] = Field(default_factory=list)
+    tool_protocol: Literal["prompt_json", "native"] = "prompt_json"
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, v: str) -> str:
@@ -508,6 +511,7 @@ class GoalGapConfig(BaseSettings):
     max_updates: int = Field(default=6, ge=1, le=8)
     window: int = Field(default=4, ge=2, le=16)
     context_chars: int = Field(default=2400, ge=1200, le=8000)
+    max_recovery_attempts: int = Field(default=2, ge=1, le=8)
 
     @model_validator(mode="after")
     def capacity_fits_context(self):
@@ -518,13 +522,19 @@ class GoalGapConfig(BaseSettings):
 
 class ActionConfig(BaseSettings):
     max_steps: int = Field(default=5, ge=1, le=50)
+    progress_grace_steps: int = Field(default=2, ge=0, le=5)
     max_parallel_tool_calls: int = Field(default=4, ge=1, le=32)
-    observation_chars: int = Field(default=16000, ge=1000, le=100000)
-    observation_history_chars: int = Field(default=96000, ge=4000, le=1000000)
+    capability_context_chars: int = Field(default=8000, ge=1000, le=64000)
+    observation_chars: int = Field(default=8000, ge=1000, le=100000)
+    observation_history_chars: int = Field(default=32000, ge=4000, le=1000000)
+    context_action_chars: int = Field(default=48000, ge=4000, le=1000000)
+    context_action_batches: int = Field(default=12, ge=2, le=100)
+    max_model_recoveries: int = Field(default=2, ge=0, le=5)
     gaps: GoalGapConfig = Field(default_factory=GoalGapConfig)
 
 
 class AmbientConfig(BaseSettings):
+    event_batch_size: int = Field(default=12, ge=1, le=32)
     enabled: bool = True
     interval_s: float = Field(default=3600, ge=10, le=86400)
     cooldown_s: float = Field(default=30, ge=1, le=3600)

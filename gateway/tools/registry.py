@@ -6,6 +6,17 @@ from .spec import SideEffectLevel, ToolSource, ToolSpec
 from .presentation import validate_presentation_declaration
 
 
+class ToolNotFoundError(LookupError):
+    code = "TOOL_NOT_FOUND"
+    category = "capability"
+    retryable = False
+    advice = "No call executed. Inspect current Runtime capabilities and propose a registered tool or a declared protocol operation."
+
+    def __init__(self, tool_name: str):
+        self.details = {"tool_name": tool_name}
+        super().__init__(f"Tool is not registered: {tool_name}")
+
+
 class ToolRegistry:
     """Unified registry for local and MCP tool specs."""
 
@@ -14,7 +25,7 @@ class ToolRegistry:
 
     def register_spec(self, spec: ToolSpec) -> None:
         existing = self._specs.get(spec.full_name)
-        if existing is not None and not existing.metadata.get("inferred") and existing.source != spec.source:
+        if existing is not None and existing.source != spec.source:
             raise ValueError(f"tool id belongs to another execution source: {spec.full_name}")
         self._specs[spec.full_name] = spec
 
@@ -37,6 +48,7 @@ class ToolRegistry:
             description=description,
             input_schema=dict(getattr(tool, "input_schema", {}) or {}),
             output_schema=dict(getattr(tool, "output_schema", {}) or {}),
+            provides=getattr(tool, "provides", []),
             side_effect_level=getattr(tool, "side_effect_level", None)
             or SideEffectLevel.PRIVILEGED_HOST_ACTION,
             timeout_ms=int(getattr(tool, "timeout_ms", 30000) or 30000),
@@ -49,6 +61,7 @@ class ToolRegistry:
             metadata={
                 "tool_id": tool_id,
                 "declared_side_effect": bool(getattr(tool, "side_effect_level", None)),
+                "observation_source": getattr(tool, "observation_source", False) is True,
                 "side_effect_selector": dict(getattr(tool, "side_effect_selector", {}) or {}),
                 "requires_capability": str(getattr(tool, "requires_capability", "") or ""),
                 "requires_config": getattr(tool, "requires_config", None),
@@ -99,10 +112,12 @@ class ToolRegistry:
                     source=ToolSource.MCP,
                     capability_type="mcp",
                     input_schema=action.get("input_schema") or {},
+                    provides=action.get("provides", []),
                     concurrency_safe=action.get("concurrency_safe") is True,
                     presentation=validate_presentation_declaration(action.get("presentation")),
                     metadata={
                         "declared_side_effect": bool(action.get("side_effect_level")),
+                        "observation_source": action.get("observation_source") is True,
                         "side_effect_selector": action.get("side_effect_selector") or {},
                         "requires_capability": str(action.get("requires_capability") or ""),
                         "requires_config": action.get("requires_config"),
@@ -186,47 +201,13 @@ class ToolRegistry:
         return raw_tool_name, params
 
     def resolve(self, *, tool_name: str, params: Dict[str, Any]) -> ToolSpec:
-        # Prefer exact full name.
-        if tool_name in self._specs:
-            return self._specs[tool_name]
-
-        agent_type = str(params.get("agentType") or "").lower()
-        if agent_type == "agent":
-            agent_name = str(params.get("agent_name") or tool_name or "agent")
-            full_name = f"agent.{agent_name}"
-            existing = self._specs.get(full_name)
-            if existing:
-                return existing
-            spec = ToolSpec(
-                tool_name=agent_name,
-                service_name="agent",
-                description="Agent handoff tool",
-                source=ToolSource.AGENT,
-                capability_type="agent",
-                side_effect_level=SideEffectLevel.EXTERNAL_WRITE,
-            )
-            self.register_spec(spec)
-            return spec
-
-        service_name = str(params.get("service_name") or tool_name)
-        actual_tool_name = str(params.get("tool_name") or params.get("command") or tool_name)
-        full_name = f"{service_name}.{actual_tool_name}"
-        existing = self._specs.get(full_name)
-        if existing:
-            return existing
-
-        # Undeclared tools fail closed at the policy boundary. Risk must come
-        # from a manifest or an explicit local ToolSpec, never name heuristics.
-        spec = ToolSpec(
-            tool_name=actual_tool_name,
-            service_name=service_name,
-            description="",
-            source=ToolSource.MCP,
-            capability_type="mcp",
-            side_effect_level=SideEffectLevel.PRIVILEGED_HOST_ACTION,
-            metadata={"inferred": True, "risk_metadata_missing": True},
-        )
-        self.register_spec(spec)
+        """Lookup never declares a capability or reserves a tool identity."""
+        canonical, _ = self.normalize_call(tool_name=tool_name, params=params)
+        spec = self._specs.get(canonical)
+        if spec is None and str(params.get("agentType") or "").lower() == "agent":
+            spec = self._specs.get(f"agent.{params.get('agent_name') or tool_name}")
+        if spec is None:
+            raise ToolNotFoundError(tool_name)
         return spec
 
     def resolve_for_call(self, *, tool_name: str, params: Dict[str, Any]) -> ToolSpec:

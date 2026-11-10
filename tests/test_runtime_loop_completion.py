@@ -51,7 +51,7 @@ async def test_model_sees_new_registry_revision_and_schema_after_tool_publicatio
         projections = [message["content"] for message in messages if message.get("role") == "system"
                        and str(message.get("content")).startswith(CAPABILITIES_HEADER)]
         assert len(projections) == 1
-        assert '"name":"generated.new"' in projections[0]
+        assert '"generated.new"' in projections[0]
         return {"action": "tool_call", "tool_name": "generated.new", "args": {}}
 
     core = Core([
@@ -83,7 +83,7 @@ async def test_model_sees_new_registry_revision_and_schema_after_tool_publicatio
 async def test_capability_diagnostics_preserve_unavailable_tools_without_offering_them_as_callable():
     service = capabilities()
     service.capability_provider = lambda: {"browser": {"ready": False, "reason": "dependency_missing"}}
-    register(service, "browser.open", requires_capability="computer.browser")
+    register(service, "browser.open", requires_capability="computer.browser", provides=["computer.browser"])
     inspection = service.inspect_capabilities(["browser.open"])
     assert inspection["items"][0]["callable_now"] is False
     assert inspection["items"][0]["callable_reason"] == "dependency_missing"
@@ -91,6 +91,51 @@ async def test_capability_diagnostics_preserve_unavailable_tools_without_offerin
     assert resolved["candidates"] == []
     assert resolved["unavailable_candidates"][0]["callable_reason"] == "computer.browser:dependency_missing"
     assert service.inspect_capabilities(["unknown.tool"])["items"][0]["callable_now"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_fetches_definition_then_executes_through_the_same_runtime():
+    from tests.support.runtime import observation_fact
+
+    calls = []
+    service = capabilities()
+
+    class Echo:
+        tool_id = name = "fixture.echo"
+        description = "ON-DEMAND-DEFINITION"
+        side_effect_level = "read_only"
+        input_schema = {"type": "object", "properties": {"value": {"type": "string"}}, "required": ["value"]}
+
+        async def invoke(self, args, ctx=None):
+            calls.append(args)
+            return {"value": args["value"]}
+
+    service.register_tool(Echo())
+
+    def discover(messages):
+        directory = next(row["content"] for row in messages if str(row.get("content", "")).startswith(CAPABILITIES_HEADER))
+        assert "fixture.echo" in directory
+        assert "ON-DEMAND-DEFINITION" not in directory and "input_schema" not in directory
+        return {"action": "capability_inspect", "capability_names": ["fixture.echo"]}
+
+    def invoke(messages):
+        spec = observation_fact(messages)["result"]["items"][0]
+        assert spec["input_schema"]["required"] == ["value"]
+        assert spec["description"] == "ON-DEMAND-DEFINITION"
+        assert spec["side_effect_level"] == "read_only" and not spec["requires_confirmation"]
+        return {"action": "tool_call", "tool_name": spec["name"], "args": {"value": "ORCHID-29"}}
+
+    def finish(messages):
+        assert observation_fact(messages)["result"] == {"value": "ORCHID-29"}
+        return {"action": "answer", "content": "ORCHID-29"}
+
+    core = Core([discover, invoke, finish])
+    conversation = ConversationService(conversation_core=core, capability_service=service)
+    context = SimpleNamespace(user_id="alice", session_id="s", prompt_blocks={})
+    result = await conversation.run_chat_loop([{"role": "user", "content": "Echo the fixture text"}],
+        user_id="alice", session_id="s", run_context=context,
+        tool_executor=lambda name, args: service.call_tool(name, args, run_context=context), max_recursion=4)
+    assert result["status"] == "success" and calls == [{"value": "ORCHID-29"}]
 
 
 def test_tool_context_refresh_replaces_only_its_owned_system_message():
@@ -101,8 +146,9 @@ def test_tool_context_refresh_replaces_only_its_owned_system_message():
     ]
     updated = PromptAssembler.refresh_tool_message(original, tools=[], snapshot={}, run_context=None)
     updated = PromptAssembler.refresh_tool_message(updated, tools=[], snapshot={}, run_context=None)
-    assert len(updated) == 3
-    assert updated[0] == original[0] and updated[-1] == original[-1]
+    assert len(updated) == 4
+    assert updated[0] == original[0] and original[-1] in updated
+    assert sum(row.get("name") == "promethea_capabilities" for row in updated) == 1
     assert original[1]["content"].endswith("old")
 
 
@@ -116,7 +162,8 @@ def test_observation_projection_preserves_ids_status_and_original_data():
     assert fact["observation_id"] == observation.observation_id and fact["status"] == "completed"
     assert fact["result"]["truncated"] is True
     assert fact["result"]["read_more"]["tool_name"] == "runtime.read_observation"
-    assert len(fact["result"]["preview"]) == 1000
+    assert 0 < len(fact["result"]["preview"]) < 1000
+    assert len(json.dumps(fact["result"], ensure_ascii=False, sort_keys=True)) <= 1000
     assert messages[-1]["content"] == original and "truncated" not in observation.structured_result
 
 
@@ -154,7 +201,8 @@ async def test_large_result_can_be_read_back_after_restart_but_not_by_another_ow
     source = "BEGIN" + "x" * 50000 + "END"
     out = await conversation.run_chat_loop([{"role": "user", "content": "fetch"}], user_id="u", session_id="s",
         tool_executor=lambda *_: {"body": source, "api_key": "secret"})
-    fact = json.loads(core.requests[1][-1]["content"][0]["text"])
+    from tests.support.runtime import observation_fact
+    fact = observation_fact(core.requests[1])
     assert fact["result"]["truncated"] is True
     assert out["observations"][0]["structured_result"]["body"] == source
     tool = RuntimeReadObservationTool(gateway_server=SimpleNamespace(event_emitter=EventEmitter(RuntimeEventLog(storage_path=log_path))))

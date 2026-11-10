@@ -9,6 +9,7 @@ from gateway.action import ActionService
 from gateway.conversation_service import ConversationService
 from gateway.goal_gaps import GoalGapState, gap_projection
 from gateway.protocol import EventType
+from tests.support.runtime import observation_fact, goal_context
 
 
 class Core:
@@ -25,7 +26,7 @@ class Core:
 
 
 def latest_fact(messages):
-    return json.loads(messages[-1]["content"][0]["text"])
+    return observation_fact(messages)
 
 
 @pytest.mark.asyncio
@@ -44,7 +45,7 @@ async def test_capability_failures_return_to_model_without_ending_turn(operation
         fact = latest_fact(messages)
         assert fact["status"] == "failed"
         assert fact["scope"]["session_id"] == "s"
-        assert "recent_obstacles" in messages[0]["content"]
+        assert "recent_obstacles" in goal_context(messages)
         return {"action": "answer", "content": "The required capability is unavailable; I have not performed the operation.",
                 "evidence_refs": [fact["observation_id"]]}
 
@@ -67,13 +68,24 @@ async def test_failed_tool_can_be_repaired_verified_and_used_in_same_loop():
         fact = latest_fact(messages)
         assert fact["error"]["code"] == "DEPENDENCY_MISSING"
         return {"action": "tool_call", "tool_name": "environment.prepare", "args": {},
-                "gap_update": {"revision": 0, "create": [{"id": "ready", "kind": "achievement", "requirement": "Environment is ready",
+                "gap_update": {"revision": goal_context(messages)["revision"], "create": [{"id": "ready", "kind": "achievement", "requirement": "Environment is ready",
                     "check": {"tool_name": "environment.check", "pointer": "/ready", "expected": True}}],
-                    "updates": [{"id": "ready", "state": "blocked", "evidence_refs": [fact["observation_id"]]}]}}
+                    "updates": [{"id": "ready", "state": "blocked", "evidence_refs": [fact["observation_id"]]}],
+                    "recovery": {"strategy": "investigate", "reason": "Prepare the missing dependency before rechecking it",
+                                 "evidence_refs": [fact["observation_id"]]}}}
+
+    def retry_after_repair(messages):
+        view = goal_context(messages)
+        facts = [json.loads(block["text"]) for row in messages if isinstance(row.get("content"), list)
+                 for block in row["content"] if block.get("type") == "text"]
+        failure = next(row for row in facts if (row.get("error") or {}).get("code") == "DEPENDENCY_MISSING")
+        return {"action": "tool_call", "tool_name": "browser.open", "args": {}, "gap_update": {
+            "revision": view["revision"], "recovery": {"strategy": "retry", "reason": "The preparation tool now reports the dependency is ready",
+                "evidence_refs": [failure["observation_id"]], "repair_refs": [latest_fact(messages)["observation_id"]]}}}
 
     def finish(messages):
         fact = latest_fact(messages)
-        view = json.loads(messages[0]["content"].split("\n", 1)[1])
+        view = goal_context(messages)
         return {"action": "answer", "content": "The environment is ready and the requested operation succeeded.",
                 "gap_update": {"revision": view["revision"], "updates": [
                     {"id": "ready", "state": "resolved", "evidence_refs": [fact["observation_id"]]}]}}
@@ -81,7 +93,7 @@ async def test_failed_tool_can_be_repaired_verified_and_used_in_same_loop():
     # The model, not Runtime, chooses the repair and verification tools.
     core = Core([
         {"action": "tool_call", "tool_name": "browser.open", "args": {}}, choose_repair,
-        {"action": "tool_call", "tool_name": "browser.open", "args": {}},
+        retry_after_repair,
         {"action": "tool_call", "tool_name": "environment.check", "args": {}}, finish,
     ])
 
@@ -129,8 +141,10 @@ async def test_multiple_invalid_actions_remain_observations_until_valid_answer(b
         goal="act", messages=[], tool_executor=lambda *args: executed.append(args), budget=3,
     )
     assert out["status"] == "success" and executed == []
-    assert len(out["observations"]) == 2
-    assert all(item["error"]["code"] == "INVALID_MODEL_ACTION" for item in out["observations"])
+    assert len(out["observations"]) == 3
+    assert all(item["error"]["code"] == "INVALID_MODEL_ACTION" for item in out["observations"][:2])
+    assert out["observations"][-1]["error"]["code"] == "MODEL_RECOVERY_EXHAUSTED"
+    assert out["execution_outcome"]["stop_reason"] == "recovery_exhausted"
     assert all(message["role"] != "assistant" for message in core.calls[-1] if message.get("role") != "system")
 
 

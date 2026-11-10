@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
-import { X } from 'lucide-react'
+import { ArrowRight, Check, LogOut, Settings, X } from 'lucide-react'
 import { authFetch } from '../services/api'
 import { useAuth } from '../store/AuthContext'
 import { useLanguage } from '../store/LanguageContext'
@@ -22,8 +22,8 @@ function parseErrorDetail(payload: unknown): { code: string; message: string } {
   return { code: '', message: '' }
 }
 
-export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: () => void; onClose?: () => void }) {
-  const { login } = useAuth()
+export default function AuthModal({ onClose, onEnterSetup, onManageAccount }: { onEnterSetup?: () => void; onClose?: () => void; onManageAccount?: () => void }) {
+  const { login, logout, user, accounts, forgetAccount } = useAuth()
   const { t } = useLanguage()
   const [isRegister, setIsRegister] = useState(false)
   const [username, setUsername] = useState('')
@@ -39,6 +39,7 @@ export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: ()
     return () => { request.current?.abort() }
   }, [])
   const close = () => { request.current?.abort(); onClose?.() }
+  const title = isRegister ? t('注册', 'Sign Up') : user ? t('切换账户', 'Switch account') : t('登录', 'Sign In')
 
   function getLocalizedFailure(resStatus: number, code: string, message: string): string {
     if (code === 'username_exists_or_system_error') {
@@ -69,6 +70,7 @@ export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: ()
         : { username, password, remember_me: remember }
 
       const res = await authFetch(endpoint, {
+        suppressAuthExpired: true,
         signal: controller.signal,
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -110,11 +112,11 @@ export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: ()
   }
 
   return (
-    <FeatureSurface onClose={close} label={isRegister ? t('注册', 'Sign Up') : t('登录', 'Sign In')} size="compact">
+    <FeatureSurface onClose={close} label={title} size="compact">
       <div className="auth-form overflow-y-auto">
         <div className="flex items-center justify-between border-b border-black/5 px-6 py-4">
           <h2 className="text-xl font-bold text-text-strong">
-            {isRegister ? t('注册', 'Sign Up') : t('登录', 'Sign In')}
+            {title}
           </h2>
           {onClose && (
             <button type="button" onClick={close} title={t('关闭', 'Close')} aria-label={t('关闭登录', 'Close sign in')} className="icon-button">
@@ -122,6 +124,20 @@ export default function AuthModal({ onClose, onEnterSetup }: { onEnterSetup?: ()
             </button>
           )}
         </div>
+        {!isRegister && <div className="px-6 pt-4">
+          {accounts.length > 0 && <div aria-label={t('此浏览器的账户', 'Accounts on this browser')} className="divide-y divide-black/5">
+            {accounts.map((account) => <div key={account.user_id} className="flex min-w-0 items-center gap-2 py-2">
+              <button type="button" disabled={loading || account.user_id === user?.user_id} className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm disabled:text-text-muted" onClick={() => { setUsername(account.username); setPassword(''); setNotice(''); document.getElementById('auth-password')?.focus() }} aria-label={`${t('登录', 'Sign in')} ${account.username}`}>
+                <span className="min-w-0 flex-1 break-all">{account.username}</span>{account.user_id === user?.user_id ? <Check size={15} /> : <ArrowRight size={15} />}
+              </button>
+              {account.user_id !== user?.user_id && <button type="button" disabled={loading} className="icon-button shrink-0" title={t('从此浏览器移除', 'Forget on this browser')} aria-label={`${t('从此浏览器移除', 'Forget on this browser')} ${account.username}`} onClick={() => forgetAccount(account.user_id)}><X size={14} /></button>}
+            </div>)}
+          </div>}
+          {user && <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/5 py-3">
+            <button type="button" disabled={loading} className="text-button inline-flex items-center gap-2" onClick={onManageAccount}><Settings size={14} />{t('管理当前账户', 'Manage current account')}</button>
+            <button type="button" disabled={loading} className="text-button inline-flex items-center gap-2" onClick={() => { void logout(); onClose?.() }}><LogOut size={14} />{t('退出登录', 'Sign out')}</button>
+          </div>}
+        </div>}
         <form onSubmit={handleSubmit} className="p-6 flex flex-col gap-4">
           {notice && (
             <div role={noticeKind === 'success' ? 'status' : 'alert'} className={`text-xs p-3 rounded-lg ${noticeKind === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>

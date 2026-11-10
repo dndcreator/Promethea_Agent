@@ -209,13 +209,17 @@ async def test_gateway_uses_bound_workspace_instead_of_project(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_browser_initialization_uses_scoped_state_and_chromium_sandbox(monkeypatch, tmp_path):
+@pytest.mark.parametrize("headless", [False, True])
+async def test_browser_initialization_uses_scoped_state_and_chromium_sandbox(monkeypatch, tmp_path, headless):
     from computer.browser import BrowserController
+    from config import config
 
+    monkeypatch.setattr(config.system, "browser_headless", headless)
     executable = tmp_path / "browser.exe"
     executable.touch()
-    browser = SimpleNamespace(new_context=AsyncMock(), close=AsyncMock())
-    context = SimpleNamespace(new_page=AsyncMock(return_value=SimpleNamespace(on=Mock())),
+    browser = SimpleNamespace(new_context=AsyncMock(), close=AsyncMock(), is_connected=Mock(return_value=True))
+    page = SimpleNamespace(on=Mock(), bring_to_front=AsyncMock(), is_closed=Mock(return_value=False))
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page),
                               storage_state=AsyncMock(), close=AsyncMock(), on=Mock())
     browser.new_context.return_value = context
     chromium = SimpleNamespace(executable_path=str(executable), launch=AsyncMock(return_value=browser))
@@ -224,12 +228,32 @@ async def test_browser_initialization_uses_scoped_state_and_chromium_sandbox(mon
     controller = BrowserController(workspace_root=str(tmp_path))
     assert await controller.initialize()
     assert chromium.launch.call_args.kwargs["chromium_sandbox"] is True
+    assert chromium.launch.call_args.kwargs["headless"] is headless
+    assert page.bring_to_front.await_count == (0 if headless else 1)
     controller.page.screenshot = AsyncMock(return_value=b"png")
     blocked = await controller.execute("screenshot", {"path": str(tmp_path.parent / "outside.png")})
     assert not blocked.success
     controller.page.screenshot.assert_not_awaited()
     await controller.cleanup()
-    context.storage_state.assert_awaited_once_with(path=str(tmp_path / "browser_state.json"))
+    context.storage_state.assert_awaited_once_with()
+    assert not (tmp_path / "browser_state.json").exists(), "unscoped browsers must not persist authentication in plaintext"
+
+
+@pytest.mark.asyncio
+async def test_browser_switch_tab_activates_the_requested_page(tmp_path):
+    from computer.browser import BrowserController
+
+    controller = BrowserController(workspace_root=str(tmp_path))
+    original = SimpleNamespace(bring_to_front=AsyncMock())
+    target = SimpleNamespace(bring_to_front=AsyncMock())
+    controller.page = original
+    controller._pages = {"default": original, "tab_1": target}
+    await controller._switch_tab({"tab_id": "tab_1"})
+    assert controller.page is target
+    target.bring_to_front.assert_awaited_once()
+    original.bring_to_front.assert_not_awaited()
+    with pytest.raises(ValueError):
+        await controller._switch_tab({"tab_id": "missing"})
 
 
 @pytest.mark.asyncio

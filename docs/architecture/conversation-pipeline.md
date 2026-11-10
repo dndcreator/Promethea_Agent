@@ -30,6 +30,21 @@ HTTP, SSE, and Gateway WebSocket transports all enter through
 `ConversationService` assembles context, while `ActionService` alone advances
 the action state machine.
 
+The accepted bounded Observation view is retained with the action history and
+checkpoint instead of being regenerated from full results on every call. The
+ContextCompiler leaves existing previews unchanged while the configured bounds
+fit. Under history pressure it projects from the authoritative original result,
+never recursively truncating a previous preview; full content remains available
+through `runtime.read_observation`. Current environment/goal/capability data is
+still refreshed and is not frozen for cache reuse.
+
+Native action and final-response requests retain identical function definitions.
+The final phase remains answer/wait-only through Runtime decoding and execution
+guards, not by changing the function list. This improves prefix stability but
+does not guarantee provider cache hits, whose timing and storage are external.
+Each model call receives a detached request list so later history updates cannot
+rewrite its captured input.
+
 For SSE, provider chunks remain inside `ActionService`. Normal assistant text
 is projected to the output sink, while tool actions and protocol JSON never
 become transport text. Disconnect cancellation still cancels the owning Action
@@ -77,14 +92,26 @@ the original Task authority, Action identity and step budget.
 Empty or truncated model output is distinguished from transport failure in
 both synchronous and streaming adapters. It returns bounded diagnostic feedback
 to the next model step; no partial action executes and no token budget or
-permissions are raised automatically. When the action budget is spent, one
-final model request must explain verified results and remaining obstacles in a
-validated answer, without executing further tools. Repeated model-output failure
-can still prevent any valid answer; this remains an explicit Runtime failure,
-never a fabricated assistant reply.
+permissions are raised automatically. A transient provider failure retries the
+same prepared model step within `action.max_model_recoveries`, without replaying
+committed tools. The ActionService owns these retries rather than stacking them
+on implicit SDK retries. A closed admission gate is not retryable and no final
+model request is made through it. Unknown usage remains explicitly unknown.
+
+Foreground chat treats the initial decision count as a checkpoint. ActionService
+may grant one small extension on a newly committed successful tool result that
+differs from prior results. The grant is persisted and cannot renew after a
+restart. It does not override tool approval, provider admission, recovery,
+cancellation, or the explicit step limits of task and background callers.
+
+When the action budget is spent, the answer-only phase asks the model to explain
+verified results and remaining obstacles, without executing further tools. If
+model recovery is exhausted or admission closes, a separate Runtime status
+retains committed results and marks the goal unverified; it is not an assistant
+answer or evidence that the task succeeded.
 
 Cancellation, invalid execution authority, observation/audit persistence failure,
-state-machine invariant failure, and unavailable model transport remain Runtime
+state-machine invariant failure, and unrecoverable model transport remain Runtime
 boundaries. They stop execution rather than asking a model to override them.
 User-facing assistant answers always come from validated model output; separate
 Runtime failure status preserves the request and available diagnostics.
@@ -100,6 +127,14 @@ control loop does not duplicate those decisions.
 
 ## Runtime Boundaries
 
+For resumable work, the main model proposes `task.start` through the same
+CapabilityService as other tools. The conversation Task driver captures the
+original user objective and workspace; TaskRuntime schedules the Action loop
+and owns its checkpoints. A different chat can discover and attach to an
+owned task through `task.list` and `task.resume`, but execution still uses the
+original scope. End-of-slice model and budget failures remain auditable without
+replacing real obstacles in Goal Gaps.
+
 Before every model request, including approval continuation, ConversationService
 refreshes the tool projection through the same CapabilityService. PromptAssembler
 replaces its dedicated capability message; it does not rebuild identity or stack
@@ -107,6 +142,12 @@ contradictory copies. Unchanged catalog and selected schemas reuse their snapsho
 identity; changed state gets a new audited snapshot and tools-block hash. Exact
 inspection checks registration, ownership, configuration and dependencies, while
 capability resolution reports unavailable matches separately from callable ones.
+The default model projection is an identifier directory, not the full Runtime
+records. Definitions are resolved on demand, and only explicitly preferred,
+callable tools may preload schemas. `action.capability_context_chars` bounds the
+directory and snapshot reference on every refresh. Current Goal Gap data is
+projected before the Conversation callback so an explicit input-budget estimate
+can account for it; context assembly remains outside the Action control loop.
 
 ContextCompiler bounds Observation text in model requests without altering the
 original Runtime facts. Oversized fields include an explicit preview, source hash

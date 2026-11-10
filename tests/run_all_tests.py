@@ -4,12 +4,15 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 import json
+from importlib import metadata
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -18,6 +21,9 @@ from tests.support.process import run_bounded
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     suites = json.loads((ROOT / "tests/evaluation/suites.json").read_text(encoding="utf-8"))
     layers = {"unit": "unit", "integration": "integration", "system": "system and not browser", "browser": "browser", "live": "live", "stress": "stress"}
     parser = argparse.ArgumentParser(description=__doc__)
@@ -40,6 +46,7 @@ def main(argv=None):
     if args.live and args.suite != "live":
         parser.error("--live is restricted to the read-only live suite; host interaction tests require separate explicit opt-in")
     env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
     env.pop("PROMETHEA_LIVE_TEST", None)
     env.pop("RUN_STRESS_TESTS", None)
     if args.live:
@@ -71,6 +78,12 @@ def main(argv=None):
               "model_api_calls": None, "model_evaluation_enabled": False,
               "code_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
               "working_tree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip())}
+    report["environment"] = {"python": sys.version, "platform": platform.platform(), "packages": {}}
+    for package in ("pytest", "pytest-asyncio", "httpx", "fastapi", "starlette", "pydantic", "openai", "mcp", "playwright"):
+        try:
+            report["environment"]["packages"][package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            report["environment"]["packages"][package] = None
     started, failed = time.monotonic(), False
     for trial in range(args.repeat):
         xml = output / f"trial-{trial + 1}.xml"
@@ -82,13 +95,24 @@ def main(argv=None):
         try:
             with (output / f"trial-{trial + 1}.log").open("w", encoding="utf-8") as log:
                 exit_code = run_bounded([*cmd, "--junitxml=" + str(xml)], cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=remaining)
-            facts = read_junit(xml) if xml.exists() else {"error": "JUnit report missing"}
+            try:
+                facts = read_junit(xml) if xml.exists() else {"error": "JUnit report missing"}
+            except (ValueError, OSError, ET.ParseError) as error:
+                facts = {"error": "Invalid JUnit report: " + type(error).__name__}
+            # Preserve the underlying failure in CI stdout, not only an aggregate.
+            if exit_code != 0 or "error" in facts or facts.get("totals", {}).get("failed"):
+                print(f"Trial {trial + 1} failed (pytest exit {exit_code}). Log: {output / f'trial-{trial + 1}.log'}", flush=True)
+                print((output / f"trial-{trial + 1}.log").read_text(encoding="utf-8", errors="replace")[-24000:], flush=True)
             failed |= exit_code != 0 or "error" in facts or bool(facts.get("totals", {}).get("failed"))
-            report["runs"].append({"trial": trial + 1, "exit_code": exit_code, **facts})
+            kind = {0: None, 1: "test_failure", 2: "collection_or_interrupt", 3: "pytest_internal", 4: "pytest_usage", 5: "no_tests"}.get(exit_code, "process_failure")
+            report["runs"].append({"trial": trial + 1, "exit_code": exit_code, "failure_kind": kind, **facts})
             print(json.dumps(report["runs"][-1].get("totals", facts)))
         except subprocess.TimeoutExpired:
             failed = True
             report["stop_reason"] = "wall_clock_budget"
+            report["runs"].append({"trial": trial + 1, "exit_code": None, "failure_kind": "timeout"})
+            print("Test process exceeded wall-clock budget", flush=True)
+            print((output / f"trial-{trial + 1}.log").read_text(encoding="utf-8", errors="replace")[-24000:], flush=True)
             break
     report["elapsed_seconds"] = round(time.monotonic() - started, 3)
     report["passed"] = not failed

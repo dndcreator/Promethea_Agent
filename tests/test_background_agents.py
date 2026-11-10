@@ -16,6 +16,7 @@ from gateway.models.session_state import SessionState
 from gateway.task_runtime import TaskRuntime
 from gateway.task_service import TaskService
 from gateway.workflow_engine import WorkflowEngine
+from tests.support.runtime import observation_fact
 
 
 def parent(user="alice", session="chat"):
@@ -56,6 +57,44 @@ async def drain(runtime):
 async def start(conversation, background, **kwargs):
     with conversation.delegation.turn():
         return await background.start(DelegationRequest(label="Research", objective="independent objective", **kwargs), parent=parent(), user_config=config.model_dump())
+
+
+@pytest.mark.asyncio
+async def test_budget_pause_requires_explicit_resume_and_does_not_repeat_committed_write(tmp_path, monkeypatch):
+    from agentkit.tools.standard.workspace_tools import WorkspaceWriteFileTool
+    from gateway.workspace_service import WorkspaceService
+    from tests.support.runtime import ScriptedModel
+
+    monkeypatch.setattr(config.multi_agent, "child_steps", 1)
+    model = ScriptedModel([
+        {"action": "tool_call", "tool_name": "workspace.write_file", "args": {"path": "result.txt", "content": "RETAINED"}},
+        "The file is saved; this execution slice stopped.",
+        {"action": "answer", "content": "The previously saved result is retained."},
+    ])
+    tasks, runtime, conversation, background = host(tmp_path, model)
+    workspace = WorkspaceService(base_dir=str(tmp_path / "workspaces"))
+    conversation.capability_service.workspace_service = workspace
+    conversation.capability_service.register_tool(WorkspaceWriteFileTool(workspace_service=workspace))
+    accepted = await start(conversation, background, tools=["workspace.write_file"])
+    try:
+        await drain(runtime)
+        task = tasks.get_task(accepted["child_id"], user_id="alice")
+        assert task["status"] == "paused" and task["runs"][0]["status"] == "paused"
+        assert task["runs"][0]["metadata"]["execution_outcome"]["goal_status"] == "unverified"
+        checkpoint = task["runs"][0]["metadata"]["checkpoint"]
+        written = next((tmp_path / "workspaces").rglob("result.txt"))
+        assert written.read_text() == "RETAINED"
+        await drain(runtime)
+        assert len(model.calls) == 2
+        runtime.resume_task(task_id=task["task_id"], user_id="alice", expected_revision=task["revision"])
+        await drain(runtime)
+        resumed = tasks.get_task(task["task_id"], user_id="alice")
+        assert resumed["runs"][0]["status"] == "completed"
+        assert len(model.calls) == 3 and written.read_text() == "RETAINED"
+        assert "resume_action_result" not in resumed["runs"][0]["metadata"]
+        assert resumed["runs"][0]["metadata"]["checkpoint"]["action_loop_id"] != checkpoint["action_loop_id"]
+    finally:
+        await runtime.shutdown()
 
 
 @pytest.mark.asyncio
@@ -130,9 +169,9 @@ async def test_shutdown_during_tool_does_not_replay_side_effect_on_restart(tmp_p
 
     class Core:
         async def call_llm(self, messages, **kwargs):
-            if not isinstance(messages[-1]["content"], list):
+            if not any(isinstance(row.get("content"), list) for row in messages):
                 return {"status": "success", "content": '{"action":"tool_call","tool_name":"test.write","args":{}}'}
-            observation = json.loads(messages[-1]["content"][0]["text"])
+            observation = observation_fact(messages)
             recovery_seen.append(observation)
             return {"status": "success", "content": json.dumps({"action": "answer", "content": "check actual file state before continuing", "evidence_refs": [observation["observation_id"]]})}
 

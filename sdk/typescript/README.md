@@ -56,6 +56,26 @@ if (ambient.pending) {
 
 ## Streaming And Steering
 
+An Agent can return `status: "needs_input"` with a generated `InputRequest`.
+This is a durable nonterminal wait, not a tool approval or completed task.
+Reload it through `session.pending_input` and reply through the same chat API:
+
+```ts
+const pending = (await client.sessions.get(sessionId)).pending_input
+if (pending) {
+  await client.runs.run({
+    session_id: sessionId,
+    message: 'I completed the page verification.',
+    reply_to_input: pending.request_id,
+  })
+}
+```
+
+Do not send passwords through this text path. Task text replies use
+`client.tasks.resume(taskId, { input_reply: { request_id, content } })`.
+The reply reports a user statement, not verified external state or permission
+to execute a sensitive tool. Existing confirmation commands remain separate.
+
 SSE `text` payloads follow the generated `AnswerUpdate` contract. Apply
 `operation: "replace"` as a replacement, including an empty string; omitted
 operations remain legacy append-only deltas. `applyAnswerUpdate(current, update)`
@@ -89,6 +109,25 @@ cancel a dispatched tool batch, undo side effects, extend the step budget or
 authorize a replacement action. Explicit stop/abort remains separate. This is
 current chat-turn control, not a new detached-task scheduler or a WebSocket
 command protocol.
+
+## Speech I/O
+
+```ts
+const status = await client.voice.status(signal)
+const models = await client.voice.models({ kind: 'tts' }, signal)
+const audio = await client.voice.synthesize({ text: 'Hello' }, signal) // Blob
+const transcript = await client.voice.transcribe(recording, 'recording.webm', signal)
+for await (const event of client.runs.stream({ message: transcript.stt.text }, signal)) {
+  console.log(event.event_type, event.payload)
+}
+```
+
+All speech request/result types are generated from Python public contracts.
+The SDK handles multipart transport, binary audio, cancellation and structured
+errors only. It does not choose models or run an Agent loop. Configure STT/TTS
+in Settings or the existing user-env API; see [Speech I/O](../../docs/configuration.md#speech-io).
+`status` is redacted configuration, not provider health. Other calls can incur
+provider charges. Revoke browser object URLs after playing returned audio blobs.
 
 ## Guest Chat
 
@@ -126,6 +165,7 @@ The first release supports:
 - non-streaming Run requests over HTTP
 - streaming Run requests over SSE
 - typed file upload and attachment conversion for multimodal Run input
+- speech configuration/model discovery, multipart transcription and binary synthesis through `client.voice`
 - Session lookup
 - Task lookup/list, detached Run start, and revision-aware pause, resume, and cancel commands
 - Workbench snapshot queries and cursor-resumable SSE subscriptions

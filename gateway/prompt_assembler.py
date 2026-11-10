@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Any, Dict, List, Optional, Set
 from loguru import logger
 
@@ -510,6 +511,8 @@ class PromptAssembler:
             )
         )
         if tools.enabled:
+            from config import ActionConfig, config
+            action_policy = ActionConfig(**{**config.action.model_dump(), **((user_config or {}).get("action") or {})})
             blocks.append(
                 PromptBlock(
                     block_id="tools",
@@ -518,6 +521,7 @@ class PromptAssembler:
                     content=build_tool_execution_prompt(
                         registered_tools=(tools.metadata or {}).get("registered_tools"),
                         capability_snapshot=(tools.metadata or {}).get("capability_snapshot"),
+                        max_chars=action_policy.capability_context_chars,
                     ),
                     priority=40,
                     can_compact=True,
@@ -718,27 +722,45 @@ class PromptAssembler:
         static = self.render_prompt([block for block in blocks if block.block_id not in {"tools", "environment_observations"}])
         tools = self.render_prompt([block for block in blocks if block.block_id == "tools"])
         observations = self.render_prompt([block for block in blocks if block.block_id == "environment_observations"])
-        return [{"role": "system", "content": content} for content in (static, tools) if content] + ([{"role": "user", "content": observations}] if observations else [])
+        from .runtime_io import ENVIRONMENT_CONTEXT
+        return [{"role": "system", "content": content} for content in (static, tools) if content] + ([{"role": "user", "name": ENVIRONMENT_CONTEXT, "content": observations}] if observations else [])
 
     @staticmethod
-    def refresh_tool_message(messages: List[Dict[str, Any]], *, tools: List[Dict[str, Any]], snapshot: Dict[str, Any], run_context: Optional[Any]) -> List[Dict[str, Any]]:
+    def refresh_tool_message(messages: List[Dict[str, Any]], *, tools: List[Dict[str, Any]], snapshot: Dict[str, Any], run_context: Optional[Any], max_chars: int = 8000) -> List[Dict[str, Any]]:
         from .tool_prompt_blocks import CAPABILITIES_HEADER
+        from .runtime_io import replace_context, CAPABILITY_CONTEXT
 
-        content = build_tool_execution_prompt(registered_tools=tools, capability_snapshot=snapshot)
         result = [dict(message) for message in messages if not (
             message.get("role") == "system" and isinstance(message.get("content"), str)
             and message["content"].startswith(CAPABILITIES_HEADER)
-        )]
-        position = next((index for index, message in enumerate(result) if message.get("role") != "system"), len(result))
-        result.insert(position, {"role": "system", "content": content})
+        ) and message.get("name") != CAPABILITY_CONTEXT]
+        remaining = max(0, int(max_chars))
+        token_budget = getattr(run_context, "token_budget", None)
+        if token_budget is not None and token_budget > 0:
+            other_chars = sum(len(row["content"]) if isinstance(row.get("content"), str)
+                              else len(json.dumps(row.get("content"), ensure_ascii=False)) for row in result)
+            remaining = min(remaining, max(0, int(token_budget) * 4 - other_chars))
+        reference = json.dumps({
+            "runtime_capability_snapshot": {key: snapshot.get(key) for key in ("snapshot_id", "registry_revision", "generated_at")},
+        }, ensure_ascii=False, sort_keys=True)
+        if len(reference) <= remaining:
+            result = replace_context(result, CAPABILITY_CONTEXT, reference)
+            remaining -= len(reference)
+        content = build_tool_execution_prompt(registered_tools=tools, capability_snapshot=snapshot, max_chars=remaining)
+        if content:
+            position = next((index for index, message in enumerate(result) if message.get("role") != "system"), len(result))
+            result.insert(position, {"role": "system", "content": content})
         blocks = getattr(run_context, "prompt_blocks", None)
         if isinstance(blocks, dict):
             blocks.setdefault("block_manifest", {})["tools"] = {
                 "block_type": PromptBlockType.TOOLS.value, "source": "tool_runtime",
                 "content_hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "projection_chars": len(content), "projection_budget_chars": remaining,
             }
-            if "tools" not in blocks.setdefault("used_block_ids", []):
+            if content and "tools" not in blocks.setdefault("used_block_ids", []):
                 blocks["used_block_ids"].append("tools")
+            elif not content:
+                blocks["used_block_ids"] = [key for key in blocks.get("used_block_ids", []) if key != "tools"]
         return result
 
     def assemble(

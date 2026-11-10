@@ -402,6 +402,7 @@ are strict and do not trigger a different browser installation.
 | JSON field | Environment variable | Default |
 | --- | --- | --- |
 | `system.browser_channel` | `SYSTEM__BROWSER_CHANNEL` | empty / automatic |
+| `system.browser_headless` | `SYSTEM__BROWSER_HEADLESS` | `false` (visible browser) |
 | `system.browser_auto_install` | `SYSTEM__BROWSER_AUTO_INSTALL` | `true` |
 | `system.browser_install_timeout_s` | `SYSTEM__BROWSER_INSTALL_TIMEOUT_S` | `120` |
 | `system.browser_install_retry_delay_s` | `SYSTEM__BROWSER_INSTALL_RETRY_DELAY_S` | `60` |
@@ -436,6 +437,37 @@ Controls every LLM call made by the runtime.
 | `API__BASE_URL` | string | _(empty)_ | **Required.** Must match your provider. |
 | `API__MODEL` | string | _(empty)_ | **Required.** Must be a model your provider supports. |
 | `API__FAILOVER_MODELS` | comma-separated string | `[]` | Optional fallback models on the main provider endpoint. |
+| `API__TOOL_PROTOCOL` | `prompt_json` / `native` | `prompt_json` | Action wire format; configure in root `.env` or the user's `secrets.env`, not ordinary behavior JSON. |
+
+### Native action protocol
+
+Use `API__TOOL_PROTOCOL=native` only with a model/endpoint supporting OpenAI-compatible
+**Chat Completions function calling**. The codec exposes five canonical action
+functions (single/batch tool proposal, capability inspect/request, answer), not a
+second copy of every registered tool. The existing CapabilitySnapshot still supplies
+the compact index and selected tool input schemas. Runtime validates the same
+ModelAction, ToolPolicy, approvals and execution state in both modes.
+
+The protocol is pinned for an action loop and saved in its checkpoint, including
+pending confirmation. Complete provider messages, reasoning and native call IDs
+are retained for accepted turns; tool replies are reconstructed only from matching
+committed Runtime Observations. History compaction drops whole accepted turns, not
+their receipt associations. Interrupted effects remain unknown and are not replayed
+automatically. Streamed function arguments are buffered until the complete response
+is validated; truncation never executes a partial call. Auxiliary model calls keep
+their existing output formats. No silent mid-loop JSON/native downgrade is performed.
+
+Provider scope (documentation support is not a live certification):
+
+| Endpoint family | Codec / verification |
+|---|---|
+| [DeepSeek Chat](https://api-docs.deepseek.com/guides/thinking_mode/) | Native codec; preserve `reasoning_content` on replay. Small isolated live acceptance uses the configured evaluation endpoint only. |
+| [Qwen compatible Chat](https://help.aliyun.com/zh/model-studio/qwen-function-calling), [GLM](https://docs.bigmodel.cn/cn/guide/capabilities/function-calling) | Same documented `tools` / `tool_calls` / call-ID shape; offline codec contracts only. Check the selected model's support and provider flags. |
+| [OpenAI Chat Completions](https://developers.openai.com/api/docs/guides/function-calling) | Same function-call wire family for compatible models; not all OpenAI models use this endpoint. No live credentials tested. |
+| [Anthropic Messages](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls), [Gemini](https://ai.google.dev/gemini-api/docs/function-calling), OpenAI Responses | Different wire formats; not implemented by this Chat codec. Changing the base URL does not add support. |
+
+Enable only after checking the exact model and endpoint. An unsupported native request
+is a provider/runtime failure, not permission to guess tool results or bypass policy.
 
 ### Multimodal model routing
 
@@ -843,17 +875,48 @@ Denied command fragments (always active when sandbox is enabled):
 
 ## Section: `action` - Main-model control loop
 
-`action.max_steps` bounds the number of model decisions during one
-turn. The default is `5`; per-user JSON configuration can lower or raise it without
-changing routing code. Runtime validation keeps the value between `1` and `50`.
-Inspection and recovery consume the same budget. A final answer-only model
-request is allowed after exhaustion, without authorizing further tool actions.
+`action.max_steps` is the initial decision threshold for foreground chat and the
+step limit for background, delegated, and task-owned runs. The default is `5`
+(range `1` to `50`). At the threshold, foreground chat can receive one bounded
+extension if the just-committed tool batch produced new successful evidence and
+Runtime recovery is not active. This is not proof of goal completion. Set
+`progress_grace_steps` to `0` for a strict limit. Explicit token/cost budgets
+disable the extension. Inspection and recovery consume decisions as before; a
+final answer-only request may be made when execution stops, with tools disabled.
 
 | JSON Key | Environment Variable | Default |
 |---|---|---|
 | `max_parallel_tool_calls` | `ACTION__MAX_PARALLEL_TOOL_CALLS` | `4` |
-| `observation_chars` | `ACTION__OBSERVATION_CHARS` | `16000` |
-| `observation_history_chars` | `ACTION__OBSERVATION_HISTORY_CHARS` | `96000` |
+| `progress_grace_steps` | `ACTION__PROGRESS_GRACE_STEPS` | `2` |
+| `capability_context_chars` | `ACTION__CAPABILITY_CONTEXT_CHARS` | `8000` |
+| `observation_chars` | `ACTION__OBSERVATION_CHARS` | `8000` |
+| `observation_history_chars` | `ACTION__OBSERVATION_HISTORY_CHARS` | `32000` |
+| `context_action_chars` | `ACTION__CONTEXT_ACTION_CHARS` | `48000` |
+| `context_action_batches` | `ACTION__CONTEXT_ACTION_BATCHES` | `12` |
+
+The action transcript is rebuilt at a batch or character threshold. The effective
+character threshold is the lower of `context_action_chars` and
+`observation_history_chars`; it is not the provider token limit. Rebuilding keeps
+recent tool exchanges intact, preserves user instructions, and replaces older
+exchanges with an evidence index. `runtime.list_observations` and
+`runtime.read_observation` retrieve retained source records on demand. A rebuild
+or explicit execution-slice continuation may add a small scoped memory recall
+without making another chat completion call. It never grants tool authority.
+| `max_model_recoveries` | `ACTION__MAX_MODEL_RECOVERIES` | `2` |
+
+`capability_context_chars` bounds the model-facing discovery block and its
+snapshot reference, both initially and after each Runtime refresh. The Registry
+retains complete definitions. The default directory contains identifiers and
+availability groups; descriptions, prerequisites, policy details and schemas
+are obtained through `capability_request` / `capability_inspect`. Only explicitly
+preferred, callable tools can preload schemas, within this same limit. An
+oversized directory falls back to namespace discovery rather than truncating a
+schema or deleting Runtime tools. `required_capabilities: ["*"]` retrieves the
+complete owner-scoped directory through the normal Observation/paging path.
+An explicit `RunContext.token_budget` can reduce this projection further using
+the existing character-based estimate. This is not an exact provider tokenizer
+or a new global history-compaction policy; original user messages, identity and
+Runtime facts are not silently discarded to fit the discovery block.
 
 Parallelism applies only to tools explicitly declared concurrency-safe. Other
 calls form exclusive barriers in model order. Result budgets bound the text
@@ -863,6 +926,53 @@ They do not enable semantic conversation summarization. Retained text results
 can be paged through `runtime.read_observation` under the authenticated owner.
 Runtime log rotation still limits availability; older truncated records remain
 explicitly truncated. All values use the existing root-env/per-user JSON rules.
+
+The latest tool-result batch gets priority over older bodies. Small scalar facts
+and structured error identities remain visible beside bounded previews and
+owner-scoped read references. Paged observations keep their original source
+cursor: projecting a shorter page adjusts its next offset, not a recursive
+reference to another truncated page. Full Runtime observations are not rewritten.
+
+`API__MAX_TOKENS` / `api.max_tokens` is the initial allowance (default 2000).
+`API__OUTPUT_TOKEN_LIMIT` / `api.output_token_limit` is the configured ceiling
+(default 8192), not a provider capability claim. Set it to what the actual model
+and deployment permit. Output truncation can double the next allowance up to
+this ceiling. If the first truncation already occurs at the ceiling, one
+smaller/split-action recovery is permitted without increasing the allowance.
+Repeated truncation or identical invalid output stops bounded recovery and
+retains progress. Truncated instructions never execute. Child and Ambient limits
+also constrain the ceiling. Failures consume the existing step budget; there
+is at most one answer-only final request after stopping. The final request uses
+the initial allowance rather than the expanded generation allowance.
+
+Action parsing accepts one complete JSON object, optionally enclosed by a single
+complete `json` or unlabelled Markdown fence around the entire response. It never
+repairs partial JSON, selects an executable prefix, or accepts surrounding prose,
+concatenated objects, duplicate keys (including nested arguments), NaN or Infinity.
+Batch calls continue to use the canonical `tool_calls` array. Accepted history
+stores canonical JSON; the model-call manifest retains the original response.
+
+The compatible error code remains `INVALID_MODEL_ACTION`; `error.details.reason`
+distinguishes `JSON_ENVELOPE_INVALID`, `MULTIPLE_ACTIONS`,
+`DUPLICATE_ACTION_FIELD` and `ACTION_SCHEMA_INVALID`. Output-limit, empty-response
+and protocol failures have separate recovery counters. Each family uses
+`max_model_recoveries` until an action is accepted; switching protocol error
+types does not reset that family's counter. All attempts still consume the same
+decision budget, and any enclosing Task/evaluation limits remain authoritative.
+Tool execution failures remain observations, not model-format retries.
+
+These checks validate the action envelope, not every tool's argument schema.
+Authorization remains centralized in CapabilityService, while argument validation
+still depends on the registered tool/provider implementation; a universal JSON
+Schema validator is not currently enforced there. No task-keyword budget predictor
+or new model-classification call is introduced. The configured initial allowance
+continues to apply until a separately evaluated prediction policy is adopted.
+
+Named Runtime environment/goal/snapshot data messages are refreshed by identity
+after historical messages. Stable system instructions and tool definitions are
+not rewritten with volatile snapshot timestamps. This preserves trust roles;
+it does not elevate external page/file text into policy. Cache hits are measured
+only when the provider reports them, never inferred from request similarity.
 
 `action.gaps` enables lightweight goal-relative state inside that same loop.
 It adds no separate model reviewer. JSON keys and their env equivalents:
@@ -874,6 +984,7 @@ It adds no separate model reviewer. JSON keys and their env equivalents:
 | `max_updates` | `ACTION__GAPS__MAX_UPDATES` | `6` |
 | `window` | `ACTION__GAPS__WINDOW` | `4` |
 | `context_chars` | `ACTION__GAPS__CONTEXT_CHARS` | `2400` |
+| `max_recovery_attempts` | `ACTION__GAPS__MAX_RECOVERY_ATTEMPTS` | `2` |
 
 The context budget is characters, not tokens; capacity must fit all gap identities
 (`context_chars >= max_gaps * 100 + 800`). Turning updates off does not delete
@@ -1073,6 +1184,64 @@ APIs:
 - `POST /api/self-evolve/tasks/{task_id}/publish`
 
 ---
+
+## Speech I/O
+
+Open **Settings > Voice interaction**. Recognition (STT) and synthesis (TTS)
+are configured independently, so a text-only main model can still participate
+in voice conversations. This integration supports online APIs and services
+you have already deployed locally; it does not download or launch speech models.
+
+1. Choose **Speech synthesis**, select a provider, and enter the endpoint, model,
+   key (if required) and voice. For OpenAI-compatible services use the API root,
+   for example `https://api.openai.com/v1` or `http://127.0.0.1:8001/v1`.
+   The server must implement `/audio/speech`; a chat endpoint alone is insufficient.
+   ElevenLabs uses `https://api.elevenlabs.io` and a real Voice ID.
+2. Save, optionally list models, then enter a short sample and select
+   **Synthesize preview**. Play or download the audio. Listing models does not
+   establish that every listed model supports speech. If listing is unsupported,
+   enter the model ID manually and test it directly.
+3. Choose **Speech recognition** and configure an OpenAI-compatible endpoint
+   implementing `/audio/transcriptions`. Test with a recording or an audio file.
+   Supported input formats depend on that provider. Uploads are bounded to 24 MiB.
+4. Use the chat microphone to start recording; click again to stop and transcribe.
+   Recording is capped at 60 seconds and requires microphone permission plus
+   localhost or HTTPS. The transcript enters normal SSE Chat, not a separate
+   Agent execution path. Enable **Spoken replies** only if completed replies
+   should be synthesized automatically. It defaults to off.
+
+Settings are stored through the existing per-user env mechanism. The canonical
+keys are `VOICE__STT_{PROVIDER,BASE_URL,API_KEY,MODEL}` and
+`VOICE__TTS_{PROVIDER,BASE_URL,API_KEY,MODEL,VOICE,FORMAT,SPEED}`, plus
+`VOICE__SPEAK_REPLIES`. Allowed STT providers: `disabled`, `openai`; TTS:
+`disabled`, `openai`, `elevenlabs`. `openai` also means compatible local services.
+Select model IDs explicitly. Defaults in `env.example` leave both providers off.
+Blank fields retain existing values; set the provider to `disabled` to turn it off.
+Local services may omit keys. A main/common key is inherited only when the
+resolved base URLs match exactly except for a trailing slash. Never reuse a
+cloud key for a different local or third-party endpoint.
+
+Legacy `VOICE__PROVIDER`, `MODEL`, `VOICE`, `FORMAT`, `SPEED`, `BASE_URL`,
+`OPENAI_BASE_URL`, `API_KEY` and ElevenLabs aliases remain readable. Role-specific
+settings take precedence. Legacy generic provider/model fields apply to TTS;
+STT still requires its own provider and model.
+
+Opening Settings reads redacted configuration, not provider health. Model discovery,
+preview synthesis, transcription and spoken replies make real provider calls
+and can incur charges. Speech billing is not included in chat text-token totals.
+Speech errors leave the completed text reply intact. Synthesis is limited to
+4096 characters; longer replies stay text rather than silently truncating them.
+Audio is returned to the caller, not added to personal files or memory by the
+speech service. The transcript and Agent reply follow ordinary conversation
+persistence. There is no realtime speech stream or always-listening detector.
+
+The provider adapters follow OpenAI's
+[speech](https://developers.openai.com/api/reference/resources/audio/subresources/speech/methods/create)
+and [transcription](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create)
+contracts and ElevenLabs'
+[text-to-speech](https://elevenlabs.io/docs/api-reference/text-to-speech/convert)
+contract. Provider-specific quotas, model/voice availability and supported formats
+must be checked against the service being used.
 
 ## Time and scheduling
 

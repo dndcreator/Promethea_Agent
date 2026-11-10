@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -42,15 +43,21 @@ class TemporalSchedulerService:
         self.lease_seconds = max(30, int(lease_seconds))
         self._tool_executor: Optional[Callable[..., Awaitable[Any]]] = None
         self._confirmation_resolver: Optional[Callable[[str, Dict[str, Any]], bool]] = None
+        self._observation_validator = None
+        self._event_emitter = None
 
     def configure_tool_runtime(
         self,
         *,
         executor: Callable[..., Awaitable[Any]],
         confirmation_resolver: Callable[[str, Dict[str, Any]], bool],
+        observation_validator=None,
+        event_emitter=None,
     ) -> None:
         self._tool_executor = executor
         self._confirmation_resolver = confirmation_resolver
+        self._observation_validator = observation_validator
+        self._event_emitter = event_emitter
 
     def _lock(self) -> threading.RLock:
         return _store_lock(self.store_path)
@@ -78,7 +85,10 @@ class TemporalSchedulerService:
         with self._lock():
             temporary = self.store_path.with_name(f".{self.store_path.name}.{uuid.uuid4().hex}.tmp")
             try:
-                temporary.write_text(json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8")
+                with temporary.open("w", encoding="utf-8") as stream:
+                    json.dump(jobs, stream, ensure_ascii=False, indent=2)
+                    stream.flush()
+                    os.fsync(stream.fileno())
                 temporary.replace(self.store_path)
             finally:
                 temporary.unlink(missing_ok=True)
@@ -95,6 +105,7 @@ class TemporalSchedulerService:
         timezone_name: str = "",
         misfire_policy: str = "run_once",
         misfire_grace_seconds: Optional[int] = None,
+        observe: bool = False,
     ) -> Dict[str, Any]:
         if not str(name or "").strip():
             raise ValueError("name is required")
@@ -125,6 +136,8 @@ class TemporalSchedulerService:
             "tool_name": str(tool_name).strip(),
         }
         full_name = f"{target_params['service_name']}.{target_params['tool_name']}"
+        if observe:
+            self._validate_observer(full_name, target_params)
         if self._confirmation_resolver and self._confirmation_resolver(full_name, target_params):
             raise PermissionError("confirmation-required tools cannot run unattended")
 
@@ -162,6 +175,7 @@ class TemporalSchedulerService:
             "next_run_at": next_at,
             "last_error": "",
             "run_count": 0,
+            "observe": bool(observe),
         }
         from .ambient_state import current_ambient
 
@@ -251,6 +265,7 @@ class TemporalSchedulerService:
         owner_user_id: Optional[str],
     ) -> Dict[str, Any]:
         now = float(now_ts) if now_ts is not None else time.time()
+        await self._deliver_observations(owner_user_id)
         claims = self._claim_due_jobs(now=now, max_jobs=max_jobs, owner_user_id=owner_user_id)
         ran: List[Dict[str, Any]] = []
         for claim in claims:
@@ -271,13 +286,21 @@ class TemporalSchedulerService:
                 }
                 if self._confirmation_resolver(full_name, payload):
                     raise PermissionError("scheduled tool requires interactive approval")
+                if job.get("observe"):
+                    self._validate_observer(full_name, payload)
+                    payload["cursor"] = dict(job.get("observation_cursor") or {})
                 result = await self._tool_executor(
                     full_name,
                     payload,
                     source="scheduler",
                     invocation_context=dict(job.get("execution_context") or {}),
                 )
-                self._finish_claim(job, lease_id=lease_id, now=now, error="")
+                updates = None
+                if job.get("observe"):
+                    from .scheduled_observations import stage_observations
+                    updates = stage_observations(job, result)
+                self._finish_claim(job, lease_id=lease_id, now=now, error="", updates=updates)
+                await self._deliver_observations(owner_user_id)
                 ran.append({"job_id": job.get("job_id"), "ok": True, "result": result})
             except Exception as exc:
                 self._finish_claim(job, lease_id=lease_id, now=now, error=str(exc), pause=isinstance(exc, PermissionError) and bool(job.get("execution_context", {}).get("ambient_scope")))
@@ -299,6 +322,8 @@ class TemporalSchedulerService:
                 owner = str(context.get("user_id") or "")
                 if not owner or (owner_user_id is not None and owner != owner_user_id):
                     continue
+                if job.get("pending_observations"):
+                    continue
                 if not bool(job.get("enabled")) or float(job.get("next_run_at") or 0) > now:
                     continue
                 if job.get("status") == "running" and float(job.get("lease_expires_at") or 0) > now:
@@ -319,12 +344,14 @@ class TemporalSchedulerService:
             self._save_jobs(jobs)
         return claims
 
-    def _finish_claim(self, claimed: Dict[str, Any], *, lease_id: str, now: float, error: str, pause: bool = False) -> None:
+    def _finish_claim(self, claimed: Dict[str, Any], *, lease_id: str, now: float, error: str, pause: bool = False, updates=None) -> None:
         with self._lock():
             jobs = self._load_jobs()
             row = next((item for item in jobs if item.get("job_id") == claimed.get("job_id")), None)
             if row is None or row.get("lease_id") != lease_id:
                 return
+            if updates:
+                row.update(updates)
             row["last_run_at"] = now
             row["updated_at"] = now
             row["last_error"] = error
@@ -338,6 +365,31 @@ class TemporalSchedulerService:
             if error and not row.get("enabled") and not pause:
                 row["status"] = "failed"
             self._save_jobs(jobs)
+
+    def _validate_observer(self, name, payload):
+        if self._event_emitter is None or self._event_emitter.event_log is None or self._observation_validator is None:
+            raise RuntimeError("persistent observation runtime is not configured")
+        self._observation_validator(name, payload)
+
+    async def _deliver_observations(self, owner):
+        from .protocol import EventType
+        for saved in self._load_jobs():
+            if owner and saved.get("execution_context", {}).get("user_id") != owner:
+                continue
+            if saved.get("status") == "paused":
+                continue
+            for item in saved.get("pending_observations") or []:
+                if self._event_emitter is None:
+                    raise RuntimeError("observation delivery runtime is unavailable")
+                # Facts are durable before publication; a crash before acknowledgement
+                # replays the same identity rather than creating a new Runtime fact.
+                await self._event_emitter.emit(EventType.ENVIRONMENT_STATE_CHANGED, item["payload"], idempotency_key=item["idempotency_key"])
+                with self._lock():
+                    jobs = self._load_jobs()
+                    row = next((row for row in jobs if row["job_id"] == saved["job_id"]), None)
+                    if row is not None:
+                        row["pending_observations"] = [value for value in row.get("pending_observations", []) if value["idempotency_key"] != item["idempotency_key"]]
+                        self._save_jobs(jobs)
 
     @staticmethod
     def _advance(row: Dict[str, Any], *, now: float) -> None:

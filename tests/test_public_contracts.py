@@ -5,6 +5,19 @@ from gateway.public_contracts import build_public_contract_schema
 from gateway.public_views import public_task, public_workbench
 
 
+def test_confirmation_projection_exposes_only_public_call_fields():
+    from gateway.public_views import public_pending_confirmation
+    from gateway.public_contracts import Session
+    pending = {"tool_call_id": "call-1", "tool_name": "example.send", "args": {"text": "hello"},
+               "model_wire": {"private": "provider transcript"}, "messages": [{"role": "system", "content": "private"}],
+               "task_checkpoint": {"execution_token": "private"}}
+    view = public_pending_confirmation(pending)
+    assert view == {"tool_call_id": "call-1", "tool_name": "example.send", "arguments": {"text": "hello"}, "status": "needs_confirmation"}
+    assert Session(session_id="s", pending_confirmation=view).pending_confirmation.tool_call_id == "call-1"
+    assert public_pending_confirmation(None) is None
+    assert public_pending_confirmation({**pending, "args": "invalid"}) is None
+
+
 def test_public_contract_schema_contains_only_external_objects():
     schema = build_public_contract_schema()
 

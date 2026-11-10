@@ -27,6 +27,7 @@ class AmbientControl(BaseModel):
     next_check_at: float = 0
     admission: dict | None = None
     last_trigger: dict = Field(default_factory=dict)
+    event_cursor: int | None = None
 
 
 class AmbientStore:
@@ -124,6 +125,8 @@ class AmbientStore:
             row.user_id = user_id
             row.settings.enabled = False  # transfer is never permission to start autonomous work
             row.admission = None
+            row.event_cursor = None
+            row.last_trigger = {}  # Event identities belong to the source Runtime log.
             key = self.key(user_id, row.session_id)
             if not merge or key not in self.scenes:
                 self.scenes[key] = row

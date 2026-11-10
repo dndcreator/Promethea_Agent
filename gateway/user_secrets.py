@@ -14,9 +14,18 @@ USER_SECRETS_DIR = PROJECT_ROOT / "config" / "users"
 
 # Personal accounts never inherit the operator's or another user's credentials.
 PERSONAL_ACCOUNT_ENV_KEYS: tuple[str, ...] = (
+    "GITHUB__TOKEN",
     "MAIL__IMAP_HOST", "MAIL__IMAP_PORT", "MAIL__SMTP_HOST", "MAIL__SMTP_PORT",
     "MAIL__SMTP_SECURITY", "MAIL__USERNAME", "MAIL__PASSWORD", "MAIL__FROM",
     "CALENDAR__URL", "CALENDAR__USERNAME", "CALENDAR__PASSWORD",
+)
+
+VOICE_ENV_KEYS = (
+    "VOICE__STT_PROVIDER", "VOICE__STT_MODEL", "VOICE__STT_BASE_URL", "VOICE__STT_API_KEY",
+    "VOICE__TTS_PROVIDER", "VOICE__TTS_MODEL", "VOICE__TTS_BASE_URL", "VOICE__TTS_API_KEY",
+    "VOICE__TTS_VOICE", "VOICE__TTS_FORMAT", "VOICE__TTS_SPEED", "VOICE__SPEAK_REPLIES",
+    "VOICE__PROVIDER", "VOICE__MODEL", "VOICE__BASE_URL", "VOICE__API_KEY", "VOICE__VOICE",
+    "VOICE__FORMAT", "VOICE__SPEED", "VOICE__OPENAI_BASE_URL", "VOICE__ELEVENLABS_BASE_URL", "VOICE__ELEVENLABS_API_KEY",
 )
 
 SENSITIVE_ENV_KEYS: tuple[str, ...] = (
@@ -24,6 +33,7 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "API__BASE_URL",
     "API__MODEL",
     "API__FAILOVER_MODELS",
+    "API__TOOL_PROTOCOL",
     "MULTIMODAL__API_KEY",
     "MULTIMODAL__BASE_URL",
     "MULTIMODAL__MODEL",
@@ -49,6 +59,7 @@ SENSITIVE_ENV_KEYS: tuple[str, ...] = (
     "SEARCH__SERPAPI_API_KEY",
     "SEARCH__SEARXNG_URL",
     *PERSONAL_ACCOUNT_ENV_KEYS,
+    *VOICE_ENV_KEYS,
 )
 
 
@@ -185,8 +196,10 @@ def resolve_llm_runtime_settings(
         "base_url": _resolve_value(values, "API__BASE_URL") or getattr(api_defaults, "base_url", ""),
         "model": _resolve_value(values, "API__MODEL") or getattr(api_defaults, "model", ""),
         "failover_models": _parse_failover_models(_resolve_value(values, "API__FAILOVER_MODELS")),
+        "tool_protocol": _resolve_value(values, "API__TOOL_PROTOCOL") or getattr(api_defaults, "tool_protocol", "prompt_json"),
         "temperature": behavior_api.get("temperature", getattr(api_defaults, "temperature", 0.7)),
         "max_tokens": behavior_api.get("max_tokens", getattr(api_defaults, "max_tokens", 2000)),
+        "output_token_limit": behavior_api.get("output_token_limit", getattr(api_defaults, "output_token_limit", 8192)),
     }
 
 

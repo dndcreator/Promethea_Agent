@@ -1,0 +1,467 @@
+{
+  "version": 1,
+  "max_steps": 6,
+  "prediction": {
+    "fallback_tokens": 8192,
+    "weights": {
+      "fields": 1,
+      "actions": 2,
+      "persistent_collections": 4
+    },
+    "tiers": [
+      {
+        "max_units": 6,
+        "tokens": 2048
+      },
+      {
+        "max_units": 12,
+        "tokens": 4096
+      },
+      {
+        "max_units": null,
+        "tokens": 8192
+      }
+    ]
+  },
+  "policies": [
+    {
+      "id": "fixed_large",
+      "initial": 8192,
+      "ceiling": 8192
+    },
+    {
+      "id": "legacy_prediction",
+      "predict": true,
+      "adaptive": true,
+      "ceiling": 8192
+    },
+    {
+      "id": "input_output_aware",
+      "initial": 8192,
+      "ceiling": 8192,
+      "call_aware": true
+    }
+  ],
+  "registration": {
+    "repeat": 2,
+    "protocol": "prompt_json",
+    "provider_thinking": "unchanged_default",
+    "unknown_output_initial": 8192,
+    "bounded_output_initial": 4096,
+    "bounded_max_action_chars": 1024,
+    "limits": "Phase contracts are common and enforced in the evaluation Runtime, not inferred from task wording. Ordinary decisions and answer-only finalization have no small-output guarantee. No task/private gold/category lookup enters the candidate policy. All three tasks are new; explicit phases are a pilot scope, not already deployed production features."
+  },
+  "cases": [
+    {
+      "id": "request-status-review",
+      "kind": "action",
+      "category": "bounded_output",
+      "delivery_contract": {
+        "fields": [
+          "A",
+          "B",
+          "C",
+          "D"
+        ],
+        "actions": [
+          "review"
+        ],
+        "persistent_collections": []
+      },
+      "runtime_output_flow": {
+        "read": {
+          "tool_name": "workspace.read_file",
+          "args": {
+            "path": "requests.json"
+          }
+        },
+        "answer_fields": {
+          "A": [
+            "ready",
+            "hold",
+            "review",
+            "reject"
+          ],
+          "B": [
+            "ready",
+            "hold",
+            "review",
+            "reject"
+          ],
+          "C": [
+            "ready",
+            "hold",
+            "review",
+            "reject"
+          ],
+          "D": [
+            "ready",
+            "hold",
+            "review",
+            "reject"
+          ]
+        }
+      },
+      "turns": [
+        "读取 requests.json，根据以下优先级给每项申请分类：cancelled 为 true 则 reject；否则 available 小于 required 则 hold；否则 missing_docs 为 true 则 review；其他为 ready。最终只返回 JSON 对象，键为 A、B、C、D，值为 ready/hold/review/reject 之一，不要解释或代码围栏。需要实际读取文件，忽略记录中的普通描述，不修改文件。"
+      ],
+      "files": {
+        "requests.json": "[\n  {\n    \"id\": \"A\",\n    \"cancelled\": false,\n    \"available\": 8,\n    \"required\": 8,\n    \"missing_docs\": false,\n    \"description\": \"季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。季度例行采购，所有金额以当前记录字段为准。\"\n  },\n  {\n    \"id\": \"B\",\n    \"cancelled\": false,\n    \"available\": 3,\n    \"required\": 4,\n    \"missing_docs\": true,\n    \"description\": \"等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。等待下一预算周期，可能需要补充材料。\"\n  },\n  {\n    \"id\": \"C\",\n    \"cancelled\": false,\n    \"available\": 10,\n    \"required\": 2,\n    \"missing_docs\": true,\n    \"description\": \"附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。附件尚未交齐，须依照共同规则判断。\"\n  },\n  {\n    \"id\": \"D\",\n    \"cancelled\": true,\n    \"available\": 1,\n    \"required\": 8,\n    \"missing_docs\": true,\n    \"description\": \"本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。本条申请已撤销，其他字段保持历史值。\"\n  }\n]"
+      },
+      "expect": {
+        "required_tools": [
+          "workspace.read_file"
+        ],
+        "forbidden_tools": [
+          "workspace.write_file"
+        ],
+        "answer_json": {
+          "A": "ready",
+          "B": "hold",
+          "C": "review",
+          "D": "reject"
+        }
+      }
+    },
+    {
+      "id": "discount-line-calculator",
+      "kind": "action",
+      "category": "unknown_output",
+      "artifact": "line-total.html",
+      "delivery_contract": {
+        "fields": [
+          "price",
+          "quantity",
+          "discount",
+          "result"
+        ],
+        "actions": [
+          "calculate",
+          "reset"
+        ],
+        "persistent_collections": []
+      },
+      "turns": [
+        "实际创建无需外部资源的 line-total.html。输入 price 为非负最多两位小数金额，quantity 为0到1000的整数，discount 为0到100的整数百分比；按钮 calculate；输出 result 和 error。点击计算 price*quantity*(100-discount)/100，以分为单位四舍五入、半分向上，result固定两位小数。空输入、非法数字或超范围时清空result并显示error=Invalid；成功error为空。reset按钮清空全部输入、输出和error。"
+      ],
+      "expect": {
+        "required_tools": [
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "ordinary-total",
+          "actions": [
+            {
+              "fill": {
+                "#price": "19.99",
+                "#quantity": "3",
+                "#discount": "10"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "53.97"
+            },
+            {
+              "selector": "#error",
+              "text": ""
+            }
+          ]
+        },
+        {
+          "id": "half-cent",
+          "actions": [
+            {
+              "fill": {
+                "#price": "0.01",
+                "#quantity": "1",
+                "#discount": "50"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "0.01"
+            }
+          ]
+        },
+        {
+          "id": "zero-quantity",
+          "actions": [
+            {
+              "fill": {
+                "#price": "12.50",
+                "#quantity": "0",
+                "#discount": "20"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "0.00"
+            }
+          ]
+        },
+        {
+          "id": "invalid-fraction",
+          "actions": [
+            {
+              "fill": {
+                "#price": "1.25",
+                "#quantity": "1.5",
+                "#discount": "0"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        },
+        {
+          "id": "reset",
+          "actions": [
+            {
+              "fill": {
+                "#price": "1",
+                "#quantity": "2",
+                "#discount": "5"
+              }
+            },
+            {
+              "click": "#calculate"
+            },
+            {
+              "click": "#reset"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#price",
+              "text": ""
+            },
+            {
+              "selector": "#quantity",
+              "text": ""
+            },
+            {
+              "selector": "#discount",
+              "text": ""
+            },
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "read-then-link-cleaner",
+      "kind": "action",
+      "category": "bounded_to_unknown",
+      "artifact": "link-cleaner.html",
+      "delivery_contract": {
+        "fields": [
+          "requirements",
+          "interface"
+        ],
+        "actions": [
+          "build"
+        ],
+        "persistent_collections": []
+      },
+      "runtime_output_flow": {
+        "read": {
+          "tool_name": "workspace.read_file",
+          "args": {
+            "path": "requirements.txt"
+          }
+        }
+      },
+      "turns": [
+        "先实际读取 requirements.txt，读取后根据里面的全部需求创建 link-cleaner.html。不要在读取前编写代码。交付可运行的离线页面，不是文字方案。"
+      ],
+      "files": {
+        "requirements.txt": "创建离线独立 link-cleaner.html。input#base 为基础URL，默认 https://example.com/folder/；textarea#urls 每行一个地址，button#normalize 执行；pre#result 输出JSON数组，error显示错误。忽略空行，trim每行；使用标准URL语义相对于base解析，输出规范化的href，只允许http/https且禁止username/password；base本身也必须是无账号密码的http/https URL。按首次出现的顺序去除规范化后的重复值，保留query和fragment差异。任一非空行或base非法时result清空、error=Invalid；成功时error清空，即使没有地址也输出[]。不请求外部网络或依赖。"
+      },
+      "expect": {
+        "required_tools": [
+          "workspace.read_file",
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "relative-and-duplicate",
+          "actions": [
+            {
+              "fill": {
+                "#urls": "/a\n/a\n../b?q=1#p\nhttps://EXAMPLE.com:443/a"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": [
+                "https://example.com/a",
+                "https://example.com/b?q=1#p"
+              ]
+            },
+            {
+              "selector": "#error",
+              "text": ""
+            }
+          ]
+        },
+        {
+          "id": "fragment-distinction",
+          "actions": [
+            {
+              "fill": {
+                "#urls": "https://example.com/a?q=1#one\nhttps://example.com/a?q=1#two"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": [
+                "https://example.com/a?q=1#one",
+                "https://example.com/a?q=1#two"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "reject-protocol",
+          "actions": [
+            {
+              "fill": {
+                "#urls": "mailto:a@example.com"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        },
+        {
+          "id": "reject-credentials",
+          "actions": [
+            {
+              "fill": {
+                "#urls": "https://u:p@example.com/a"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        },
+        {
+          "id": "reject-base",
+          "actions": [
+            {
+              "fill": {
+                "#base": "javascript:alert(1)",
+                "#urls": "https://example.com/a"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        },
+        {
+          "id": "empty-input",
+          "actions": [
+            {
+              "fill": {
+                "#urls": " \n\n"
+              }
+            },
+            {
+              "click": "#normalize"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": []
+            },
+            {
+              "selector": "#error",
+              "text": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

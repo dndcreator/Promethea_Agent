@@ -242,7 +242,7 @@ async def handle_chat(self, connection, request):
                 )
             return GatewayProtocol.create_response(request.id, True, payload)
 
-        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed"}:
+        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed", "needs_input"}:
             error = tool_call_outcome.get("error")
             self.message_manager.abort_turn(
                 session_id, turn_id, user_id=user_id,
@@ -261,13 +261,14 @@ async def handle_chat(self, connection, request):
             reasoning_tree_id=tree_id,
             reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or []),
             agent_message_ids=tool_call_outcome.get("agent_message_ids"),
+            execution_outcome=tool_call_outcome.get("execution_outcome"),
         )
         if not committed:
             return GatewayProtocol.create_response(
                 request.id, False, error="failed to commit turn"
             )
 
-        if self.reasoning_service and tree_id:
+        if self.reasoning_service and tree_id and tool_call_outcome.get("status") == "success" and not tool_call_outcome.get("execution_outcome"):
             assessment = await self.reasoning_service.assess_outcome(
                 tree_id=tree_id,
                 assistant_output=final_content,
@@ -332,12 +333,14 @@ async def handle_chat(self, connection, request):
             session_id=session_id,
             user_id=user_id,
             response_text=final_content,
+            execution_outcome=tool_call_outcome.get("execution_outcome"),
+            input_request=tool_call_outcome.get("input_request"),
             memory_write_summary=(
                 dict(tool_call_outcome.get("memory_visibility") or {})
                 if isinstance(tool_call_outcome.get("memory_visibility"), dict)
                 else {}
             ),
-            status="success",
+            status=tool_call_outcome.get("status", "success"),
         )
         payload = adapter.emit_response(gateway_response)
         if self.event_emitter:
@@ -518,7 +521,7 @@ async def handle_chat_confirm(self, connection, request):
                 },
             )
 
-        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed"}:
+        if str(tool_call_outcome.get("status") or "success").lower() not in {"success", "ok", "completed", "needs_input"}:
             if turn_id:
                 self.message_manager.abort_turn(
                     session_id, turn_id, user_id=user_id,
@@ -539,6 +542,7 @@ async def handle_chat_confirm(self, connection, request):
                 reasoning_tree_id=pending.get("reasoning_tree_id"),
                 reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or pending.get("reasoning_steps") or []),
                 agent_message_ids=tool_call_outcome.get("agent_message_ids"),
+                execution_outcome=tool_call_outcome.get("execution_outcome"),
             )
             if not committed:
                 return GatewayProtocol.create_response(
@@ -547,16 +551,18 @@ async def handle_chat_confirm(self, connection, request):
         else:
             self.message_manager.add_message(
                 session_id,
-                "assistant",
+                "status" if (tool_call_outcome.get("execution_outcome") or {}).get("response_source") == "runtime" else "assistant",
                 final_content,
                 user_id,
                 reasoning_steps=list(tool_call_outcome.get("reasoning_steps") or []),
+                execution_outcome=tool_call_outcome.get("execution_outcome"),
             )
 
         return GatewayProtocol.create_response(
             request.id,
             True,
-            {"status": "success", "trace_id": run_context.trace_id, "session_id": session_id, "response": final_content},
+            {"status": tool_call_outcome.get("status", "success"), "trace_id": run_context.trace_id, "session_id": session_id, "response": final_content,
+             "execution_outcome": tool_call_outcome.get("execution_outcome"), "input_request": tool_call_outcome.get("input_request")},
         )
     except asyncio.CancelledError:
         if consumed_turn_id:

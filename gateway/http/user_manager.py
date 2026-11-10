@@ -468,11 +468,13 @@ class UserManager:
 
     def _cleanup_user_local_state(self, *, raw_user_id: str, graph_user_id: str) -> None:
         project_root = self._cleanup_project_root()
+        from agentkit.security.credential_store import ProtectedStore
         candidates = [
             project_root / "logs" / raw_user_id,
             project_root / "logs" / graph_user_id,
             project_root / "workspace" / raw_user_id,
             project_root / "workspace" / graph_user_id,
+            ProtectedStore(raw_user_id, project_root / "config" / "users").root,
         ]
         for target in candidates:
             try:
@@ -480,6 +482,7 @@ class UserManager:
                 allowed_roots = [
                     (project_root / "logs").resolve(),
                     (project_root / "workspace").resolve(),
+                    (project_root / "config" / "users").resolve(),
                 ]
                 if not any(resolved == root or root in resolved.parents for root in allowed_roots):
                     continue

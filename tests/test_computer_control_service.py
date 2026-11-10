@@ -51,24 +51,22 @@ async def test_perception_observe_aggregates_signals(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_perception_find_browser_target_passes_arg(monkeypatch):
+async def test_perception_find_browser_target_uses_fixed_snapshot(monkeypatch):
     svc = ComputerControlService()
     captured = {}
 
     async def fake_raw(capability, action, params=None):
-        if action == "evaluate":
+        if action == "snapshot":
             captured["params"] = params or {}
-            return {"ok": True, "result": [{"selector": "button.download", "score": 1.0}]}
+            return {"ok": True, "result": {"nodes": [{"selector": "button.download", "text": "Download", "tag": "button"}]}}
         return {"ok": True, "result": None}
 
     monkeypatch.setattr(svc, "_execute_action_raw", fake_raw)
     out = await svc.perception_action(mode="find_browser_target", target_text="Download", max_candidates=5)
 
     assert out.startswith("SUCCESS: perception find_browser_target")
-    arg = captured["params"].get("arg")
-    assert isinstance(arg, dict)
-    assert arg.get("needle") == "Download"
-    assert arg.get("maxN") == 5
+    assert captured["params"] == {"query": "Download", "max_nodes": 200}
+    assert "button.download" in out
 
 
 @pytest.mark.asyncio
@@ -82,13 +80,13 @@ async def test_browser_snapshot_builds_refs(monkeypatch):
     svc = ComputerControlService()
 
     async def fake_raw(capability, action, params=None):
-        if action == "evaluate":
+        if action == "snapshot":
             return {
                 "ok": True,
-                "result": [
+                "result": {"nodes": [
                     {"selector": "button.download", "text": "Download"},
                     {"selector": "a.more", "text": "More"},
-                ],
+                ], "frames": [], "frame_count": 0},
             }
         return {"ok": False, "error": "unexpected"}
 

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "id": "sokobanobservation",
+  "goal": "请打开 https://tudi.games/sokoban/play/index.html，录下这次游戏，并开始第一关。请实际看清棋盘，选一个方向尝试一步，然后观察人物有没有换格。如果第一次没有换格，允许根据新的画面再选一个方向试一次。每次操作需要审批就等待用户确认；不允许访问其他站点、账号或付款。不必通关，也不必剪辑。最后停止录像，保留产物，并用前后的实际观察说明发生了什么；如果没走成，不要猜测或把页面加载当作棋盘操作成功。",
+  "independent_checks": [
+    "Check that a real model request carried pixels of the recording tab, not just a screenshot path.",
+    "Check that the model selected the interaction and any required approval was relayed explicitly.",
+    "Check before and after visual evidence and verify that any recording artifact decodes."
+  ]
+}

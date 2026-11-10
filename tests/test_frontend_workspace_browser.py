@@ -85,6 +85,9 @@ async def prepare(page):
             data = {"ready": True, "active_backend": "neo4j"}
         elif path == "config/secrets":
             data = {"secrets": {"api": {"model": "deepseek-chat"}}}
+        elif path == "voice/status":
+            endpoint = {"provider": "disabled", "model": "", "base_url": "", "configured": False, "api_key_configured": False, "reason": "disabled"}
+            data = {"stt": endpoint, "tts": endpoint, "speak_replies": False}
         elif path == "channels":
             data = []
         elif path == "memory/write-proposals":

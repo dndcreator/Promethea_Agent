@@ -1,0 +1,642 @@
+{
+  "version": 1,
+  "max_steps": 8,
+  "prediction": {
+    "fallback_tokens": 8192,
+    "weights": {
+      "fields": 1,
+      "actions": 2,
+      "persistent_collections": 4
+    },
+    "tiers": [
+      {
+        "max_units": 6,
+        "tokens": 2048
+      },
+      {
+        "max_units": 12,
+        "tokens": 4096
+      },
+      {
+        "max_units": null,
+        "tokens": 8192
+      }
+    ]
+  },
+  "policies": [
+    {
+      "id": "fixed_large",
+      "initial": 8192,
+      "ceiling": 8192
+    },
+    {
+      "id": "predicted_fixed",
+      "predict": true,
+      "adaptive": false,
+      "ceiling": 8192
+    },
+    {
+      "id": "predicted_adaptive",
+      "predict": true,
+      "adaptive": true,
+      "ceiling": 8192
+    }
+  ],
+  "registration": {
+    "protocol": "prompt_json",
+    "repeat": 2,
+    "pre_registered_categories": true,
+    "limits": "Four new tasks, not reused pilot cases. Underestimated is a prospective stress category, not a guarantee of truncation. Acceptance checks never enter model context."
+  },
+  "cases": [
+    {
+      "id": "bmi-calculator",
+      "category": "simple",
+      "kind": "action",
+      "artifact": "bmi.html",
+      "delivery_contract": {
+        "fields": [
+          "height",
+          "weight",
+          "result"
+        ],
+        "actions": [
+          "calculate"
+        ],
+        "persistent_collections": []
+      },
+      "turns": [
+        "创建离线独立 bmi.html：数字输入 height（厘米）、weight（千克），按钮 calculate，输出 result 和 error。点击计算 BMI=体重/(身高米数平方)，保留两位小数。输入空、非正值时 result 清空且 error 显示 Invalid，成功时 error 清空。不使用外部资源。"
+      ],
+      "expect": {
+        "required_tools": [
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "interface",
+          "actions": [],
+          "assertions": [
+            {
+              "selector": "#height",
+              "count": 1
+            },
+            {
+              "selector": "#weight",
+              "count": 1
+            },
+            {
+              "selector": "#calculate",
+              "count": 1
+            }
+          ]
+        },
+        {
+          "id": "bmi",
+          "actions": [
+            {
+              "fill": {
+                "#height": "180",
+                "#weight": "81"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "25.00"
+            },
+            {
+              "selector": "#error",
+              "text": ""
+            }
+          ]
+        },
+        {
+          "id": "reject-zero",
+          "actions": [
+            {
+              "fill": {
+                "#height": "0",
+                "#weight": "81"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "savings-projection",
+      "category": "medium",
+      "kind": "action",
+      "artifact": "savings.html",
+      "delivery_contract": {
+        "fields": [
+          "initial",
+          "monthly",
+          "months",
+          "annual",
+          "result"
+        ],
+        "actions": [
+          "calculate"
+        ],
+        "persistent_collections": []
+      },
+      "turns": [
+        "创建离线 savings.html：initial 初始存款、monthly 每月月末存款、months 月数、annual 年利率百分数，按钮 calculate，输出 result 和 error。每月先按年利率/12计息再存款，最终保留2位小数；0利率要正确。金额和利率须非负有限数，月数须0至600的整数，空值无效。非法时清空result并显示error=Invalid；成功error为空。"
+      ],
+      "expect": {
+        "required_tools": [
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "zero-rate",
+          "actions": [
+            {
+              "fill": {
+                "#initial": "100",
+                "#monthly": "25",
+                "#months": "4",
+                "#annual": "0"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "200.00"
+            }
+          ]
+        },
+        {
+          "id": "interest-order",
+          "actions": [
+            {
+              "fill": {
+                "#initial": "100",
+                "#monthly": "10",
+                "#months": "2",
+                "#annual": "12"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "122.11"
+            }
+          ]
+        },
+        {
+          "id": "zero-months",
+          "actions": [
+            {
+              "fill": {
+                "#initial": "50",
+                "#monthly": "20",
+                "#months": "0",
+                "#annual": "5"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": "50.00"
+            }
+          ]
+        },
+        {
+          "id": "fraction-rejected",
+          "actions": [
+            {
+              "fill": {
+                "#initial": "0",
+                "#monthly": "1",
+                "#months": "1.5",
+                "#annual": "1"
+              }
+            },
+            {
+              "click": "#calculate"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "persistent-contact-book",
+      "category": "large",
+      "kind": "action",
+      "artifact": "contacts.html",
+      "delivery_contract": {
+        "fields": [
+          "name",
+          "email",
+          "query",
+          "count",
+          "result",
+          "error"
+        ],
+        "actions": [
+          "add",
+          "delete",
+          "filter",
+          "export",
+          "reset"
+        ],
+        "persistent_collections": [
+          "contacts"
+        ]
+      },
+      "turns": [
+        "创建独立离线 contacts.html 联系人簿：name,email输入，add按钮，query实时按姓名或email不区分大小写过滤，count显示总联系人数量。每条显示在 #rows > li，含删除按钮 button.delete；禁止用innerHTML插入用户内容。姓名/email trim后不能为空，email含@；同email不区分大小写拒绝重复，error=Invalid。添加成功清空error，保留用户提供的trim后名字/email。localStorage持久化。export按钮在result输出JSON数组，每项只有name,email，按添加顺序；reset按钮清空数据、持久化、query、result、error。刷新后恢复。"
+      ],
+      "expect": {
+        "required_tools": [
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "persist-and-export",
+          "actions": [
+            {
+              "fill": {
+                "#name": " Alice ",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            },
+            {
+              "reload": true
+            },
+            {
+              "click": "#export"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#count",
+              "number": 1
+            },
+            {
+              "selector": "#rows > li",
+              "count": 1
+            },
+            {
+              "selector": "#result",
+              "json": [
+                {
+                  "name": "Alice",
+                  "email": "a@example.com"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "duplicate",
+          "actions": [
+            {
+              "fill": {
+                "#name": "Alice",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            },
+            {
+              "fill": {
+                "#name": "Other",
+                "#email": "A@EXAMPLE.COM"
+              }
+            },
+            {
+              "click": "#add"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#count",
+              "number": 1
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        },
+        {
+          "id": "filter-and-delete",
+          "actions": [
+            {
+              "fill": {
+                "#name": "Alice",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            },
+            {
+              "fill": {
+                "#query": "BOB"
+              }
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#rows > li",
+              "count": 0
+            },
+            {
+              "selector": "#count",
+              "number": 1
+            }
+          ]
+        },
+        {
+          "id": "delete-persists",
+          "actions": [
+            {
+              "fill": {
+                "#name": "Alice",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            },
+            {
+              "click": "#rows > li button.delete"
+            },
+            {
+              "reload": true
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#count",
+              "number": 0
+            },
+            {
+              "selector": "#rows > li",
+              "count": 0
+            }
+          ]
+        },
+        {
+          "id": "reset",
+          "actions": [
+            {
+              "fill": {
+                "#name": "Alice",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            },
+            {
+              "click": "#reset"
+            },
+            {
+              "reload": true
+            },
+            {
+              "click": "#export"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#count",
+              "number": 0
+            },
+            {
+              "selector": "#result",
+              "json": []
+            }
+          ]
+        },
+        {
+          "id": "literal-name",
+          "actions": [
+            {
+              "fill": {
+                "#name": "<b>Alice</b>",
+                "#email": "a@example.com"
+              }
+            },
+            {
+              "click": "#add"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#rows b",
+              "count": 0
+            },
+            {
+              "selector": "#count",
+              "number": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "json-merge-patch",
+      "category": "underestimated",
+      "kind": "action",
+      "artifact": "merge.html",
+      "delivery_contract": {
+        "fields": [
+          "base",
+          "patch",
+          "result"
+        ],
+        "actions": [
+          "merge"
+        ],
+        "persistent_collections": []
+      },
+      "turns": [
+        "创建离线独立 merge.html：textarea#base、textarea#patch，button#merge，pre#result及error。实现RFC7396 JSON Merge Patch：patch不是普通JSON对象时整体替换；patch为对象时base非对象先当空对象，逐键递归，值null删除该键，数组整体替换；必须保留false、0和空字符串，输入不能修改，原型属性名__proto__/constructor等按普通JSON键安全处理，不污染原型。成功result为有效JSON且error为空，JSON非法时result清空error=Invalid。没有外部资源。"
+      ],
+      "expect": {
+        "required_tools": [
+          "workspace.write_file"
+        ]
+      },
+      "checks": [
+        {
+          "id": "nested-delete",
+          "actions": [
+            {
+              "fill": {
+                "#base": "{\"user\":{\"name\":\"A\",\"old\":1},\"keep\":0}",
+                "#patch": "{\"user\":{\"name\":\"B\",\"old\":null}}"
+              }
+            },
+            {
+              "click": "#merge"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": {
+                "user": {
+                  "name": "B"
+                },
+                "keep": 0
+              }
+            }
+          ]
+        },
+        {
+          "id": "root-array",
+          "actions": [
+            {
+              "fill": {
+                "#base": "{\"a\":1}",
+                "#patch": "[1,false,null]"
+              }
+            },
+            {
+              "click": "#merge"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": [
+                1,
+                false,
+                null
+              ]
+            }
+          ]
+        },
+        {
+          "id": "primitive-to-object",
+          "actions": [
+            {
+              "fill": {
+                "#base": "42",
+                "#patch": "{\"zero\":0,\"no\":false,\"empty\":\"\",\"remove\":null}"
+              }
+            },
+            {
+              "click": "#merge"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": {
+                "zero": 0,
+                "no": false,
+                "empty": ""
+              }
+            }
+          ]
+        },
+        {
+          "id": "safe-property",
+          "actions": [
+            {
+              "fill": {
+                "#base": "{}",
+                "#patch": "{\"__proto__\":{\"polluted\":true},\"constructor\":{\"ok\":1}}"
+              }
+            },
+            {
+              "click": "#merge"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "json": {
+                "__proto__": {
+                  "polluted": true
+                },
+                "constructor": {
+                  "ok": 1
+                }
+              }
+            }
+          ]
+        },
+        {
+          "id": "invalid-json",
+          "actions": [
+            {
+              "fill": {
+                "#base": "{\"a\":}",
+                "#patch": "{}"
+              }
+            },
+            {
+              "click": "#merge"
+            }
+          ],
+          "assertions": [
+            {
+              "selector": "#result",
+              "text": ""
+            },
+            {
+              "selector": "#error",
+              "text": "Invalid"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

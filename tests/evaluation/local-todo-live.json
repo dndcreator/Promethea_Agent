@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "todo",
+  "goal": "请在当前工作区创建一个可以直接在浏览器打开的待办事项网页。\n\n要求支持添加任务、标记完成、删除任务，并且刷新网页后任务仍然保留。\n\n你可以自行决定实现方式和使用哪些工具。完成后，请实际验证主要功能，修复发现的问题，并告诉我最终文件的位置和验证结果。\n\n如果遇到障碍，请自行调查并尝试解决，不要将尚未验证的功能报告为已经成功。",
+  "independent_checks": [
+    "Open the actual entry file with file:// in an isolated browser profile; do not supply a dev server.",
+    "Add two assessor-chosen tasks through visible UI controls.",
+    "Mark one task completed and observe its real visible/control state.",
+    "Reload and verify both tasks and completion state remain.",
+    "Delete the other task, reload and verify deletion persists.",
+    "Close and reopen the browser using the same isolated profile; verify saved state again."
+  ],
+  "limits": "The driver must not author app code, prescribe tool actions, prefill task data for the Agent or grant tool approvals. Product completion, Agent self-verification and assessor verification are distinct outcomes."
+}

@@ -97,20 +97,41 @@ class SelfModelService:
             await self.event_emitter.emit(EventType.SELF_MODEL_UPDATED, {"user_id": user, "revision": current.revision})
         return {"ok": True, "revision": current.cognition_revision, "classification": "working_interpretation_not_memory_fact"}
 
-    def working_context(self, user):
+    def _event_observation(self, user, reference, *, max_chars=1200):
+        log = getattr(self.event_emitter, "event_log", None)
+        seq = reference.get("seq") if isinstance(reference, dict) else None
+        if log is None or not isinstance(seq, int) or seq < 1:
+            return None
+        rows = log.query(user_id=user, after_seq=seq - 1, limit=1, oldest_first=True)
+        if not rows or rows[0]["seq"] != seq or rows[0]["event_id"] != reference.get("event_id"):
+            return None
+        row = rows[0]
+        text = json.dumps(row["payload"], ensure_ascii=False, default=str)
+        return {"event_id": row["event_id"], "seq": seq, "event_type": row["event_type"],
+                "payload_excerpt": text[:max_chars], "truncated": len(text) > max_chars}
+
+    def working_context(self, user, *, trigger=None, triggers=None):
         current = self.state.get(user)
         if user not in self.state.users:
-            return {"revision": 0, "attention": [], "questions": [], "interpretation": "", "surface": self.environment.current_surface(user)}
+            result = {"revision": 0, "attention": [], "questions": [], "interpretation": "", "surface": self.environment.current_surface(user)}
+            if trigger:
+                result["trigger_observation"] = self._event_observation(user, trigger, max_chars=4000)
+            if triggers:
+                result["trigger_observations"] = [self._event_observation(user, ref) for ref in triggers]
+            return result
         result = current.model_dump(exclude={"expressions", "cognition_revision"})
         result["state_revision"], result["revision"] = current.revision, current.cognition_revision
         result["surface"] = self.environment.current_surface(user)
-        log = getattr(self.event_emitter, "event_log", None)
-        if log is not None:
-            for change in result["changes"][-4:]:
-                seq = change.get("seq") or 0
-                rows = log.query(user_id=user, after_seq=seq - 1, limit=1, oldest_first=True) if seq else []
-                if rows and rows[0]["seq"] == seq:
-                    change["observation_excerpt"] = json.dumps(rows[0]["payload"], ensure_ascii=False, default=str)[:1200]
+        for change in result["changes"][-4:]:
+            observation = self._event_observation(user, change)
+            if observation:
+                change["observation_excerpt"] = observation["payload_excerpt"]
+                change["observation_truncated"] = observation["truncated"]
+        if trigger:
+            # Resolve the admitted event independently of the rolling attention window.
+            result["trigger_observation"] = self._event_observation(user, trigger, max_chars=4000)
+        if triggers:
+            result["trigger_observations"] = [self._event_observation(user, ref) for ref in triggers]
         return result
 
     async def build_observation_context(self, user):

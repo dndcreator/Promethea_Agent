@@ -10,6 +10,11 @@ there is no parallel code-generation agent or hidden retry loop.
 - A **tool package** exports `tool.py:handle(command, args)`, declares smoke-test
   arguments, and optionally declares `expected_result`. Publication creates an
   immutable version and hot-registers it through the existing ToolRegistry.
+  Each command can also declare `provides`, `inputSchema` and `outputSchema`;
+  these survive staging and publication into the registered ToolSpec. They
+  describe discovery and call arguments, not additional authority. The next
+  model step receives the refreshed capability snapshot and can resolve or
+  inspect the new operation without starting another conversation.
 - A **canvas application** contains a static HTML entrypoint, scripts/styles, and
   declared browser tests. It runs independently inside the existing Canvas shell.
   It is an artifact, not a new tool protocol or a replacement for the main UI.
@@ -43,6 +48,12 @@ previews are not a general replacement for arbitrary websites or development ser
 7. Repair the identified cause and validate again. `evolve_publish` and
    `evolve_open_canvas` require a passing validation digest matching the current
    files. Changes during validation or publication are rejected.
+
+Failed validation retains typed smoke-test errors and returns `error_detail`
+through the ordinary tool Observation, so a timeout is distinguishable from a
+syntax or expectation failure. A failure never permits publication. Native
+Windows execution keeps temporary files inside the same sandbox workspace and
+rejects an unusable Win32 temporary path instead of falling back to host TEMP.
 
 The engineering mechanisms borrow checkpoints/review from
 [Cursor](https://docs.cursor.com/en/agent/chat/checkpoints) and verification-driven

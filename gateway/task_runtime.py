@@ -279,15 +279,36 @@ class TaskRuntime:
             )
         return current
 
-    def resume_task(self, *, task_id: str, user_id: str, expected_revision: Optional[int] = None) -> Dict[str, Any]:
+    def resume_task(self, *, task_id: str, user_id: str, expected_revision: Optional[int] = None, input_reply: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         task = self._require_task(task_id, user_id)
         self.task_service.assert_revision(task_id=task_id, user_id=user_id, expected_revision=expected_revision)
         scheduled = 0
         waiting = False
         for item in task.get("runs", []):
             run_id = str(item.get("run_id") or "")
+            checkpoint = item.get("metadata", {}).get("checkpoint") or {}
+            if input_reply and (checkpoint.get("pending_input") or {}).get("request_id") != input_reply.get("request_id"):
+                continue
+            if item.get("run_type") in self._drivers and (item["status"] == "waiting_user" or item["status"] == "paused" and checkpoint.get("pending_input")):
+                checkpoint = item.get("metadata", {}).get("checkpoint") or {}
+                request = checkpoint.get("pending_input") or {}
+                if input_reply and input_reply.get("request_id") != request.get("request_id"):
+                    continue
+                if not input_reply:
+                    raise ValueError("this task requires an explicit input reply, not a generic resume")
+                if not request.get("request_id"):
+                    raise ValueError("task has no pending input request")
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="pending", detail={
+                    "checkpoint": {**checkpoint, "input_response": input_reply},
+                    "input_request": None,
+                })
+                scheduled += 1
+                continue
             if item.get("run_type") in self._drivers and item["status"] == "paused":
-                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="pending")
+                checkpoint = item.get("metadata", {}).get("checkpoint") or {}
+                continuation = bool((checkpoint.get("result") or {}).get("execution_outcome"))
+                self.task_service.update_run(task_id=task_id, user_id=user_id, run_id=run_id, status="pending",
+                                             detail={"resume_action_result": continuation})
                 scheduled += 1
                 continue
             if item.get("run_type") in self._drivers and item["status"] == "waiting_human":

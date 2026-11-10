@@ -11,10 +11,12 @@ class ActionPhase(str, Enum):
 
     PENDING = "pending"
     AWAITING_MODEL = "awaiting_model"
+    REASSESSING = "reassessing"
     EVALUATING = "evaluating"
     VALIDATING = "validating"
     EXECUTING = "executing"
     WAITING_CONFIRMATION = "waiting_confirmation"
+    WAITING_INPUT = "waiting_input"
     OBSERVING = "observing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -30,8 +32,10 @@ TERMINAL_PHASES: Set[ActionPhase] = {
 
 _ALLOWED: Mapping[ActionPhase, Set[ActionPhase]] = {
     ActionPhase.PENDING: {ActionPhase.AWAITING_MODEL, ActionPhase.FAILED, ActionPhase.CANCELLED},
-    ActionPhase.AWAITING_MODEL: {ActionPhase.EVALUATING, ActionPhase.OBSERVING, ActionPhase.FAILED, ActionPhase.CANCELLED},
+    ActionPhase.AWAITING_MODEL: {ActionPhase.REASSESSING, ActionPhase.EVALUATING, ActionPhase.OBSERVING, ActionPhase.FAILED, ActionPhase.CANCELLED},
+    ActionPhase.REASSESSING: {ActionPhase.EVALUATING, ActionPhase.OBSERVING, ActionPhase.FAILED, ActionPhase.CANCELLED},
     ActionPhase.EVALUATING: {
+        ActionPhase.WAITING_INPUT,
         ActionPhase.AWAITING_MODEL,
         ActionPhase.OBSERVING,
         ActionPhase.VALIDATING,
@@ -64,6 +68,7 @@ _ALLOWED: Mapping[ActionPhase, Set[ActionPhase]] = {
         ActionPhase.FAILED,
         ActionPhase.CANCELLED,
     },
+    ActionPhase.WAITING_INPUT: {ActionPhase.OBSERVING, ActionPhase.CANCELLED, ActionPhase.FAILED},
     ActionPhase.COMPLETED: set(),
     ActionPhase.FAILED: set(),
     ActionPhase.CANCELLED: set(),

@@ -30,13 +30,27 @@ class MetricsCollector:
         self.http_by_path: Dict[str, Dict[str, float]] = {}
         self.priced_calls = 0
         self.known_cost = 0.0
+        self.llm_by_purpose = {}
+        self.cache_reported_calls = 0
+        self.cached_prompt_tokens = 0
+        self.failed_llm_calls = 0
     
-    def record_llm_call(self, duration: float, prompt_tokens: int = 0, completion_tokens: int = 0, *, cost_estimate=None):
+    def record_llm_call(self, duration: float, prompt_tokens: int = 0, completion_tokens: int = 0, *, cost_estimate=None, usage=None, purpose="unspecified", failed=False):
         """Record one LLM call."""
         self.stats['llm_calls'] += 1
         self.stats['llm_total_time'] += duration
         self.stats['prompt_tokens'] += prompt_tokens
         self.stats['completion_tokens'] += completion_tokens
+        self.failed_llm_calls += int(failed)
+        from gateway.model_usage import cached_tokens
+        cache = cached_tokens(usage)
+        if cache is not None:
+            self.cache_reported_calls += 1
+            self.cached_prompt_tokens += cache
+        group = self.llm_by_purpose.setdefault(purpose, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+        group["calls"] += 1
+        group["prompt_tokens"] += prompt_tokens
+        group["completion_tokens"] += completion_tokens
         if cost_estimate is not None:
             import math
             amount = cost_estimate.get("estimated_usd")
@@ -84,6 +98,10 @@ class MetricsCollector:
                 'total_tokens': total_tokens,
                 'prompt_tokens': self.stats['prompt_tokens'],
                 'completion_tokens': self.stats['completion_tokens'],
+                'cached_prompt_tokens': self.cached_prompt_tokens if self.cache_reported_calls == self.stats['llm_calls'] else None,
+                'cache_reported_calls': self.cache_reported_calls,
+                'failed_calls': self.failed_llm_calls,
+                'by_purpose': {key: dict(value) for key, value in self.llm_by_purpose.items()},
                 'estimated_cost': estimated_cost,
             },
             'memory': {

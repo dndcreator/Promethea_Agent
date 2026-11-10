@@ -17,7 +17,7 @@ TERMINAL_ACTIVITY_STATES = {
     "failed", "cancelled", "canceled", "stopped", "interrupted",
 }
 ATTENTION_ACTIVITY_STATES = {
-    "waiting", "waiting_confirmation", "waiting_user", "waiting_human",
+    "waiting", "waiting_confirmation", "waiting_input", "needs_input", "waiting_user", "waiting_human",
     "paused", "failed", "interrupted",
 }
 
@@ -331,7 +331,7 @@ class WorkbenchProjection:
             "event_type": event_type,
             "kind": kind,
             "subject": subject,
-            "subject_i18n": cls._localized_text(payload, "title_i18n", subject=subject),
+            "subject_i18n": cls._localized_text(payload, "title_i18n"),
             "summary": cls._summary(payload, subject=subject),
             "summary_i18n": cls._localized_text(payload, "summary_i18n"),
             "status": status,
@@ -619,8 +619,6 @@ class WorkbenchProjection:
         cls,
         payload: Dict[str, Any],
         field: str,
-        *,
-        subject: str = "",
     ) -> Dict[str, str]:
         presentation = payload.get("presentation") if isinstance(payload.get("presentation"), dict) else {}
         values = presentation.get(field) if isinstance(presentation.get(field), dict) else {}
@@ -632,8 +630,7 @@ class WorkbenchProjection:
                 continue
             if field == "title_i18n":
                 text = cls._join_title(text, presented_subject)
-            if text != subject:
-                output[str(language)] = text[:600]
+            output[str(language)] = text[:600]
         return output
 
     @staticmethod

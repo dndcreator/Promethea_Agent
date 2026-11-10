@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal, Optional
 
 
@@ -11,6 +11,20 @@ class ToolCallProposal:
     tool_name: str
     arguments: Dict[str, Any]
     call_id: str = field(default_factory=lambda: f"call_{uuid.uuid4().hex}")
+    operation: Literal["tool_call", "capability_inspect", "capability_request"] = "tool_call"
+
+    def __post_init__(self) -> None:
+        if self.operation not in {"tool_call", "capability_inspect", "capability_request"}:
+            raise ValueError("unsupported Runtime operation kind")
+
+    @property
+    def is_capability(self) -> bool:
+        return self.operation in {"capability_inspect", "capability_request"}
+
+    def as_action(self) -> Dict[str, Any]:
+        if self.is_capability:
+            return {"action": self.operation, "id": self.call_id, **self.arguments}
+        return {"id": self.call_id, "tool_name": self.tool_name, "args": self.arguments}
 
 
 @dataclass(frozen=True)
@@ -23,7 +37,7 @@ class CapabilityRequest:
 
 @dataclass(frozen=True)
 class ModelAction:
-    kind: Literal["answer", "tool_calls", "capability_inspect", "capability_request"]
+    kind: Literal["answer", "tool_calls", "capability_inspect", "capability_request", "await_user"]
     content: str = ""
     calls: List[ToolCallProposal] = field(default_factory=list)
     capability_names: List[str] = field(default_factory=list)
@@ -34,6 +48,10 @@ class ModelAction:
 
 class InvalidModelAction(ValueError):
     code = "INVALID_MODEL_ACTION"
+
+    def __init__(self, message: str, *, reason: str = "ACTION_SCHEMA_INVALID"):
+        super().__init__(message)
+        self.reason = reason
 
 
 class AnswerDeltaProjector:
@@ -156,28 +174,71 @@ def _unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise InvalidModelAction("duplicate runtime action fields")
+            raise InvalidModelAction("duplicate runtime action fields", reason="DUPLICATE_ACTION_FIELD")
         result[key] = value
     return result
 
 
-def parse_model_action(content: str) -> ModelAction:
+def _json_envelope(content: str) -> str:
     text = str(content or "").strip()
     if not text:
-        raise InvalidModelAction("model returned no assistant content")
+        raise InvalidModelAction("model returned no assistant content", reason="JSON_ENVELOPE_INVALID")
+    if text.startswith("```"):
+        opening, newline, rest = text.partition("\n")
+        body, closing_newline, closing = rest.rpartition("\n")
+        if not newline or not closing_newline or opening.strip().lower() not in {"```", "```json"} or closing.strip() != "```":
+            raise InvalidModelAction("expected one complete JSON fence enclosing the entire response", reason="JSON_ENVELOPE_INVALID")
+        return body.strip()
+    return text
+
+
+def _invalid_constant(value):
+    raise InvalidModelAction(f"non-JSON numeric constant: {value}", reason="JSON_ENVELOPE_INVALID")
+
+
+def _multiple_objects(text: str) -> bool:
+    # Classify only: no decoded prefix is ever returned for execution.
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
     try:
-        parsed = json.loads(text, object_pairs_hook=_unique_object)
+        first, end = decoder.raw_decode(text)
+        second, _ = decoder.raw_decode(text[end:].lstrip())
+        return isinstance(first, dict) and isinstance(second, dict)
+    except ValueError:
+        return False
+
+
+def decode_action_object(text: str) -> Dict[str, Any]:
+    """Strict JSON object decoding shared by model wire formats."""
+    if not isinstance(text, str):
+        raise InvalidModelAction("runtime action JSON must be text")
+    try:
+        parsed = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
     except json.JSONDecodeError as exc:
-        raise InvalidModelAction("model returned a non-canonical runtime action") from exc
+        reason = "MULTIPLE_ACTIONS" if exc.msg == "Extra data" and _multiple_objects(text) else "JSON_ENVELOPE_INVALID"
+        raise InvalidModelAction(
+            f"model returned a non-canonical runtime action: {exc.msg} at line {exc.lineno}, column {exc.colno}; expected one complete JSON object",
+            reason=reason,
+        ) from exc
     if not isinstance(parsed, dict):
         raise InvalidModelAction("runtime action must be a JSON object")
-    raw = dict(parsed)
+    return parsed
+
+
+def parse_model_action(content: str) -> ModelAction:
+    raw = decode_action_object(_json_envelope(content))
     procedure_refs = raw.get("procedure_refs", [])
     if not isinstance(procedure_refs, list) or any(not isinstance(ref, str) for ref in procedure_refs):
         raise InvalidModelAction("procedure_refs must be an array of versioned rule references")
     action = str(raw.get("action") or "").strip().lower()
     if not action:
         raise InvalidModelAction("runtime action type is required")
+    if action == "await_user":
+        content = raw.get("content")
+        if not isinstance(content, str) or not content.strip() or len(content) > 4000:
+            raise InvalidModelAction("await_user requires non-empty content up to 4000 characters")
+        if raw.get("input_kind", "acknowledgement") not in {"acknowledgement", "text"}:
+            raise InvalidModelAction("await_user supports non-secret text or acknowledgement only")
+        return ModelAction(kind="await_user", content=content, raw=raw)
     if action == "answer":
         answer = raw.get("content", raw.get("answer", ""))
         if not isinstance(answer, str) or not answer.strip():
@@ -199,6 +260,14 @@ def parse_model_action(content: str) -> ModelAction:
         for item in source_calls:
             if not isinstance(item, dict):
                 raise InvalidModelAction("each tool call must be an object")
+            kind = item.get("action", "tool_call")
+            if kind in {"capability_inspect", "capability_request"}:
+                if "gap_update" in item or "procedure_refs" in item:
+                    raise InvalidModelAction("declare batch metadata only on the outer action")
+                calls.extend(parse_model_action(json.dumps(item, ensure_ascii=False)).calls)
+                continue
+            if kind != "tool_call":
+                raise InvalidModelAction("execution batches cannot include answer, await_user or nested batches")
             name = str(item.get("tool_name") or item.get("name") or "").strip()
             arguments = item.get("args", item.get("arguments", {}))
             if not name:
@@ -221,9 +290,14 @@ def parse_model_action(content: str) -> ModelAction:
             names = [names]
         if not isinstance(names, list) or not names:
             raise InvalidModelAction("capability_inspect requires capability_names")
+        names = [str(item) for item in names if str(item).strip()]
+        if not names:
+            raise InvalidModelAction("capability_inspect requires non-empty capability_names")
         return ModelAction(
             kind="capability_inspect",
-            capability_names=[str(item) for item in names if str(item).strip()],
+            capability_names=names,
+            calls=[ToolCallProposal("runtime.capability_inspect", {"capability_names": names},
+                                    str(raw.get("id") or f"call_{uuid.uuid4().hex}"), "capability_inspect")],
             raw=raw,
         )
     if action == "capability_request":
@@ -248,14 +322,17 @@ def parse_model_action(content: str) -> ModelAction:
             "privileged_host_action",
         }:
             raise InvalidModelAction("capability_request max_side_effect is invalid")
+        request = CapabilityRequest(
+            objective=objective,
+            required_capabilities=[str(item).strip() for item in required if str(item).strip()],
+            max_side_effect=max_side_effect,
+            preferred_modalities=[str(item).strip() for item in modalities if str(item).strip()],
+        )
         return ModelAction(
             kind="capability_request",
-            capability_request=CapabilityRequest(
-                objective=objective,
-                required_capabilities=[str(item).strip() for item in required if str(item).strip()],
-                max_side_effect=max_side_effect,
-                preferred_modalities=[str(item).strip() for item in modalities if str(item).strip()],
-            ),
+            calls=[ToolCallProposal("runtime.capability_resolve", asdict(request),
+                                    str(raw.get("id") or f"call_{uuid.uuid4().hex}"), "capability_request")],
+            capability_request=request,
             raw=raw,
         )
     raise InvalidModelAction(f"unsupported model action: {action or '<missing>'}")

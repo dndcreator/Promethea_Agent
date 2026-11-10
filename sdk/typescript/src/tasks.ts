@@ -1,7 +1,9 @@
 import type {
   Task,
   TaskCancelRequest,
+  TaskConfirmationRequest,
   TaskControlRequest,
+  TaskResumeRequest,
   TaskListResponse,
   TaskResponse,
   TaskRun,
@@ -49,7 +51,7 @@ export class TasksClient {
     return await this.control(taskId, 'pause', request, signal)
   }
 
-  async resume(taskId: string, request: TaskControlRequest = {}, signal?: AbortSignal): Promise<Task> {
+  async resume(taskId: string, request: TaskResumeRequest = {}, signal?: AbortSignal): Promise<Task> {
     return await this.control(taskId, 'resume', request, signal)
   }
 
@@ -57,10 +59,14 @@ export class TasksClient {
     return await this.control(taskId, 'cancel', request, signal)
   }
 
+  async confirm(taskId: string, request: TaskConfirmationRequest, signal?: AbortSignal): Promise<Task> {
+    return await this.control(taskId, 'confirm', request, signal)
+  }
+
   private async control(
     taskId: string,
-    operation: 'pause' | 'resume' | 'cancel',
-    request: TaskControlRequest | TaskCancelRequest,
+    operation: 'pause' | 'resume' | 'cancel' | 'confirm',
+    request: TaskControlRequest | TaskCancelRequest | TaskConfirmationRequest,
     signal?: AbortSignal,
   ): Promise<Task> {
     const response = await this.transport.json<TaskResponse>(
