@@ -10,13 +10,13 @@ from gateway.action.model_action import InvalidModelAction, parse_model_action
 from gateway.action.state_machine import ActionPhase, RuntimeActionStateMachine, InvalidActionTransition
 from gateway.model_protocol import decode_native
 from tests.test_action_service import _Core
-from tests.support.runtime import runtime_at, ScriptedModel
+from tests.support.runtime import runtime_at, ScriptedModel, user_choice
 
 
 @pytest.mark.asyncio
 async def test_wait_is_nonterminal_persistent_and_resumes_with_unverified_report():
     saved = []
-    core = _Core([{"content": json.dumps({"action": "await_user", "content": "请完成页面验证"})}])
+    core = _Core([{"content": json.dumps(user_choice("请完成页面验证"))}])
     first = await ActionService(conversation_core=core).run_action(
         goal="register", messages=[{"role": "user", "content": "register"}], user_id="alice", session_id="s",
         checkpoint_sink=lambda value: saved.append(deepcopy(value)), budget=1,
@@ -72,7 +72,7 @@ def test_wait_request_protocol_is_bounded_and_native_batches_cannot_mix_it():
 
 @pytest.mark.asyncio
 async def test_session_wait_survives_restart_and_rejects_stale_reply(tmp_path):
-    host = runtime_at(tmp_path, ScriptedModel([{"action": "await_user", "content": "请完成页面验证"}]))
+    host = runtime_at(tmp_path, ScriptedModel([user_choice("请完成页面验证")]))
     host.message_manager.create_session("s", "alice")
     first = await host.conversation_service.run_chat_loop([{"role": "user", "content": "start"}],
         user_id="alice", session_id="s")
@@ -95,7 +95,7 @@ async def test_session_wait_survives_restart_and_rejects_stale_reply(tmp_path):
 
 @pytest.mark.asyncio
 async def test_input_request_is_not_published_if_durable_save_fails():
-    core = _Core([{"content": '{"action":"await_user","content":"请操作页面"}'}])
+    core = _Core([{"content": json.dumps(user_choice("请操作页面"))}])
     published = []
 
     def fail(_):
@@ -114,7 +114,7 @@ async def test_input_request_is_not_published_if_durable_save_fails():
 @pytest.mark.parametrize("kind", ["acknowledgement", "text"])
 async def test_background_task_wait_survives_runtime_restart_without_model_polling(tmp_path, kind):
     from tests.test_background_agents import host, start, drain
-    model = ScriptedModel([{"action": "await_user", "content": "请提供说明", "input_kind": kind}])
+    model = ScriptedModel([user_choice("请提供说明", input_kind=kind)])
     tasks, runtime, conversation, background = host(tmp_path, model)
     accepted = await start(conversation, background, tools=[])
     try:

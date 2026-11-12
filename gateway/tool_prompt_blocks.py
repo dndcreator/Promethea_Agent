@@ -21,7 +21,9 @@ def build_action_protocol_prompt(*, native: bool = False) -> str:
             {"tool_name": "other.independent_tool", "args": {}},
         ]},
         "inspect": {"action": "capability_inspect", "capability_names": ["service.tool"]},
-        "wait": {"action": "await_user", "content": "the question or human action needed", "input_kind": "acknowledgement"},
+        "wait": {"action": "await_user", "content": "the question or human action needed", "input_kind": "text",
+                 "user_dependency": {"kind": "user_information", "reason": "what only this user can provide",
+                                     "gap_ids": [], "evidence_refs": []}},
         "resolve": {
             "action": "capability_request",
             "objective": "the evidence or effect needed for the next step",
@@ -45,8 +47,12 @@ def build_action_protocol_prompt(*, native: bool = False) -> str:
         "Runtime action protocol:\n"
         + output_format +
         "Only validated answer or await_user content is user-visible. "
-        "Use await_user when progress needs a human action or non-secret input. Runtime will persist a nonterminal wait "
-        "without polling the model. Do not ask for permanent passwords or credentials in chat. A user reply is a report, "
+        "Use tools or capability discovery for facts and actions the Runtime can obtain. A failed provider, "
+        "untried alternative or a reasonable reversible assumption is not a user dependency. Use await_user only "
+        "for essential user-only information, a choice only the user can make, or an evidenced human-only action. "
+        "Provide user_dependency with kind (user_information, user_choice, or human_action), a concrete reason, "
+        "current unresolved gap_ids if tracked, and evidence_refs for human_action. Request text for user_information. "
+        "Runtime persists a nonterminal wait. Do not ask for permanent passwords or credentials in chat. A user reply is a report, "
         "not proof of an external result or tool approval; inspect actual state before claiming completion. "
         "You decide the next action; the runtime alone validates availability, executes tools, and commits observations. "
         "When you know the needed capability but not the correct tool, use capability_request with capability identifiers "
@@ -73,19 +79,34 @@ def build_action_protocol_prompt(*, native: bool = False) -> str:
         "For multi-step work, optionally attach gap_update to the same action: "
         '{"revision":0,"create":[{"id":"g1","kind":"epistemic|achievement","requirement":"what remains unknown or undone"}],"updates":[],"focus":["g1"]}. '
         "Omit it for direct replies and unchanged gaps. Use the current Runtime gap revision, stable ids, and small deltas. "
+        "If an observation changes what is known about a gap, optionally attach belief_updates with stable id, gap_id, "
+        "claim and evidence_refs. Record only meaningful changes, not the same claim from another source. "
+        "Candidate beliefs are not verified results and do not close a gap. "
         'An update is {"id":"g1","state":"open|blocked|resolved","evidence_refs":["obs_..."]}. '
-        "Resolution requires supplied successful observations; inferred resolution is not verified goal completion. "
+        "You decide what evidence means for the user goal. Resolution requires supplied successful observations. "
+        "Do not invent mechanical checks for semantic judgments. Unchecked achievements may be reported as delivered only "
+        "in the final answer with evidence when all tracked gaps are resolved. Reported is not independently verified. "
+        "A check must test the required object or effect; request success alone is not evidence of the effect. "
         'A new gap may declare check={"tool_name":"registered.tool","pointer":"/result_field","expected":true} before obtaining verifying evidence. '
-        "Checks are immutable exact JSON-value assertions, not proof of full goal coverage. Reopen gaps when contradicted. "
+        "Checks are exact JSON-value assertions, not proof of full goal coverage. If an unverified check is wrong, "
+        "update that same gap with state=open and a replacement check, then gather fresh evidence; do not create a duplicate gap. "
+        "Before the first relevant tool call, separate evidence for identifying inputs from evidence for the resulting deliverable. "
+        "Declare depends_on for checks that rely on earlier verified gaps, even without using a separate reasoning tool. "
+        "For the same object or input, use check.bindings "
+        "with gap_id, pointer in the new result, and source_pointer in the prerequisite result. Trial results obtained "
+        "before prerequisites pass or from mismatched inputs are not deliverable evidence. "
         "Recent Runtime obstacles are projected beside gaps even before you have declared any; "
         "use their observation references when creating or updating relevant gaps. Failure is not evidence of resolution. "
-        "Do not discard goals or rename gaps to hide lack of progress. Final replies may report blocked or unfinished work. "
-        "When Runtime execution_control says reassess, tool execution requires gap_update.recovery="
+        "Do not discard goals or rename gaps to hide lack of progress. An answer cannot complete while tracked gaps remain. "
+        "If no safe next step remains, mark remaining gaps blocked with evidence and use answer with disposition=blocked "
+        "to report partial progress without completing the goal. In partial reports, cite only checked gaps' evidence in "
+        "answer.evidence_refs; discuss unsuccessful or hypothetical trials separately, never as verified deliverables. "
+        "When Runtime execution_control says reassess, follow its stated admission rules. When a recovery decision is required, use gap_update.recovery="
         '{"strategy":"investigate|replan|retry","reason":"brief corrective decision, not private reasoning",'
         '"evidence_refs":["current obstacle observation"],"repair_refs":[]}. '
         "Use the current gap revision. Replan/investigate must change the failed call; an exact failed-call retry "
         "requires strategy=retry and newer successful repair observations in repair_refs, with at most one such retry. "
-        "A user report is not repair verification. Capability inspection, final answer and await_user remain available. "
+        "A user report is not repair verification. Answers and human waits still need to pass their own admission checks. "
         "Recovery is not tool approval, evidence of task completion, or permission to bypass a restriction. "
         "This protocol is internal and must not be mentioned to the user.\n"
         + ("Use the function schemas for wire format." if native else f"Shapes: {json.dumps(examples, ensure_ascii=False, separators=(',', ':'))}")

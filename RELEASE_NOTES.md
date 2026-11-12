@@ -4,6 +4,53 @@
 
 ## Unreleased
 
+### 2026-11-12 22:41:40 (Asia/Shanghai, UTC+08:00)
+
+- Let the model own semantic decomposition and delivery assessment. Allow dependencies between unchecked gaps; allow an evidence-backed final answer to close an unchecked achievement as `reported`, never as `checked`. Retain independent check, evidence, and prerequisite enforcement where declared. Default fresh eligible actions to advisory Recovery, without changing approval, failed-call replay, or resource boundaries. Regenerated public contracts; 116 focused tests passed.
+
+### 2026-11-12 22:24:08 (Asia/Shanghai, UTC+08:00)
+
+- Run a live 2x2 Goal Gap ablation on one controlled recovery and delivery task, two repetitions per profile. All eight runs produced the correct fixture artifact; every profile verified 1/2 deliveries. Baseline, semantic context only, advisory Recovery only, and both used 14/11/9/13 requests respectively. Only baseline saw Recovery denials (2). Invalid dependency and evidence proposals remain visible failure modes. Total: 47 requests, $0.0481047 conservative cost, no budget stop. Keep defaults unchanged; evidence: ignored `.tmp/evaluations/goal-gap-ablation-live-20261112/`.
+
+### 2026-11-12 22:20:13 (Asia/Shanghai, UTC+08:00)
+
+- Fix premature delivery claims: unchecked achievement evidence stays open with inferred support. Allow an unverified check to be replaced on the same gap with a fresh evidence boundary; reject known schema type mismatches and declared transport metadata. Regenerate public contracts; 80 local regressions passed.
+- Add opt-in Goal Gap ablation profiles for a compact objective/evidence view and advisory Recovery. Hold authorization, failed-call replay and verification rules constant. Four fixed-trajectory profiles verified delivery; the advisory profiles used four model decisions rather than five. The explicit approval regression also passed.
+
+### 2026-11-12 00:08:46 (Asia/Shanghai, UTC+08:00)
+
+- Treat the Action step allowance as a soft threshold for foreground chat and durable chat Tasks. Tracked goals can earn one bounded extension from recent Goal Gap progress plus a fresh tool observation, including during Recovery. Preserve explicit cost and token limits, approval, and checkpoint behavior. Verified 110 local regressions.
+- Live commute trial: the model repaired its first `task.start` call after inspecting the schema and created a durable Task. The evaluator reached its observation deadline with the Task still running and zero checked Goal Gaps. The run used 21 metered requests and a conservative $0.1388991 of the $0.50 authorization; it was not stopped by cost admission. The deployment snapshot preceded the durable Task extension change, so only the local system test verifies that extension. Evidence: ignored `.tmp/evaluations/morning-commute-soft-steps-live-20261112/`.
+
+### 2026-11-11 23:57:24 (Asia/Shanghai, UTC+08:00)
+
+- Stop treating a novel tool result as verified progress for tracked Goal Gaps. Add bounded, evidence-referenced Task Beliefs through the existing delta and checkpoint; repeated claims do not add candidate progress, and only checked resolution clears tracked Recovery. Preserve read-only exploration and the untracked-run behavior. No additional model call or long-term memory write. Regenerated contracts; 71 focused tests passed.
+
+### 2026-11-11 23:38:10 (Asia/Shanghai, UTC+08:00)
+
+- Separate successful exploratory calls from verified partial delivery. For tracked Goal Gaps, stopped and blocked answers can cite only evidence from passed checks; rejected goal updates cannot support a stopped report. Ask for input prerequisites and exact bindings before dependent work, independently of Reasoning Tree use. Free-text explanations remain model-authored and are not semantic proof.
+
+### 2026-11-11 23:22:11 (Asia/Shanghai, UTC+08:00)
+
+- Run one live read-only commute trial through the isolated production chat API after the Reasoning Tree and Goal Gaps integration. The Agent switched from failed searches to browser and routing tools; two screenshot attachments reached the model and one archived observation was retrieved. OSRM returned a route for an assumed origin, not a verified housing-complex location; no public-transit itinerary was verified. The Action step limit produced a model-authored unverified report with all three gaps open. No `reasoning.run` invocation or durable Task, so this run did not exercise the new bridge or cross-chat continuation. Nineteen settled requests cost a conservative $0.1120872 under the authorized $0.50, with no cost admission stop. Evidence: ignored `.tmp/evaluations/morning-commute-delivery-live-20261111/`.
+
+### 2026-11-11 23:03:19 (Asia/Shanghai, UTC+08:00)
+
+- Connect selected Reasoning Tree steps to the existing Goal Gaps ledger when they declare an independent structured delivery check. Pruned branches and reasoning summaries are not completion evidence. Action imports the checks as open gaps; committed tool evidence is required before tracked delivery can be marked complete. No new service or model call.
+
+### 2026-11-11 22:52:29 (Asia/Shanghai, UTC+08:00)
+
+- Extend Goal Gaps with verified prerequisites and optional exact bindings across committed tool results. A result from an unverified, earlier, or mismatched input cannot close a dependent gap; reopening or replacing prerequisite evidence invalidates downstream completion and points the Action loop back to unresolved prerequisite checks. Reuse Task/Action state and generated public contracts. Sixty-seven focused tests pass; no paid calls.
+
+### 2026-11-11 21:36:35 (Asia/Shanghai, UTC+08:00)
+
+- Repeat the live commute trial after terminal and Recovery changes. The model keeps trying distinct read-only sources after search failures and retrieves an archived observation. It gives an unverified progress report at the Action step limit, not the currency limit. A real road-routing response used an unverified origin that snaps to Dongguantou Road, inconsistent with the independently checked housing-complex location near Liuliqiao; the published timings are not valid commute evidence. No Task was created and no cross-chat resume was tested. Fifteen settled requests cost a conservative $0.1076904 under the authorized $0.50. Evidence: ignored `.tmp/evaluations/morning-commute-recovery-live-20261111/`.
+
+### 2026-11-10 22:42:01 (Asia/Shanghai, UTC+08:00)
+
+- Gate terminal Agent decisions in Runtime. A durable user wait needs a typed user-only dependency, any applicable unresolved Goal Gap IDs, and committed evidence for a human-only action. A completion answer cannot close tracked unresolved gaps. An evidence-backed blocked report uses `goal_blocked`, retains the checkpoint, and pauses the Task rather than completing it. Budget-limited reports still distinguish delivery from goal verification.
+- Let new registry-classified read-only investigations proceed during Recovery under normal tool policy. Count repeated no-progress trials rather than all distinct failures toward early termination; preserve exact failed-call replay checks, approval, and normal Action budgets. Verified 229 Python regression tests and a 25-test focused rerun; contract generation and SDK/UI production build passed. No paid calls.
+
 ### 2026-11-10 21:45:29 (Asia/Shanghai, UTC+08:00)
 
 - Repeat the commute goal with the real model and the new durable chat Task tools. The first wire request contains both the handoff guidance and the available `task.start` entry, but the model chooses ordinary chat tool calls and declares three Goal Gaps without handing off. Search times out, public geocoding is blocked by the DNS sandbox, and the retrieved map homepage contains no route. Recovery stops the turn and the model asks for clarification. No Task or map pixels are produced; the cross-chat phase is not reached. Five settled requests cost a conservative $0.0213294 against the authorized $0.50; budget admission did not stop the run. The scripted Task continuation acceptance passes, but real automatic admission does not pass this case. Evidence: ignored `.tmp/evaluations/morning-commute-task-live-20261110/`.

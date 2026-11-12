@@ -2113,9 +2113,48 @@
       "title": "FileUploadResponse",
       "type": "object"
     },
+    "GapBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "gap_id": {
+          "title": "Gap Id",
+          "type": "string"
+        },
+        "pointer": {
+          "maxLength": 300,
+          "pattern": "^(?:/(?:[^~]|~[01])*)*$",
+          "title": "Pointer",
+          "type": "string"
+        },
+        "source_pointer": {
+          "maxLength": 300,
+          "pattern": "^(?:/(?:[^~]|~[01])*)*$",
+          "title": "Source Pointer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gap_id",
+        "pointer",
+        "source_pointer"
+      ],
+      "title": "GapBinding",
+      "type": "object"
+    },
     "GapChange": {
       "additionalProperties": false,
       "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GapCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "evidence_refs": {
           "items": {
             "type": "string"
@@ -2148,6 +2187,14 @@
     "GapCheck": {
       "additionalProperties": false,
       "properties": {
+        "bindings": {
+          "items": {
+            "$ref": "#/$defs/GapBinding"
+          },
+          "maxItems": 4,
+          "title": "Bindings",
+          "type": "array"
+        },
         "expected": {
           "title": "Expected"
         },
@@ -2175,6 +2222,14 @@
     "GapDelta": {
       "additionalProperties": false,
       "properties": {
+        "belief_updates": {
+          "items": {
+            "$ref": "#/$defs/TaskBelief"
+          },
+          "maxItems": 4,
+          "title": "Belief Updates",
+          "type": "array"
+        },
         "create": {
           "items": {
             "$ref": "#/$defs/GapSpec"
@@ -2288,6 +2343,14 @@
           ],
           "default": null
         },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Depends On",
+          "type": "array"
+        },
         "id": {
           "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,47}$",
           "title": "Id",
@@ -2334,6 +2397,14 @@
           "title": "Declared At",
           "type": "string"
         },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Depends On",
+          "type": "array"
+        },
         "evidence_refs": {
           "items": {
             "type": "string"
@@ -2376,6 +2447,7 @@
           "enum": [
             "none",
             "inferred",
+            "reported",
             "checked"
           ],
           "title": "Support",
@@ -2922,7 +2994,8 @@
         "stop_reason": {
           "enum": [
             "budget_exhausted",
-            "recovery_exhausted"
+            "recovery_exhausted",
+            "goal_blocked"
           ],
           "title": "Stop Reason",
           "type": "string"
@@ -3921,6 +3994,43 @@
         "revision"
       ],
       "title": "Task",
+      "type": "object"
+    },
+    "TaskBelief": {
+      "additionalProperties": false,
+      "properties": {
+        "claim": {
+          "maxLength": 320,
+          "minLength": 1,
+          "title": "Claim",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "gap_id": {
+          "title": "Gap Id",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[a-zA-Z][a-zA-Z0-9_-]{0,47}$",
+          "title": "Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "gap_id",
+        "claim",
+        "evidence_refs"
+      ],
+      "title": "TaskBelief",
       "type": "object"
     },
     "TaskCancelRequest": {

@@ -6,7 +6,7 @@ import pytest
 
 from config import GoalGapConfig, PrometheaConfig
 from gateway.action import ActionService
-from gateway.goal_gaps import GoalGapState, apply_gap_delta, gap_outcome, gap_projection, observe_gap_step
+from gateway.goal_gaps import GoalGapState, answer_disposition, apply_gap_delta, gap_outcome, gap_projection, observe_gap_step, reasoning_delivery_gaps
 from gateway.public_contracts import Task
 from gateway.public_views import public_task
 from gateway.task_service import TaskService, TaskRevisionConflict, TaskExecutionConflict
@@ -51,6 +51,74 @@ def current_revision(messages):
     return goal_context(messages)["revision"]
 
 
+@pytest.mark.asyncio
+async def test_budget_progress_report_cannot_cite_trial_as_verified_delivery():
+    def premature_report(messages):
+        gap = goal_context(messages)["gaps"][0]
+        assert gap["state"] == "open"
+        return {"action": "answer", "content": "Verified route from the requested address",
+                "evidence_refs": [trial_refs[0]]}
+
+    trial_refs = []
+    def second_step(messages):
+        trial_refs.append(last_observation(messages)["observation_id"])
+        return {"action": "tool_call", "tool_name": "document.validate", "args": {}}
+
+    core = Core([{"action": "tool_call", "tool_name": "route.trial", "args": {},
+                  "gap_update": {"revision": 0, "create": [SPEC]}}, second_step, premature_report])
+    out = await ActionService(conversation_core=core).run_action(
+        goal="Deliver a verified result", messages=[], budget=2,
+        tool_executor=lambda *_: {"valid": False})
+    assert out["execution_outcome"]["response_source"] == "runtime"
+    assert out["execution_outcome"]["goal_status"] == "unverified"
+    assert "Verified route" not in out["content"]
+
+
+def test_reasoning_proposals_keep_only_independent_checks_with_selected_prerequisites():
+    child = {**SPEC, "id": "child", "depends_on": ["artifact"], "check": {
+        **SPEC["check"], "bindings": [{"gap_id": "artifact", "pointer": "/id", "source_pointer": "/id"}]}}
+    proposals = reasoning_delivery_gaps("tree", [
+        child, SPEC, {**SPEC, "id": "pruned", "depends_on": ["absent"]},
+        {**SPEC, "id": "aggregate", "check": {**SPEC["check"], "tool_name": "reasoning.run"}},
+    ])
+    parent, dependent = proposals
+    assert parent["id"] != "artifact"
+    assert dependent["depends_on"] == [parent["id"]]
+    assert dependent["check"]["bindings"][0]["gap_id"] == parent["id"]
+    assert parent["id"] == reasoning_delivery_gaps("tree", [SPEC])[0]["id"]
+
+
+@pytest.mark.asyncio
+async def test_selected_reasoning_step_gates_answer_until_independent_verification(tmp_path):
+    tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
+    task_id = tasks.create_task(user_id="u", title="Export", objective="Export")["task_id"]
+    proposals = reasoning_delivery_gaps("tree", [SPEC])
+    gap_id = proposals[0]["id"]
+
+    def premature(messages):
+        assert goal_context(messages)["gaps"][0]["id"] == gap_id
+        assert tasks.get_task(task_id)["goal_gaps"]["gaps"][0]["state"] == "open"
+        return {"action": "answer", "content": "Done"}
+
+    def verify(messages):
+        assert "GOAL_UNRESOLVED" in str(messages)
+        return {"action": "tool_call", "tool_name": "document.validate", "args": {}}
+
+    def final(messages):
+        return {"action": "answer", "content": "Validated", "gap_update": {
+            "revision": current_revision(messages), "updates": [{"id": gap_id, "state": "resolved",
+                "evidence_refs": [last_observation(messages)["observation_id"]]}]}}
+
+    core = Core([{"action": "tool_call", "tool_name": "reasoning.run", "args": {"objective": "Export"}},
+                 premature, verify, final])
+    out = await ActionService(conversation_core=core, task_service=tasks).run_action(
+        goal="Export", messages=[], user_id="u", session_id="s", run_context=SimpleNamespace(task_id=task_id),
+        tool_executor=lambda name, *_: {"delivery_gaps": proposals} if name == "reasoning.run" else {"valid": True})
+    assert out["status"] == "success"
+    assert out["goal_progress"]["checks_passed"] == 1
+    assert tasks.get_task(task_id)["goal_gaps"]["gaps"][0]["state"] == "resolved"
+
+
 def test_checks_are_real_but_not_proof_of_full_goal_coverage():
     state = declared()
     resolved = apply_gap_delta(state, resolve(state), [observation()])
@@ -59,6 +127,32 @@ def test_checks_are_real_but_not_proof_of_full_goal_coverage():
     assert gap_outcome(resolved)["goal_verification"] == "unknown"
     assert gap_projection(resolved)["gaps"][0]["id"] == "artifact"
     assert state.gaps[0].state == "open"
+
+
+def test_task_belief_is_candidate_only_and_duplicate_sources_do_not_add_progress():
+    state = declared()
+    state.recovery.mode = "trial"
+    page = observation({"address": "58 West Road"}, id="page", tool="search")
+    state = observe_gap_step(state, [], [page])
+    assert state.recovery.mode == "reassess"
+    assert not state.recent[-1].progress and not state.recent[-1].candidate_progress
+    belief = {"id": "origin", "gap_id": "artifact", "claim": "Found a candidate address", "evidence_refs": ["page"]}
+    delta = {"revision": state.revision, "belief_updates": [belief]}
+    with pytest.raises(ValueError, match="successful Runtime observations"):
+        apply_gap_delta(state, delta, [])
+    state = apply_gap_delta(state, delta, [page])
+    assert state.recent[-1].candidate_progress and not state.recent[-1].progress
+    assert state.recovery.mode == "reassess"
+    assert gap_projection(state)["candidate_beliefs"][0] == belief
+    assert GoalGapState.model_validate_json(state.model_dump_json()) == state
+
+    other = observation({"address": "58 West Road"}, id="other", tool="lookup")
+    state = observe_gap_step(state, [], [other])
+    duplicate = {**belief, "id": "same_address", "evidence_refs": ["other"]}
+    unchanged = apply_gap_delta(state, {"revision": state.revision, "belief_updates": [duplicate]}, [page, other])
+    assert unchanged == state and not unchanged.recent[-1].candidate_progress
+    checked = apply_gap_delta(state, resolve(state), [page, other, observation()])
+    assert checked.recent[-1].progress and checked.recovery.mode == "execute"
 
 
 @pytest.mark.parametrize("item", [
@@ -93,11 +187,70 @@ def test_semantic_resolution_remains_inferred_and_gap_identity_is_immutable():
     state = apply_gap_delta(GoalGapState(), {"revision": 0, "create": [spec]}, [])
     state = apply_gap_delta(state, resolve(state), [observation()])
     assert state.gaps[0].support == "inferred"
+    assert state.gaps[0].state == "open"
     assert gap_outcome(state)["checks_passed"] == 0
+    with pytest.raises(ValueError, match="cannot complete"):
+        answer_disposition(state, blocked=False, observations=[])
     for delta in ({"revision": 0}, {"revision": state.revision, "create": [spec]},
-                  {"revision": state.revision, "focus": ["artifact"]}, {"revision": state.revision, "delete": ["artifact"]}):
+                  {"revision": state.revision, "delete": ["artifact"]}):
         with pytest.raises(ValueError):
             apply_gap_delta(state, delta, [])
+    earlier = observation()
+    state = apply_gap_delta(state, {"revision": state.revision, "updates": [
+        {"id": "artifact", "state": "open", "check": SPEC["check"]}]}, [earlier])
+    with pytest.raises(ValueError, match="check did not pass"):
+        apply_gap_delta(state, resolve(state), [earlier])
+    checked = apply_gap_delta(state, resolve(state, "fresh"), [earlier, observation(id="fresh")])
+    assert checked.gaps[0].support == "checked"
+
+
+@pytest.mark.parametrize("tool, pointer, expected, reason", [
+    ("web.search", "/results/0/title", True, "value type"),
+    ("web.fetch_json", "/status", 200, "Transport metadata"),
+])
+def test_registered_output_schema_rejects_invalid_goal_checks(tool, pointer, expected, reason):
+    from agentkit.tools.standard.web_tools import WebFetchJsonTool, WebSearchTool
+
+    schemas = {"web.fetch_json": WebFetchJsonTool.output_schema, "web.search": WebSearchTool.output_schema}
+    spec = {**SPEC, "check": {"tool_name": tool, "pointer": pointer, "expected": expected}}
+    with pytest.raises(ValueError, match=reason):
+        apply_gap_delta(GoalGapState(), {"revision": 0, "create": [spec]}, [], output_schema=schemas.__getitem__)
+
+
+@pytest.mark.asyncio
+async def test_model_can_deliver_semantic_result_with_unchecked_prerequisite():
+    gaps = [
+        {"id": "source", "kind": "epistemic", "requirement": "Identify the relevant source"},
+        {"id": "summary", "kind": "achievement", "requirement": "Deliver an evidence-based summary",
+         "depends_on": ["source"]},
+    ]
+
+    def deliver(messages):
+        ref = last_observation(messages)["observation_id"]
+        return {"action": "answer", "content": "The source supports the conclusion, with limits.",
+                "evidence_refs": [ref], "gap_update": {"revision": current_revision(messages), "updates": [
+                    {"id": gap["id"], "state": "resolved", "evidence_refs": [ref]} for gap in reversed(gaps)
+                ]}}
+
+    model = Core([{"action": "tool_call", "tool_name": "document.read", "args": {},
+                   "gap_update": {"revision": 0, "create": gaps}}, deliver])
+    out = await ActionService(conversation_core=model).run_action(
+        goal="Summarize the source", messages=[], tool_executor=lambda *_: {"text": "Source contents"})
+    assert out["status"] == "success" and out.get("execution_outcome") is None
+    assert [(gap["state"], gap["support"]) for gap in out["goal_gaps"]["gaps"]] == [
+        ("resolved", "inferred"), ("resolved", "reported")]
+    assert out["goal_progress"]["checks_passed"] == 0
+    assert out["goal_progress"]["goal_verification"] == "unknown"
+    assert GoalGapState.model_validate(out["goal_gaps"]).gaps[1].state == "resolved"
+
+
+def test_semantic_delivery_is_not_committed_with_other_outstanding_work():
+    spec = {key: value for key, value in SPEC.items() if key != "check"}
+    state = apply_gap_delta(GoalGapState(), {"revision": 0, "create": [
+        spec, {"id": "source", "kind": "epistemic", "requirement": "Verify the source"}]}, [])
+    with pytest.raises(ValueError, match="other tracked gaps"):
+        apply_gap_delta(state, resolve(state), [observation()], allow_inferred_delivery=True)
+    assert state.gaps[0].state == "open"
 
 
 def test_capacity_and_short_projection_do_not_discard_outstanding_ids():
@@ -145,13 +298,57 @@ def test_checks_remain_visible_without_explicit_focus():
     assert gap_projection(state)["focus_checks"]["artifact"] == SPEC["check"]
 
 
+def test_dependent_check_requires_verified_matching_input_and_reopens_on_change():
+    location = {"id": "place", "kind": "epistemic", "requirement": "Verify origin",
+                "check": {"tool_name": "places.lookup", "pointer": "/matched", "expected": True}}
+    route = {"id": "route", "kind": "achievement", "requirement": "Calculate route from verified origin",
+             "depends_on": ["place"], "check": {"tool_name": "routing.plan", "pointer": "/ok", "expected": True,
+                 "bindings": [{"gap_id": "place", "pointer": "/origin", "source_pointer": "/coordinates"}]}}
+    state = apply_gap_delta(GoalGapState(), {"revision": 0, "create": [route, location]}, [])
+
+    def fact(id, name, value):
+        return {"observation_id": id, "tool_name": name, "ok": True, "structured_result": value}
+
+    def resolve(id, ref):
+        return {"id": id, "state": "resolved", "evidence_refs": [ref]}
+
+    trial = fact("trial", "routing.plan", {"ok": True, "origin": [1, 2]})
+    place = fact("place", "places.lookup", {"matched": True, "coordinates": [1, 2]})
+    wrong = fact("wrong", "routing.plan", {"ok": True, "origin": [4, 5]})
+    correct = fact("correct", "routing.plan", {"ok": True, "origin": [1, 2]})
+    with pytest.raises(ValueError, match="prerequisites"):
+        apply_gap_delta(state, {"revision": 1, "updates": [resolve("route", "trial")]}, [trial])
+    for ref in ("trial", "wrong"):
+        with pytest.raises(ValueError, match="declared check did not pass"):
+            apply_gap_delta(state, {"revision": 1, "updates": [resolve("route", ref), resolve("place", "place")]},
+                            [trial, place, wrong])
+    checked = apply_gap_delta(state, {"revision": 1, "updates": [resolve("route", "correct"), resolve("place", "place")]},
+                              [trial, place, wrong, correct])
+    reopened = apply_gap_delta(checked, {"revision": 2, "updates": [{"id": "place", "state": "open"}]},
+                               [trial, place, wrong, correct])
+    assert all(gap.state == "open" and not gap.evidence_refs for gap in reopened.gaps)
+
+
+def test_cyclic_goal_dependencies_are_rejected():
+    parent = {**SPEC, "depends_on": ["other"]}
+    child = {**SPEC, "id": "other", "depends_on": [SPEC["id"]]}
+    with pytest.raises(ValueError, match="cycles"):
+        apply_gap_delta(GoalGapState(), {"revision": 0, "create": [parent, child]}, [])
+
+
 @pytest.mark.asyncio
 async def test_confirmation_restores_task_scope_to_new_request_context(tmp_path):
     tasks = TaskService(storage_path=str(tmp_path / "tasks.json"))
     task_id = tasks.create_task(user_id="u", title="Goal", objective="Goal")["task_id"]
     first = {"action": "tool_call", "tool_name": "document.validate", "args": {},
              "gap_update": {"revision": 0, "create": [SPEC]}}
-    core = Core([first, {"action": "answer", "content": "Finished"}])
+    def verified(messages):
+        obs = last_observation(messages)
+        return {"action": "answer", "content": "Finished", "gap_update": {
+            "revision": current_revision(messages), "updates": [{"id": "artifact", "state": "resolved",
+                "evidence_refs": [obs["observation_id"]]}]}}
+
+    core = Core([first, verified])
     service = ActionService(conversation_core=core, task_service=tasks)
     pending = await service.run_action(goal="Goal", messages=[], user_id="u", session_id="s",
                                        run_context=SimpleNamespace(task_id=task_id, task_run_id=None), confirmation_resolver=lambda *_: True)
@@ -235,12 +432,19 @@ async def test_invalid_gap_delta_does_not_add_retry_or_replace_valid_assistant_r
 @pytest.mark.asyncio
 async def test_confirmation_checkpoint_restores_gap_state_on_refusal():
     first = {"action": "tool_call", "tool_name": "document.validate", "args": {}, "gap_update": {"revision": 0, "create": [SPEC]}}
-    service = ActionService(conversation_core=Core([first, {"action": "answer", "content": "Not executed"}]))
+    def declined(messages):
+        obs = last_observation(messages)
+        return {"action": "answer", "content": "Not executed", "disposition": "blocked", "gap_update": {
+            "revision": current_revision(messages), "updates": [{"id": "artifact", "state": "blocked",
+                "evidence_refs": [obs["observation_id"]]}]}}
+
+    service = ActionService(conversation_core=Core([first, declined]))
     pending = await service.run_action(goal="Validate", messages=[], confirmation_resolver=lambda *_: True)
     assert pending["goal_gaps"]["gaps"][0]["state"] == "open"
     rejected = await service.reject_pending_action(pending=pending, user_config=None, session_id="s", user_id="u", run_context=None,
                                                   tool_executor=lambda *_: pytest.fail("must not execute"), confirmation_resolver=None)
-    assert rejected["goal_gaps"]["gaps"][0]["state"] == "open" and rejected["goal_gaps"]["recent"] == []
+    assert rejected["goal_gaps"]["gaps"][0]["state"] == "blocked" and rejected["goal_gaps"]["recent"] == []
+    assert rejected["execution_outcome"]["stop_reason"] == "goal_blocked"
 
 
 def test_task_gap_state_is_durable_isolated_and_prevents_false_completion(tmp_path):
@@ -294,8 +498,9 @@ async def test_action_uses_durable_task_gap_state_across_runtime_instances(tmp_p
     tasks = TaskService(storage_path=path)
     task_id = tasks.create_task(user_id="u", title="Export", objective="Export")["task_id"]
     context = SimpleNamespace(task_id=task_id, task_run_id=None)
-    first = Core([{"action": "answer", "content": "Need validation", "gap_update": {"revision": 0, "create": [SPEC]}}])
-    await ActionService(conversation_core=first, task_service=tasks).run_action(goal="Export", messages=[], user_id="u", run_context=context)
+    first = Core([{"action": "answer", "content": "Need validation", "gap_update": {"revision": 0, "create": [SPEC]}},
+                  {"action": "answer", "content": "Validation still pending."}])
+    await ActionService(conversation_core=first, task_service=tasks).run_action(goal="Export", messages=[], user_id="u", run_context=context, budget=1)
     assert context.goal_gaps["summary"]["open"] == 1
     tasks = TaskService(storage_path=path)
     def final(messages):

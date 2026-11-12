@@ -256,7 +256,7 @@ class ToolResult(PublicContract):
 class RunOutcome(PublicContract):
     """Turn termination is not proof that the user's goal was delivered."""
 
-    stop_reason: Literal["budget_exhausted", "recovery_exhausted"]
+    stop_reason: Literal["budget_exhausted", "recovery_exhausted", "goal_blocked"]
     goal_status: Literal["unverified"] = "unverified"
     response_source: Literal["model", "runtime"] = "model"
 

@@ -258,10 +258,17 @@ export interface CanvasDocument {
   root: CanvasText | CanvasInput | CanvasCheckbox | CanvasSelect | CanvasButton | CanvasTable | CanvasStack
 }
 
+export interface GapBinding {
+  gap_id: string
+  pointer: string
+  source_pointer: string
+}
+
 export interface GapCheck {
   tool_name: string
   pointer: string
   expected: unknown
+  bindings?: Array<GapBinding>
 }
 
 export interface GoalGap {
@@ -269,9 +276,10 @@ export interface GoalGap {
   kind: "epistemic" | "achievement"
   requirement: string
   check?: GapCheck | null
+  depends_on?: Array<string>
   declared_at?: string
   state?: "open" | "blocked" | "resolved"
-  support?: "none" | "inferred" | "checked"
+  support?: "none" | "inferred" | "reported" | "checked"
   evidence_refs?: Array<string>
 }
 
@@ -286,6 +294,7 @@ export interface GapChange {
   id: string
   state: "open" | "blocked" | "resolved"
   evidence_refs?: Array<string>
+  check?: GapCheck | null
 }
 
 export interface GapRecoveryDecision {
@@ -300,6 +309,14 @@ export interface GapSpec {
   kind: "epistemic" | "achievement"
   requirement: string
   check?: GapCheck | null
+  depends_on?: Array<string>
+}
+
+export interface TaskBelief {
+  id: string
+  gap_id: string
+  claim: string
+  evidence_refs: Array<string>
 }
 
 export interface GapDelta {
@@ -308,6 +325,7 @@ export interface GapDelta {
   updates?: Array<GapChange>
   focus?: Array<string> | null
   recovery?: GapRecoveryDecision | null
+  belief_updates?: Array<TaskBelief>
 }
 
 export interface RunRequest {
@@ -380,7 +398,7 @@ export interface InputRequest {
 }
 
 export interface RunOutcome {
-  stop_reason: "budget_exhausted" | "recovery_exhausted"
+  stop_reason: "budget_exhausted" | "recovery_exhausted" | "goal_blocked"
   goal_status?: string
   response_source?: "model" | "runtime"
 }

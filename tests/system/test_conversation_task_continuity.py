@@ -13,7 +13,7 @@ import requests
 from gateway.http.routes import auth
 from tests.support.http_runtime import app_at
 from tests.support.production import prepare_deployment, production_server
-from tests.support.runtime import ScriptedModel, observation_fact
+from tests.support.runtime import ScriptedModel, goal_context, observation_fact
 
 
 def call(name, **args):
@@ -113,12 +113,70 @@ async def test_chat_handoff_restart_and_resume_from_another_chat(tmp_path, monke
 
 
 @pytest.mark.asyncio
+async def test_durable_chat_task_can_verify_at_soft_step_boundary(tmp_path, monkeypatch):
+    def read(messages):
+        return {**call("workspace.read_file", path="artifact.txt"), "gap_update": {
+            "revision": goal_context(messages)["revision"], "belief_updates": [
+                {"id": "written", "gap_id": "artifact", "claim": "The artifact has been written",
+                 "evidence_refs": [observation_fact(messages)["observation_id"]]}]}}
+
+    def finish(messages):
+        assert any("Runtime granted" in str(row.get("content")) for row in messages)
+        return {**answer("Verified the artifact."), "gap_update": {
+            "revision": goal_context(messages)["revision"], "updates": [
+                {"id": "artifact", "state": "resolved", "evidence_refs": [observation_fact(messages)["observation_id"]]}]}}
+
+    model = ScriptedModel([call("task.start", title="Verify artifact"), answer("Started."),
+        {**call("workspace.write_file", path="artifact.txt", content="proof"), "gap_update": {
+            "revision": 0, "create": [{"id": "artifact", "kind": "achievement", "requirement": "Verify file content",
+                "check": {"tool_name": "workspace.read_file", "pointer": "/content", "expected": "proof"}}]}},
+        read, finish])
+    app, host = app_at(tmp_path, model, monkeypatch, durable_chat=True)
+    settings = host.config_service.get_merged_config("alice")
+    settings["action"].update(max_steps=2, progress_grace_steps=2)
+    monkeypatch.setattr(host.config_service, "get_merged_config", lambda _: settings)
+    try:
+        async with browser(app) as client:
+            assert await chat(client, "origin", "Write and verify an artifact") == "Started."
+            tasks = (await client.get("/api/tasks")).json()["tasks"]
+            task = await settled(client, tasks[0]["task_id"], "completed")
+            assert task["runs"][0]["output"] == "Verified the artifact."
+    finally:
+        await host.task_runtime.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_direct_chat_does_not_create_a_task(tmp_path, monkeypatch):
     app, host = app_at(tmp_path, ScriptedModel([answer("Four.")]), monkeypatch, durable_chat=True)
     async with browser(app) as client:
         assert await chat(client, "quick", "What is two plus two?") == "Four."
         assert (await client.get("/api/tasks")).json()["tasks"] == []
     await host.task_runtime.shutdown()
+
+@pytest.mark.asyncio
+async def test_blocked_report_does_not_complete_durable_task(tmp_path, monkeypatch):
+    from tests.support.runtime import goal_context
+
+    def blocked(messages):
+        observation = observation_fact(messages)
+        assert observation["status"] == "failed"
+        return {**answer("The source file is missing."), "disposition": "blocked", "gap_update": {
+            "revision": goal_context(messages)["revision"],
+            "updates": [{"id": "source", "state": "blocked", "evidence_refs": [observation["observation_id"]]}]}}
+
+    model = ScriptedModel([call("task.start", title="Read source"), answer("Started."),
+        {**call("workspace.read_file", path="missing.txt"), "gap_update": {"revision": 0,
+            "create": [{"id": "source", "kind": "epistemic", "requirement": "Read the source file"}]}}, blocked])
+    app, host = app_at(tmp_path, model, monkeypatch, durable_chat=True)
+    try:
+        async with browser(app) as client:
+            await chat(client, "origin", "Read the source file and compare the results")
+            task_id = (await client.get("/api/tasks")).json()["tasks"][0]["task_id"]
+            paused = await settled(client, task_id, "paused")
+            assert paused["status"] == "paused" and paused["goal_progress"]["blocked"] == 1
+            assert paused["runs"][0]["output"] == "The source file is missing."
+    finally:
+        await host.task_runtime.shutdown()
 
 
 @pytest.mark.asyncio

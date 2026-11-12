@@ -93,28 +93,53 @@ After its real observation, update with the current revision:
 
 The revision includes monitoring-state commits, so it must be read from the
 current projection, not guessed from the number of model updates. IDs,
-requirements and checks are immutable. States are `open`, `blocked`, or
-`resolved`; reopening is supported. There is no silent deletion, supersession,
-dependency graph, or unbounded recursive goal decomposition in this version.
+and requirements are immutable. An unverified check may be replaced by
+reopening the same gap, without evidence, and declaring a new check. States are
+`open`, `blocked`, or `resolved`; there is no silent deletion or unbounded
+recursive goal decomposition.
 
+The model owns decomposition and the semantic interpretation of observations.
 Resolution requires successful observations supplied by Runtime. Without a
-check it is `inferred`, not independently verified. With a check, Runtime must
+check, knowledge can resolve as `inferred`. An achievement stays open during
+execution; a final answer can close it as `reported` once all tracked gaps
+are resolved. Neither status counts as independent verification.
+With a check, Runtime must
 match the registered tool identifier and exact JSON value at the JSON Pointer.
 The check must precede the verifying observation. Causal observation boundaries,
 not wall-clock comparisons, enforce this. Reopening invalidates the previous
 verification boundary. Refused or failed actions cannot establish resolution.
+Declared output schema types and fields marked as transport metadata constrain
+admission, but do not prove that a check is semantically sufficient.
+
+A gap can declare `depends_on` when a downstream result needs earlier inputs.
+For semantic resolution, prerequisites must be resolved. For a checked result,
+the prerequisites also require passed checks. The
+dependent Observation must follow the prerequisite Observations; optional
+`check.bindings` compare exact JSON values between those receipts. Replacing or
+reopening a prerequisite invalidates dependent results. Runtime still permits
+exploration before verification, but cannot use the trial as a completed gap.
+Dependencies are local to the Goal Gap ledger; they do not add a second task
+or reasoning graph.
 
 Passing a model-declared check proves only that specific assertion, not its
 relevance or coverage of the user's entire goal. `checks_passed` is reported
 separately; overall `goal_verification` remains `unknown`. TaskService still
-derives Task lifecycle status. A finished execution with outstanding tracked
-gaps becomes `waiting_user`, while a final assistant reply can explain unfinished
-work without pretending to have completed it. Tasks without gaps retain their
-existing lifecycle behavior. Explicit user completion remains available.
+derives Task lifecycle status. During execution, an answer cannot complete with
+open or blocked tracked gaps. An explicit blocked report may settle the current
+slice after every remaining gap is marked blocked with evidence. It carries
+`goal_blocked` and an unverified goal, so Task drivers pause rather than complete.
+Budget-limited final reports also remain unverified. An untracked direct reply
+does not require fabricated gaps.
 
-Invalid gap deltas do not discard a valid tool action or assistant answer. The
-rejection becomes bounded feedback on the next ordinary model step, without a
-dedicated retry. Persistence or execution-fencing failures still fail closed.
+Before persisting `await_user`, Runtime checks a typed user dependency, its
+references to unresolved gaps, and any cited observations. User-only information
+requires a text request; a human-only action needs Runtime evidence. The model
+still judges whether the information or decision genuinely belongs to the user.
+Tool failures alone do not establish that dependency.
+
+Invalid gap deltas become bounded feedback on the next ordinary model step.
+A terminal decision that depends on a rejected update cannot pass. Persistence
+or execution-fencing failures still fail closed.
 This does not bypass recovery admission: when a recovery decision is required,
 an invalid delta cannot grant permission to execute the proposed tool batch.
 
@@ -150,9 +175,10 @@ An evidence-backed blocked update for a focused gap also requests reassessment.
 
 ### Controlled Recovery
 
-ActionService enters `reassessing` for the next ordinary model decision. Final
-answers, `await_user` and capability inspection/resolution remain available. A
-tool proposal requires a recovery decision inside the existing delta:
+ActionService enters `reassessing` for the next ordinary model decision.
+Capability inspection and new calls classified read-only by the ToolRegistry
+can investigate through the usual authorization path without a recovery
+packet. Other tool calls require a recovery decision inside the existing delta:
 
 ```json
 {
@@ -174,14 +200,40 @@ and at most one granted retry for the failed call. Repeating a failed call twice
 within one batch is refused. One ordinary transient failure can retry once
 without a separate recovery decision. No call in a rejected batch is executed.
 
-An admitted decision starts one trial. New successful evidence returns control
-to normal execution, but is not verified goal progress; only checked resolution
-has that meaning. Repeated/failed trials and rejected proposals are bounded by
-`max_recovery_attempts`. At the bound, execution stops and the existing final
-model call supplies a progress report or durable human-input wait, not another
-tool action. Recovery does not bypass policy, approval, Task leases or cancellation.
+An admitted decision starts one trial. When gaps are tracked, a novel successful
+result does not clear Recovery. A checked resolution can clear it; independently
+authorized read-only investigations remain available in the meantime. Runs with
+no declared gaps retain the existing successful-trial behavior.
+
+The model may attach `gap_update.belief_updates` to an existing decision. Each
+entry identifies a gap, a claim and successful Observation references. Runtime
+keeps a bounded set of these candidate beliefs in the same checkpoint, prioritizes
+focused gaps when projecting them, and ignores exact repeated claims for the same
+gap even when the source changes. A candidate does not verify the claim, close
+the gap or reset Recovery. Raw observations remain separate from task beliefs.
+
+Foreground chat and durable chat Tasks have a configurable, one-time extension
+at the Action step boundary. For tracked gaps, it requires recent candidate or
+checked progress and a fresh successful tool observation. It does not reset
+Recovery, bypass tool policy, or change model-request admission. An explicit
+RunContext cost or token limit still disables automatic extension.
+
+Repeated no-progress trials and consecutive rejected proposals
+are bounded by `max_recovery_attempts`; distinct alternatives are still bounded
+by the normal Action budget, but do not exhaust Recovery just by failing.
+The final model call can report partial progress or propose a validated wait,
+not dispatch another tool. Recovery does not bypass policy, approval, Task leases
+or cancellation.
 The model still judges whether a different method and its repair evidence are
 semantically relevant; Runtime verifies receipts and ordering, not that judgment.
+
+Advisory Recovery is the default; strict Recovery is available by setting
+`action.gaps.advisory_recovery` to false. The optional
+`action.gaps.semantic_context` adds a bounded original-goal excerpt and linked
+evidence index. Advisory Recovery lets fresh registered workspace
+operations pass the same heuristic gate as fresh read-only operations. Neither
+option bypasses ordinary authorization, exact failed-call replay guards, or
+delivery checks. External and privileged operations keep their existing rules.
 
 Session/Task checkpoints retain this control state with their Observations through
 approval, restart and human waits. A human reply opens another bounded decision

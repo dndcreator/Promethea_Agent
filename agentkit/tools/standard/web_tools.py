@@ -114,6 +114,11 @@ class WebExtractLinksTool:
 
 
 class WebFetchJsonTool:
+    output_schema = {"type": "object", "properties": {
+        "url": {"type": "string", "x-promethea-evidence": "transport"},
+        "status": {"type": "integer", "x-promethea-evidence": "transport"},
+        "data": {},
+    }}
     concurrency_safe = True
     input_schema = input_object(
         {"url": text(), "timeout_s": integer(minimum=1), "user_agent": text()},
@@ -172,7 +177,7 @@ class WebSearchTool:
             "query": {"type": "string"},
             "provider": {"type": "string"},
             "count": {"type": "integer"},
-            "results": {"type": "array"},
+            "results": {"type": "array", "items": {"type": "object", "properties": {"title": {"type": "string"}}}},
             "truncated": {"type": "boolean"},
         },
         "required": ["query", "provider", "count", "results", "truncated"],

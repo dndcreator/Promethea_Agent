@@ -240,6 +240,8 @@ def parse_model_action(content: str) -> ModelAction:
             raise InvalidModelAction("await_user supports non-secret text or acknowledgement only")
         return ModelAction(kind="await_user", content=content, raw=raw)
     if action == "answer":
+        if "disposition" in raw and raw["disposition"] != "blocked":
+            raise InvalidModelAction("answer disposition, if supplied, must be blocked")
         answer = raw.get("content", raw.get("answer", ""))
         if not isinstance(answer, str) or not answer.strip():
             raise InvalidModelAction("answer content must be non-empty text")

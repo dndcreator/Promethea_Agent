@@ -20,11 +20,17 @@ from gateway.events import EventEmitter
 from gateway.model_protocol import NativeStream, decode_native, request_fields
 from gateway.tool_prompt_blocks import build_action_protocol_prompt
 from gateway.workspace_service import WorkspaceService
+from tests.support.runtime import user_choice
 
 
 def packet(kind, args, identifier="native_one"):
     return {"role": "assistant", "content": None, "reasoning_content": "opaque provider reasoning",
             "tool_calls": [{"id": identifier, "type": "function", "function": {"name": kind, "arguments": json.dumps(args)}}]}
+
+def wait_packet(content, identifier):
+    args = user_choice(content)
+    args.pop("action")
+    return packet("await_user", args, identifier)
 
 
 def core(monkeypatch, packets, *, stream=False):
@@ -185,7 +191,7 @@ async def test_native_recovery_denial_replays_receipts_without_dispatch(monkeypa
     conv, requests = core(monkeypatch, [packet("tool_call", {"tool_name": "fixture.read", "args": {}}, "first"),
         packet("tool_calls", {"calls": [{"id": "again", "tool_name": "fixture.read", "args": {}},
                                        {"id": "send", "tool_name": "fixture.send", "args": {}}]}, "blocked_batch"),
-        packet("await_user", {"content": "Please restore the resource"}, "wait")])
+        wait_packet("Please restore the resource", "wait")])
     executed = []
 
     def execute(name, args):
@@ -228,7 +234,7 @@ async def test_native_approval_restart_keeps_ids_reasoning_and_runtime_truth(mon
 
 @pytest.mark.asyncio
 async def test_native_wait_restart_replays_a_user_report_not_an_approval(monkeypatch):
-    conv, requests = core(monkeypatch, [packet("await_user", {"content": "Please verify the page"}, "human_step"),
+    conv, requests = core(monkeypatch, [wait_packet("Please verify the page", "human_step"),
                                       {"role": "assistant", "content": "I will inspect the page again."}])
     saved = []
     result = await ActionService(conversation_core=conv).run_action(goal="verify", messages=[{"role": "system", "content": build_action_protocol_prompt()}, {"role": "user", "content": "verify"}],
@@ -248,7 +254,7 @@ async def test_native_wait_restart_replays_a_user_report_not_an_approval(monkeyp
 @pytest.mark.asyncio
 async def test_budget_completion_keeps_schemas_stable_but_rejects_executable_native_actions(monkeypatch):
     conv, requests = core(monkeypatch, [packet("tool_call", {"tool_name": "fixture.read", "args": {}}, "read"),
-        packet("await_user", {"content": "Please verify the page"}, "boundary_wait"),
+        wait_packet("Please verify the page", "boundary_wait"),
         {"role": "assistant", "content": "I will inspect the reported change."}])
     saved, effects = [], []
     first = await ActionService(conversation_core=conv).run_action(goal="verify", messages=[{"role": "system", "content": build_action_protocol_prompt()}],

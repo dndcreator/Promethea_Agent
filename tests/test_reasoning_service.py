@@ -494,9 +494,21 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
                 "requires_tools": True,
                 "tool_intent": "help me with tooling",
                 "notes": "",
+                "delivery_gap": {"id": "selected", "kind": "achievement", "requirement": "Selected artifact",
+                                 "check": {"tool_name": "document.validate", "pointer": "/valid", "expected": True}},
+            },
+            {
+                "title": "unused alternative",
+                "goal": "alternative route",
+                "delivery_gap": {"id": "pruned", "kind": "achievement", "requirement": "Pruned artifact",
+                                 "check": {"tool_name": "document.validate", "pointer": "/valid", "expected": True}},
             }
         ]
 
+    async def select_first(**kwargs):
+        return kwargs["candidate_node_ids"][:1]
+
+    monkeypatch.setattr(svc, "_select_beam_nodes", select_first)
     monkeypatch.setattr(svc, "_gate_reasoning", fake_gate)
     monkeypatch.setattr(svc, "_execute_step", fake_execute_step)
     monkeypatch.setattr(svc, "_summarize_tree", fake_summarize_tree)
@@ -518,6 +530,7 @@ async def test_run_exports_plan_to_moirai_when_enabled(monkeypatch):
     )
 
     assert result["used_reasoning"] is True
+    assert [gap["requirement"] for gap in result["delivery_gaps"]] == ["Selected artifact"]
     assert result["moirai_run_id"] == "wf_test"
     assert len(capability_service.calls) == 1
     call = capability_service.calls[0]

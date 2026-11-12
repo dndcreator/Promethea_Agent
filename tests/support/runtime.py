@@ -53,6 +53,10 @@ def observation_fact(messages):
                         return fact
     raise AssertionError("No Runtime observation was provided")
 
+def user_choice(content, *, input_kind="acknowledgement"):
+    return {"action": "await_user", "content": content, "input_kind": input_kind,
+            "user_dependency": {"kind": "user_choice", "reason": "The user must choose the preferred next step."}}
+
 
 def goal_context(messages):
     return json.loads(next(row["content"] for row in messages if row.get("name") == "promethea_goals").split("\n", 1)[1])

@@ -51,8 +51,8 @@ def restore(value, context):
 def continue_run(value, context, *, goal, budget=None):
     previous = restore(value, context)
     outcome = (value.get("result") or {}).get("execution_outcome") or {}
-    if previous.machine.phase != ActionPhase.COMPLETED or outcome.get("stop_reason") not in {"budget_exhausted", "recovery_exhausted"}:
-        raise ValueError("only a settled budget-stopped checkpoint can begin another slice")
+    if previous.machine.phase != ActionPhase.COMPLETED or outcome.get("stop_reason") not in {"budget_exhausted", "recovery_exhausted", "goal_blocked"}:
+        raise ValueError("only a settled unfinished checkpoint can begin another slice")
     if previous.goal != goal:
         raise ValueError("continuation goal differs from the saved checkpoint")
     run = ActionRun(

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from .events import EventEmitter
+from .goal_gaps import reasoning_delivery_gaps
 from .model_language import response_language_context, with_response_language
 from .protocol import EventType
 from .reasoning_budget import ReasoningBudgetLedger
@@ -43,6 +44,15 @@ from .reasoning_state_machine import (
     WAITING_HUMAN,
     WAITING_TOOL,
     TERMINAL_STATES,
+)
+
+
+_DELIVERY_GAP_INSTRUCTIONS = (
+    " Only for a concrete deliverable with a known independent structured tool check, "
+    "a step may include delivery_gap: {id, kind: 'achievement' or 'epistemic', requirement, "
+    "check: {tool_name, pointer, expected}, depends_on: [step gap ids]}. "
+    "Use JSON Pointers into actual tool results. Do not invent tools or checks; "
+    "omit delivery_gap for exploration or when no independent check is known."
 )
 
 
@@ -802,6 +812,7 @@ class ReasoningService:
             iteration_budget = policy["max_iterations"] if is_complex else 1
             stopped_by_user = False
 
+            delivery_steps = []
             while frontier and tree.stats["iterations"] < iteration_budget:
                 if self._is_stop_requested(tree.tree_id):
                     stopped_by_user = True
@@ -818,6 +829,9 @@ class ReasoningService:
                         tree.stats["termination"] = "budget_exhausted"
                         break
                     tree.stats["iterations"] += 1
+                    delivery_gap = tree.nodes[node_id].metadata.get("delivery_gap")
+                    if isinstance(delivery_gap, dict):
+                        delivery_steps.append(delivery_gap)
                     extra_steps = await self._execute_step(
                         tree=tree,
                         node_id=node_id,
@@ -982,9 +996,11 @@ class ReasoningService:
             if len(self._pending_outcomes) > 512:
                 oldest = next(iter(self._pending_outcomes.keys()))
                 self._pending_outcomes.pop(oldest, None)
+            delivery_gaps = reasoning_delivery_gaps(tree.tree_id, delivery_steps)
             return {
                 "used_reasoning": True,
                 "tree_id": tree.tree_id,
+                **({"delivery_gaps": delivery_gaps} if delivery_gaps else {}),
                 "system_prompt": final_prompt,
                 "reasoning_summary": reasoning_summary,
                 "plan_steps": steps,
@@ -1090,6 +1106,7 @@ class ReasoningService:
             "\"memory_query\":string,\"requires_tools\":bool,\"tool_intent\":string,"
             "\"notes\":string}]}. Keep at most "
             f"{candidate_limit} steps."
+            + _DELIVERY_GAP_INSTRUCTIONS
         )
         result = await self._call_json(
             [
@@ -1125,6 +1142,7 @@ class ReasoningService:
                     "requires_tools": self._to_bool(step.get("requires_tools", False), default=False),
                     "tool_intent": str(step.get("tool_intent", "")).strip(),
                     "notes": str(step.get("notes", "")).strip(),
+                    **({"delivery_gap": step["delivery_gap"]} if isinstance(step.get("delivery_gap"), dict) else {}),
                 }
             )
         return normalized
@@ -2428,6 +2446,7 @@ class ReasoningService:
             "\"tool_intent\":string,\"additional_steps\":[{\"title\":string,\"goal\":string,"
             "\"requires_memory\":bool,\"memory_query\":string,\"requires_tools\":bool,"
             "\"tool_intent\":string,\"notes\":string}],\"strategy_reflection\":string}"
+            + _DELIVERY_GAP_INSTRUCTIONS
         )
         result = await self._call_json(
             [

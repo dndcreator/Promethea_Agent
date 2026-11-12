@@ -8,13 +8,13 @@ import pytest
 
 from fastapi.testclient import TestClient
 from gateway.http.routes import auth
-from tests.support.runtime import ScriptedModel, finish_from_observation, runtime_at
+from tests.support.runtime import ScriptedModel, finish_from_observation, runtime_at, user_choice
 from tests.support.http_runtime import app_at
 
 
 @pytest.mark.parametrize("stream", [False, True])
 def test_user_input_wait_restarts_through_public_chat_and_never_grants_tool_approval(tmp_path, monkeypatch, stream):
-    model = ScriptedModel([{"action": "await_user", "content": "请在页面中完成验证"}])
+    model = ScriptedModel([user_choice("请在页面中完成验证")])
     app, host = app_at(tmp_path, model, monkeypatch)
 
     def result(response):

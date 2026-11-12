@@ -7,7 +7,7 @@ import pytest
 from gateway.action import ActionService
 from gateway.action.completion import parse_final_answer
 from gateway.action.model_action import InvalidModelAction, parse_model_action
-from tests.support.runtime import ScriptedModel
+from tests.support.runtime import ScriptedModel, goal_context, observation_fact
 
 
 @pytest.mark.parametrize("text", ["The file is saved; preview remains unverified.", '{"action":"answer","content":"Saved, not verified."}'])
@@ -49,6 +49,37 @@ async def test_step_grace_requires_new_successful_tool_evidence_and_no_hard_budg
     assert calls == [1, 2] and len(model.calls) == 3
     assert result["execution_outcome"]["stop_reason"] == "budget_exhausted"
     assert not any(row["event"] == "action.budget_extended" for row in result["action_trace"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record_belief", [False, True])
+async def test_tracked_goal_continues_past_soft_limit_only_with_recent_progress(record_belief):
+    def second(messages):
+        delta = {"revision": goal_context(messages)["revision"]}
+        if record_belief:
+            delta["belief_updates"] = [{"id": "origin", "gap_id": "locate", "claim": "Found a candidate address",
+                                       "evidence_refs": [observation_fact(messages)["observation_id"]]}]
+        return {"action": "tool_call", "tool_name": "fixture.read", "args": {"cursor": 2}, "gap_update": delta}
+
+    def third(messages):
+        if not record_belief:
+            return "The origin remains unverified."
+        assert any("Runtime granted 2 additional decisions" in str(row.get("content")) for row in messages)
+        return {"action": "tool_call", "tool_name": "fixture.read", "args": {"cursor": 3}}
+
+    model = ScriptedModel([{"action": "tool_call", "tool_name": "fixture.read", "args": {"cursor": 1},
+                            "gap_update": {"revision": 0, "create": [{"id": "locate", "kind": "epistemic",
+                                                                     "requirement": "Verify the origin"}]}},
+                           second, third, {"action": "tool_call", "tool_name": "fixture.read", "args": {"cursor": 4}},
+                           "The origin remains unverified."])
+    calls = []
+    result = await ActionService(conversation_core=model).run_action(
+        goal="Verify the origin", messages=[], budget=2, allow_progress_grace=True,
+        tool_executor=lambda _, args: calls.append(args["cursor"]) or args)
+    extensions = [row for row in result["action_trace"] if row["event"] == "action.budget_extended"]
+    assert len(extensions) == int(record_belief)
+    assert calls == ([1, 2, 3, 4] if record_belief else [1, 2])
+    assert result["execution_outcome"]["goal_status"] == "unverified"
 
 
 @pytest.mark.asyncio

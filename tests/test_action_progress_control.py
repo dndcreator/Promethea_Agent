@@ -7,7 +7,7 @@ import pytest
 from agentkit.mcp.tool_result import ToolErrorInfo, ToolExecutionResult
 from gateway.action import ActionService
 from gateway.goal_gaps import GoalGapState, admit_gap_action, apply_gap_delta, gap_projection, observe_gap_step
-from tests.support.runtime import goal_context, observation_fact
+from tests.support.runtime import goal_context, observation_fact, user_choice
 from tests.test_goal_gaps import Core, declared, observation
 
 
@@ -24,6 +24,11 @@ def recovery(messages, *, name="resource.reopen", strategy="replan", args=None, 
     return {**tool(name, **(args or {})), "gap_update": {"revision": view["revision"], "recovery": {
         "strategy": strategy, "reason": "Recheck the failed precondition using another observation",
         "evidence_refs": view["execution_control"]["evidence_refs"], "repair_refs": repairs or []}}}
+
+def wait_for_repair(messages):
+    return {"action": "await_user", "content": "Please restore access to the resource",
+            "user_dependency": {"kind": "human_action", "reason": "Only the owner can restore this resource.",
+                                "evidence_refs": goal_context(messages)["execution_control"]["evidence_refs"]}}
 
 
 @pytest.mark.parametrize("gaps", ["absent", "open", "blocked"])
@@ -51,7 +56,7 @@ async def test_failed_batch_is_rejected_before_any_dispatch_or_approval():
     core = Core([tool(), {"action": "tool_calls", "calls": [
         {"id": "different-id", "tool_name": "resource.read", "args": {}},
         {"tool_name": "external.send", "args": {"text": "must not send"}}]},
-        {"action": "await_user", "content": "Please restore the required resource"}])
+        wait_for_repair])
 
     def execute(name, args):
         executed.append(name)
@@ -111,15 +116,15 @@ async def test_recovery_rejections_end_in_model_reply_not_an_infinite_loop():
 
 
 @pytest.mark.asyncio
-async def test_declared_but_failed_new_methods_do_not_reset_recovery_limits():
+async def test_distinct_failed_methods_do_not_exhaust_recovery():
     core = Core([tool(), lambda messages: recovery(messages, args={"variant": 1}),
                  lambda messages: recovery(messages, args={"variant": 2}),
-                 {"action": "await_user", "content": "The alternatives also failed; please restore access"}])
+                 wait_for_repair])
     executed = []
     out = await ActionService(conversation_core=core).run_action(goal="deliver", messages=[], budget=20,
         tool_executor=lambda name, args: executed.append((name, args)) or closed(name))
     assert out["status"] == "needs_input" and len(executed) == 3 and len(core.calls) == 4
-    assert out["goal_gaps"]["recovery"]["failed_trials"] == 2
+    assert out["goal_gaps"]["recovery"]["failed_trials"] == 0
 
 
 @pytest.mark.asyncio
@@ -143,7 +148,7 @@ async def test_recovery_permission_survives_approval_restart_but_is_not_approval
 @pytest.mark.asyncio
 async def test_capability_inspection_is_available_while_reassessing():
     core = Core([tool(), {"action": "capability_inspect", "capability_names": ["resource.reopen"]},
-                 {"action": "await_user", "content": "Please confirm the intended repair"}])
+                 user_choice("Please confirm the intended repair")])
     seen = []
 
     async def inspect(names):
@@ -160,7 +165,7 @@ async def test_mixed_inspection_does_not_turn_execution_into_diagnostic_permissi
     core = Core([tool(), {"action": "tool_calls", "calls": [
         {"action": "capability_inspect", "id": "inspect", "capability_names": ["resource.reopen"]},
         {"tool_name": "external.send", "id": "send", "args": {}}]},
-        {"action": "await_user", "content": "Please restore the resource"}])
+        wait_for_repair])
     seen = []
     async def inspect(names):
         seen.append("inspect")
@@ -186,7 +191,7 @@ def test_recovery_rejects_invented_evidence_and_preserves_runtime_owned_state():
 @pytest.mark.asyncio
 async def test_exhausted_wait_restarts_with_user_report_but_not_verified_repair():
     saved = []
-    core = Core([tool(), tool(), tool(), {"action": "await_user", "content": "Please restore access"}])
+    core = Core([tool(), tool(), tool(), wait_for_repair])
     first = await ActionService(conversation_core=core).run_action(goal="deliver", messages=[], budget=20,
         user_id="alice", session_id="s", tool_executor=lambda name, args: closed(name),
         checkpoint_sink=lambda value: saved.append(deepcopy(value)))
@@ -195,7 +200,7 @@ async def test_exhausted_wait_restarts_with_user_report_but_not_verified_repair(
     checkpoint["input_response"] = {"request_id": first["input_request"]["request_id"], "content": "I restored access"}
     executed = []
     # The model must inspect first; a human report cannot replay the failed call.
-    resumed_core = Core([tool(), {"action": "await_user", "content": "I still need an independent observation"}])
+    resumed_core = Core([tool(), wait_for_repair])
     resumed = await ActionService(conversation_core=resumed_core).run_action(goal="deliver", messages=[],
         user_id="alice", session_id="s", checkpoint=checkpoint,
         tool_executor=lambda name, args: executed.append(name) or {"ready": True})
@@ -241,9 +246,11 @@ async def test_monitor_revision_is_visible_before_any_semantic_gap_is_declared()
         return {"action": "answer", "content": "A validation step is still needed", "gap_update": {
             "revision": view["revision"], "create": [{"id": "verify", "kind": "epistemic", "requirement": "Validate the current evidence"}]}}
 
-    out = await ActionService(conversation_core=Core([tool(), declare])).run_action(goal="inspect", messages=[],
+    out = await ActionService(conversation_core=Core([tool(), declare, {"action": "answer", "content": "Not verified yet."}])).run_action(goal="inspect", messages=[], budget=2,
         tool_executor=lambda name, args: {"value": 42})
     assert out["goal_gaps"]["gaps"][0]["id"] == "verify"
+    assert out["execution_outcome"]["goal_status"] == "unverified"
+    assert any((row.get("error") or {}).get("code") == "GOAL_UNRESOLVED" for row in out["observations"])
 
 
 @pytest.mark.asyncio
@@ -256,7 +263,7 @@ async def test_independent_task_run_keeps_goals_without_stale_recovery_deadlock(
     tasks.commit_goal_gaps(task_id=task_id, user_id="alice", state=state, expected_revision=0, expected_objective="Deliver")
     executed = []
     out = await ActionService(conversation_core=Core([tool(), {"action": "answer", "content": "Fresh state inspected"}]), task_service=tasks).run_action(
-        goal="Deliver", messages=[], user_id="alice", run_context=SimpleNamespace(task_id=task_id),
+        goal="Deliver", messages=[], user_id="alice", run_context=SimpleNamespace(task_id=task_id), budget=1,
         tool_executor=lambda name, args: executed.append(name) or {"ready": True})
     assert executed == ["resource.read"] and out["status"] == "success"
     assert out["goal_gaps"]["gaps"][0]["requirement"] == state.gaps[0].requirement
@@ -264,9 +271,93 @@ async def test_independent_task_run_keeps_goals_without_stale_recovery_deadlock(
 
 
 @pytest.mark.asyncio
+async def test_open_gap_rejects_unsupported_wait_and_premature_answer_then_allows_checked_completion():
+    def finish(messages):
+        fact = observation_fact(messages)
+        assert fact["status"] == "completed"
+        return {"action": "answer", "content": "Verified.", "gap_update": {
+            "revision": goal_context(messages)["revision"],
+            "updates": [{"id": "verify", "state": "resolved", "evidence_refs": [fact["observation_id"]]}]}}
+
+    core = Core([
+        {**user_choice("Which site should I search?"), "gap_update": {"revision": 0,
+            "create": [{"id": "verify", "kind": "achievement", "requirement": "Verify the address",
+                        "check": {"tool_name": "source.read", "pointer": "/confirmed", "expected": True}}]}},
+        {"action": "answer", "content": "Done already."}, tool("source.read"), finish,
+    ])
+    out = await ActionService(conversation_core=core).run_action(goal="Verify", messages=[], budget=5,
+        tool_executor=lambda *_: {"confirmed": True})
+    assert out["content"] == "Verified." and out["goal_progress"]["checks_passed"] == 1
+    assert "execution_outcome" not in out and not out.get("input_request")
+    assert [(row["error"] or {}).get("code") for row in out["observations"]] == [
+        "USER_DEPENDENCY_REQUIRED", "GOAL_UNRESOLVED", None]
+
+@pytest.mark.asyncio
+async def test_user_only_information_can_pause_with_an_open_gap():
+    proposal = {"action": "await_user", "content": "Which building is your office in?", "input_kind": "text",
+                "user_dependency": {"kind": "user_information", "reason": "Only the user knows their office building.",
+                                    "gap_ids": ["building"]},
+                "gap_update": {"revision": 0, "create": [{"id": "building", "kind": "epistemic",
+                                                        "requirement": "Identify the user's office building"}]}}
+    out = await ActionService(conversation_core=Core([proposal])).run_action(goal="Plan door-to-door travel", messages=[])
+    assert out["status"] == "needs_input"
+    assert out["input_request"]["input_kind"] == "text" and out["goal_progress"]["open"] == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_wait_is_not_persisted_even_during_final_completion():
+    invalid = {"action": "await_user", "content": "Please do the lookup instead."}
+    saved = []
+    core = Core([invalid, invalid])
+    out = await ActionService(conversation_core=core).run_action(
+        goal="Look up a public fact", messages=[], budget=1, checkpoint_sink=saved.append)
+    assert not out.get("input_request") and not any(checkpoint.get("pending_input") for checkpoint in saved)
+    assert out["execution_outcome"]["goal_status"] == "unverified"
+    assert out["execution_outcome"]["response_source"] == "runtime"
+    assert out["observations"][0]["error"]["code"] == "USER_DEPENDENCY_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_evidenced_block_returns_report_without_completing_goal():
+    def blocked(messages):
+        fact = observation_fact(messages)
+        return {"action": "answer", "content": "The source is unavailable.", "disposition": "blocked", "gap_update": {
+            "revision": goal_context(messages)["revision"],
+            "updates": [{"id": "verify", "state": "blocked", "evidence_refs": [fact["observation_id"]]}]}}
+
+    core = Core([{**tool("source.read"), "gap_update": {"revision": 0, "create": [
+        {"id": "verify", "kind": "epistemic", "requirement": "Verify the source"}]}}, blocked])
+    out = await ActionService(conversation_core=core).run_action(goal="Verify", messages=[], tool_executor=lambda name, _: closed(name))
+    assert out["execution_outcome"] == {"stop_reason": "goal_blocked", "goal_status": "unverified", "response_source": "model"}
+    assert out["goal_progress"]["blocked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_read_only_alternative_uses_registry_without_recovery_packet():
+    from types import SimpleNamespace
+    from gateway.tools.registry import ToolRegistry
+    from gateway.tools.spec import SideEffectLevel, ToolSpec
+
+    registry = ToolRegistry()
+    sources = ("source.first", "source.second", "source.third", "source.final")
+    for name in sources:
+        registry.register_spec(ToolSpec(tool_name=name, side_effect_level=SideEffectLevel.READ_ONLY))
+    executed = []
+
+    def execute(name, _):
+        executed.append(name)
+        return {"value": 42} if name == "source.final" else closed(name)
+
+    core = Core([*(tool(name) for name in sources), {"action": "answer", "content": "Found the answer."}])
+    out = await ActionService(conversation_core=core, capability_service=SimpleNamespace(tool_registry=registry)).run_action(
+        goal="Find", messages=[], tool_executor=execute)
+    assert out["status"] == "success" and executed == list(sources)
+
+
+@pytest.mark.asyncio
 async def test_failed_capability_inspection_cannot_be_repeated_without_repair():
     inspect_action = {"action": "capability_inspect", "capability_names": ["resource.read"]}
-    core = Core([inspect_action, inspect_action, {"action": "await_user", "content": "Capability inspection is unavailable"}])
+    core = Core([inspect_action, inspect_action, wait_for_repair])
     seen = []
 
     # Capability callbacks return projections; this is an explicit structured failure.

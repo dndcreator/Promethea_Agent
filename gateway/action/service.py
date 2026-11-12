@@ -15,7 +15,7 @@ from agentkit.security.approval import approval_scope
 from gateway.events import EventEmitter
 from gateway.protocol import EventType
 from config import GoalGapConfig, ActionConfig, config as global_config
-from gateway.goal_gaps import GoalGapState, GapRecoveryState, apply_gap_delta, admit_gap_action, gap_event_delta, gap_outcome, gap_projection, observe_gap_step
+from gateway.goal_gaps import GoalGapState, GapRecoveryState, answer_disposition, apply_gap_delta, admit_gap_action, gap_event_delta, gap_outcome, gap_projection, observe_gap_step, validate_partial_evidence, validate_user_dependency
 
 from .model_action import AnswerDeltaProjector, InvalidModelAction, ModelAction, ToolCallProposal, parse_model_action
 from .models import MAX_ACTION_BUDGET, ActionContext, ActionResult, ActionRun, resolve_action_budget
@@ -27,6 +27,7 @@ from .completion import parse_final_answer, runtime_progress_notice
 from .context_window import compact_action_history
 from .recovery import recover as recover_model_output, reset_failures
 from gateway.tools.registry import ToolNotFoundError
+from gateway.tools.spec import SideEffectLevel
 
 
 CapabilityInspector = Callable[[List[str]], Awaitable[Dict[str, Any]]]
@@ -169,6 +170,7 @@ class ActionService:
                 return dict(checkpoint["result"])
             if continuing:
                 action_run = continue_checkpoint(checkpoint, action_run.context, goal=action_run.goal, budget=budget)
+                action_run.progress_grace_steps = grace_steps
                 action_run.messages.append({"role": "user", "_runtime_rebuild": action_run.goal, "content": (
                     "The user explicitly resumed this task. A new bounded execution slice is active. "
                     "Continue from the committed observations and remaining goal gaps; previous budget-stop "
@@ -578,13 +580,30 @@ class ActionService:
                 if await self._apply_steering(action_run, messages, usage, output_sink):
                     await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
                     continue
-                if "gap_update" in action.raw:
-                    await self._apply_goal_delta(action_run, action.raw["gap_update"])
+                delta_accepted = "gap_update" not in action.raw or await self._apply_goal_delta(
+                    action_run, action.raw["gap_update"],
+                    allow_inferred_delivery=action.kind == "answer" and not action.raw.get("disposition"),
+                )
                 if await self._apply_steering(action_run, messages, usage, output_sink):
                     await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="user_steering_applied")
                     continue
 
-                if action.kind == "answer":
+                if action.kind in {"answer", "await_user"}:
+                    try:
+                        disposition = self._terminal_disposition(action_run, action, delta_accepted=delta_accepted)
+                    except ValueError as exc:
+                        await self._replace_answer(action_run, "", output_sink)
+                        await self._observe_outcome(
+                            action_run, messages, model_step_id=model_step_id, assistant_content=content,
+                            result=ToolExecutionResult(tool_name="runtime.terminal_decision", ok=False, error=ToolErrorInfo(
+                                "USER_DEPENDENCY_REQUIRED" if action.kind == "await_user" else "GOAL_UNRESOLVED",
+                                str(exc), "progress_control", False,
+                                advice="Continue with a permitted investigation or submit a justified terminal decision.",
+                            )),
+                        )
+                        continue
+                    if action.kind == "await_user":
+                        return await self._await_input(action_run, action, messages, usage, model_step_id, output_sink)
                     result = await self._complete_answer(
                         action_run,
                         action=action,
@@ -592,12 +611,11 @@ class ActionService:
                         started=started,
                         model_step_id=model_step_id,
                         messages=messages,
+                        execution_outcome={"stop_reason": disposition, "goal_status": "unverified",
+                                           "response_source": "model"} if disposition else None,
                     )
                     await self._replace_answer(action_run, action.content, output_sink)
                     return result
-
-                if action.kind == "await_user":
-                    return await self._await_input(action_run, action, messages, usage, model_step_id, output_sink)
 
                 if await self._control_progress(action_run, action, messages, model_step_id, content, output_sink):
                     continue
@@ -658,8 +676,11 @@ class ActionService:
                     started_ids={call.call_id for call in action.calls} if preparation_error is None else set(),
                 )
                 messages.extend(self._observation_messages(content, observations, model_step_id=model_step_id if model_step_id in action_run.model_wire else None))
-                await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="observation_committed")
+                previous_budget = action_run.budget
                 self._grant_progress_grace(action_run, messages, observations)
+                await self._transition(action_run, ActionPhase.AWAITING_MODEL, cause="observation_committed",
+                                       facts={"step_budget_extended": action_run.budget - previous_budget}
+                                       if action_run.budget > previous_budget else None)
 
             return await self._finish_stopped(
                 action_run,
@@ -720,6 +741,22 @@ class ActionService:
         finally:
             action_run.accepting_steering = False
             self._active_runs.pop(action_run.run_id, None)
+
+    def _terminal_disposition(self, run, action, *, delta_accepted=True):
+        state = run.gap_state if self._gap_policy(run).enabled else GoalGapState()
+        if not delta_accepted:
+            raise ValueError("The terminal decision depends on a rejected Goal Gap update.")
+        if action.kind == "await_user":
+            validate_user_dependency(state, action.raw.get("user_dependency"), run.observations,
+                                     input_kind=action.raw.get("input_kind", "acknowledgement"))
+            return None
+        if (not state.gaps and state.recovery.mode == "reassess" and getattr(run.context.run_context, "task_id", None)
+                and not action.raw.get("disposition")):
+            raise ValueError("The task still has an unresolved Runtime obstacle; continue or report a blocked goal.")
+        blocked = action.raw.get("disposition") == "blocked"
+        if blocked:
+            validate_partial_evidence(state, action.evidence_refs, run.observations)
+        return answer_disposition(state, blocked=blocked, observations=run.observations)
 
     async def _await_input(self, run, action, messages, usage, model_step_id, output_sink):
         request = {"request_id": f"input_{uuid.uuid4().hex}", "content": action.content,
@@ -919,24 +956,38 @@ class ActionService:
         action_run.add_trace("goal.gaps.updated", {"revision": state.revision, "summary": gap_outcome(state)})
         return True
 
-    async def _apply_goal_delta(self, action_run: ActionRun, raw: Any) -> None:
+    async def _apply_goal_delta(self, action_run: ActionRun, raw: Any, *, allow_inferred_delivery: bool = False) -> bool:
         policy = self._gap_policy(action_run)
         if not policy.enabled:
-            return
+            return True
+        registry = getattr(self.capability_service, "tool_registry", None)
+
+        def output_schema(name):
+            try:
+                return registry.resolve(tool_name=name, params={}).output_schema
+            except ToolNotFoundError:
+                return {}
+
         try:
-            state = apply_gap_delta(action_run.gap_state, raw, action_run.observations, max_gaps=policy.max_gaps, max_updates=policy.max_updates, loop_id=action_run.run_id)
+            state = apply_gap_delta(action_run.gap_state, raw, action_run.observations, max_gaps=policy.max_gaps,
+                                    max_updates=policy.max_updates, loop_id=action_run.run_id,
+                                    output_schema=output_schema if registry is not None else None,
+                                    allow_inferred_delivery=allow_inferred_delivery)
         except (ValueError, TypeError) as exc:
             action_run.gap_feedback = str(exc)[:200]
             action_run.add_trace("goal.gaps.rejected", {"reason": action_run.gap_feedback})
-            return
+            return False
         if state.revision != action_run.gap_state.revision:
             action_run.gap_feedback = ""
-            await self._save_goal_gaps(action_run, state)
+            return await self._save_goal_gaps(action_run, state)
+        return True
 
     def _gap_view(self, action_run: ActionRun) -> Dict[str, Any]:
         policy = self._gap_policy(action_run)
         return gap_projection(action_run.gap_state, context_chars=policy.context_chars, window=policy.window,
-                              feedback=action_run.gap_feedback, observations=action_run.observations)
+                              feedback=action_run.gap_feedback, observations=action_run.observations,
+                              objective=action_run.goal if policy.semantic_context else "",
+                              advisory_recovery=policy.advisory_recovery)
 
     def _with_goal_projection(self, action_run: ActionRun, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not self._gap_policy(action_run).enabled:
@@ -977,16 +1028,34 @@ class ActionService:
             action_run.execution_path.append(record)
         action_run.approved_call_ids.difference_update(call.call_id for call in action.calls)
         await self._commit_observations(action_run, observations)
+        known = {gap.id for gap in action_run.gap_state.gaps}
+        for call, result in zip(action.calls, results):
+            if (call.operation != "tool_call" or call.tool_name != "reasoning.run"
+                    or call.call_id not in started_ids or not result.ok or not isinstance(result.value, dict)):
+                continue
+            proposals = result.value.get("delivery_gaps")
+            if not isinstance(proposals, list):
+                continue
+            create = [row for row in proposals if isinstance(row, dict) and isinstance(row.get("id"), str)
+                      and row["id"] not in known]
+            if create and await self._apply_goal_delta(action_run, {"revision": action_run.gap_state.revision, "create": create}):
+                known.update(row["id"] for row in create)
         return observations
 
     def _grant_progress_grace(self, run: ActionRun, messages: List[Dict[str, Any]], observations: List[RuntimeObservation]) -> None:
         extra = min(run.progress_grace_steps, MAX_ACTION_BUDGET - run.budget)
-        if extra <= 0 or run.step != run.budget or run.gap_state.recovery.mode != "execute":
+        if extra <= 0 or run.step != run.budget:
             return
         context = run.context.run_context
         if any(getattr(context, key, None) is not None for key in ("cost_budget", "token_budget")):
             return
-        if not observations or any(not row.ok for row in observations):
+        tracked = bool(run.gap_state.gaps)
+        recent = run.gap_state.recent[-self._gap_policy(run).window:]
+        progress = ("checked" if any(frame.progress for frame in recent)
+                    else "candidate" if any(frame.candidate_progress for frame in recent) else None)
+        if (tracked and not progress) or (not tracked and run.gap_state.recovery.mode != "execute"):
+            return
+        if not observations or (not tracked and any(not row.ok for row in observations)):
             return
         executed = {row["observation_id"] for row in run.execution_path[-len(observations):]
                     if row.get("executed") and row.get("kind") == "tool_call"}
@@ -997,16 +1066,17 @@ class ActionService:
         prior, latest = run.observations[:-len(observations)], run.observations[-len(observations):]
         for row in latest:
             value = evidence(row)
-            if row["observation_id"] not in executed or value in (None, "", [], {}):
+            if not row.get("ok") or row["observation_id"] not in executed or value in (None, "", [], {}):
                 continue
             # Changing arguments alone does not make an unchanged result new evidence.
             if any(item.get("ok") and item.get("tool_name") == row["tool_name"] and evidence(item) == value for item in prior):
                 continue
             run.budget += extra
             run.progress_grace_steps = 0
-            run.add_trace("action.budget_extended", {"step": run.step, "extra_steps": extra, "observation_id": row["observation_id"]})
+            run.add_trace("action.budget_extended", {"step": run.step, "extra_steps": extra,
+                                                     "progress": progress or "new_observation", "observation_id": row["observation_id"]})
             messages.append({"role": "user", "name": "promethea_action_budget", "content": (
-                f"Runtime granted {extra} additional decisions after new tool evidence. "
+                f"Runtime granted {extra} additional decisions after recent progress. "
                 "Use them for the most important remaining checks or to finish the answer. "
                 "Do not repeat completed work. No further automatic extension is available."
             )})
@@ -1111,9 +1181,24 @@ class ActionService:
             return failed_tool_result(name, exc)
 
     async def _control_progress(self, run, action, messages, model_step_id, content, output_sink) -> bool:
-        if not self._gap_policy(run).enabled:
+        policy = self._gap_policy(run)
+        if not policy.enabled:
             return False
-        diagnostic = bool(action.calls) and all(call.is_capability for call in action.calls)
+        registry = getattr(self.capability_service, "tool_registry", None)
+
+        def can_explore(call):
+            if call.is_capability:
+                return True
+            try:
+                if registry is None:
+                    return False
+                level = registry.resolve_for_call(tool_name=call.tool_name, params=call.arguments).side_effect_level
+                return level == SideEffectLevel.READ_ONLY or (
+                    policy.advisory_recovery and level == SideEffectLevel.WORKSPACE_WRITE)
+            except (ValueError, ToolNotFoundError):
+                return False
+
+        diagnostic = run.gap_state.recovery.mode == "reassess" and bool(action.calls) and all(can_explore(call) for call in action.calls)
         calls = [{"tool_name": call.tool_name, "args": call.arguments} for call in action.calls]
         candidate, denial = admit_gap_action(run.gap_state, calls, run.observations, diagnostic=diagnostic)
         if candidate.revision != run.gap_state.revision and not await self._save_goal_gaps(run, candidate):
@@ -1123,7 +1208,7 @@ class ActionService:
         await self._replace_answer(run, "", output_sink)
         results = [ToolExecutionResult(tool_name=call["tool_name"], ok=False, error=ToolErrorInfo(
             code="ACTION_REASSESSMENT_REQUIRED", message=denial, category="progress_control", retryable=False,
-            advice="No proposed operation executed. Inspect another capability, propose an evidence-backed recovery, answer or await_user.",
+            advice="No proposed operation executed. Investigate with a new read-only call, or propose an evidence-backed recovery.",
         )) for call in calls]
         observations = await self._record_tool_results(run, action, results, model_step_id=model_step_id, started_ids=set())
         messages.extend(self._observation_messages(content, observations, model_step_id=model_step_id if model_step_id in run.model_wire else None))
@@ -1260,7 +1345,10 @@ class ActionService:
             "role": "user",
             "content": (
                 f"Execution has stopped ({stop_reason}). Give a concise final progress report in the "
-                "user's language, based only on committed observations. Explain what remains unverified or blocked. "
+                "user's language. For tracked gaps, only results supported by a checked Goal Gap are verified. "
+                "Successful tool calls with assumed inputs are trials: describe the limitation, not their output as a deliverable. "
+                "Use an answer action with evidence_refs for any verified partial deliverables. "
+                "Explain what remains unverified or blocked. "
                 "Return ordinary user-facing text or an answer action. If progress specifically needs a human "
                 "response, use await_user to persist the question and pause instead of only describing a wait. "
                 "No tools can execute in this phase. Do not promise an unavailable capability."
@@ -1280,6 +1368,13 @@ class ActionService:
             self._merge_usage(usage, response.get("usage"))
             action = parse_final_answer(str(response.get("content") or ""))
             self._validate_answer_evidence(action_run, action)
+            delta_accepted = "gap_update" not in action.raw or await self._apply_goal_delta(action_run, action.raw["gap_update"])
+            if action.kind == "await_user":
+                self._terminal_disposition(action_run, action, delta_accepted=delta_accepted)
+            elif self._gap_policy(action_run).enabled and action_run.gap_state.gaps:
+                if not delta_accepted:
+                    raise ValueError("The progress report depends on a rejected Goal Gap update.")
+                validate_partial_evidence(action_run.gap_state, action.evidence_refs, action_run.observations)
         except Exception as exc:
             if isinstance(exc, ModelResponseError):
                 self._merge_usage(usage, exc.usage)
@@ -1299,8 +1394,6 @@ class ActionService:
             ))
             action_run.add_trace("action.completion_failed", completion_error)
         await self._transition(action_run, ActionPhase.EVALUATING, cause="budget_final_response_settled")
-        if "gap_update" in action.raw:
-            await self._apply_goal_delta(action_run, action.raw["gap_update"])
         if action.kind == "await_user":
             return await self._await_input(action_run, action, messages, usage, model_step_id, output_sink)
         result = await self._complete_answer(

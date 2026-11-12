@@ -507,6 +507,8 @@ class SystemPrompts(BaseSettings):
 
 class GoalGapConfig(BaseSettings):
     enabled: bool = True
+    semantic_context: bool = False
+    advisory_recovery: bool = True
     max_gaps: int = Field(default=12, ge=1, le=32)
     max_updates: int = Field(default=6, ge=1, le=8)
     window: int = Field(default=4, ge=2, le=16)

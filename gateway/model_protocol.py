@@ -17,9 +17,15 @@ def native_functions():
         "capability_inspect": ({"capability_names": strings}, ["capability_names"]),
         "capability_request": ({"objective": text, "required_capabilities": strings, "preferred_modalities": strings,
                                 "max_side_effect": {"type": "string", "enum": ["read_only", "workspace_write", "external_write", "privileged_host_action"]}}, ["objective", "required_capabilities"]),
-        "answer": ({"content": text, "evidence_refs": strings}, ["content"]),
+        "answer": ({"content": text, "evidence_refs": strings,
+                    "disposition": {"type": "string", "enum": ["blocked"]}}, ["content"]),
         "await_user": ({"content": {"type": "string", "minLength": 1, "maxLength": 4000},
-                        "input_kind": {"type": "string", "enum": ["acknowledgement", "text"]}}, ["content"]),
+                        "input_kind": {"type": "string", "enum": ["acknowledgement", "text"]},
+                        "user_dependency": {"type": "object", "properties": {
+                            "kind": {"type": "string", "enum": ["user_information", "user_choice", "human_action"]},
+                            "reason": {"type": "string", "minLength": 1, "maxLength": 400},
+                            "gap_ids": strings, "evidence_refs": strings},
+                            "required": ["kind", "reason"], "additionalProperties": False}}, ["content", "user_dependency"]),
     }
     return [{"type": "function", "function": {"name": name, "description": "Propose canonical Runtime action: " + name,
              "parameters": {"type": "object", "properties": {**properties, "procedure_refs": strings, "gap_update": {"type": "object"}},

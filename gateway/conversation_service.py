@@ -1183,8 +1183,10 @@ class ConversationService:
         learning = getattr(getattr(self.reasoning_service, "template_memory", None), "learning", None)
         origin = (getattr(run_context, "input_payload", {}) or {}).get("metadata", {}).get("origin")
         internal_followup = origin in {"agent_inbox", "ambient"}
-        allow_progress_grace = bool(user_id and session_id and checkpoint_sink is None and not internal_followup
-                                    and not getattr(run_context, "task_id", None)
+        task_id = getattr(run_context, "task_id", None)
+        foreground = not task_id and checkpoint_sink is None
+        durable_chat = task_id and checkpoint_sink is not None and origin == "conversation_task"
+        allow_progress_grace = bool(user_id and session_id and (foreground or durable_chat) and not internal_followup
                                     and not getattr(run_context, "workflow_run_id", None)
                                     and not (current_delegation() and current_delegation().depth))
         if learning is not None and user_id and not internal_followup and not (current_delegation() and current_delegation().depth):
