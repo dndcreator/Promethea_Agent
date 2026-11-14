@@ -4,6 +4,42 @@
 
 ## Unreleased
 
+### 2026-11-14 12:48:28 (Asia/Shanghai, UTC+08:00)
+
+- Simplify Action continuation: fresh, nonduplicate tool evidence can renew an eligible slice without requiring a specific Gap update or a separate evidence-review mode. Keep step-window, replay, approval and resource guards. The model decides how to proceed; Runtime still checks delivery against recorded gaps and observations and runs answer-only wrap-up when execution cannot continue. Verified 154 offline regressions, including repeated renewal without intermediate Gap updates, checked-delivery admission and partial wrap-up. No live calls.
+
+### 2026-11-14 12:10:14 (Asia/Shanghai, UTC+08:00)
+
+- Close the Action continuation loop when a soft checkpoint lands immediately after fresh evidence. An advisory tracked run can spend one decision evaluating that evidence before wrap-up; further dispatch requires an accepted Goal Gap or belief reference and still passes normal admission. Unsupported continuation enters model wrap-up without executing the proposed tool. Normal delivery and wrap-up both ask the model to compare against the full original objective, while Runtime still validates recorded evidence and gaps. Verified 154 offline regressions across Action, Goal Gaps, HTTP/SSE, and task continuity. No paid calls.
+
+### 2026-11-14 12:00:31 (Asia/Shanghai, UTC+08:00)
+
+- Remove the separate 4096-token wrap-up cap that truncated the live commute response. Use the same configured initial output allowance as ordinary Action calls and reuse bounded recovery after a confirmed truncation, without replaying tools or bypassing request admission. The earlier budget pilot favored fixed 8192 over both predictive policies; this change does not rewrite the global model configuration or make paid calls. The 148 regressions outside the updated HTTP/SSE fixture passed, and its four cases passed on rerun.
+
+### 2026-11-14 11:52:16 (Asia/Shanghai, UTC+08:00)
+
+- Re-ran the original read-only commute task through isolated production HTTP/SSE. Runtime granted two decisions after the initial 16-step threshold; no second renewal or durable task was observed. The separate final response was sent but hit the 4096-token output limit, leaving four gaps open and no verified itinerary. The legacy trial launcher also omitted the local Trafilatura dependency, so several body-fetch operations failed and the agent switched to browser tools. Nineteen settled calls cost a conservative $0.120534 under the $0.50 ceiling with no admission stop. Keep the renewal and delivery findings separate; no product code changed in this trial. Evidence: ignored `.tmp/evaluations/morning-commute-renewable-steps-live-20261114/`.
+
+### 2026-11-14 11:32:16 (Asia/Shanghai, UTC+08:00)
+
+- Treat eligible chat Action step limits as renewable checkpoints rather than one grace grant or a cumulative 50-step cap. Use new, nonduplicate executed observations since the previous grant, with Goal Gap or belief references for subsequent tracked renewals. Reuse persisted Action trace across recovery and approval waits. Keep explicit budget exclusions, a configurable renewal time window, and the separate model wrap-up. Verified 121 offline regressions, including passing the old step ceiling and refusing stale evidence after restore; no live API calls.
+
+### 2026-11-14 11:22:34 (Asia/Shanghai, UTC+08:00)
+
+- Preserve one bounded continuation at the soft Action step threshold when a tracked advisory run recently obtained novel tool evidence, even if its last check failed. Keep strict limits and admission unchanged. After tool dispatch stops, use a separate configurable answer allowance and accept evidence-backed Goal Gap delivery through the existing validation, otherwise report remaining work. Verified 123 offline regressions. The same production HTTP/SSE inventory trial returned the correct file and closed both gaps in four real model requests ($0.0120609 conservative); it finished before the step threshold, so the boundary itself was verified by deterministic regressions. Evidence: ignored `.tmp/evaluations/goal-gaps-continuation-20261114/`.
+
+### 2026-11-14 11:09:39 (Asia/Shanghai, UTC+08:00)
+
+- Ran a real-model Goal Gaps acceptance trial through the isolated production HTTP/SSE chat entry point with native tool calling. The Agent wrote and read back the correct inventory reconciliation (49 units), but left both achievement gaps open. An invalid file-info digest was followed by the Action step limit; the finalization request was not sent because its reserve exceeded the remaining $0.05 test allowance. Seven settled requests cost a conservative $0.0241452. Independent artifact check passed; autonomous delivery did not. No runtime changes. Evidence: ignored `.tmp/evaluations/goal-gaps-production-20261114/`.
+
+### 2026-11-13 21:22:59 (Asia/Shanghai, UTC+08:00)
+
+- Ran one live Goal Gaps smoke test on the current ActionService defaults with isolated fixture tools. After the primary source closed, the model found the backup, wrote the exact label, and passed an independent file check. Runtime rejected one final proposal whose focus referenced a resolved gap; the model corrected it on the next call. Two gaps resolved (one inferred, one checked); six settled model requests cost a conservative $0.006426. No runtime changes. Evidence: ignored `.tmp/evaluations/goal-gaps-smoke-20261113-212129/`.
+
+### 2026-11-13 21:15:57 (Asia/Shanghai, UTC+08:00)
+
+- Keep local test scratch and tool caches on the checkout drive. Direct pytest runs now get independent temporary trees, and explicit base temp paths outside checkout scratch are rejected. Added a Windows command wrapper for subprocess temp files and pip, uv, npm, Node, and Playwright caches, without changing system settings. Verified concurrent pytest runs and child-process paths; existing shared C-drive caches and the inaccessible legacy pytest directory were not moved.
+
 ### 2026-11-12 22:41:40 (Asia/Shanghai, UTC+08:00)
 
 - Let the model own semantic decomposition and delivery assessment. Allow dependencies between unchecked gaps; allow an evidence-backed final answer to close an unchecked achievement as `reported`, never as `checked`. Retain independent check, evidence, and prerequisite enforcement where declared. Default fresh eligible actions to advisory Recovery, without changing approval, failed-call replay, or resource boundaries. Regenerated public contracts; 116 focused tests passed.

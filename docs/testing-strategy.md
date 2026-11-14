@@ -558,9 +558,26 @@ operator consent and must never be enabled against valuable files.
 
 ## Artifact Policy
 
-Direct pytest uses `.tmp/pytest-runtime/`; runner trials use a dedicated
-`<output>/pytest-runtime/` so concurrent invocations cannot clean each other's
-data. Both remove their own temporary tree on normal completion.
+Direct pytest creates a unique run under `.tmp/pytest-runtime/`; runner trials
+use a unique run under `<output>/pytest-runtime/` when the output is in the
+checkout. Python temp files, pytest fixtures and child process temp files use
+that run. Normal completion cleans only that run. An explicit `--basetemp`
+must be a new directory under the checkout's `.tmp/`.
+
+On Windows, use the repository wrapper for dependency installation, browser
+downloads and test launches. It redirects only the command's environment
+and stores caches under `.tmp/test-storage/` on the checkout drive:
+
+```powershell
+.\scripts\with-test-storage.ps1 python -m pip install -e ".[dev]"
+.\scripts\with-test-storage.ps1 python -m playwright install chromium
+.\scripts\with-test-storage.ps1 npm --prefix UI ci
+.\scripts\with-test-storage.ps1 python -m pytest -q
+```
+
+Use the same wrapper for browser tests that require the downloaded browser.
+The wrapper does not change Windows-wide settings or move shared user caches.
+
 Interrupted cleanup may leave residue there. Persistent reports, coverage and
 local evidence belong in ignored `.tmp/evaluations/`. The runner chooses unique
 output directories by default; an explicit output path may be overwritten.

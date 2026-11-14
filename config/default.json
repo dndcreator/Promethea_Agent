@@ -23,6 +23,7 @@
     "action": {
                   "max_steps": 5,
                   "progress_grace_steps": 2,
+                  "progress_grace_seconds": 300,
                   "max_parallel_tool_calls": 4,
                   "capability_context_chars": 8000,
                   "observation_chars": 8000,

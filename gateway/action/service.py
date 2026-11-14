@@ -18,7 +18,7 @@ from config import GoalGapConfig, ActionConfig, config as global_config
 from gateway.goal_gaps import GoalGapState, GapRecoveryState, answer_disposition, apply_gap_delta, admit_gap_action, gap_event_delta, gap_outcome, gap_projection, observe_gap_step, validate_partial_evidence, validate_user_dependency
 
 from .model_action import AnswerDeltaProjector, InvalidModelAction, ModelAction, ToolCallProposal, parse_model_action
-from .models import MAX_ACTION_BUDGET, ActionContext, ActionResult, ActionRun, resolve_action_budget
+from .models import ActionContext, ActionResult, ActionRun, resolve_action_budget
 from .observation import RuntimeObservation
 from .state_machine import ActionPhase
 from .state_machine import RuntimeActionStateMachine
@@ -1043,44 +1043,60 @@ class ActionService:
         return observations
 
     def _grant_progress_grace(self, run: ActionRun, messages: List[Dict[str, Any]], observations: List[RuntimeObservation]) -> None:
-        extra = min(run.progress_grace_steps, MAX_ACTION_BUDGET - run.budget)
+        extra = run.progress_grace_steps
         if extra <= 0 or run.step != run.budget:
             return
         context = run.context.run_context
         if any(getattr(context, key, None) is not None for key in ("cost_budget", "token_budget")):
             return
+        policy = self._gap_policy(run)
+        action_policy = ActionConfig(**{**global_config.action.model_dump(), **((run.context.user_config or {}).get("action") or {})})
+        extensions = [row for row in run.trace if row["event"] == "action.budget_extended"]
+        if extensions and time.time() - extensions[0]["at"] >= action_policy.progress_grace_seconds:
+            return
+        # The trace is already persisted across checkpoints and confirmation waits.
+        evidence_floor = extensions[-1]["payload"].get("observations_seen", len(run.observations)) if extensions else 0
         tracked = bool(run.gap_state.gaps)
-        recent = run.gap_state.recent[-self._gap_policy(run).window:]
-        progress = ("checked" if any(frame.progress for frame in recent)
-                    else "candidate" if any(frame.candidate_progress for frame in recent) else None)
-        if (tracked and not progress) or (not tracked and run.gap_state.recovery.mode != "execute"):
+        if not tracked and run.gap_state.recovery.mode != "execute":
             return
         if not observations or (not tracked and any(not row.ok for row in observations)):
             return
-        executed = {row["observation_id"] for row in run.execution_path[-len(observations):]
+        # A late failed check must not hide evidence obtained just before the boundary.
+        window = policy.window if tracked else 1
+        recent_steps = set(list(dict.fromkeys(row["model_step_id"] for row in run.observations))[-window:])
+        executed = {row["observation_id"] for row in run.execution_path
                     if row.get("executed") and row.get("kind") == "tool_call"}
         def evidence(row):
             value = row.get("structured_result")
             return row.get("model_projection") if value is None else value
 
-        prior, latest = run.observations[:-len(observations)], run.observations[-len(observations):]
-        for row in latest:
+        for index in range(len(run.observations) - 1, evidence_floor - 1, -1):
+            row = run.observations[index]
+            if row["model_step_id"] not in recent_steps:
+                continue
             value = evidence(row)
             if not row.get("ok") or row["observation_id"] not in executed or value in (None, "", [], {}):
                 continue
             # Changing arguments alone does not make an unchanged result new evidence.
-            if any(item.get("ok") and item.get("tool_name") == row["tool_name"] and evidence(item) == value for item in prior):
+            if any(item.get("ok") and item.get("tool_name") == row["tool_name"] and evidence(item) == value
+                   for item in run.observations[:index]):
                 continue
-            run.budget += extra
-            run.progress_grace_steps = 0
-            run.add_trace("action.budget_extended", {"step": run.step, "extra_steps": extra,
-                                                     "progress": progress or "new_observation", "observation_id": row["observation_id"]})
-            messages.append({"role": "user", "name": "promethea_action_budget", "content": (
-                f"Runtime granted {extra} additional decisions after recent progress. "
-                "Use them for the most important remaining checks or to finish the answer. "
-                "Do not repeat completed work. No further automatic extension is available."
-            )})
-            break
+            self._extend_action_budget(run, messages, extra, row["observation_id"])
+            return
+
+    @staticmethod
+    def _extend_action_budget(run, messages, extra, ref):
+        run.budget += extra
+        run.add_trace("action.budget_extended", {"step": run.step, "extra_steps": extra,
+                                                 "observations_seen": len(run.observations),
+                                                 "progress": "new_observation", "observation_id": ref})
+        instruction = (
+            f"Runtime granted {extra} additional decisions after new evidence. "
+            "Review it against the original objective and decide whether to continue, deliver, or explain a blocker. "
+            "Do not repeat completed work."
+        )
+        messages[:] = [row for row in messages if row.get("name") != "promethea_action_budget"]
+        messages.append({"role": "user", "name": "promethea_action_budget", "content": instruction})
 
     async def _execute_batch(self, action_run: ActionRun, action: ModelAction, executor: Any, *, model_step_id: str,
                              capability_inspector=None, capability_resolver=None) -> List[ToolExecutionResult]:
@@ -1344,8 +1360,12 @@ class ActionService:
         completion_messages = [*messages, {
             "role": "user",
             "content": (
-                f"Execution has stopped ({stop_reason}). Give a concise final progress report in the "
-                "user's language. For tracked gaps, only results supported by a checked Goal Gap are verified. "
+                f"Tool execution has stopped ({stop_reason}). Use the existing observations to decide whether "
+                "you can deliver. Review every requirement of the original objective, including any missing from the tracked gaps. "
+                "If evidence supports the whole objective, return an answer action with a current "
+                "gap_update and cite the observations. Distinguish reported semantic conclusions from independent checks. "
+                "Otherwise give a concise progress report in the user's language. For partial delivery, "
+                "only results supported by a checked Goal Gap are verified. "
                 "Successful tool calls with assumed inputs are trials: describe the limitation, not their output as a deliverable. "
                 "Use an answer action with evidence_refs for any verified partial deliverables. "
                 "Explain what remains unverified or blocked. "
@@ -1357,6 +1377,7 @@ class ActionService:
         model_step_id = f"step_{uuid.uuid4().hex}"
         completion_error = None
         response_source = "model"
+        disposition = stop_reason
         try:
             if unavailable_model is not None:
                 raise unavailable_model
@@ -1366,15 +1387,22 @@ class ActionService:
                 final_answer=True,
             )
             self._merge_usage(usage, response.get("usage"))
+            self._assert_task_execution(action_run)
             action = parse_final_answer(str(response.get("content") or ""))
             self._validate_answer_evidence(action_run, action)
-            delta_accepted = "gap_update" not in action.raw or await self._apply_goal_delta(action_run, action.raw["gap_update"])
+            delivery = action.kind == "answer" and not action.raw.get("disposition") and "gap_update" in action.raw
+            delta_accepted = "gap_update" not in action.raw or await self._apply_goal_delta(
+                action_run, action.raw["gap_update"], allow_inferred_delivery=delivery,
+            )
             if action.kind == "await_user":
                 self._terminal_disposition(action_run, action, delta_accepted=delta_accepted)
             elif self._gap_policy(action_run).enabled and action_run.gap_state.gaps:
                 if not delta_accepted:
                     raise ValueError("The progress report depends on a rejected Goal Gap update.")
-                validate_partial_evidence(action_run.gap_state, action.evidence_refs, action_run.observations)
+                if action.raw.get("disposition") or (delivery and all(gap.state == "resolved" for gap in action_run.gap_state.gaps)):
+                    disposition = self._terminal_disposition(action_run, action)
+                else:
+                    validate_partial_evidence(action_run.gap_state, action.evidence_refs, action_run.observations)
         except Exception as exc:
             if isinstance(exc, ModelResponseError):
                 self._merge_usage(usage, exc.usage)
@@ -1404,9 +1432,9 @@ class ActionService:
             model_step_id=model_step_id,
             messages=messages,
             execution_outcome={
-                "stop_reason": stop_reason, "goal_status": "unverified",
+                "stop_reason": disposition, "goal_status": "unverified",
                 "response_source": response_source,
-            },
+            } if disposition else None,
             completion_error=completion_error,
         )
         await self._replace_answer(action_run, action.content, output_sink)
@@ -1437,17 +1465,37 @@ class ActionService:
         # Checkpoints retain the accepted bounded view; full observations remain Runtime-owned.
         messages[:] = prepared
         usage = {}
+        final_recovery = {} if final_answer else None
         for attempt in range(policy.max_model_recoveries + 1):
             self._assert_task_execution(action_run)
             try:
                 response = await self._call_model_once(
                     action_run, messages, model_step_id, output_sink=output_sink,
                     reasoning_sink=reasoning_sink, final_answer=final_answer,
+                    output_allowance=final_recovery.get("output_tokens") if final_recovery is not None else None,
                 )
             except ModelResponseError as exc:
                 self._merge_usage(usage, exc.usage)
                 exc.usage = usage
-                if exc.code != "MODEL_TRANSPORT_TRANSIENT" or attempt >= policy.max_model_recoveries:
+                if attempt >= policy.max_model_recoveries:
+                    raise
+                if final_recovery is not None and exc.code == "MODEL_OUTPUT_LIMIT":
+                    initial, ceiling = self._output_limits(action_run)
+                    retry, _ = recover_model_output(final_recovery, code=exc.code, signature=exc.signature,
+                                                    initial=initial, ceiling=ceiling, retries=policy.max_model_recoveries)
+                    action_run.add_trace("action.final_output_recovery", {
+                        "retry": retry, "output_tokens": final_recovery.get("output_tokens", initial),
+                    })
+                    if not retry:
+                        raise
+                    if not any(row.get("name") == "promethea_final_retry" for row in messages):
+                        messages.append({"role": "user", "name": "promethea_final_retry", "content": (
+                            "The final response was truncated. Do not investigate or call execution tools. "
+                            "Use the evidence already available and give a shorter complete answer. "
+                            "Prioritize what was delivered, what was verified, and what remains."
+                        )})
+                    continue
+                if exc.code != "MODEL_TRANSPORT_TRANSIENT":
                     raise
                 action_run.add_trace("action.model_transport_retry", {"model_step_id": model_step_id, "retry": attempt + 1})
                 await self._replace_answer(action_run, "", output_sink)
@@ -1467,11 +1515,13 @@ class ActionService:
         output_sink: Optional[OutputSink],
         reasoning_sink: Optional[ReasoningSink],
         final_answer: bool = False,
+        output_allowance: Optional[int] = None,
     ) -> Dict[str, Any]:
         messages = list(messages)
         initial, ceiling = self._output_limits(action_run)
         user_config = dict(action_run.context.user_config or {})
-        user_config["api"] = {**user_config.get("api", {}), "max_tokens": min(ceiling, initial if final_answer else int(action_run.model_recovery.get("output_tokens") or initial))}
+        maximum = (output_allowance or initial) if final_answer else int(action_run.model_recovery.get("output_tokens") or initial)
+        user_config["api"] = {**user_config.get("api", {}), "max_tokens": min(ceiling, maximum)}
         purpose = "final_response" if final_answer else "action"
         if not action_run.model_protocol:
             from gateway.user_secrets import resolve_llm_runtime_settings

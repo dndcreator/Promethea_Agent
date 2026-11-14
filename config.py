@@ -525,6 +525,7 @@ class GoalGapConfig(BaseSettings):
 class ActionConfig(BaseSettings):
     max_steps: int = Field(default=5, ge=1, le=50)
     progress_grace_steps: int = Field(default=2, ge=0, le=5)
+    progress_grace_seconds: int = Field(default=300, ge=1)
     max_parallel_tool_calls: int = Field(default=4, ge=1, le=32)
     capability_context_chars: int = Field(default=8000, ge=1000, le=64000)
     observation_chars: int = Field(default=8000, ge=1000, le=100000)

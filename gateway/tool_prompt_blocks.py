@@ -98,6 +98,8 @@ def build_action_protocol_prompt(*, native: bool = False) -> str:
         "Recent Runtime obstacles are projected beside gaps even before you have declared any; "
         "use their observation references when creating or updating relevant gaps. Failure is not evidence of resolution. "
         "Do not discard goals or rename gaps to hide lack of progress. An answer cannot complete while tracked gaps remain. "
+        "Before delivery, compare the result with every material requirement in the original user objective, not just the current gaps. "
+        "If a requirement was missed, record it and continue with a useful next action instead of claiming completion. "
         "If no safe next step remains, mark remaining gaps blocked with evidence and use answer with disposition=blocked "
         "to report partial progress without completing the goal. In partial reports, cite only checked gaps' evidence in "
         "answer.evidence_refs; discuss unsuccessful or hypothetical trials separately, never as verified deliverables. "

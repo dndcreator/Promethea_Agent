@@ -875,19 +875,27 @@ Denied command fragments (always active when sandbox is enabled):
 
 ## Section: `action` - Main-model control loop
 
-`action.max_steps` is the initial decision threshold for foreground chat and the
-step limit for background, delegated, and task-owned runs. The default is `5`
-(range `1` to `50`). At the threshold, foreground chat can receive one bounded
-extension if the just-committed tool batch produced new successful evidence and
-Runtime recovery is not active. This is not proof of goal completion. Set
-`progress_grace_steps` to `0` for a strict limit. Explicit token/cost budgets
-disable the extension. Inspection and recovery consume decisions as before; a
-final answer-only request may be made when execution stops, with tools disabled.
+`action.max_steps` is the initial decision threshold (default `5`, range
+`1` to `50`, an initial threshold, not a cumulative step limit). Eligible
+foreground chat and durable chat tasks can renew their decision allowance at
+each checkpoint with fresh, nonduplicate tool evidence. For tracked goals,
+a last-step failure does not erase recent evidence. The model decides what
+the evidence means and which action to take; no Gap update is required to
+earn a renewal. No observation can fund two extensions. This is not proof of
+completion. Renewals stop at the next checkpoint after
+`progress_grace_seconds` has elapsed since the first extension.
+`progress_grace_steps=0` or explicit Runtime token/cost budgets disable the
+extension. Once execution stops, a separate answer-only request uses the same
+configured output allowance as ordinary decisions. It can recover from a
+confirmed output truncation within the existing recovery and admission limits.
+It can complete tracked delivery from existing evidence or report what remains,
+but cannot execute tools or bypass model admission.
 
 | JSON Key | Environment Variable | Default |
 |---|---|---|
 | `max_parallel_tool_calls` | `ACTION__MAX_PARALLEL_TOOL_CALLS` | `4` |
 | `progress_grace_steps` | `ACTION__PROGRESS_GRACE_STEPS` | `2` |
+| `progress_grace_seconds` | `ACTION__PROGRESS_GRACE_SECONDS` | `300` |
 | `capability_context_chars` | `ACTION__CAPABILITY_CONTEXT_CHARS` | `8000` |
 | `observation_chars` | `ACTION__OBSERVATION_CHARS` | `8000` |
 | `observation_history_chars` | `ACTION__OBSERVATION_HISTORY_CHARS` | `32000` |

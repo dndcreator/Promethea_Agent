@@ -85,9 +85,11 @@ def test_session_pending_confirmation_is_owner_scoped_and_safe(tmp_path, monkeyp
 @pytest.mark.parametrize("final_failure", [False, True])
 def test_calculator_budget_stop_preserves_actual_file_reply_and_reopened_history(tmp_path, monkeypatch, stream, final_failure):
     reply = "The calculator file was created. Canvas mounting and browser validation remain unverified."
+    truncation = {"status": "error", "code": "MODEL_OUTPUT_LIMIT", "error": "truncated", "content": ""}
     model = ScriptedModel([
         {"action": "tool_call", "tool_name": "workspace.write_file", "args": {"path": "calculator.html", "content": "<html><button>Calculator</button></html>"}},
-        {"status": "error", "code": "MODEL_OUTPUT_LIMIT", "error": "truncated"} if final_failure else reply,
+        truncation,
+        {"status": "error", "code": "MODEL_ADMISSION_CLOSED", "content": ""} if final_failure else reply,
     ])
     app, host = app_at(tmp_path, model, monkeypatch)
     original_settings = host.config_service.get_merged_config
@@ -95,6 +97,7 @@ def test_calculator_budget_stop_preserves_actual_file_reply_and_reopened_history
     def limited_settings(user):
         settings = original_settings(user)
         settings["action"].update(max_steps=1, progress_grace_steps=0)
+        settings["api"].update(max_tokens=8192, output_token_limit=8192)
         return settings
 
     monkeypatch.setattr(host.config_service, "get_merged_config", limited_settings)
@@ -112,7 +115,10 @@ def test_calculator_budget_stop_preserves_actual_file_reply_and_reopened_history
         else:
             result = response.json()
             text = result["response"]
-        assert text.startswith("Runtime:") if final_failure else text == reply
+        if final_failure:
+            assert text.startswith("Runtime:"), text
+        else:
+            assert text == reply
         assert result["execution_outcome"] == {
             "stop_reason": "budget_exhausted", "goal_status": "unverified",
             "response_source": "runtime" if final_failure else "model",
@@ -123,7 +129,7 @@ def test_calculator_budget_stop_preserves_actual_file_reply_and_reopened_history
         assert saved[-1]["execution_outcome"] == result["execution_outcome"]
     handle = host.workspace_service.resolve_workspace_handle(user_id="alice", workspace_id="calculator")
     assert (Path(handle.root_path) / "calculator.html").read_text() == "<html><button>Calculator</button></html>"
-    assert len(model.calls) == 2
+    assert len(model.calls) == 3
     assert "workspace.write_file" in (tmp_path / "events.jsonl").read_text(encoding="utf-8")
     reopened_app, _ = app_at(tmp_path, ScriptedModel([]), monkeypatch)
     with TestClient(reopened_app) as client:
